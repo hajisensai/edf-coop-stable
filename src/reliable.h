@@ -42,6 +42,8 @@ private:
     double rttvar_ = 50.0;
     bool haveRtt_ = false;
     uint64_t retransmits_ = 0;
+    double budget_ = 64.0;  // retransmission tokens, see kRetransmitPerSecond
+    uint64_t lastBudgetMs_ = 0;
 };
 
 class ReliableReceiver {

@@ -77,6 +77,7 @@ private:
         int addrLen = 0;
         std::string puid;
         uint32_t peerNonce = 0;
+        uint32_t epoch = 0;  // linkEpoch(client nonce, host nonce)
         bool up = false;
         uint64_t lastRecvMs = 0;
         uint64_t lastPingMs = 0;
@@ -94,6 +95,7 @@ private:
     void deliverLocal(DataMsg msg);
     void sendData(Link& link, DataMsg msg, uint64_t now);
     void sendMsg(const Message& m, const sockaddr_storage& to, int toLen);
+    void sendLink(Link& link, Message m);
     void sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen);
     void tick(uint64_t now);
     void broadcastRoster();

@@ -25,6 +25,7 @@ constexpr uint64_t kRosterIntervalMs = 5000;
 constexpr uint64_t kRosterBurstMs = 1000;
 constexpr uint64_t kRosterBurstIntervalMs = 200;
 constexpr uint64_t kResolveIntervalMs = 30000;
+constexpr uint64_t kMigrateQuietMs = 5000;
 constexpr uint16_t kDefaultPort = 27015;
 
 uint64_t nowMs() { return GetTickCount64(); }
@@ -312,6 +313,7 @@ void DirectNet::sendMsg(const Message& m, const sockaddr_storage& to, int toLen)
 void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
     Message m;
     m.type = MsgType::Data;
+    m.epoch = link.epoch;
     bool reliable = msg.reliability != 0;
     msg.seq = reliable ? link.tx.nextSeq() : 0;
     uint32_t seq = msg.seq;
@@ -350,14 +352,24 @@ void DirectNet::routeData(DataMsg msg) {
     sendData(it->second, std::move(msg), nowMs());
 }
 
+void DirectNet::sendLink(Link& link, Message m) {
+    m.epoch = link.epoch;
+    sendMsg(m, link.addr, link.addrLen);
+}
+
 void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
+    if (isLinkScoped(m.type) && m.epoch != link.epoch) {
+        logRateLimited("stale-epoch", 10000, "DIRECT ignored a packet from an earlier session of link %s",
+                       shortId(link.puid).c_str());
+        return;
+    }
     link.lastRecvMs = now;
     switch (m.type) {
         case MsgType::Ping: {
             Message pong;
             pong.type = MsgType::Pong;
             pong.ping = m.ping;
-            sendMsg(pong, link.addr, link.addrLen);
+            sendLink(link, pong);
             break;
         }
         case MsgType::Pong:
@@ -375,7 +387,7 @@ void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
             Message ack;
             ack.type = MsgType::Ack;
             ack.ack = link.rx.onData(m.data, ready);
-            sendMsg(ack, link.addr, link.addrLen);
+            sendLink(link, ack);
             for (auto& d : ready) routeData(std::move(d));
             break;
         }
@@ -400,8 +412,17 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
             return;
         }
         auto it = clients_.find(id);
-        bool fresh = it == clients_.end() || it->second.peerNonce != m.hello.nonce ||
-                     !sameAddr(it->second.addr, it->second.addrLen, from, fromLen);
+        bool fresh = it == clients_.end() || it->second.peerNonce != m.hello.nonce;
+        if (!fresh && !sameAddr(it->second.addr, it->second.addrLen, from, fromLen)) {
+            // Same session from a new address. Hellos can be replayed by anyone who saw one, so only
+            // follow it when the old address has gone quiet (a live client pings every second);
+            // otherwise a replay would hijack the link.
+            if (now - it->second.lastRecvMs < kMigrateQuietMs) return;
+            logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
+                 addrToString(it->second.addr, it->second.addrLen).c_str(), addrToString(from, fromLen).c_str());
+            it->second.addr = from;
+            it->second.addrLen = fromLen;
+        }
         if (fresh) {
             // New client or a restarted one: start its reliable streams from scratch.
             if (Link* other = hostClientByAddr(from, fromLen); other && other->puid != id) {
@@ -413,6 +434,7 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
             link.addrLen = fromLen;
             link.puid = id;
             link.peerNonce = m.hello.nonce;
+            link.epoch = linkEpoch(m.hello.nonce, localNonce_);
             link.up = true;
             link.lastRecvMs = now;
             clients_[id] = std::move(link);
@@ -431,7 +453,29 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
         return;
     }
     Link* link = hostClientByAddr(from, fromLen);
+    bool knownSession = false;
+    if (!link && isLinkScoped(m.type)) {
+        // A live session showing up from a new address (NAT rebinding): migrate instead of resetting.
+        // Packets can be replayed by anyone who saw them (a key only stops forgery), so the link moves
+        // only on proof of freshness: a reliable packet the host has not received yet, or the old
+        // address having gone quiet (a live client pings every second).
+        for (auto& [id, candidate] : clients_) {
+            if (candidate.epoch != m.epoch) continue;
+            knownSession = true;
+            bool freshData = m.type == MsgType::Data && m.data.seq != 0 && m.data.src == id &&
+                             m.data.seq >= candidate.rx.expected();
+            if (!freshData && now - candidate.lastRecvMs < kMigrateQuietMs) break;
+            logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
+                 addrToString(candidate.addr, candidate.addrLen).c_str(), addrToString(from, fromLen).c_str());
+            candidate.addr = from;
+            candidate.addrLen = fromLen;
+            link = &candidate;
+            break;
+        }
+    }
     if (!link) {
+        if (knownSession) return;  // belongs to a live link; never reset it on an unproven packet
+
         // Traffic from a client this host does not know (e.g. the host restarted): make it re-hello now.
         if (m.type != MsgType::Bye) {
             Message bye;
@@ -465,6 +509,7 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
                 hostLink_->addr = from;
                 hostLink_->addrLen = fromLen;
                 hostLink_->peerNonce = m.welcome.hostNonce;
+                hostLink_->epoch = linkEpoch(localNonce_, m.welcome.hostNonce);
                 logf("DIRECT connected to host %s at %s", shortId(m.welcome.hostPuid).c_str(),
                      addrToString(from, fromLen).c_str());
             }
@@ -568,7 +613,7 @@ void DirectNet::tick(uint64_t now) {
             Message p;
             p.type = MsgType::Ping;
             p.ping.timeMs = now;
-            sendMsg(p, link.addr, link.addrLen);
+            sendLink(link, p);
             link.lastPingMs = now;
         }
     };

@@ -82,6 +82,18 @@ void testWire() {
     CHECK(!dn::decode(tagged.data(), tagged.size(), "secret", &err) && err == dn::DecodeError::TagMismatch);
     CHECK(!dn::decode(plain.data(), 10, "", &err) && err == dn::DecodeError::Truncated);
 
+    dn::Message ack;
+    ack.type = dn::MsgType::Ack;
+    ack.epoch = dn::linkEpoch(7, 9);
+    ack.ack.cumulative = 100;
+    ack.ack.set(0);
+    ack.ack.set(255);
+    auto adg = dn::encode(ack, "");
+    auto aback = dn::decode(adg.data(), adg.size(), "", &err);
+    CHECK(aback && aback->epoch == ack.epoch && aback->ack.cumulative == 100 && aback->ack.has(0) &&
+          aback->ack.has(255) && !aback->ack.has(1));
+    CHECK(dn::linkEpoch(7, 9) != dn::linkEpoch(9, 7) && dn::linkEpoch(7, 9) != dn::linkEpoch(8, 9));
+
     dn::Message w;
     w.type = dn::MsgType::Welcome;
     w.welcome.hostNonce = 5;
@@ -186,7 +198,8 @@ bool streamInOrder(dn::DirectNet& from, const std::string& toId, dn::DirectNet& 
     for (uint32_t i = 0; i < count; ++i) {
         auto p = payloadFor(i);
         if (!from.send(toId, "EDF6", 1, 2, p.data(), p.size())) return false;
-        if (i % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // ~1000 packets/s: still an order of magnitude above EDF6's per-peer traffic.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     uint32_t next = 0;
     bool ok = true;
@@ -303,42 +316,88 @@ void testStalledLinkSurvives() {
     CHECK(ok && next == 300);
 }
 
+void testRetransmitBudget() {
+    printf("reliable: a large stalled backlog is retransmitted at a bounded rate\n");
+    dn::ReliableSender tx;
+    for (uint32_t i = 0; i < 3000; ++i) tx.track(tx.nextSeq(), std::vector<uint8_t>(1000), 1);
+    size_t sent = 0;
+    auto count = [&](const std::vector<uint8_t>&) { ++sent; };
+    tx.poll(60000, count);  // every timer expired during a 60 s stall
+    CHECK(sent <= 64);
+    size_t burst = sent;
+    for (uint64_t t = 60005; t <= 61000; t += 5) tx.poll(t, count);
+    printf("  burst=%zu, first second=%zu\n", burst, sent);
+    CHECK(sent >= 1900 && sent <= 2100);
+}
+
 void testDisconnectHold() {
     printf("hold: transient disconnects are hidden from the game and recovered\n");
-    dn::DisconnectHold hold({true, 30000, 2000});
     int forwarded = 0, reaccepts = 0;
     auto fwd = [&] { ++forwarded; };
     auto re = [&] { ++reaccepts; };
+    auto noDirect = [](const std::string&) { return false; };
 
-    CHECK(!hold.offer(kA, 3, 0, fwd, re));  // never connected: a failed first handshake must reach the game
-    hold.onEstablished(kA, 0);
-    CHECK(!hold.offer(kA, 2, 0, fwd, re));    // ClosedByPeer: the player really left
-    CHECK(!hold.offer(kA, 1, 0, fwd, re));    // ClosedByLocalUser
-    CHECK(hold.offer(kA, 3, 1000, fwd, re));  // TimedOut: held
-    CHECK(hold.isHeld(kA) && reaccepts == 0);  // no EOS call from inside the EOS callback
-    hold.poll(1001);
+    // mode "all": any previously connected peer
+    dn::DisconnectHold all({30000, 2000, true});
+    CHECK(!all.offer(kA, 3, false, 0, fwd, re));  // never connected: a failed first handshake must reach the game
+    all.onEstablished(kA);
+    CHECK(!all.offer(kA, 2, false, 0, fwd, re));    // ClosedByPeer: the player really left
+    CHECK(!all.offer(kA, 1, false, 0, fwd, re));    // ClosedByLocalUser
+    all.onEstablished(kA);
+    CHECK(all.offer(kA, 3, false, 1000, fwd, re));  // TimedOut: held
+    CHECK(all.isHeld(kA) && reaccepts == 0);        // no EOS call from inside the EOS callback
+    all.poll(1001, noDirect);
     CHECK(reaccepts == 1);
-    hold.poll(2000);
+    all.poll(2000, noDirect);
     CHECK(reaccepts == 1);
-    hold.poll(3002);
+    all.poll(3002, noDirect);
     CHECK(reaccepts == 2);
-    CHECK(hold.onEstablished(kA, 5000) == 1 && !hold.isHeld(kA) && forwarded == 0);  // game saw nothing
+    CHECK(all.onEstablished(kA) == 1 && !all.isHeld(kA) && forwarded == 0);  // recovered, game saw nothing
 
-    CHECK(hold.offer(kA, 7, 10000, fwd, re));  // ConnectionFailed
-    CHECK(hold.poll(39999).empty() && forwarded == 0);
-    auto expired = hold.poll(40000);
-    CHECK(expired.size() == 1 && forwarded == 1 && !hold.isHeld(kA));
-    CHECK(!hold.offer(kA, 3, 50000, fwd, re));  // after expiry the peer is gone until re-established
+    CHECK(all.offer(kA, 7, false, 10000, fwd, re));  // ConnectionFailed
+    CHECK(all.poll(39999, noDirect).empty() && forwarded == 0);
+    auto expired = all.poll(40000, noDirect);
+    CHECK(expired.size() == 1 && forwarded == 1 && !all.isHeld(kA));
+    CHECK(!all.offer(kA, 3, false, 50000, fwd, re));  // after expiry the peer is gone until re-established
 
-    hold.onEstablished(kB, 0);
-    CHECK(hold.offer(kB, 3, 0, fwd, re));
-    CHECK(hold.onGameClosed(kB) == 1 && !hold.isHeld(kB));
-    hold.poll(100000);
+    all.onEstablished(kB);
+    CHECK(all.offer(kB, 3, false, 0, fwd, re));
+    CHECK(all.onGameClosed(kB) == 1 && !all.isHeld(kB));
+    all.poll(100000, noDirect);
     CHECK(forwarded == 1);  // the game closed it itself: nothing forwarded
 
-    dn::DisconnectHold off({false, 30000, 2000});
-    off.onEstablished(kA, 0);
-    CHECK(!off.offer(kA, 3, 0, fwd, re));
+    // a deliberate close supersedes a held transient one (the game gets exactly one event)
+    all.onEstablished(kB);
+    CHECK(all.offer(kB, 3, false, 0, fwd, re));
+    CHECK(!all.offer(kB, 2, false, 10, fwd, re) && !all.isHeld(kB));
+    all.poll(100000, noDirect);
+    CHECK(forwarded == 1);
+
+    // the lobby says the player left: held events reach the game at once, even with a live direct link
+    all.onEstablished(kA);
+    CHECK(all.offer(kA, 3, true, 0, fwd, re));
+    CHECK(all.release(kA) == 1 && forwarded == 2 && !all.isHeld(kA));
+    CHECK(all.release(kA) == 0);
+    all.onEstablished(kA);
+    all.onEstablished(kB);
+    CHECK(all.offer(kA, 3, false, 0, fwd, re) && all.offer(kB, 8, false, 0, fwd, re));
+    CHECK(all.releaseAll() == 2 && forwarded == 4 && all.heldCount() == 0);
+    forwarded = 1;
+
+    // mode "auto": plain EOS peers are never held (they may not run the plugin)
+    dn::DisconnectHold autoHold({30000, 2000, false});
+    autoHold.onEstablished(kA);
+    CHECK(!autoHold.offer(kA, 3, false, 0, fwd, re));
+    // direct-link members are held, even without a prior EOS connection, and never expire while
+    // the direct link is alive
+    CHECK(autoHold.offer(kB, 3, true, 0, fwd, re));
+    bool directUp = true;
+    auto direct = [&](const std::string& r) { return directUp && r == kB; };
+    CHECK(autoHold.poll(100000, direct).empty() && autoHold.isHeld(kB));
+    CHECK(autoHold.poll(200000, direct).empty() && autoHold.isHeld(kB));
+    directUp = false;  // direct link lost too: the normal grace applies from the last time it was alive
+    CHECK(autoHold.poll(229999, direct).empty());
+    CHECK(autoHold.poll(230000, direct).size() == 1 && forwarded == 2);
 }
 
 void testKeyMismatch() {
@@ -372,6 +431,10 @@ void testIat(const wchar_t* edfPath) {
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_CloseConnection") != nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_CloseConnections") != nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived") != nullptr);
+    CHECK(dn::findImportSlot(edf, dll, "EOS_Platform_Tick") != nullptr);
+    CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_RemoveNotifyPeerConnectionClosed") != nullptr);
+    // The receive hook relies on the game reading packets only through ReceivePacket.
+    CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_GetNextReceivedPacketSize") == nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_NoSuchFunction") == nullptr);
     CHECK(dn::findImportSlot(edf, "nosuch.dll", "EOS_P2P_SendPacket") == nullptr);
     FreeLibrary(edf);
@@ -397,16 +460,18 @@ void testConfig() {
     dn::Config def = dn::loadConfig(path);
     CHECK(GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES);  // default file written
     CHECK(def.enabled && def.direct.mode == dn::Mode::Off && def.direct.listenPort == 27015 && def.eosRelay == -1);
+    CHECK(def.hold == dn::Config::Hold::Auto && def.graceMs == 30000 && def.direct.linkTimeoutMs == 60000);
 
     FILE* f = _wfopen(path.c_str(), L"wb");
     fputs("[DirectNet]\r\nMode= Join \r\nHostAddress=[2408:8207::5]:30000\r\nKey=abc\r\n"
-          "[EOS]\r\nFixedPort=27100\r\nRelay=NoRelay\r\n", f);
+          "[EOS]\r\nFixedPort=27100\r\nRelay=NoRelay\r\n[Resilience]\r\nHoldDisconnects=ALL\r\nGraceSeconds=45\r\n", f);
     fclose(f);
     dn::Config c = dn::loadConfig(path);
     CHECK(c.direct.mode == dn::Mode::Join);
     CHECK(c.direct.hostAddress == "[2408:8207::5]:30000");
     CHECK(c.direct.listenPort == 0);  // join without ListenPort binds any port
     CHECK(c.direct.key == "abc" && c.eosFixedPort == 27100 && c.eosRelay == 0);
+    CHECK(c.hold == dn::Config::Hold::All && c.graceMs == 45000);
     DeleteFileW(path.c_str());
 }
 
@@ -420,6 +485,7 @@ int wmain(int argc, wchar_t** argv) {
     testNetif();
     testIat(edf);
     testKeyMismatch();
+    testRetransmitBudget();
     testDisconnectHold();
     testHostRestart();
     testStalledLinkSurvives();

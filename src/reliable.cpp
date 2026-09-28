@@ -9,9 +9,11 @@ namespace {
 constexpr uint32_t kMinRtoMs = 60;
 constexpr uint32_t kMaxRtoMs = 1000;
 constexpr size_t kMaxReorderBuffer = 4096;
-// While a link is stalled every pending packet expires at once; resending only the oldest few per
-// poll keeps a recovering link from being flooded with the whole backlog in one burst.
-constexpr size_t kMaxResendPerPoll = 32;
+// Retransmission rate limit (token bucket). After a long stall thousands of packets are pending and
+// all their timers expire together; the budget caps the resend burst (~2.4 MB/s at full packets)
+// while still letting every lost packet be retried, so recovery is not serialised behind the oldest.
+constexpr double kRetransmitPerSecond = 2000.0;
+constexpr double kRetransmitBurst = 64.0;
 
 }  // namespace
 
@@ -58,9 +60,11 @@ uint32_t ReliableSender::rtoMs() const {
 }
 
 void ReliableSender::poll(uint64_t nowMs, const std::function<void(const std::vector<uint8_t>&)>& resend) {
-    size_t resent = 0;
+    if (lastBudgetMs_ == 0) lastBudgetMs_ = nowMs;
+    budget_ = std::min(kRetransmitBurst, budget_ + (nowMs - lastBudgetMs_) * kRetransmitPerSecond / 1000.0);
+    lastBudgetMs_ = nowMs;
     for (auto& [seq, p] : pending_) {
-        if (resent >= kMaxResendPerPoll) break;
+        if (budget_ < 1.0) break;
         // Exponential backoff per packet, capped at the maximum RTO.
         uint64_t backoff = std::min<uint64_t>(static_cast<uint64_t>(rtoMs()) << std::min<uint32_t>(p.sends - 1, 4),
                                               kMaxRtoMs);
@@ -69,7 +73,7 @@ void ReliableSender::poll(uint64_t nowMs, const std::function<void(const std::ve
         p.lastSentMs = nowMs;
         ++p.sends;
         ++retransmits_;
-        ++resent;
+        budget_ -= 1.0;
     }
 }
 

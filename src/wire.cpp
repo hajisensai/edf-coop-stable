@@ -81,6 +81,7 @@ std::vector<std::string> readRoster(Reader& r) {
 }
 
 void writeBody(Writer& w, const Message& m) {
+    if (isLinkScoped(m.type)) w.u32(m.epoch);
     switch (m.type) {
         case MsgType::Hello:
             w.u32(m.hello.nonce);
@@ -120,6 +121,7 @@ void writeBody(Writer& w, const Message& m) {
 }
 
 bool readBody(Reader& r, Message& m) {
+    if (isLinkScoped(m.type)) m.epoch = r.u32();
     switch (m.type) {
         case MsgType::Hello:
             m.hello.nonce = r.u32();

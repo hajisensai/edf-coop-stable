@@ -56,11 +56,14 @@ const char kDefaultIni[] =
     "\r\n"
     "[Resilience]\r\n"
     "; 断线宽限：EOS 连接因超时/网络错误断开时，先不告诉游戏，插件自动重新连接；\r\n"
-    "; 宽限期内恢复，游戏完全感觉不到，不会把人踢出去。1 开 / 0 关（关了就是原版行为）\r\n"
-    "; 注意：要双方都装了本插件，对方那边才会配合重连\r\n"
-    "HoldDisconnects=1\r\n"
+    "; 恢复了游戏完全感觉不到，不会把人踢出去。\r\n"
+    ";   auto 只对「直连」的人生效（他们一定装了插件）；直连还通就一直扣住，永远不会因 EOS 断开而掉人\r\n"
+    ";   all  对房间里所有人生效。只有确认一起玩的人【全部】装了本插件才能开：\r\n"
+    ";        没装插件的人那边会照常把你踢掉，你这边却以为他还在，两边会对不上\r\n"
+    ";   off  关闭（原版行为）\r\n"
+    "HoldDisconnects=auto\r\n"
     "\r\n"
-    "; 宽限秒数：超过这么久还没恢复，才把断线交给游戏处理\r\n"
+    "; all 模式下的宽限秒数：超过这么久还没恢复，才把断线交给游戏处理\r\n"
     "GraceSeconds=30\r\n";
 
 std::wstring readString(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
@@ -118,7 +121,8 @@ Config loadConfig(const std::wstring& iniPath) {
     std::wstring relay = lower(readString(iniPath, L"EOS", L"Relay", L"default"));
     c.eosRelay = relay == L"norelay" ? 0 : relay == L"allow" ? 1 : relay == L"force" ? 2 : -1;
 
-    c.holdDisconnects = readInt(iniPath, L"Resilience", L"HoldDisconnects", 1) != 0;
+    std::wstring hold = lower(readString(iniPath, L"Resilience", L"HoldDisconnects", L"auto"));
+    c.hold = hold == L"all" ? Config::Hold::All : (hold == L"off" || hold == L"0") ? Config::Hold::Off : Config::Hold::Auto;
     c.graceMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, L"Resilience", L"GraceSeconds", 30), 1, 600)) * 1000u;
     return c;
 }

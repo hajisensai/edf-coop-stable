@@ -12,7 +12,7 @@
 namespace dn {
 
 constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
-constexpr uint16_t kProtocol = 1;
+constexpr uint16_t kProtocol = 2;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
 
@@ -72,6 +72,10 @@ struct PingMsg {
 
 struct Message {
     MsgType type = MsgType::Ping;
+    // Link session id for Data/Ack/Ping/Pong, derived from both sides' hello nonces. Packets from an
+    // older session of the same link (in flight across a reconnect) carry a different epoch and are
+    // dropped instead of acknowledging or duplicating packets of the new session.
+    uint32_t epoch = 0;
     HelloMsg hello;
     WelcomeMsg welcome;
     RosterMsg roster;
@@ -79,6 +83,14 @@ struct Message {
     AckMsg ack;
     PingMsg ping;  // also used for Pong
 };
+
+inline bool isLinkScoped(MsgType t) {
+    return t == MsgType::Data || t == MsgType::Ack || t == MsgType::Ping || t == MsgType::Pong;
+}
+
+inline uint32_t linkEpoch(uint32_t clientNonce, uint32_t hostNonce) {
+    return clientNonce * 0x9E3779B1u ^ hostNonce;
+}
 
 // Encodes a message; when `key` is non-empty an HMAC tag is appended.
 std::vector<uint8_t> encode(const Message& msg, const std::string& key);

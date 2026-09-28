@@ -65,6 +65,9 @@ void startDirect(dn::Config& c) {
         dn::logf("DIRECT Mode=join but HostAddress is empty; direct link disabled");
         return;
     }
+    if (c.direct.mode == dn::Mode::Host && c.direct.key.empty())
+        dn::logf("DIRECT WARNING: hosting without Key= ; anyone who knows your address and a player's EOS id "
+                 "can disturb that player's direct link. Set the same Key= for everyone in the room.");
     g_net = new dn::DirectNet();
     if (!g_net->start(c.direct)) {
         dn::logf("DIRECT failed to start (is UDP port %u already in use?); direct link disabled",
@@ -77,6 +80,13 @@ void startDirect(dn::Config& c) {
 }
 
 }  // namespace
+
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+    // At exit the worker thread is already killed (possibly holding a lock) and static objects are
+    // about to be destroyed, while EDF.dll may still call EOS through our hooks.
+    if (reason == DLL_PROCESS_DETACH) dn::eosHooksShutdown();
+    return TRUE;
+}
 
 extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
     info->infoVersion = 1;

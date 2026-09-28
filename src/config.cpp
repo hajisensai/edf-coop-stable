@@ -54,6 +54,12 @@ const char kDefaultIni[] =
     "; EOS 中继策略：default 不改 / allow 允许中继 / norelay 禁止中继（只直连，打洞失败就连不上）/ force 强制中继\r\n"
     "Relay=default\r\n"
     "\r\n"
+    "[Sync]\r\n"
+    "; 防不同步：游戏原本把所有联机数据都用「不可靠」方式发送，网络一丢包就丢了，是画面不同步的来源之一。\r\n"
+    "; 1 = 改成「可靠但不排队」发送：丢了自动重发，到了马上交给游戏。只需要发送方装插件就生效。\r\n"
+    "; 0 = 原版行为\r\n"
+    "ReliableGameTraffic=1\r\n"
+    "\r\n"
     "[Resilience]\r\n"
     "; 断线宽限：EOS 连接因超时/网络错误断开时，先不告诉游戏，插件自动重新连接；\r\n"
     "; 恢复了游戏完全感觉不到，不会把人踢出去。\r\n"
@@ -123,6 +129,8 @@ Config loadConfig(const std::wstring& iniPath) {
 
     std::wstring hold = lower(readString(iniPath, L"Resilience", L"HoldDisconnects", L"auto"));
     c.hold = hold == L"all" ? Config::Hold::All : (hold == L"off" || hold == L"0") ? Config::Hold::Off : Config::Hold::Auto;
+    c.reliableGameTraffic = readInt(iniPath, L"Sync", L"ReliableGameTraffic", 1) != 0;
+    c.direct.upgradeUnreliable = c.reliableGameTraffic;
     c.graceMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, L"Resilience", L"GraceSeconds", 30), 1, 600)) * 1000u;
     return c;
 }

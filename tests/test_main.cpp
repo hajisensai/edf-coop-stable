@@ -316,6 +316,97 @@ void testStalledLinkSurvives() {
     CHECK(ok && next == 300);
 }
 
+void testReliableUnordered() {
+    printf("reliable: unordered mode delivers every packet exactly once under 40%% loss\n");
+    dn::ReliableSender tx;
+    dn::ReliableReceiver rx;
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> coin(0, 1);
+    std::vector<std::pair<std::vector<uint8_t>, bool>> wire;  // datagram, isAck
+    std::vector<int> seen(3000, 0);
+    size_t delivered = 0;
+    uint64_t now = 0;
+    uint32_t sent = 0;
+    auto push = [&](std::vector<uint8_t> dg, bool isAck) {
+        if (coin(rng) >= 0.4) wire.emplace_back(std::move(dg), isAck);
+    };
+    while (delivered < 3000 && now < 600000) {
+        for (int k = 0; k < 3 && sent < 3000; ++k, ++sent) {
+            dn::Message m;
+            m.type = dn::MsgType::Data;
+            m.data.reliability = 1;
+            m.data.seq = tx.nextSeq();
+            m.data.payload = payloadFor(sent);
+            auto dg = dn::encode(m, "");
+            tx.track(m.data.seq, dg, now);
+            push(dg, false);
+        }
+        tx.poll(now, [&](const std::vector<uint8_t>& dg) { push(dg, false); });
+        auto due = std::move(wire);
+        wire.clear();
+        std::shuffle(due.begin(), due.end(), rng);
+        for (auto& [dg, isAck] : due) {
+            auto m = dn::decode(dg.data(), dg.size(), "", nullptr);
+            if (isAck) {
+                tx.onAck(m->ack, now);
+                continue;
+            }
+            std::vector<dn::DataMsg> ready;
+            dn::Message ack;
+            ack.type = dn::MsgType::Ack;
+            ack.ack = rx.onData(m->data, ready);
+            push(dn::encode(ack, ""), true);
+            for (auto& d : ready) {
+                uint32_t id = 0;
+                memcpy(&id, d.payload.data(), 4);
+                ++seen[id];
+                ++delivered;
+            }
+        }
+        now += 10;
+    }
+    bool exactlyOnce = std::all_of(seen.begin(), seen.end(), [](int n) { return n == 1; });
+    printf("  delivered %zu (exactly once: %s) in %.1fs simulated\n", delivered, exactlyOnce ? "yes" : "NO",
+           now / 1000.0);
+    CHECK(delivered == 3000 && exactlyOnce);
+}
+
+void testDirectUpgradesUnreliable() {
+    printf("direct: game packets sent unreliable arrive completely under 20%% loss (upgraded)\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0.2)));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0.2)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 10000));
+    for (uint32_t i = 0; i < 500; ++i) {
+        auto p = payloadFor(i);
+        CHECK(a.send(kHost, "EDF6", 0, 0, p.data(), p.size()));  // reliability 0, as EDF6 sends it
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::vector<int> seen(500, 0);
+    size_t got = 0;
+    waitFor(
+        [&] {
+            dn::Delivered d;
+            while (host.pop(nullptr, 1170, d)) {
+                uint32_t id = 0;
+                memcpy(&id, d.data.data(), 4);
+                if (id < 500) ++seen[id];
+                ++got;
+            }
+            return got >= 500;
+        },
+        15000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // catch late duplicates, if any
+    dn::Delivered d;
+    while (host.pop(nullptr, 1170, d)) ++got;
+    bool exactlyOnce = std::all_of(seen.begin(), seen.end(), [](int n) { return n == 1; });
+    printf("  received %zu/500, exactly once: %s\n", got, exactlyOnce ? "yes" : "NO");
+    CHECK(got == 500 && exactlyOnce);
+}
+
 void testRetransmitBudget() {
     printf("reliable: a large stalled backlog is retransmitted at a bounded rate\n");
     dn::ReliableSender tx;
@@ -461,6 +552,7 @@ void testConfig() {
     CHECK(GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES);  // default file written
     CHECK(def.enabled && def.direct.mode == dn::Mode::Off && def.direct.listenPort == 27015 && def.eosRelay == -1);
     CHECK(def.hold == dn::Config::Hold::Auto && def.graceMs == 30000 && def.direct.linkTimeoutMs == 60000);
+    CHECK(def.reliableGameTraffic && def.direct.upgradeUnreliable);
 
     FILE* f = _wfopen(path.c_str(), L"wb");
     fputs("[DirectNet]\r\nMode= Join \r\nHostAddress=[2408:8207::5]:30000\r\nKey=abc\r\n"
@@ -485,7 +577,9 @@ int wmain(int argc, wchar_t** argv) {
     testNetif();
     testIat(edf);
     testKeyMismatch();
+    testReliableUnordered();
     testRetransmitBudget();
+    testDirectUpgradesUnreliable();
     testDisconnectHold();
     testHostRestart();
     testStalledLinkSurvives();

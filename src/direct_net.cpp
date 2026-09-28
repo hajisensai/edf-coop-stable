@@ -238,7 +238,7 @@ bool DirectNet::send(const std::string& remote, const std::string& socketName, u
     msg.dst = remote;
     msg.socketName = socketName;
     msg.channel = channel;
-    msg.reliability = reliability;
+    msg.reliability = reliability == 0 && opt_.upgradeUnreliable ? 1 : reliability;
     msg.payload.assign(data, data + size);
     sendData(*link, std::move(msg), nowMs());
     return true;
@@ -259,6 +259,12 @@ bool DirectNet::pop(const uint8_t* channel, uint32_t maxSize, Delivered& out) {
         return true;
     }
     return false;
+}
+
+bool DirectNet::heardFromRecently(const std::string& remote, uint64_t windowMs) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = lastDataMs_.find(remote);
+    return it != lastDataMs_.end() && nowMs() - it->second <= windowMs;
 }
 
 std::vector<std::string> DirectNet::directMembers() {
@@ -324,6 +330,7 @@ void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
 }
 
 void DirectNet::deliverLocal(DataMsg msg) {
+    lastDataMs_[msg.src] = nowMs();
     if (inbox_.size() >= kMaxInbox) {
         logRateLimited("inbox-full", 5000, "DIRECT inbox full (%zu packets): game is not reading, dropping oldest",
                        inbox_.size());

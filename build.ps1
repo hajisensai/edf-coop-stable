@@ -17,7 +17,8 @@ $steps = @(
     "call `"$vcvars`" >nul",
     "cd /d `"$root`"",
     "cl $common /LD $core src\upnp.cpp src\eos_hooks.cpp src\plugin.cpp /Fobuild\ /Febuild\EDF6DirectNet.dll /link $libs",
-    "cl $common $core tests\test_main.cpp /Fobuild\ /Febuild\edf6_directnet_tests.exe /link $libs"
+    "cl $common $core tests\test_main.cpp /Fobuild\ /Febuild\edf6_directnet_tests.exe /link $libs",
+    "cl $common $core tests\probe_join.cpp /Fobuild\ /Febuild\probe_join.exe /link $libs"
 )
 cmd /c ($steps -join ' && ')
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }

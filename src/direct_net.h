@@ -31,8 +31,14 @@ struct DirectOptions {
     std::string key;              // optional shared secret; must be identical for everyone
     uint32_t ifIndexV4 = 0;       // IP_UNICAST_IF: force egress through this adapter (0 = OS routing)
     uint32_t ifIndexV6 = 0;
-    uint32_t linkTimeoutMs = 60000;  // a stalled link keeps buffering/retransmitting this long
+    // A stalled link keeps buffering/retransmitting this long. Kept short on purpose: while game data
+    // is stuck in a stalled link the other players may be waiting for it at a sync point.
+    uint32_t linkTimeoutMs = 60000;
     uint32_t pingIntervalMs = 1000;
+    // EDF6 sends all game data UnreliableUnordered. Carrying it reliably-unordered delivers every
+    // packet exactly once, possibly reordered: a pattern the unreliable transport can produce anyway,
+    // so the game handles it; it just never loses a packet any more.
+    bool upgradeUnreliable = true;
     double testDropRate = 0.0;  // tests only: drop this fraction of outgoing datagrams
 };
 
@@ -64,6 +70,9 @@ public:
               const uint8_t* data, size_t size);
     // Pops the next packet for the local player; `channel` filters like EOS RequestedChannel.
     bool pop(const uint8_t* channel, uint32_t maxSize, Delivered& out);
+
+    // True when a game packet from `remote` arrived over the direct link within `windowMs`.
+    bool heardFromRecently(const std::string& remote, uint64_t windowMs);
 
     std::vector<std::string> directMembers();
     std::string statusLine();
@@ -117,6 +126,7 @@ private:
     std::string localPuid_;
     uint32_t localNonce_ = 0;
     std::deque<Delivered> inbox_;
+    std::map<std::string, uint64_t> lastDataMs_;  // per source: last game packet received
 
     // Host mode.
     std::map<std::string, Link> clients_;

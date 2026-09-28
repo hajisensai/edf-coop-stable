@@ -15,7 +15,9 @@ struct Config {
     // Hide transient EOS connection loss from the game while reconnecting (see hold.h):
     // off, auto (direct-link members only), all (every member runs the plugin).
     enum class Hold { Off, Auto, All } hold = Hold::Auto;
-    uint32_t graceMs = 30000;
+    uint32_t graceMs = 30000;  // bounded: a hidden disconnect may make everyone wait at a sync point
+    // Send EDF6's UnreliableUnordered game packets as ReliableUnordered (EOS and direct link).
+    bool reliableGameTraffic = true;
 };
 
 // Reads the INI; writes a commented default file first when it does not exist.

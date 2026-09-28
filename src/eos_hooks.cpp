@@ -18,6 +18,7 @@ namespace {
 
 constexpr const char* kEosDll = "EOSSDK-Win64-Shipping.dll";
 constexpr ULONGLONG kStatsIntervalMs = 60000;
+constexpr uint64_t kMinQueueBytes = 64ull * 1024 * 1024;
 
 using PFN_EOS_Platform_Tick = void (*)(EOS_HPlatform);
 using PFN_EOS_P2P_RemoveNotify = void (*)(EOS_HP2P, EOS_NotificationId);
@@ -34,6 +35,8 @@ struct Api {
     PFN_EOS_P2P_QueryNATType queryNat = nullptr;
     PFN_EOS_P2P_SetRelayControl setRelay = nullptr;
     PFN_EOS_P2P_SetPortRange setPortRange = nullptr;
+    PFN_EOS_P2P_SetPacketQueueSize setQueueSize = nullptr;
+    PFN_EOS_P2P_GetPacketQueueInfo getQueueInfo = nullptr;
     PFN_EOS_ProductUserId_ToString idToString = nullptr;
     PFN_EOS_ProductUserId_FromString idFromString = nullptr;
     PFN_EOS_EResult_ToString resultToString = nullptr;
@@ -72,7 +75,7 @@ struct State {
     std::atomic<EOS_ProductUserId> localUser{nullptr};
     std::mutex idMutex;
     std::unordered_map<std::string, EOS_ProductUserId> idCache;
-    std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0};
+    std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0}, eosUpgraded{0};
     ULONGLONG lastStatsMs = 0;
 };
 
@@ -114,7 +117,13 @@ EOS_ProductUserId idHandle(const std::string& s) {
     return id;
 }
 
-bool directAlive(const std::string& remote) { return g.net && !remote.empty() && g.net->canRoute(remote); }
+// A held peer stays hidden only while it demonstrably still plays: the direct link is up AND game
+// data from it arrived recently. A peer whose plugin keeps pinging after its game stopped (left,
+// crashed to menu) must not stay held, or everyone would wait for it at the next sync point.
+constexpr uint64_t kDirectDataFreshMs = 10000;
+bool directAlive(const std::string& remote) {
+    return g.net && !remote.empty() && g.net->canRoute(remote) && g.net->heardFromRecently(remote, kDirectDataFreshMs);
+}
 
 std::string peerLabel(EOS_ProductUserId id) {
     std::string s = idString(id);
@@ -292,6 +301,22 @@ void configureHandle(EOS_HP2P h) {
         EOS_EResult r = g.api.setRelay(h, &o);
         logf("EOS relay control %s: %s", relayName(g.config.eosRelay), resultName(r));
     }
+    if (g.api.getQueueInfo && g.api.setQueueSize) {
+        // A full queue makes EOS silently drop packets, which desyncs the game. Only ever grow it.
+        EOS_P2P_GetPacketQueueInfoOptions qo{1};
+        EOS_P2P_PacketQueueInfo info{};
+        if (g.api.getQueueInfo(h, &qo, &info) == EOS_Success) {
+            auto grow = [](uint64_t cur) { return cur == 0 ? 0 : (cur < kMinQueueBytes ? kMinQueueBytes : cur); };
+            EOS_P2P_SetPacketQueueSizeOptions so{1, grow(info.IncomingPacketQueueMaxSizeBytes),
+                                                grow(info.OutgoingPacketQueueMaxSizeBytes)};
+            EOS_EResult r = g.api.setQueueSize(h, &so);
+            logf("EOS packet queues in %llu -> %llu bytes, out %llu -> %llu bytes (0 = unlimited): %s",
+                 static_cast<unsigned long long>(info.IncomingPacketQueueMaxSizeBytes),
+                 static_cast<unsigned long long>(so.IncomingPacketQueueMaxSizeBytes),
+                 static_cast<unsigned long long>(info.OutgoingPacketQueueMaxSizeBytes),
+                 static_cast<unsigned long long>(so.OutgoingPacketQueueMaxSizeBytes), resultName(r));
+        }
+    }
     if (g.api.addQueueFull) {
         EOS_P2P_AddNotifyIncomingPacketQueueFullOptions o{1};
         g.api.addQueueFull(h, &o, nullptr, onQueueFull);
@@ -322,10 +347,11 @@ void maybeLogStats() {
     if (first) return;
     uint64_t dOut = g.directOut.exchange(0), dIn = g.directIn.exchange(0);
     uint64_t eOut = g.eosOut.exchange(0), eIn = g.eosIn.exchange(0), fail = g.eosSendFail.exchange(0);
+    uint64_t upg = g.eosUpgraded.exchange(0);
     if (!(dOut | dIn | eOut | eIn | fail)) return;
-    logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu in=%llu send-failures=%llu%s%s",
+    logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
-         static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(eIn),
+         static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
          static_cast<unsigned long long>(fail), g.net ? " | " : "", g.net ? g.net->statusLine().c_str() : "");
 }
 
@@ -364,11 +390,19 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
         return EOS_Success;
     }
     EOS_EResult r;
-    if (g.hold && o && o->ApiVersion >= 3 && g.hold->isHeld(remote)) {
+    bool held = g.hold && o && o->ApiVersion >= 3 && g.hold->isHeld(remote);
+    bool upgrade = g.config.reliableGameTraffic && o && o->ApiVersion >= 3 && o->Reliability == EOS_PR_UnreliableUnordered;
+    if (held || upgrade) {
+        EOS_P2P_SendPacketOptions copy = *o;
         // The connection is being rebuilt: let EOS queue the packet instead of discarding it.
-        EOS_P2P_SendPacketOptions queued = *o;
-        queued.bAllowDelayedDelivery = 1;
-        r = g.api.send(h, &queued);
+        if (held) copy.bAllowDelayedDelivery = 1;
+        // EDF6 sends all game data UnreliableUnordered; lost packets are a desync source. Reliable-
+        // unordered delivers every packet exactly once, possibly reordered, which the unreliable
+        // transport could also do, so the game handles it. Only this sender needs the plugin: EOS on
+        // the receiving side acknowledges reliable packets by itself.
+        if (upgrade) copy.Reliability = EOS_PR_ReliableUnordered;
+        r = g.api.send(h, &copy);
+        if (upgrade) ++g.eosUpgraded;
     } else {
         r = g.api.send(h, o);
     }
@@ -438,6 +472,8 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     resolve(eos, "EOS_P2P_QueryNATType", g.api.queryNat);
     resolve(eos, "EOS_P2P_SetRelayControl", g.api.setRelay);
     resolve(eos, "EOS_P2P_SetPortRange", g.api.setPortRange);
+    resolve(eos, "EOS_P2P_SetPacketQueueSize", g.api.setQueueSize);
+    resolve(eos, "EOS_P2P_GetPacketQueueInfo", g.api.getQueueInfo);
     resolve(eos, "EOS_ProductUserId_ToString", g.api.idToString);
     resolve(eos, "EOS_ProductUserId_FromString", g.api.idFromString);
     resolve(eos, "EOS_EResult_ToString", g.api.resultToString);

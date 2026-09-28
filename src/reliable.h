@@ -48,8 +48,9 @@ private:
 
 class ReliableReceiver {
 public:
-    // Feeds a received reliable DataMsg. In-order messages (including ones released from the
-    // reorder buffer) are appended to `deliver`. Returns the ACK to send back.
+    // Feeds a received reliable DataMsg and appends deliverable messages to `deliver`, each exactly
+    // once. ReliableOrdered (2) messages are delivered in sequence order; ReliableUnordered (1)
+    // messages as soon as they arrive. Returns the ACK to send back.
     AckMsg onData(DataMsg msg, std::vector<DataMsg>& deliver);
     uint32_t expected() const { return expected_; }
     size_t buffered() const { return buffer_.size(); }
@@ -57,8 +58,13 @@ public:
 private:
     AckMsg currentAck() const;
 
+    struct Slot {
+        DataMsg msg;
+        bool delivered = false;  // unordered packet already handed out; kept only for dedup/ACK
+    };
+
     uint32_t expected_ = 1;
-    std::map<uint32_t, DataMsg> buffer_;
+    std::map<uint32_t, Slot> buffer_;
 };
 
 }  // namespace dn

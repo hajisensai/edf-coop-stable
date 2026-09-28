@@ -111,6 +111,25 @@ struct EOS_P2P_SetPortRangeOptions {  // ApiVersion 1
     uint16_t MaxAdditionalPortsToTry;
 };
 
+struct EOS_P2P_SetPacketQueueSizeOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+    uint64_t IncomingPacketQueueMaxSizeBytes;
+    uint64_t OutgoingPacketQueueMaxSizeBytes;
+};
+
+struct EOS_P2P_GetPacketQueueInfoOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+};
+
+struct EOS_P2P_PacketQueueInfo {
+    uint64_t IncomingPacketQueueMaxSizeBytes;
+    uint64_t IncomingPacketQueueCurrentSizeBytes;
+    uint64_t IncomingPacketQueueCurrentPacketCount;
+    uint64_t OutgoingPacketQueueMaxSizeBytes;
+    uint64_t OutgoingPacketQueueCurrentSizeBytes;
+    uint64_t OutgoingPacketQueueCurrentPacketCount;
+};
+
 struct EOS_P2P_AddNotifyIncomingPacketQueueFullOptions {  // ApiVersion 1
     int32_t ApiVersion;
 };
@@ -183,6 +202,9 @@ using PFN_EOS_P2P_QueryNATType = void (*)(EOS_HP2P, const EOS_P2P_QueryNATTypeOp
                                           EOS_P2P_OnQueryNATTypeCompleteCallback);
 using PFN_EOS_P2P_SetRelayControl = EOS_EResult (*)(EOS_HP2P, const EOS_P2P_SetRelayControlOptions*);
 using PFN_EOS_P2P_SetPortRange = EOS_EResult (*)(EOS_HP2P, const EOS_P2P_SetPortRangeOptions*);
+using PFN_EOS_P2P_SetPacketQueueSize = EOS_EResult (*)(EOS_HP2P, const EOS_P2P_SetPacketQueueSizeOptions*);
+using PFN_EOS_P2P_GetPacketQueueInfo = EOS_EResult (*)(EOS_HP2P, const EOS_P2P_GetPacketQueueInfoOptions*,
+                                                      EOS_P2P_PacketQueueInfo*);
 using PFN_EOS_ProductUserId_ToString = EOS_EResult (*)(EOS_ProductUserId, char*, int32_t*);
 using PFN_EOS_ProductUserId_FromString = EOS_ProductUserId (*)(const char*);
 using PFN_EOS_EResult_ToString = const char* (*)(EOS_EResult);

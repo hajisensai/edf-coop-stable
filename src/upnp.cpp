@@ -63,9 +63,13 @@ void mapPort(uint16_t port, const std::string& localIpv4) {
                  ext.c_str());
         }
         SysFreeString(external);
-    } else {
-        logf("UPNP port mapping unavailable (router has UPnP disabled or not supported, hr=0x%08lx). "
+    } else if (SUCCEEDED(hr)) {
+        // The UPnP API itself worked but found no router offering a port-mapping service.
+        logf("UPNP no router with UPnP port mapping found (UPnP disabled or unsupported on the router). "
              "Forward UDP %u to %s manually, or use IPv6.",
+             port, localIpv4.c_str());
+    } else {
+        logf("UPNP port mapping failed (hr=0x%08lx). Forward UDP %u to %s manually, or use IPv6.",
              static_cast<unsigned long>(hr), port, localIpv4.c_str());
     }
     if (mapping) mapping->Release();

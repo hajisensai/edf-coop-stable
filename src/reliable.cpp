@@ -93,18 +93,29 @@ AckMsg ReliableReceiver::currentAck() const {
 
 AckMsg ReliableReceiver::onData(DataMsg msg, std::vector<DataMsg>& deliver) {
     uint32_t seq = msg.seq;
+    // Already delivered (below the cumulative point) or already held: a retransmitted duplicate.
+    if (seq < expected_ || buffer_.count(seq)) return currentAck();
     if (seq == expected_) {
         deliver.push_back(std::move(msg));
         ++expected_;
+        // Release everything now contiguous: ordered packets that were waiting, and skip markers of
+        // unordered packets that were handed out on arrival.
         for (auto it = buffer_.find(expected_); it != buffer_.end(); it = buffer_.find(expected_)) {
-            deliver.push_back(std::move(it->second));
+            if (!it->second.delivered) deliver.push_back(std::move(it->second.msg));
             buffer_.erase(it);
             ++expected_;
         }
-    } else if (seq > expected_ && buffer_.size() < kMaxReorderBuffer) {
-        buffer_.emplace(seq, std::move(msg));
+    } else if (buffer_.size() < kMaxReorderBuffer) {
+        Slot slot;
+        if (msg.reliability == 2) {
+            slot.msg = std::move(msg);  // ReliableOrdered: wait for every earlier packet
+        } else {
+            deliver.push_back(std::move(msg));  // ReliableUnordered: deliver now, remember it for dedup
+            slot.delivered = true;
+        }
+        buffer_.emplace(seq, std::move(slot));
     }
-    // seq < expected_: duplicate of something already delivered; just re-ACK.
+    // Buffer full: drop without acknowledging; the sender retransmits once the gap closes.
     return currentAck();
 }
 

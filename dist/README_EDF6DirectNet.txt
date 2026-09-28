@@ -37,9 +37,16 @@ EDF6DirectNet 0.2.0 —— EDF6 联机稳定插件（EDFModLoader 插件）
 ==================================================================
 安装
 ==================================================================
-前提：已装 EDFModLoader（游戏目录里有 winmm.dll 和 Mods\Plugins 文件夹）。
-1. 把 EDF6DirectNet.dll 放进  游戏目录\Mods\Plugins\
-2. 启动一次游戏，会自动生成  Mods\Plugins\EDF6DirectNet.ini  和  .log
+最简单：解压下载的 zip，双击 INSTALL.bat。
+  会自动找到 Steam 里的 EDF6，装好插件；
+  如果你还没装 EDFModLoader，会顺便装上官方版（已经装了的话不会动你的）。
+卸载：双击 UNINSTALL.bat（只删本插件，ModLoader 和其他 Mod 不动）。
+
+手动安装也行：把 zip 里的所有文件直接解压到游戏目录（EDF6.exe 所在的文件夹）。
+  没装过 EDFModLoader 的话，再把 EDFModLoader 文件夹里的 winmm.dll 和 ModLoader.ini 拿到游戏目录。
+  游戏目录：Steam 库里右键 EDF6 → 管理 → 浏览本地文件。
+
+装完从 Steam 正常启动游戏，第一次启动会生成 Mods\Plugins\EDF6DirectNet.ini（设置）和 .log（日志）。
 装完就有「防不同步」和「日志」。
 想要「掉线不重来」：所有人都装上，并把 ini 里 [Resilience] HoldDisconnects 改成 all。
 
@@ -50,7 +57,7 @@ EDF6DirectNet 0.2.0 —— EDF6 联机稳定插件（EDFModLoader 插件）
 1. 打开 Mods\Plugins\EDF6DirectNet.ini，改成：
        Mode=host
        ListenPort=27015
-2. 右键「EDF6DirectNet_防火墙放行.bat」→ 以管理员身份运行（只需一次）。
+2. 右键「EDF6DirectNet_AllowFirewall.bat」→ 以管理员身份运行（只需一次）。
 3. 让别人能访问到你（二选一）：
    a) IPv6（推荐，国内家宽大多有公网 IPv6，一般不用设置路由器）：
       启动游戏后看日志里的这一行，把地址发给朋友：

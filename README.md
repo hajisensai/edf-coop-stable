@@ -19,9 +19,15 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，基�
 EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的 `RequestedChannel` 为 NULL，且不检查频道/Socket），所以无法在 EOS 上安全地探测对方是否装了插件。
 因此默认只对公网直连成员（必然装了插件）生效；确认所有人都装了时可设 `HoldDisconnects=all`。
 
-## 安装 / 使用
+## 安装
 
-见 [dist/README_EDF6DirectNet.txt](dist/README_EDF6DirectNet.txt)（中文玩家说明）。
+1. 到 [Releases](https://github.com/hajisensai/edf6-coop-stable/releases/latest) 下载 `EDF6DirectNet-v*.zip` 并解压。
+2. 双击 **`INSTALL.bat`**：自动从 Steam 库找到 EDF6 并安装插件；没有 EDFModLoader 时会装上附带的官方版（[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10，MIT），已有的不会覆盖。
+3. 从 Steam 正常启动游戏。
+
+卸载：双击 `UNINSTALL.bat`。设置与使用说明见 [dist/README_EDF6DirectNet.txt](dist/README_EDF6DirectNet.txt)（中文）。
+
+也可以手动把 zip 内容解压到游戏目录（`EDF6.exe` 所在文件夹）。
 
 ## 构建
 
@@ -29,6 +35,8 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1 -Test
+# 打发布包（需要官方 EDFModLoader.zip 解压后的目录，外加它的 LICENSE.txt）
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.2.0 -ModLoaderDir <目录>
 ```
 
 产物：`build\EDF6DirectNet.dll`（静态 CRT，只依赖系统 DLL）与 `build\edf6_directnet_tests.exe`（单元测试 + 本机回环多节点测试，含 20%~40% 丢包、断网、重启场景；`EDF.dll` 导入表测试需要本机装有游戏，否则跳过）。

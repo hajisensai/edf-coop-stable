@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "crashlog.h"
 #include "log.h"
 #include "patches.h"
 
@@ -47,20 +48,22 @@ void LogOnce(unsigned bit, const char* text, long long value) {
 
 // OnlineSession() without C++ objects so it can use SEH.
 bool OnlineMode() {
-    __try {
-        std::uint64_t status = 0;
-        std::memcpy(&status, game + kGameStatusPointer, sizeof(status));
-        const auto* s = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(status));
-        const std::int32_t mode = *reinterpret_cast<const std::int32_t*>(s + 0x38);
-        if (mode == -1) return false;
-        const auto* modes = *reinterpret_cast<const std::uint8_t* const*>(s + 0x20);
-        const auto* entry = *reinterpret_cast<const std::uint8_t* const*>(modes + static_cast<std::uint32_t>(mode) * 8);
-        const auto* info = *reinterpret_cast<const std::uint8_t* const*>(entry + 0x10);
-        const std::int32_t offset = *reinterpret_cast<const std::int32_t*>(info + 8);
-        return *reinterpret_cast<const std::int32_t*>(info + offset + 0x68) != 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            std::uint64_t status = 0;
+            std::memcpy(&status, game + kGameStatusPointer, sizeof(status));
+            const auto* s = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(status));
+            const std::int32_t mode = *reinterpret_cast<const std::int32_t*>(s + 0x38);
+            if (mode == -1) return false;
+            const auto* modes = *reinterpret_cast<const std::uint8_t* const*>(s + 0x20);
+            const auto* entry = *reinterpret_cast<const std::uint8_t* const*>(modes + static_cast<std::uint32_t>(mode) * 8);
+            const auto* info = *reinterpret_cast<const std::uint8_t* const*>(entry + 0x10);
+            const std::int32_t offset = *reinterpret_cast<const std::int32_t*>(info + 8);
+            return *reinterpret_cast<const std::int32_t*>(info + offset + 0x68) != 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 template <std::uint64_t CpuContext::*Target, std::uint64_t CpuContext::*Index>

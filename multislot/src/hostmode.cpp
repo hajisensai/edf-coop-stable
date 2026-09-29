@@ -11,6 +11,7 @@
 #include "armor.h"
 #include "updatecheck.h"
 #include "identity.h"
+#include "crashlog.h"
 #include "log.h"
 #include "mission.h"
 #include "patches.h"
@@ -84,14 +85,16 @@ void Release(SharedPtr& pointer) {
 }
 
 bool InRoomSession() {
-    __try {
-        std::uint64_t holder = 0;
-        std::memcpy(&holder, game + kSessionHolder, sizeof(holder));
-        if (!holder) return false;
-        return *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(holder - 0x98 + 0xC0)) != 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            std::uint64_t holder = 0;
+            std::memcpy(&holder, game + kSessionHolder, sizeof(holder));
+            if (!holder) return false;
+            return *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(holder - 0x98 + 0xC0)) != 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 bool RoomHost() {
@@ -199,14 +202,16 @@ std::atomic<std::uint64_t> searchAgainAt{0};  // when F2 asked for a new search 
 
 // 1: the list may search now, 0: not yet (a search is running or a dialog is open), -1: not readable.
 int LobbyMaySearch(const unsigned char* lobby) {
-    __try {
-        const unsigned char* search = lobby + kLobbySearch;
-        void* dialog = nullptr;
-        std::memcpy(&dialog, lobby + kLobbyDialogCallback, sizeof(dialog));
-        return LobbyMaySearchAgain(search[kSearchActive], search[kSearchResultsIn], dialog != nullptr) ? 1 : 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return -1;
-    }
+    return Probing([&]() -> int {
+        __try {
+            const unsigned char* search = lobby + kLobbySearch;
+            void* dialog = nullptr;
+            std::memcpy(&dialog, lobby + kLobbyDialogCallback, sizeof(dialog));
+            return LobbyMaySearchAgain(search[kSearchActive], search[kSearchResultsIn], dialog != nullptr) ? 1 : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return -1;
+        }
+    });
 }
 template <std::uint32_t High>
 void SearchRangeHandler(CpuContext* context) {

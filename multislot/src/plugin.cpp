@@ -124,15 +124,17 @@ RoomViewSettings ReadRoomView(const wchar_t* ini) {
 }
 
 bool SupportedImage(const unsigned char* base) {
-    __try {
-        const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return false;
-        const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-               nt->FileHeader.TimeDateStamp == kImageTimeDateStamp && nt->OptionalHeader.SizeOfImage == kImageSize;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return false;
+            const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+                   nt->FileHeader.TimeDateStamp == kImageTimeDateStamp && nt->OptionalHeader.SizeOfImage == kImageSize;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 struct Redirect {
@@ -386,7 +388,7 @@ bool LoadPlugin(PluginInfo* info) {
     const float smoothing = smoothingPercent > 0 && smoothingPercent <= 100
                                 ? static_cast<float>(smoothingPercent) / 100.0f
                                 : 0.0f;
-    // A minidump of the first access violation inside EDF.dll, one file overwritten each launch. The
+    // A minidump of the first access violation inside EDF.dll or the plugin, one file overwritten each launch. The
     // 2026-09-27 host crash is a null whose source is a stack local, which no log line can show.
     // Off unless the INI asks for it: a dump carries process memory, which can include the room name and
     // chat text, and that is not something to switch on for everyone who installs the package.
@@ -615,7 +617,7 @@ bool LoadPlugin(PluginInfo* info) {
         const bool wantDump = crashDump && SiblingPath(dumpPath, L"-crash.dmp");
         InstallCrashLog(game, wantDump ? dumpPath : nullptr);
         if (CrashDumpArmed())
-            Log("Crash log armed; CrashDump=1, so the first access violation in EDF.dll also writes %ls "
+            Log("Crash log armed; CrashDump=1, so the first access violation in EDF.dll or the plugin also writes %ls "
                 "(one per launch, overwritten each time). It holds process memory, so only send it on "
                 "purpose", dumpPath);
         else if (crashDump)

@@ -2,14 +2,18 @@
 // null whose source is a stack local, so the log's registers and call stack cannot explain it and a
 // dump of the faulting frame is the only way on. This checks the writer really produces a file, and
 // that it stays within the limits the shipped default relies on: at most one per launch, only for an
-// access violation in the module it was given, and nothing at all when it is switched off.
+// access violation in the module it was given or in the plugin itself, never for a fault the plugin's own
+// probes expect and catch, and nothing at all when it is switched off.
 //
-//   CrashDumpTests work-folder
+//   CrashDumpTests work-folder [plugin]
+// `plugin` runs it with another module as the game, so this executable (where crashlog.cpp is linked, as in the
+// plugin) is only the plugin.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "../src/crashlog.h"
@@ -45,13 +49,20 @@ void FaultOnce() {
     }
 }
 
+std::size_t Count(const std::string& text, const char* needle) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++count;
+    return count;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::wstring folder = argc > 1 ? std::wstring(argv[1], argv[1] + std::strlen(argv[1])) : L".";
+    const bool pluginOnly = argc > 2 && std::strcmp(argv[2], "plugin") == 0;
     CreateDirectoryW(folder.c_str(), nullptr);
-    const std::wstring log = folder + L"\\crashdump.log";
-    const std::wstring dump = folder + L"\\crashdump.dmp";
+    const std::wstring log = folder + (pluginOnly ? L"\\crashdump-plugin.log" : L"\\crashdump.log");
+    const std::wstring dump = folder + (pluginOnly ? L"\\crashdump-plugin.dmp" : L"\\crashdump.dmp");
     DeleteFileW(log.c_str());
     DeleteFileW(dump.c_str());
     LogOpen(log.c_str());
@@ -59,9 +70,16 @@ int main(int argc, char** argv) {
     // Nothing is armed before the handler is installed, and a null path leaves it unarmed.
     Check(!CrashDumpArmed(), "no dump before the handler is installed");
 
-    // The test executable stands in for EDF.dll: a fault in this module counts as a fault in "the game".
-    InstallCrashLog(GetModuleHandleW(nullptr), dump.c_str());
+    // The test executable stands in for EDF.dll: a fault in this module counts as a fault in "the game". Or, with
+    // `plugin`, the game is kernel32.dll and a fault here is a fault in the plugin, which is dumped the same way.
+    InstallCrashLog(pluginOnly ? GetModuleHandleW(L"kernel32.dll") : GetModuleHandleW(nullptr), dump.c_str());
     Check(CrashDumpArmed(), "a usable path and DbgHelp arm the dump");
+
+    // One of the plugin's probes (armor.cpp RulesFor calling into the game, say): its __except catches the fault,
+    // so the crash handler looks away - no report, and the one dump is not spent on it.
+    Probing([] { FaultOnce(); });
+    Check(FileSize(dump) < 0, "a fault inside a probe writes no dump");
+    Check(!InProbe() && Probing([] { return 5; }) == 5 && !InProbe(), "a probe passes its result on and ends with it");
 
     FaultOnce();
     const long long first = FileSize(dump);
@@ -91,7 +109,8 @@ int main(int argc, char** argv) {
         CloseHandle(handle);
     }
     Check(text.find("CRASH DUMP written") != std::string::npos, "the log names the dump it wrote");
-    Check(text.find("EXCEPTION C0000005") != std::string::npos, "and still records the exception itself");
+    Check(Count(text, "EXCEPTION C0000005") == 2, "and records both faults that were not probes, and not the probe");
+    if (pluginOnly) Check(text.find("CrashDumpTests.exe+") != std::string::npos, "the plugin's fault is placed in its module");
 
     if (failures) std::printf("--- log was ---\n%s---------------\n", text.c_str());
     DeleteFileW(dump.c_str());

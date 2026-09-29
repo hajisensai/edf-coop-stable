@@ -163,6 +163,7 @@ add_test(NAME LogFileCap COMMAND LogTests "${CMAKE_BINARY_DIR}/logtest")
 add_executable(CrashDumpTests tests/crashdump_test.cpp src/crashlog.cpp src/log.cpp)
 target_compile_options(CrashDumpTests PRIVATE ${WARNINGS})
 add_test(NAME CrashDump COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/crashdumptest")
+add_test(NAME CrashDumpInPlugin COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/crashdumptest" plugin)
 
 # A plugin that refuses (Enabled=0, or no supported EDF.dll) is unloaded by EDFModLoader at once: nothing of it
 # may keep running. Needs no game: without EDF.dll in the process the plugin refuses as it does in an unsupported one.

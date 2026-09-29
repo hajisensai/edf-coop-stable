@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <intrin.h>
 
+#include "crashlog.h"
 #include "log.h"
 #include "identity.h"
 #include "joinlog.h"
@@ -122,47 +123,51 @@ struct HelloScope {
 
 bool EligibleFinalHello(void* manager, const void* peer) {
     if (!manager || !peer) return false;
-    __try {
-        const auto* bytes = static_cast<const unsigned char*>(manager);
-        const auto local = *reinterpret_cast<const void* const*>(bytes + 0x138);
-        if (!local || local == peer) return false;
-        const auto users = *reinterpret_cast<const void* const*>(bytes + 0x140);
-        // Do not queue a reply from an old manager after leaving/replacing the active room.
-        std::uintptr_t roomUsers = 0;
-        const char* failure = nullptr;
-        if (!ReadCurrentRoomUsers(gameAddress, roomUsers, failure) ||
-            reinterpret_cast<const void*>(roomUsers) != users) return false;
-        UserSlotsSnapshot snapshot{};
-        if (!ReadUserSlots(users, snapshot) || snapshot.occupied <= 4) return false;
-        bool localReady = false, peerReady = false;
-        for (const auto& slot : snapshot.slots) {
-            const auto id = reinterpret_cast<const void*>(slot.productId);
-            if (slot.object && id == local && (slot.flags & 1)) localReady = true;
-            // The peer must already have passed the game's validation on this machine.
-            if (slot.object && id == peer && (slot.flags & 3) == 3) peerReady = true;
+    return Probing([&]() -> bool {
+        __try {
+            const auto* bytes = static_cast<const unsigned char*>(manager);
+            const auto local = *reinterpret_cast<const void* const*>(bytes + 0x138);
+            if (!local || local == peer) return false;
+            const auto users = *reinterpret_cast<const void* const*>(bytes + 0x140);
+            // Do not queue a reply from an old manager after leaving/replacing the active room.
+            std::uintptr_t roomUsers = 0;
+            const char* failure = nullptr;
+            if (!ReadCurrentRoomUsers(gameAddress, roomUsers, failure) ||
+                reinterpret_cast<const void*>(roomUsers) != users) return false;
+            UserSlotsSnapshot snapshot{};
+            if (!ReadUserSlots(users, snapshot) || snapshot.occupied <= 4) return false;
+            bool localReady = false, peerReady = false;
+            for (const auto& slot : snapshot.slots) {
+                const auto id = reinterpret_cast<const void*>(slot.productId);
+                if (slot.object && id == local && (slot.flags & 1)) localReady = true;
+                // The peer must already have passed the game's validation on this machine.
+                if (slot.object && id == peer && (slot.flags & 3) == 3) peerReady = true;
+            }
+            return localReady && peerReady;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
         }
-        return localReady && peerReady;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    });
 }
 
 bool MatchFinalHello(void* handle, const SendPacketOptions* options, std::uintptr_t caller) {
     if (!activeHello || caller != 0x12C90F2 || !options) return false;
-    __try {
-        const auto* manager = static_cast<const unsigned char*>(activeHello->manager);
-        std::uint32_t type = ~0u;
-        if (!options->Data || options->DataLengthBytes < sizeof(type)) return false;
-        std::memcpy(&type, options->Data, sizeof(type));
-        return type == 0 && options->ApiVersion == 3 && options->Channel == 0 &&
-            options->Reliability == 1 && options->AllowDelayedDelivery == 0 && options->DisableAutoAccept == 1 &&
-            options->RemoteUserId == activeHello->peer &&
-            options->LocalUserId == *reinterpret_cast<const void* const*>(manager + 0x138) &&
-            options->Socket == reinterpret_cast<const SocketId*>(manager + 0x20) &&
-            handle == *reinterpret_cast<void* const*>(manager + 0x18);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            const auto* manager = static_cast<const unsigned char*>(activeHello->manager);
+            std::uint32_t type = ~0u;
+            if (!options->Data || options->DataLengthBytes < sizeof(type)) return false;
+            std::memcpy(&type, options->Data, sizeof(type));
+            return type == 0 && options->ApiVersion == 3 && options->Channel == 0 &&
+                options->Reliability == 1 && options->AllowDelayedDelivery == 0 && options->DisableAutoAccept == 1 &&
+                options->RemoteUserId == activeHello->peer &&
+                options->LocalUserId == *reinterpret_cast<const void* const*>(manager + 0x138) &&
+                options->Socket == reinterpret_cast<const SocketId*>(manager + 0x20) &&
+                handle == *reinterpret_cast<void* const*>(manager + 0x18);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 bool HandshakeBudget() {
@@ -177,14 +182,16 @@ std::uintptr_t GameRva(const void* address) {
 }
 
 bool IsHello(const void* data, std::uint32_t length) {
-    __try {
-        std::uint32_t type = ~0u;
-        if (!data || length < sizeof(type)) return false;
-        std::memcpy(&type, data, sizeof(type));
-        return type == 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            std::uint32_t type = ~0u;
+            if (!data || length < sizeof(type)) return false;
+            std::memcpy(&type, data, sizeof(type));
+            return type == 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 // Keep the import wrapper itself small so its return address is always the real game caller.
@@ -202,18 +209,20 @@ EOS_EResult DispatchSendPacket(void* handle, const SendPacketOptions* options, s
         ++activeHello->sends;
         activeHello->result = result;
     }
-    __try {
-        if (packetDiagnostics && caller == 0x12C90F2 && effective && HandshakeBudget()) {
-            char local[40]{}, remote[40]{};
-            ProductUserIdText(effective->LocalUserId, local, sizeof(local));
-            ProductUserIdText(effective->RemoteUserId, remote, sizeof(remote));
-            Log("HANDSHAKE SEND: %s -> %s bytes=%u channel=%u delayed=%d reliability=%d result=%d thread=%lu",
-                local, remote, effective->DataLengthBytes, effective->Channel, effective->AllowDelayedDelivery,
-                effective->Reliability, result, GetCurrentThreadId());
+    return Probing([&]() -> EOS_EResult {
+        __try {
+            if (packetDiagnostics && caller == 0x12C90F2 && effective && HandshakeBudget()) {
+                char local[40]{}, remote[40]{};
+                ProductUserIdText(effective->LocalUserId, local, sizeof(local));
+                ProductUserIdText(effective->RemoteUserId, remote, sizeof(remote));
+                Log("HANDSHAKE SEND: %s -> %s bytes=%u channel=%u delayed=%d reliability=%d result=%d thread=%lu",
+                    local, remote, effective->DataLengthBytes, effective->Channel, effective->AllowDelayedDelivery,
+                    effective->Reliability, result, GetCurrentThreadId());
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return result;
+        return result;
+    });
 }
 
 EOS_EResult HookSendPacket(void* handle, const SendPacketOptions* options) {
@@ -224,39 +233,44 @@ EOS_EResult HookReceivePacket(void* handle, const void* options, void** peer, So
                              std::uint8_t* channel, void* data, std::uint32_t* size) {
     const auto caller = GameRva(_ReturnAddress());
     const auto result = originalReceivePacket(handle, options, peer, socket, channel, data, size);
-    __try {
-        if (result == 0 && size && IsHello(data, *size) && HandshakeBudget()) {
-            char remote[40]{};
-            ProductUserIdText(peer ? *peer : nullptr, remote, sizeof(remote));
-            Log("HANDSHAKE RECEIVE type=0: EOS %s bytes=%u channel=%u socket=%.33s caller=EDF+%llX thread=%lu",
-                remote, *size, channel ? *channel : 255, socket ? socket->Name : "?",
-                static_cast<unsigned long long>(caller), GetCurrentThreadId());
+    return Probing([&]() -> EOS_EResult {
+        __try {
+            if (result == 0 && size && IsHello(data, *size) && HandshakeBudget()) {
+                char remote[40]{};
+                ProductUserIdText(peer ? *peer : nullptr, remote, sizeof(remote));
+                Log("HANDSHAKE RECEIVE type=0: EOS %s bytes=%u channel=%u socket=%.33s caller=EDF+%llX thread=%lu",
+                    remote, *size, channel ? *channel : 255, socket ? socket->Name : "?",
+                    static_cast<unsigned long long>(caller), GetCurrentThreadId());
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return result;
+        return result;
+    });
 }
 
 EOS_EResult HookCloseConnection(void* handle, const CloseConnectionOptions* options) {
     const auto caller = GameRva(_ReturnAddress());
-    __try {
-        if (options && HandshakeBudget()) {
-            char local[40]{}, remote[40]{};
-            ProductUserIdText(options->LocalUserId, local, sizeof(local));
-            ProductUserIdText(options->RemoteUserId, remote, sizeof(remote));
-            void* stack[6]{};
-            const auto count = CaptureStackBackTrace(0, 6, stack, nullptr);
-            std::uintptr_t frames[6]{};
-            for (USHORT i = 0; i < count; ++i) frames[i] = GameRva(stack[i]);
-            Log("HANDSHAKE CLOSE: %s -> %s reason=%s caller=EDF+%llX thread=%lu stackEDF=%llX,%llX,%llX,%llX,%llX,%llX",
-                local, remote, caller == 0x12C7C2C ? "initial-retry" : caller == 0x12C95A2 ? "Users-disconnect-notify" : "other",
-                static_cast<unsigned long long>(caller), GetCurrentThreadId(),
-                static_cast<unsigned long long>(frames[0]), static_cast<unsigned long long>(frames[1]),
-                static_cast<unsigned long long>(frames[2]), static_cast<unsigned long long>(frames[3]),
-                static_cast<unsigned long long>(frames[4]), static_cast<unsigned long long>(frames[5]));
+    // Taken here, so the frames are this wrapper's callers and not the probe's.
+    void* stack[6]{};
+    const auto count = CaptureStackBackTrace(0, 6, stack, nullptr);
+    Probing([&] {
+        __try {
+            if (options && HandshakeBudget()) {
+                char local[40]{}, remote[40]{};
+                ProductUserIdText(options->LocalUserId, local, sizeof(local));
+                ProductUserIdText(options->RemoteUserId, remote, sizeof(remote));
+                std::uintptr_t frames[6]{};
+                for (USHORT i = 0; i < count; ++i) frames[i] = GameRva(stack[i]);
+                Log("HANDSHAKE CLOSE: %s -> %s reason=%s caller=EDF+%llX thread=%lu stackEDF=%llX,%llX,%llX,%llX,%llX,%llX",
+                    local, remote, caller == 0x12C7C2C ? "initial-retry" : caller == 0x12C95A2 ? "Users-disconnect-notify" : "other",
+                    static_cast<unsigned long long>(caller), GetCurrentThreadId(),
+                    static_cast<unsigned long long>(frames[0]), static_cast<unsigned long long>(frames[1]),
+                    static_cast<unsigned long long>(frames[2]), static_cast<unsigned long long>(frames[3]),
+                    static_cast<unsigned long long>(frames[4]), static_cast<unsigned long long>(frames[5]));
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+    });
     return originalCloseConnection(handle, options);
 }
 struct SetLobbyIdOptions {
@@ -311,15 +325,17 @@ std::atomic<std::uint32_t> lastMemberCount{0xFFFFFFFF};
 
 // EOS strings come from the game or the SDK; keep log lines bounded and printable.
 const char* Printable(const char* text, char* buffer, std::size_t size) {
-    __try {
-        if (!text) return "(null)";
-        std::size_t i = 0;
-        for (; i + 1 < size && text[i]; ++i) buffer[i] = (text[i] >= 0x20 && text[i] < 0x7F) ? text[i] : '?';
-        buffer[i] = 0;
-        return buffer;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return "(unreadable)";
-    }
+    return Probing([&]() -> const char* {
+        __try {
+            if (!text) return "(null)";
+            std::size_t i = 0;
+            for (; i + 1 < size && text[i]; ++i) buffer[i] = (text[i] >= 0x20 && text[i] < 0x7F) ? text[i] : '?';
+            buffer[i] = 0;
+            return buffer;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return "(unreadable)";
+        }
+    });
 }
 
 void LogAttribute(const char* what, const AttributeData* data, std::int32_t extra) {
@@ -440,14 +456,16 @@ bool Wanted(const char* category) {
 }
 
 void OnEosLog(const LogMessage* message) {
-    __try {
-        // No per-session line limit: the log file drops its oldest lines past 2 MB (log.h), so the lines
-        // leading up to a late crash are kept.
-        if (message && message->Category && message->Message && (message->Level <= 300 || Wanted(message->Category)))
-            Log("EOSSDK %d %.40s: %.600s", message->Level, message->Category, message->Message);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    if (gameLogCallback) gameLogCallback(message);
+    Probing([&] {
+        __try {
+            // No per-session line limit: the log file drops its oldest lines past 2 MB (log.h), so the lines
+            // leading up to a late crash are kept.
+            if (message && message->Category && message->Message && (message->Level <= 300 || Wanted(message->Category)))
+                Log("EOSSDK %d %.40s: %.600s", message->Level, message->Category, message->Message);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        if (gameLogCallback) gameLogCallback(message);
+    });
 }
 
 EOS_EResult HookSetLogCallback(LogCallback callback) {

@@ -4,6 +4,7 @@
 
 #include "fakemembers.h"
 
+#include "crashlog.h"
 #include "log.h"
 #include "patches.h"
 #include "roomview.h"
@@ -43,21 +44,25 @@ void ReleaseMember(RoomMember& member) {
 }
 
 std::size_t GuardedClamp(RoomMemberList* list) {
-    __try {
-        return ClampMembers(list, static_cast<std::size_t>(kMaxPlayers), &ReleaseMember);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
+    return Probing([&]() -> std::size_t {
+        __try {
+            return ClampMembers(list, static_cast<std::size_t>(kMaxPlayers), &ReleaseMember);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
+    });
 }
 
 // The list and its helpers belong to the game; a wrong assumption about them must not end the process.
 std::size_t GuardedAppend(RoomMemberList* list, std::size_t fakes) {
-    __try {
-        return AppendFakeMembers(list, fakes, static_cast<std::size_t>(kMaxPlayers),
-                                 reinterpret_cast<ReserveFn>(game + kReserve), reinterpret_cast<ResizeFn>(game + kResize));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
+    return Probing([&]() -> std::size_t {
+        __try {
+            return AppendFakeMembers(list, fakes, static_cast<std::size_t>(kMaxPlayers),
+                                     reinterpret_cast<ReserveFn>(game + kReserve), reinterpret_cast<ResizeFn>(game + kResize));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
+    });
 }
 
 std::uint32_t __fastcall MemberListHook(void* roomInfo, RoomMemberList* out) {

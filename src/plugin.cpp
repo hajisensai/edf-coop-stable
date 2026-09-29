@@ -77,7 +77,8 @@ private:
 };
 Advertised* g_advertised = new Advertised();  // never destroyed, like g_net
 
-void startDirect(dn::Config& c) {
+// Returns whether it asked the router for a UPnP port mapping (recorded in `upnpRecord`).
+bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
     auto pi = dn::findPhysicalInterface();
     if (pi) {
         logInterface(*pi);
@@ -88,10 +89,10 @@ void startDirect(dn::Config& c) {
     } else {
         dn::logf("NET could not identify the physical adapter; using normal OS routing");
     }
-    if (c.direct.mode == dn::Mode::Off) return;
+    if (c.direct.mode == dn::Mode::Off) return false;
     if (c.direct.mode == dn::Mode::Join && c.direct.hostAddress.empty()) {
         dn::logf("DIRECT Mode=join but HostAddress is empty; direct link disabled");
-        return;
+        return false;
     }
     if (c.direct.mode == dn::Mode::Host && c.direct.key.empty())
         dn::logf("DIRECT WARNING: hosting without Key= ; anyone who knows your address and a player's EOS id "
@@ -102,29 +103,32 @@ void startDirect(dn::Config& c) {
                  c.direct.listenPort);
         delete g_net;
         g_net = nullptr;
-        return;
+        return false;
     }
-    if (c.direct.mode != dn::Mode::Host) return;
+    if (c.direct.mode != dn::Mode::Host) return false;
     uint16_t port = g_net->boundPort();
     if (!c.publicAddress.empty()) {
         g_advertised->set(c.publicAddress, {});
         dn::logf("DIRECT players who join your room connect to %s (PublicAddress; UPnP skipped)",
                  c.publicAddress.c_str());
-        return;
+        return false;
     }
     std::string v6 = pi && !pi->globalIpv6.empty() ? "[" + pi->globalIpv6.front() + "]:" + std::to_string(port) : "";
     if (!v6.empty()) {
         g_advertised->set(v6, {});
         dn::logf("DIRECT players who join your room connect to %s (public IPv6)", v6.c_str());
     }
-    if (c.upnp && pi)
-        dn::upnpMapUdpAsync(port, pi->ipv4, [port](const std::string& wan) {
+    if (c.upnp && pi) {
+        dn::upnpMapUdpAsync(port, pi->ipv4, upnpRecord, [port](const std::string& wan) {
             std::string v4 = wan + ":" + std::to_string(port);
             g_advertised->set({}, v4);
             dn::logf("DIRECT players who join your room can also connect to %s (UPnP)", v4.c_str());
         });
-    else if (v6.empty())
+        return true;
+    }
+    if (v6.empty())
         dn::logf("DIRECT WARNING: no public IPv6 and UPnP is off; set PublicAddress= to your public IP:port");
+    return false;
 }
 
 }  // namespace
@@ -154,11 +158,20 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
         return false;  // the loader unloads us
     }
 
-    dn::removeOldUpdate(pluginPath());
+    for (const std::string& warning : config.warnings) dn::logf("%s", warning.c_str());
+    // Before anything that could fail in a new version: a version whose previous run did not last is
+    // replaced by the one before it, and this session runs without the plugin.
+    std::wstring self = pluginPath();
+    dn::RunState run = dn::beginRun(self, kVersionText);
+    if (run == dn::RunState::RolledBack) {
+        dn::logClose();
+        return false;  // the loader unloads us
+    }
+    if (run == dn::RunState::Trial) dn::startHealthWatch(self, kVersionText);
     if (config.autoUpdate)
-        dn::startAutoUpdate(pluginPath(), kVersionText);
+        dn::startAutoUpdate(self, kVersionText);
     else
-        dn::logf("UPDATE automatic updates are off (AutoUpdate=0)");
+        dn::logf("UPDATE automatic updates are off");
 
     HMODULE game = GetModuleHandleW(L"EDF.dll");
     HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
@@ -166,7 +179,10 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
         dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
         return true;
     }
-    startDirect(config);
+    // A router mapping lives until a start that does not map it: at game exit there is no safe point
+    // for the network calls removing it (DllMain runs under the loader lock with the other threads gone).
+    std::wstring upnpRecord = dir + L"EDF6DirectNet.upnp";
+    if (!startDirect(config, upnpRecord)) dn::upnpRemoveRecordedAsync(upnpRecord);
     if (!dn::installEosHooks(game, eos, config, g_net) && g_net) {
         g_net->stop();
         delete g_net;

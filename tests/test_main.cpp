@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,7 @@
 #include "../src/reliable.h"
 #include "../src/traffic.h"
 #include "../src/updater.h"
+#include "../src/upnp.h"
 #include "../src/wire.h"
 
 namespace {
@@ -616,11 +618,11 @@ void testUpdater() {
     CHECK(parseVersion("v1.2.3.4").patch == 3 && parseVersion("x 12.0.999999").patch == 999999);
 
     std::string json = R"({"tag_name": "v0.3.6", "assets": [
-        {"name":"EDF6DirectNet-v0.3.6.zip","browser_download_url":"https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet-v0.3.6.zip"},
-        {"name": "EDF6DirectNet.dll", "browser_download_url": "https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet.dll"},
+        {"name":"EDF6DirectNet-v0.3.6.zip","browser_download_url":"https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.6/EDF6DirectNet-v0.3.6.zip"},
+        {"name": "EDF6DirectNet.dll", "browser_download_url": "https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.6/EDF6DirectNet.dll"},
         {"name":"EDF6DirectNet.dll.sha256","browser_download_url":"https://evil.example/EDF6DirectNet.dll.sha256"}]})";
     CHECK(dn::jsonString(json, "tag_name") == "v0.3.6");
-    CHECK(dn::assetUrl(json, "EDF6DirectNet.dll") == "https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet.dll");
+    CHECK(dn::assetUrl(json, "EDF6DirectNet.dll") == "https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.6/EDF6DirectNet.dll");
     CHECK(dn::assetUrl(json, "EDF6DirectNet.dll.sha256").empty());  // not GitHub: refused
     CHECK(dn::assetUrl(json, "missing.dll").empty());
     // The shape GitHub actually returns: release name/author before the assets, label and uploader inside
@@ -629,15 +631,15 @@ void testUpdater() {
         "tag_name":"v0.3.7","name":"EDF6DirectNet.dll","author":{"login":"o","name":"EDF6DirectNet.dll"},"assets":[
         {"url":"https://api.github.com/a/1","id":1,"name":"EDF6DirectNet.dll.sha256","label":null,
          "uploader":{"login":"github-actions[bot]","id":2},"content_type":"text/plain","size":84,
-         "digest":"sha256:00","browser_download_url":"https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll.sha256"},
+         "digest":"sha256:00","browser_download_url":"https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll.sha256"},
         {"url":"https://api.github.com/a/2","id":3,"name":"EDF6DirectNet.dll","label":"",
          "uploader":{"login":"github-actions[bot]","id":2},"content_type":"application/x-msdownload","size":400000,
-         "digest":"sha256:11","browser_download_url":"https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll"}],
+         "digest":"sha256:11","browser_download_url":"https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll"}],
         "body":"see \"name\": \"EDF6DirectNet.dll\" https://evil.example/x"})";
     CHECK(dn::parseVersion(dn::jsonString(real, "tag_name")).patch == 7);
-    CHECK(dn::assetUrl(real, "EDF6DirectNet.dll") == "https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll");
+    CHECK(dn::assetUrl(real, "EDF6DirectNet.dll") == "https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll");
     CHECK(dn::assetUrl(real, "EDF6DirectNet.dll.sha256") ==
-          "https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll.sha256");
+          "https://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll.sha256");
 
     std::vector<uint8_t> abc = {'a', 'b', 'c'};
     CHECK(dn::sha256Hex(abc) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -682,17 +684,18 @@ void testUpdater() {
     if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
     CHECK(size == dll.size());                                                               // the new file is in place
     CHECK(GetFileAttributesW((installed + L".old").c_str()) != INVALID_FILE_ATTRIBUTES);  // the loaded one moved aside
-    dn::removeOldUpdate(installed);  // still mapped: cannot go yet
+    dn::removeUpdateLeftovers(installed);  // kept for rollback until the new version is healthy
     CHECK(GetFileAttributesW((installed + L".old").c_str()) != INVALID_FILE_ATTRIBUTES);
     if (loaded) FreeLibrary(loaded);
-    dn::removeOldUpdate(installed);  // the next game start: gone
-    CHECK(GetFileAttributesW((installed + L".old").c_str()) == INVALID_FILE_ATTRIBUTES);
+    dn::removeUpdateLeftovers(installed);
+    CHECK(GetFileAttributesW((installed + L".old").c_str()) != INVALID_FILE_ATTRIBUTES);
+    DeleteFileW((installed + L".old").c_str());
     CHECK(GetFileAttributesW((installed + L".new" + std::to_wstring(GetCurrentProcessId())).c_str()) ==
           INVALID_FILE_ATTRIBUTES);
     // A game that quit between writing its download and renaming it leaves installed.new<pid>.
     std::wstring stale = installed + L".new4242", other = installed + L".newer";
     CHECK(CopyFileW(built.c_str(), stale.c_str(), FALSE) && CopyFileW(built.c_str(), other.c_str(), FALSE));
-    dn::removeOldUpdate(installed);
+    dn::removeUpdateLeftovers(installed);
     CHECK(GetFileAttributesW(stale.c_str()) == INVALID_FILE_ATTRIBUTES);
     CHECK(GetFileAttributesW(other.c_str()) != INVALID_FILE_ATTRIBUTES);  // not ours: left alone
     DeleteFileW(other.c_str());
@@ -955,6 +958,332 @@ void testConfig() {
     DeleteFileW(path.c_str());
 }
 
+// A throwaway P-256 key pair made for these tests (only its public half is here) and .NET ECDsaCng
+// signatures over manifests of testDll("0.3.7") and testDll("0.3.5"), made the way the release workflow
+// signs.
+const std::vector<uint8_t> kTestKey = {
+    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x03, 0x95, 0xbe, 0x95, 0x54, 0x5d, 0xe1, 0xbc, 0xc8, 0x6c,
+    0x11, 0xf9, 0x92, 0x0e, 0x76, 0xec, 0x91, 0x4a, 0x50, 0x28, 0xc3, 0x95, 0xad, 0xa6, 0x8e, 0xb7, 0x19, 0x75,
+    0x44, 0x4e, 0x07, 0x0e, 0xba, 0x6b, 0xd2, 0x28, 0x98, 0x11, 0x69, 0xf0, 0x56, 0x4a, 0x8e, 0x9b, 0x42, 0xf9,
+    0x47, 0xf7, 0x03, 0xd7, 0xda, 0xb3, 0x08, 0xc9, 0x0b, 0x01, 0xf9, 0x2a, 0x67, 0x17, 0x82, 0x4f, 0x6e, 0x90};
+const char* const kTestSig037 =
+    "EDF6DirectNet 0.3.7\n"
+    "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d\n"
+    "0eeed29a0bd1595119798327f0a5f3bb8dbdb09a101734747355139df0456cba"
+    "58f065c04b40800adac57da10a8ff836caa19f1e187b91ed94f083eedd073b10\n";
+const char* const kTestSig035 =
+    "EDF6DirectNet 0.3.5\n"
+    "661665d34625dd6cf62577435eae547b2b30d73a85a74f01c7f2ef94b28e43f2\n"
+    "82082f5551989fc3792d8f4fed80f3f44448c6abfa12d2532666e866c71acfab"
+    "09dde9021d56ba265e40e3427747ba140d3012cec9620469a66fc700d2db8c4a\n";
+
+// 4 KiB: "MZ", zeros, the version marker at 1000.
+std::vector<uint8_t> testDll(const char* version) {
+    std::vector<uint8_t> dll(4096, 0);
+    dll[0] = 'M';
+    dll[1] = 'Z';
+    std::string marker = dn::versionMarker(dn::parseVersion(version));
+    std::copy(marker.begin(), marker.end(), dll.begin() + 1000);
+    return dll;
+}
+
+void testUpdateSigning() {
+    printf("update: signed manifest, version binding, no downgrade\n");
+    using dn::parseVersion;
+    std::string why;
+    std::vector<uint8_t> dll = testDll("0.3.7");
+    dn::Version v037 = parseVersion("0.3.7"), v036 = parseVersion("0.3.6");
+    CHECK(dn::sha256Hex(dll) == "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d");
+    dn::SignedManifest m;
+    CHECK(dn::readSignedManifest(kTestSig037, kTestKey, &m, &why) && m.version == v037);
+    CHECK(dn::verifyRelease(dll, kTestSig037, v037, v036, kTestKey, &why));
+    // Production trusts only the embedded release key: the test key's signature does not count.
+    CHECK(dn::releaseSigningKey().size() == 72 && dn::releaseSigningKey() != kTestKey);
+    CHECK(!dn::verifyRelease(dll, kTestSig037, v037, v036, dn::releaseSigningKey(), &why));
+    CHECK(why.find("signature is not valid") != std::string::npos);
+    // The signature binds version and digest.
+    std::string other = kTestSig037;
+    other[16] = '8';  // "EDF6DirectNet 0.3.8"
+    CHECK(!dn::readSignedManifest(other, kTestKey, &m, &why));
+    other = kTestSig037;
+    other[20] = other[20] == 'd' ? 'e' : 'd';  // first digest digit
+    CHECK(!dn::readSignedManifest(other, kTestKey, &m, &why));
+    other = kTestSig037;
+    other[other.size() - 2] = other[other.size() - 2] == '0' ? '1' : '0';  // last signature digit
+    CHECK(!dn::readSignedManifest(other, kTestKey, &m, &why));
+    // A validly signed release is taken only as the release it says it is, and only forward.
+    CHECK(!dn::verifyRelease(dll, kTestSig037, parseVersion("0.3.8"), v036, kTestKey, &why));  // tag 0.3.8, signed 0.3.7
+    CHECK(!dn::verifyRelease(dll, kTestSig037, v037, v037, kTestKey, &why));                   // not newer
+    CHECK(!dn::verifyRelease(testDll("0.3.5"), kTestSig035, parseVersion("0.3.5"), v036, kTestKey, &why));  // downgrade
+    CHECK(why.find("not newer") != std::string::npos);
+    CHECK(dn::verifyRelease(testDll("0.3.5"), kTestSig035, parseVersion("0.3.5"), parseVersion("0.3.4"), kTestKey, &why));
+    // The DLL must be the signed one.
+    std::vector<uint8_t> damaged = dll;
+    damaged[3000] ^= 1;
+    CHECK(!dn::verifyRelease(damaged, kTestSig037, v037, v036, kTestKey, &why));
+    CHECK(!dn::verifyRelease(testDll("0.3.5"), kTestSig037, v037, v036, kTestKey, &why));
+    // Strict format: nothing missing, added or respelled.
+    std::string good = kTestSig037;
+    for (const std::string& bad :
+         {std::string(), good.substr(0, good.size() - 1), good + "\n", good + "x", "\n" + good,
+          std::string("EDF6DirectNet 00.3.7") + good.substr(19), std::string("EDF6DirectNet  0.3.7") + good.substr(19),
+          std::string("EDF6DirectNet v0.3.7") + good.substr(19), std::string("edf6directnet 0.3.7") + good.substr(19)}) {
+        CHECK(!dn::readSignedManifest(bad, kTestKey, &m, &why));
+    }
+    std::string crlf;
+    for (char c : good) crlf += c == '\n' ? std::string("\r\n") : std::string(1, c);
+    CHECK(!dn::readSignedManifest(crlf, kTestKey, &m, &why));
+    std::string upper = good;
+    std::transform(upper.begin() + 20, upper.end(), upper.begin() + 20, [](char c) { return static_cast<char>(toupper(c)); });
+    CHECK(!dn::readSignedManifest(upper, kTestKey, &m, &why));
+    CHECK(!dn::readSignedManifest(good, std::vector<uint8_t>(72, 0), &m, &why));  // not a key
+    CHECK(!dn::readSignedManifest(good, {}, &m, &why));
+
+    // Asset URLs: this repository, this release's tag, this name; nothing else.
+    auto release = [](const std::string& tag, const std::string& url) {
+        return R"({"tag_name":")" + tag + R"(","assets":[{"name":"EDF6DirectNet.dll.sig","browser_download_url":")" +
+               url + R"("}]})";
+    };
+    const std::string base = "https://github.com/hajisensai/edf-coop-stable/releases/download/";
+    CHECK(dn::assetUrl(release("v0.3.7", base + "v0.3.7/EDF6DirectNet.dll.sig"), "EDF6DirectNet.dll.sig") ==
+          base + "v0.3.7/EDF6DirectNet.dll.sig");
+    for (const std::string& url :
+         {std::string("https://github.com/other/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll.sig"),
+          std::string("https://github.com/hajisensai/edf-coop-stable-fork/releases/download/v0.3.7/EDF6DirectNet.dll.sig"),
+          base + "v0.3.6/EDF6DirectNet.dll.sig", base + "v0.3.7/../../../../x/y/releases/download/v0.3.7/EDF6DirectNet.dll.sig",
+          base + "v0.3.7/EDF6DirectNet.dll.sig?x=1", std::string("http://github.com/hajisensai/edf-coop-stable/releases/download/v0.3.7/EDF6DirectNet.dll.sig"),
+          base + "v0.3.7/EDF6DirectNet.dll"}) {
+        CHECK(dn::assetUrl(release("v0.3.7", url), "EDF6DirectNet.dll.sig").empty());
+    }
+    CHECK(dn::assetUrl(release("v0.3.7/../x", base + "v0.3.7/../x/EDF6DirectNet.dll.sig"), "EDF6DirectNet.dll.sig").empty());
+}
+
+bool fileExists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+std::string fileText(const std::wstring& path) {
+    std::string text;
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return text;
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof(buf), f)) > 0;) text.append(buf, n);
+    fclose(f);
+    return text;
+}
+
+void putFile(const std::wstring& path, const std::string& text) {
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (!f) return;
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+}
+
+std::wstring freshDir(const wchar_t* name) {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring dir = std::wstring(tmp) + name + L"\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW((dir + L"*").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((dir + found.cFileName).c_str());
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    return dir;
+}
+
+void testUpdateRollback() {
+    printf("update: rollback state machine (trial, healthy, rolled back, bad version)\n");
+    std::wstring dir = freshDir(L"edf6dn_rollback_test");
+    std::wstring dll = dir + L"EDF6DirectNet.dll", old = dll + L".old", trial = dll + L".trial", bad = dll + L".bad";
+    auto install = [&](const char* version) { putFile(dll, "MZ EDF6DN_VERSION=" + std::string(version)); };
+    std::string why;
+
+    // Installed by hand: nothing to prove, a stray trial is dropped.
+    install("0.3.7");
+    putFile(trial, "0.3.7 0\n");
+    CHECK(dn::beginRun(dll, "0.3.7") == dn::RunState::Normal && !fileExists(trial));
+
+    // 0.3.7 updates itself to 0.3.8: 0.3.7 is kept as .old.
+    std::vector<uint8_t> v038 = testDll("0.3.8");
+    CHECK(dn::installOver(dll, v038, &why));
+    CHECK(fileText(old).find("EDF6DN_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
+    // The first start of 0.3.8 is a trial; healthy after a while: the trial and .old go.
+    CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Trial);
+    CHECK(fileText(trial) == "0.3.8 " + std::to_string(GetCurrentProcessId()) + "\n");
+    dn::confirmHealthy(dll, "0.3.7");  // someone else's trial: nothing happens
+    CHECK(fileExists(trial) && fileExists(old));
+    dn::confirmHealthy(dll, "0.3.8");
+    CHECK(!fileExists(trial) && !fileExists(old));
+    CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Normal);
+
+    // 0.3.8 updates to 0.3.9, whose first run dies before it is healthy (the trial stays).
+    std::vector<uint8_t> v039 = testDll("0.3.9");
+    CHECK(dn::installOver(dll, v039, &why));
+    CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);
+    CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);  // the same game asking again: still its trial
+    putFile(trial, "0.3.9 0\n");                              // that game is gone
+    CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
+    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
+    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.3.9") != std::string::npos);
+    CHECK(!fileExists(old) && !fileExists(trial));
+    CHECK(dn::badVersion(dll) == dn::parseVersion("0.3.9"));
+    // The next start is 0.3.8 again, normal; the moved-aside DLL is cleaned up.
+    CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Normal && !fileExists(dll + L".rolledback"));
+
+    // An older updater installs 0.3.9 again anyway: rolled back at once, without another trial.
+    CHECK(dn::installOver(dll, v039, &why));
+    CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
+    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
+
+    // Another game running the same trial right now (this process) is not a failed run.
+    CHECK(dn::installOver(dll, testDll("0.4.0"), &why));
+    putFile(trial, "0.4.0 " + std::to_string(GetCurrentProcessId()) + "\n");
+    CHECK(dn::beginRun(dll, "0.4.0") == dn::RunState::Trial && fileExists(old));
+
+    // A version on trial that installs the next one gives up its own trial: its health check must not
+    // delete the new version's rollback target.
+    CHECK(dn::installOver(dll, testDll("0.4.1"), &why));
+    CHECK(!fileExists(trial) && fileText(old).find("EDF6DN_VERSION=0.4.0") != std::string::npos);
+    dn::confirmHealthy(dll, "0.4.0");
+    CHECK(fileExists(old));
+
+    // Garbage in the state files is harmless.
+    putFile(trial, "garbage");
+    putFile(bad, "\xff\xfe");
+    CHECK(dn::beginRun(dll, "0.4.1") == dn::RunState::Trial && dn::badVersion(dll).valid() == false);
+
+    for (const wchar_t* f : {L"", L".old", L".trial", L".bad", L".rolledback"}) DeleteFileW((dll + f).c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
+void testSwapKeepsDllLoadable() {
+    printf("update: the plugin file never goes missing while it is replaced (loaded image)\n");
+    std::wstring dir = freshDir(L"edf6dn_swap_test");
+    std::wstring dll = dir + L"EDF6DirectNet.dll";
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
+    CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
+    HMODULE loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    CHECK(loaded != nullptr);
+    std::atomic<bool> done{false};
+    std::atomic<int> missing{0}, looks{0};
+    std::thread watcher([&] {
+        while (!done) {
+            if (!fileExists(dll)) ++missing;
+            ++looks;
+        }
+    });
+    std::string why;
+    // The running plugin is replaced: its image stays mapped under the second name .old.
+    bool allOk = dn::installOver(dll, testDll("0.3.8"), &why);
+    CHECK(allOk && fileExists(dll + L".old"));
+    CHECK(!DeleteFileW((dll + L".old").c_str()));  // still the loaded image
+    if (loaded) FreeLibrary(loaded);
+    // A watcher opening the file at the wrong moment must not make the replacement fail either.
+    for (int i = 0; i < 40; ++i) allOk = dn::installOver(dll, testDll(i % 2 ? "0.3.9" : "0.3.8"), &why) && allOk;
+    // A rollback also replaces the running (loaded) version.
+    CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
+    loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    CHECK(loaded != nullptr);
+    putFile(dll + L".old", "MZ EDF6DN_VERSION=0.3.9");
+    putFile(dll + L".trial", "0.9.9 0\n");
+    bool rolledBack = dn::beginRun(dll, "0.9.9") == dn::RunState::RolledBack;
+    done = true;
+    watcher.join();
+    CHECK(allOk && rolledBack);
+    CHECK(missing == 0 && looks > 0);
+    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    if (loaded) FreeLibrary(loaded);
+    DeleteFileW((dll + L".rolledback").c_str());
+    DeleteFileW((dll + L".bad").c_str());
+    // A download that could not be put in place leaves the installed file as it was.
+    CHECK(CopyFileW(built.c_str(), (dll + L".old").c_str(), FALSE));
+    HANDLE lock = CreateFileW((dll + L".old").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    CHECK(!dn::installOver(dll, testDll("0.4.0"), &why));  // the old backup cannot be removed
+    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    CHECK(!fileExists(dll + L".new" + std::to_wstring(GetCurrentProcessId())));
+    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+    for (const wchar_t* f : {L"", L".old", L".trial"}) DeleteFileW((dll + f).c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
+void testUpnpAddresses() {
+    printf("upnp: which WAN addresses are advertised, which mappings are ours\n");
+    for (const char* ok : {"1.2.3.4", "8.8.8.8", "100.63.255.255", "100.128.0.1", "172.15.0.1", "172.32.0.1",
+                           "169.253.1.1", "223.255.255.254", "198.17.0.1", "198.20.0.1"})
+        CHECK(dn::isPublicIpv4(ok));
+    for (const char* no : {"0.0.0.0", "0.1.2.3", "127.0.0.1", "127.255.255.254", "169.254.1.1", "10.0.0.1", "172.16.0.1",
+                           "172.31.255.255", "192.168.1.1", "100.64.0.1", "100.127.255.255", "224.0.0.1", "239.1.1.1",
+                           "240.0.0.1", "255.255.255.255", "192.0.0.8", "198.18.0.1", "198.19.255.1", "", "1.2.3",
+                           "1.2.3.4.5", "1.2.3.256", "01.2.3.4", " 1.2.3.4", "1.2.3.4 ", "1.2.3.4x", "a.b.c.d", "::1"})
+        CHECK(!dn::isPublicIpv4(no));
+    CHECK(dn::isBehindNatIpv4("100.64.0.1") && dn::isBehindNatIpv4("192.168.0.1") && !dn::isBehindNatIpv4("0.0.0.0"));
+    CHECK(!dn::isBehindNatIpv4("8.8.8.8") && !dn::isBehindNatIpv4("127.0.0.1"));
+
+    std::vector<std::string> me = {"192.168.1.10", "10.0.0.5"};
+    CHECK(dn::upnpMayReplace("192.168.1.10", me) && dn::upnpMayReplace("10.0.0.5", me));
+    CHECK(!dn::upnpMayReplace("192.168.1.11", me) && !dn::upnpMayReplace("", me));
+    // Another PC's mapping is never touched, even under our description.
+    CHECK(!dn::upnpMayRemove("192.168.1.11", "EDF6DirectNet", me));
+    CHECK(dn::upnpMayRemove("192.168.1.10", "EDF6DirectNet", me));
+    CHECK(!dn::upnpMayRemove("192.168.1.10", "Some game server", me));
+}
+
+void testConfigParsing() {
+    printf("config: UTF-8 with BOM, inline comments, strict numbers, AutoUpdate of old files\n");
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring path = std::wstring(tmp) + L"edf6directnet_parse_test.ini";
+    // What Notepad saves: UTF-8 with BOM, here straight before the first section (no comment line).
+    putFile(path,
+            "\xEF\xBB\xBF[DirectNet]\r\nMode=host ; \xE6\x88\xBF\xE4\xB8\xBB\r\nHostAddress=\xE4\xBE\x8B\xE3\x81\x88.jp:1\r\n"
+            "Key=abc#def\r\nPublicAddress=\"1.2.3.4:40000\"\r\nListenPort=27020\t# mine\r\nAutoJoin=0;x\r\n"
+            "[update]\r\nautoupdate = 1 ; on\r\n");
+    dn::Config c = dn::loadConfig(path);
+    CHECK(c.direct.mode == dn::Mode::Host && c.direct.listenPort == 27020);
+    CHECK(c.direct.hostAddress == "\xE4\xBE\x8B\xE3\x81\x88.jp:1");
+    CHECK(c.direct.key == "abc#def" && c.publicAddress == "1.2.3.4:40000");
+    CHECK(c.autoJoin);  // "0;x" is not a number (no space before ';'): the default, warned
+    CHECK(c.autoUpdate && c.warnings.size() == 1 && c.warnings[0].find("AutoJoin") != std::string::npos);
+
+    // Numbers are numbers: anything else keeps the default and says so.
+    putFile(path, "[DirectNet]\r\nListenPort=abc\r\nEnabled=yes\r\nLinkTimeoutMs=0x10\r\nUPnP=2\r\n"
+                  "[EOS]\r\nFixedPort=70000\r\n[Resilience]\r\nGraceSeconds=-5\r\n[Update]\r\nAutoUpdate=0\r\n");
+    c = dn::loadConfig(path);
+    CHECK(c.direct.listenPort == 27015 && c.enabled && c.direct.linkTimeoutMs == 60000 && c.upnp);
+    CHECK(c.eosFixedPort == 0 && c.graceMs == 30000 && !c.autoUpdate);
+    CHECK(c.warnings.size() == 6);
+    bool mentionsPort = false;
+    for (const std::string& w : c.warnings) mentionsPort = mentionsPort || w.find("ListenPort=abc") != std::string::npos;
+    CHECK(mentionsPort);
+
+    // A settings file from before auto-update (no AutoUpdate line) keeps it off and says how to turn it on.
+    putFile(path, "; old\r\n[DirectNet]\r\nMode=off\r\n");
+    c = dn::loadConfig(path);
+    CHECK(!c.autoUpdate && c.warnings.size() == 1 && c.warnings[0].find("AutoUpdate=1") != std::string::npos);
+    // A new default file has it on, with nothing to warn about.
+    DeleteFileW(path.c_str());
+    c = dn::loadConfig(path);
+    CHECK(c.autoUpdate && c.warnings.empty());
+
+    // UTF-16 (Notepad's "Unicode") and ANSI files work too.
+    std::wstring wide = L"\xFEFF[DirectNet]\r\nMode=join\r\nHostAddress=\x4F8B.jp:2\r\n";
+    putFile(path, std::string(reinterpret_cast<const char*>(wide.data()), wide.size() * sizeof(wchar_t)));
+    c = dn::loadConfig(path);
+    CHECK(c.direct.mode == dn::Mode::Join && c.direct.hostAddress == "\xE4\xBE\x8B.jp:2" && c.direct.listenPort == 0);
+    putFile(path, "[DirectNet]\r\nMode=join\r\nKey=\xC4\xE3\r\n");  // not UTF-8: the ANSI code page
+    c = dn::loadConfig(path);
+    wchar_t ansi[4] = {};
+    int n = MultiByteToWideChar(CP_ACP, 0, "\xC4\xE3", 2, ansi, 4);
+    char expected[16] = {};
+    WideCharToMultiByte(CP_UTF8, 0, ansi, n, expected, sizeof(expected), nullptr, nullptr);
+    CHECK(c.direct.mode == dn::Mode::Join && c.direct.key == expected);
+    DeleteFileW(path.c_str());
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -980,6 +1309,11 @@ int wmain(int argc, wchar_t** argv) {
     testLobbyStatusHold();
     testTrafficMeter();
     testUpdater();
+    testUpdateSigning();
+    testUpdateRollback();
+    testSwapKeepsDllLoadable();
+    testUpnpAddresses();
+    testConfigParsing();
     testRosterDropsQuietMember();
     testLinksFollowTheRoom();
     testHostRestart();

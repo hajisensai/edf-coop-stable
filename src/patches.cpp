@@ -28,6 +28,12 @@ constexpr std::uint8_t kToVanillaBase = static_cast<std::uint8_t>(0x90 - kLowMir
 constexpr std::uint8_t kCentreDisp = static_cast<std::uint8_t>(0x100 - kSearchTypeCenter); // low byte of disp32 -centre
 constexpr std::uint8_t kNearestKind = static_cast<std::uint8_t>(0x91 - kSearchTypeCenter); // |v - centre| of kind 0
 static_assert(kSearchTypeCenter <= 0x80 && Mirror(0x91) < 0x90, "the mirror must stay below the vanilla values");
+// Sign-extended imm8/disp8 operands above: each must stay below 0x80 or the rewritten code means something else.
+static_assert(Mirror(0x94) <= 0x80 && 0x90 - Mirror(0x94) < 0x80 && 0x91 - kSearchTypeCenter < 0x80,
+              "the centre's operands must fit the rewritten SEARCH_TYPE code");
+// A larger room is a family of its own: it must not publish the 8-player family's values (0x54..0x57).
+static_assert(kMaxPlayers == 8 || Mirror(0x91) < 0x54 || Mirror(0x94) > 0x57,
+              "a larger room must not share the 8-player family");
 
 }  // namespace
 

@@ -24,9 +24,11 @@ template <typename T> void Put(unsigned char* data, std::size_t offset, T value)
 int wmain(int argc, wchar_t** argv) {
     if (argc != 2) return 1;
     // Real MSVC vector layout; shared_ptr entries have an object and a control-block pointer.
-    std::array<std::array<unsigned char, 0xA0>, 8> users{};
-    std::uintptr_t slots[16]{};
-    for (std::size_t i = 0; i < 8; ++i) {
+    // A full room of this build (kMaxPlayers user slots); `last` is its highest slot.
+    constexpr std::size_t kN = static_cast<std::size_t>(kMaxPlayers), last = kN - 1;
+    std::array<std::array<unsigned char, 0xA0>, kN> users{};
+    std::uintptr_t slots[2 * kN]{};
+    for (std::size_t i = 0; i < kN; ++i) {
         slots[2 * i] = reinterpret_cast<std::uintptr_t>(users[i].data());
         Put(users[i].data(), 0x18, std::uintptr_t{0x1000} + i);
         Put(users[i].data(), 0x40, static_cast<std::int32_t>(i));
@@ -35,24 +37,24 @@ int wmain(int argc, wchar_t** argv) {
     const auto begin = reinterpret_cast<std::uintptr_t>(slots);
     std::uintptr_t vector[] = {begin, begin + sizeof(slots), begin + sizeof(slots)};
     UserSlotsSnapshot snapshot{};
-    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == 8 && snapshot.ready == 8, "eight ready users");
+    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == kN && snapshot.ready == kN, "a full room of ready users");
     slots[2] = 0;
-    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == 7 && snapshot.ready == 7,
-          "a hole below the highest slot is not counted as an eighth member");
-    Put(users[7].data(), 0x10, std::uint32_t{2});
-    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == 7 && snapshot.ready == 6 &&
-          snapshot.slots[7].productId == 0x1007 && snapshot.slots[7].index == 7,
+    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == kN - 1 && snapshot.ready == kN - 1,
+          "a hole below the highest slot is not counted as a member");
+    Put(users[last].data(), 0x10, std::uint32_t{2});
+    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == kN - 1 && snapshot.ready == kN - 2 &&
+          snapshot.slots[last].productId == 0x1000 + last && snapshot.slots[last].index == static_cast<std::int32_t>(last),
           "allocated but unconfirmed user is identified separately");
-    Put(users[7].data(), 0x10, std::uint32_t{3});
-    Check(ReadUserSlots(vector, snapshot) && snapshot.ready == 7, "confirmation without a slot-count change");
-    slots[14] = 0;
-    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == 6 && snapshot.slots[7].object == 0,
+    Put(users[last].data(), 0x10, std::uint32_t{3});
+    Check(ReadUserSlots(vector, snapshot) && snapshot.ready == kN - 1, "confirmation without a slot-count change");
+    slots[2 * last] = 0;
+    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == kN - 2 && snapshot.slots[last].object == 0,
           "removal discards the previous observation");
     slots[2] = reinterpret_cast<std::uintptr_t>(users[1].data());
     Put(users[1].data(), 0x10, std::uint32_t{2});
-    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == 7 && snapshot.ready == 6,
+    Check(ReadUserSlots(vector, snapshot) && snapshot.occupied == kN - 1 && snapshot.ready == kN - 2,
           "slot reuse can start a new pending handshake");
-    vector[1] = begin + 9 * 16;
+    vector[1] = begin + (kN + 1) * 16;
     vector[2] = vector[1];
     Check(!ReadUserSlots(vector, snapshot) && snapshot.occupied == 0, "oversized vector rejected");
     vector[1] = begin + 17;
@@ -96,7 +98,8 @@ int wmain(int argc, wchar_t** argv) {
         LogFlush();
         std::ifstream log(argv[1], std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
-        const std::string success = "ROOM USERS: occupied=7 ready=6 pending=1 roster=6 slots=8";
+        const std::string success = "ROOM USERS: occupied=" + std::to_string(kN - 1) + " ready=" + std::to_string(kN - 2) +
+                                    " pending=1 roster=6 slots=" + std::to_string(kN);
         const auto first = text.find(success);
         Check(first != std::string::npos && text.find(success, first + success.size()) != std::string::npos,
               "real diagnostic path emits counts before and after an unavailable room");

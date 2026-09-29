@@ -289,7 +289,7 @@ std::size_t ComposeLabel(const MenuContext& context, bool on, bool roomOn, wchar
     } else {
         // The page guide: while the room screen shows more than four members, and always in a MultiSlot room
         // this player hosts (there it names the second page before anyone fills it).
-        wchar_t pages[40]{};
+        wchar_t pages[64]{};  // room for "...: Members 9-12" behind a long key hint
         const RoomPageView& view = context.pages;
         const bool guide = view.pages > 1 || (context.roomHost && roomOn);
         if (view.active && guide && context.pageHint && context.pageHint[0]) {
@@ -350,9 +350,8 @@ void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
         const bool on = !eightPlayers.load();
         eightPlayers.store(on);
         Save(on);
-        Log("MENU F2: 8Player MOD %s (%s)", on ? "ON - rooms you create are MultiSlot rooms for 8 players"
-                                               : "OFF - rooms you create are normal 4-player rooms",
-            iniFile[0] ? "saved" : "not saved");
+        Log("MENU F2: %dPlayer MOD %s - rooms you create are %s (%s)", kModRoomCapacity, on ? "ON" : "OFF",
+            on ? "MultiSlot rooms for that many players" : "normal 4-player rooms", iniFile[0] ? "saved" : "not saved");
         const std::uint64_t now = GetTickCount64();
         if (now - lobbySeenAt.load() < kLobbyVisibleMs) {
             searchAgainAt.store(now);

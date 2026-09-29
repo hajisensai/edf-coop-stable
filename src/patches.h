@@ -10,7 +10,17 @@ constexpr std::uint32_t kImageTimeDateStamp = 0x678CCB46;
 constexpr std::uint32_t kImageSize = 0x22CE000;
 
 constexpr int kVanillaPlayers = 4;
-constexpr int kMaxPlayers = 8;
+// The room size is a build setting (CMake MULTISLOT_MAX_PLAYERS): 8 is the distributed build, 10 and 12 are
+// separate builds whose rooms only the same build can join (see kSearchTypeCenter below).
+#ifndef MULTISLOT_MAX_PLAYERS
+#define MULTISLOT_MAX_PLAYERS 8
+#endif
+constexpr int kMaxPlayers = MULTISLOT_MAX_PLAYERS;
+// Past eight players enemy counts stop growing (spawn.h): every extra player already costs the host frame time,
+// and a room that asked for ten did not ask for more enemies than eight get.
+constexpr int kEnemyScalePlayers = kMaxPlayers < 8 ? kMaxPlayers : 8;
+static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 16,
+              "5..16 players: loadout log bits (mission.cpp) and imm8 player counts in the patches limit the room");
 
 // Lobby SEARCH_TYPE. Vanilla rooms publish 0x90+k (k = 1..4) and a search asks for the range
 // [0x91, 0x90+m]; joining checks (v & ~0xF) == 0x90. MultiSlot rooms publish the mirror of the vanilla
@@ -29,7 +39,22 @@ constexpr int kMaxPlayers = 8;
 // Raising kMaxPlayers means a new family too: a room of nine needs nine user slots on every machine in it.
 // Ten was built and tested offline on 2026-09-19 (centre 0x70, see research/NOTES.md); the distributed
 // build stays at the eight that five machines have played.
+//
+// Centres per build, one family each (published values 2*centre-0x94 .. 2*centre-0x91):
+//   8 players  0x74 -> 0x54..0x57  (upstream, 1.2.6+)
+//   10 players 0x6E -> 0x48..0x4B
+//   12 players 0x6A -> 0x40..0x43
+// The larger rooms sit off upstream's grid of fours (0x70, 0x6C, ... are its next families, 0x70 its own
+// offline ten), so a later upstream family can never share a value with them.
+#if MULTISLOT_MAX_PLAYERS == 8
 constexpr std::uint32_t kSearchTypeCenter = 0x74;
+#elif MULTISLOT_MAX_PLAYERS == 10
+constexpr std::uint32_t kSearchTypeCenter = 0x6E;
+#elif MULTISLOT_MAX_PLAYERS == 12
+constexpr std::uint32_t kSearchTypeCenter = 0x6A;
+#else
+#error "MULTISLOT_MAX_PLAYERS needs a SEARCH_TYPE centre of its own in patches.h (8, 10 or 12)"
+#endif
 
 // Bytes replaced at a fixed RVA. `original` is verified before anything is written.
 struct Patch {

@@ -82,7 +82,8 @@ int main() {
         }
     }
     // Every count the mod supports, against the factors the README and the INI promise (tenths, half up).
-    const int factorTenths[] = {10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 22, 24, 26};
+    // Past eight players the factor stays at eight's x1.8 (kEnemyScalePlayers).
+    const int factorTenths[] = {10, 10, 10, 10, 10, 12, 14, 16, 18, 18, 18, 18, 18, 18, 18, 18, 18};
     bool factors = kMaxPlayers < static_cast<int>(sizeof(factorTenths) / sizeof(*factorTenths));
     for (int players = 1; players <= kMaxPlayers; ++players)
         for (const int count : {1, 2, 3, 5, 10, 150}) {

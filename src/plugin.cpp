@@ -36,7 +36,15 @@
 namespace multislot {
 namespace {
 
-constexpr const char* kVersion = "1.5.12";
+constexpr const char* kVersion = "1.5.13";
+// Which room-size build this is (patches.h); empty for the distributed eight.
+#define MULTISLOT_TEXT2(x) #x
+#define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)
+#if MULTISLOT_MAX_PLAYERS == 8
+constexpr const char* kRoomTag = "";
+#else
+constexpr const char* kRoomTag = "-" MULTISLOT_TEXT(MULTISLOT_MAX_PLAYERS) "p";
+#endif
 HMODULE self = nullptr;
 
 // out: MAX_PATH characters. Refuses paths too long to also hold the rotated log name (log.cpp), instead of
@@ -337,7 +345,7 @@ bool LoadPlugin(PluginInfo* info) {
     info->name = "EDF6 MultiSlot";
     info->version = PLUG_VER(1, 5, 5, 0);
 
-    Log("==== EDF6MultiSlot %s ====", kVersion);
+    Log("==== EDF6MultiSlot %s%s ====", kVersion, kRoomTag);
     const auto loader = GetModuleHandleW(L"winmm.dll");
     for (const auto name : {"timeBeginPeriod", "timeEndPeriod", "PlaySoundW"})
         Log("LOADER %s proxy=%s", name, LoaderProxyStyle(loader ? reinterpret_cast<const void*>(GetProcAddress(loader, name)) : nullptr));
@@ -536,8 +544,9 @@ bool LoadPlugin(PluginInfo* info) {
             char factors[160]{};
             int used = 0;
             for (int players = kVanillaPlayers + 1; players <= kMaxPlayers && used >= 0; ++players) {
+                const int p = players < kEnemyScalePlayers ? players : kEnemyScalePlayers;  // capped at eight
                 const int written = _snprintf_s(factors + used, sizeof(factors) - used, _TRUNCATE, "%sx%d.%d (%d)",
-                                                used ? " " : "", (players + 1) / 5, (players + 1) * 2 % 10, players);
+                                                used ? " " : "", (p + 1) / 5, (p + 1) * 2 % 10, players);
                 used = written < 0 ? -1 : used + written;
             }
             Log("Mission: 5+ players online - enemy counts %s, rounded; nests, anchors, ships and other fixed "

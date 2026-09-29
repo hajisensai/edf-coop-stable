@@ -309,13 +309,14 @@ int main() {
     // when the field is full: the guides above it say what the buttons do right now, the notice does not.
     SetUpdateNoticeForTest(L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat");
     const std::wstring withNotice = Compose(Menu(false, false, 0, 0), true, false);
-    Check(withNotice.find(L"8Player MOD :ON") != std::wstring::npos, "the controls still come first");
-    Check(withNotice.find(L"NEW EDF6VR") > withNotice.find(L"8Player MOD"), "the notice comes after them");
+    const std::wstring modOn = std::to_wstring(kModRoomCapacity) + L"Player MOD :ON";
+    Check(withNotice.find(modOn) != std::wstring::npos, "the controls still come first");
+    Check(withNotice.find(L"NEW EDF6VR") > withNotice.find(modOn), "the notice comes after them");
     Check(withNotice.find(L"Update_EDF6VR.bat") != std::wstring::npos, "and says what to run");
     wchar_t squeezed[32]{};
     ComposeLabel(Menu(false, false, 0, 0), true, false, squeezed, 32);
     const std::wstring cut = squeezed;
-    Check(cut.find(L"8Player MOD :ON") != std::wstring::npos, "a full field keeps the controls");
+    Check(cut.find(modOn) != std::wstring::npos, "a full field keeps the controls");
     Check(cut.find(L"Update_EDF6VR.bat") == std::wstring::npos, "and drops the notice, not the other way round");
     SetUpdateNoticeForTest(L"");
     Check(Compose(Menu(false, false, 0, 0), true, false).find(L"NEW EDF6VR") == std::wstring::npos,

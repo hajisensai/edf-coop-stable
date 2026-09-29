@@ -247,7 +247,7 @@ bool ReadUserSlots(const void* users, UserSlotsSnapshot& out) {
         const auto* vector = static_cast<const std::uintptr_t*>(users);
         const auto begin = vector[0], end = vector[1], allocatedEnd = vector[2];
         if (!begin || end < begin || allocatedEnd < end || (end - begin) % 16 ||
-            (end - begin) / 16 > 8) return false;
+            (end - begin) / 16 > static_cast<std::uintptr_t>(kMaxPlayers)) return false;
         UserSlotsSnapshot snapshot{};
         snapshot.capacity = (end - begin) / 16;
         for (std::size_t i = 0; i < snapshot.capacity; ++i) {
@@ -301,7 +301,7 @@ void NoteUserSlots(std::size_t rosterCount) {
     }
     bool changed = lastSlotFailure || users != lastUsers || rosterCount != lastRosterCount || snapshot.capacity != lastSlots.capacity;
     lastSlotFailure = nullptr;
-    for (std::size_t i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kMaxPlayers); ++i) {
         const auto& a = snapshot.slots[i];
         const auto& b = lastSlots.slots[i];
         changed = changed || a.object != b.object || a.productId != b.productId || a.flags != b.flags || a.index != b.index;

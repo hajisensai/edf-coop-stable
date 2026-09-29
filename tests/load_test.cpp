@@ -84,10 +84,11 @@ Behaviour Observe(const unsigned char* base) {
 // This version's MultiSlot rooms: the vanilla kinds mirrored around the centre.
 bool IsMirror(int v) { return v >= 2 * static_cast<int>(kSearchTypeCenter) - 0x94 && v <= 2 * static_cast<int>(kSearchTypeCenter) - 0x91; }
 // Rooms of MultiSlot 0.2-0.4.1 (0x8C..0x8F), 0.4.2-0.4.3 (0x7C..0x7F), 0.5.0-1.0.0 (0x74..0x77), 1.1.0-1.1.1 (0x6C..0x6F)
-// and 1.2.0 (0x64..0x67).
+// 1.2.0 (0x64..0x67), 1.2.1-1.2.5 (0x5C..0x5F) and, for a 10- or 12-player build, the 8-player rooms (0x54..0x57).
 bool IsOldMirror(int v) {
     return !IsMirror(v) && ((v >= 0x8C && v <= 0x8F) || (v >= 0x7C && v <= 0x7F) || (v >= 0x74 && v <= 0x77) ||
-                            (v >= 0x6C && v <= 0x6F) || (v >= 0x64 && v <= 0x67));
+                            (v >= 0x6C && v <= 0x6F) || (v >= 0x64 && v <= 0x67) || (v >= 0x5C && v <= 0x5F) ||
+                            (v >= 0x54 && v <= 0x57));
 }
 
 bool InModule(std::uintptr_t address, HMODULE module) {
@@ -329,7 +330,8 @@ int wmain(int argc, wchar_t** argv) {
             Check(Contains(written, "[RoomScreen]") && Contains(written, "EightPlayerRooms=0\r\n") && Contains(written, "NetLog=1\r\n") &&
                       Contains(written, "DummyMembers=0") && Contains(written, "PageKeys=F3,Tab\r\n") &&
                       Contains(written, "[CopyArmor]") && Contains(written, "PadButton=LeftStick\r\n") &&
-                      Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "PageKey="),
+                      Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "PageKey=") &&
+                      !Contains(written, "@MULTISLOT_"),
                   "missing INI is written with the documented defaults (CRLF)");
             Check(Contains(log, "Wrote default settings"), "writing the default INI is logged");
             // A dump copies the game's memory, so it must never be on for someone who only installed

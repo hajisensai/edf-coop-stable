@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "midhook.h"
+#include "patches.h"  // kMaxPlayers
 
 namespace multislot {
 
@@ -20,7 +21,8 @@ struct UserSlotState {
 };
 struct UserSlotsSnapshot {
     std::size_t capacity = 0, occupied = 0, ready = 0;
-    UserSlotState slots[8]{};
+    // One per user slot of a room (SessionPatches size the game's vector to kMaxPlayers).
+    UserSlotState slots[kMaxPlayers]{};
 };
 bool ReadUserSlots(const void* users, UserSlotsSnapshot& out);
 // Active RoomImpl, not its eos::lobby::Room base (whose vtable is installed during teardown).

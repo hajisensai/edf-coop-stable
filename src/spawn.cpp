@@ -193,7 +193,8 @@ void InstantAreaExHandler(CpuContext* context) { StackCount(context, 0x110, "Ins
 
 int ScaledEnemyCount(int count, int players) {
     if (count <= 0 || players <= kVanillaPlayers) return count;
-    const long long p = players < kMaxPlayers ? players : kMaxPlayers;
+    // Rooms larger than eight stop at eight's x1.8 (kEnemyScalePlayers, patches.h).
+    const long long p = players < kEnemyScalePlayers ? players : kEnemyScalePlayers;
     // count * (p + 1) / 5, rounded half up, in integers (no float drift at x.5).
     const long long scaled = (2LL * count * (p + 1) + 5) / 10;
     return scaled > kLargestScaledCount ? (count > kLargestScaledCount ? count : kLargestScaledCount) : static_cast<int>(scaled);

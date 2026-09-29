@@ -9,6 +9,9 @@
 # winmm.dll is EDFModLoader with the shared-dispatch race fixed. VR bundling must
 # use this file too; copying only the plugin DLL leaves the loader defect active.
 # Reads only; writes nothing outside _MultislotDEV\release.
+# -Players 10 or 12 packages the larger-room build (build.cmd 10 / 12, dist-10p / dist-12p) as
+# EDF6MultiSlot-<version>-10p: its rooms are a family of their own that only the same build can join.
+param([ValidateSet(8, 10, 12)][int]$Players = 8)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $game = Split-Path -Parent $root
@@ -20,7 +23,10 @@ $plugin = Get-Content -LiteralPath (Join-Path $root 'src\plugin.cpp') -Raw
 if ($plugin -notmatch 'kVersion = "(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)"') { throw 'Plugin version not found' }
 $version = $Matches[1]
 if (($version -split '-')[0] -ne $baseVersion) { throw 'CMake and plugin versions differ' }
-$loaderSource = Join-Path $root 'dist\winmm.dll'
+$distName = if ($Players -eq 8) { 'dist' } else { "dist-${Players}p" }
+$buildName = if ($Players -eq 8) { 'build' } else { "build-${Players}p" }
+if ($Players -ne 8) { $version = "$version-${Players}p" }
+$loaderSource = Join-Path $root "$distName\winmm.dll"
 $loaderHash = (Get-FileHash -LiteralPath $loaderSource -Algorithm SHA256).Hash
 if ($loaderHash -ne 'BE94E1FAC0CA12C41B6924E2EB168851641C999CE951D2A5A9FAEA5161B0F9A3') {
     throw "winmm.dll is not the verified race-fixed EDFModLoader ($loaderHash); run tools/fix_winmm_proxy.py"
@@ -30,13 +36,19 @@ $release = Join-Path $root 'release'
 $out = Join-Path $release $name
 $zip = Join-Path $release "$name.zip"
 
+# The research and References folders are not in the published source; the build writes the same
+# loader-fix.json, and the EDF6VR package carries the same EDFModLoader license text.
+$license = Join-Path $root 'References\EDFModLoader-master\LICENSE'
+if (-not (Test-Path -LiteralPath $license)) { $license = Join-Path $game '_VRDEV\EDF6VR\packaging\Licenses\EDFModLoader.txt' }
+$loaderFix = Join-Path $root 'research\crashes-20260922\loader-fix.json'
+if (-not (Test-Path -LiteralPath $loaderFix)) { $loaderFix = Join-Path $root "$buildName\loader-fix.json" }
 $sources = @{
     'winmm.dll'                      = $loaderSource
-    'EDFModLoader_LICENSE.txt'       = Join-Path $root 'References\EDFModLoader-master\LICENSE'
-    'Mods\Plugins\EDF6MultiSlot.dll' = Join-Path $root 'dist\EDF6MultiSlot.dll'
+    'EDFModLoader_LICENSE.txt'       = $license
+    'Mods\Plugins\EDF6MultiSlot.dll' = Join-Path $root "$distName\EDF6MultiSlot.dll"
     'HANDSHAKE_RECOVERY_JA.md'       = Join-Path $root 'packaging\HANDSHAKE_RECOVERY_JA.md'
     'LOADER_FIX_JA.md'               = Join-Path $root 'packaging\LOADER_FIX_JA.md'
-    'loader-fix.json'               = Join-Path $root 'research\crashes-20260922\loader-fix.json'
+    'loader-fix.json'               = $loaderFix
 }
 foreach ($source in $sources.Values) {
     if (-not (Test-Path -LiteralPath $source)) { throw "Missing $source (run build.cmd first?)" }

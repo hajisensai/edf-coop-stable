@@ -13,6 +13,9 @@ int InstallNetLog(HMODULE game, bool diagnostics, bool recovery);
 
 // Call site EDF+12D5B9B only: one final hello when leaving Link::OnInitial.
 void FinalHelloHook(void* manager, const void* peer, const char* token);
+// The game function FinalHelloHook passes the call on to. Set before the call site is redirected (plugin.cpp
+// Apply writes the redirect; InstallNetLog runs only after that), so a hello sent in between reaches the game.
+void InitFinalHello(const unsigned char* gameBase);
 
 // EDF.dll ends the game by calling TerminateProcess on itself, which skips every DLL_PROCESS_DETACH,
 // so the SHUTDOWN line added in 1.5.2 was never written once and every start reported the previous run

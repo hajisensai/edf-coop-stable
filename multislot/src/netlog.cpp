@@ -553,11 +553,14 @@ void FinalHelloHook(void* manager, const void* peer, const char* token) {
     }
 }
 
+void InitFinalHello(const unsigned char* gameBase) {
+    originalFinalHello = reinterpret_cast<FinalHelloFn>(const_cast<unsigned char*>(gameBase) + 0x12C8F50);
+}
+
 int InstallNetLog(HMODULE game, bool diagnostics, bool recovery) {
     gameAddress = reinterpret_cast<std::uintptr_t>(game);
     packetDiagnostics = diagnostics;
     handshakeRecovery = false;
-    originalFinalHello = reinterpret_cast<FinalHelloFn>(gameAddress + 0x12C8F50);
     constexpr const char* sdk = "EOSSDK-Win64-Shipping.dll";
     struct Entry {
         const char* name;

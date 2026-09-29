@@ -526,6 +526,7 @@ bool LoadPlugin(PluginInfo* info) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitJoinLog(base);
+    InitFinalHello(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
     InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
     if (!Apply(base, roomView.dummies, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,

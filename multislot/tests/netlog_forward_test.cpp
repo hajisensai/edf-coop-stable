@@ -137,10 +137,31 @@ void RunRecovery(int expectedCalls, const char* label) {
     Check(helloCalls == expectedCalls && recoverySends == expectedCalls && !activeHello, label);
 }
 void ThrowingHello(void*, const void*, const char*) { throw std::runtime_error("test unwinding"); }
+// Apply (plugin.cpp) points the final hello call at FinalHelloHook before InstallNetLog runs, so the hook must
+// already know the game's sender then: a hello in that window used to call a null pointer.
+void HookBeforeInstall(unsigned char* mappedGame) {
+    originalFinalHello = nullptr;
+    handshakeRecovery = false;
+    InitFinalHello(mappedGame);
+    Check(reinterpret_cast<const unsigned char*>(originalFinalHello) == mappedGame + 0x12C8F50,
+          "the game's final hello sender is known before the call is redirected");
+    // The sender stands in as `inc dword [rcx]; ret`: rcx is the manager argument.
+    unsigned char* sender = mappedGame + 0x12C8F50;
+    const unsigned char code[] = {0xFF, 0x01, 0xC3};
+    std::memcpy(sender, code, sizeof(code));
+    DWORD previous = 0;
+    Check(VirtualProtect(sender, sizeof(code), PAGE_EXECUTE_READWRITE, &previous) != 0, "fake sender executable");
+    FlushInstructionCache(GetCurrentProcess(), sender, sizeof(code));
+    alignas(4) std::uint32_t calls = 0;
+    FinalHelloHook(&calls, Peer(1), token);
+    Check(calls == 1, "a hello before InstallNetLog reaches the game's sender unchanged");
+    VirtualProtect(sender, sizeof(code), previous, &previous);
+}
 void RecoveryTests() {
     auto* mappedGame = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x22CE000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     Check(mappedGame != nullptr, "fake image allocated");
     if (!mappedGame) return;
+    HookBeforeInstall(mappedGame);
     gameAddress = reinterpret_cast<std::uintptr_t>(mappedGame);
     ResetRecovery(); RunRecovery(2, "NoConnection: one queued retry");
     ResetRecovery(); secondResult = 1; RunRecovery(2, "retry also fails: no third attempt");

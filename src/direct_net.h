@@ -35,6 +35,9 @@ struct DirectOptions {
     // is stuck in a stalled link the other players may be waiting for it at a sync point.
     uint32_t linkTimeoutMs = 60000;
     uint32_t pingIntervalMs = 1000;
+    // host: the member list sent to joiners names only clients heard from within this long, so every
+    // joiner learns within seconds (not after linkTimeoutMs) that a member's link went quiet.
+    uint32_t rosterFreshMs = 10000;
     // EDF6 sends all game data UnreliableUnordered. Carrying it reliably-unordered delivers every
     // packet exactly once, possibly reordered: a pattern the unreliable transport can produce anyway,
     // so the game handles it; it just never loses a packet any more.
@@ -79,6 +82,10 @@ public:
     bool linkAlive(const std::string& remote, uint64_t windowMs);
     // True when any of our direct links answered within `windowMs`.
     bool anyLinkAlive(uint64_t windowMs);
+    // Direct links belong to the room we are in. Inactive (not in a room): every link is closed with a
+    // BYE, a host welcomes nobody and a joiner dials nobody, so a player back at the title screen whose
+    // plugin still runs cannot look like someone still playing. Active by default.
+    void setActive(bool active);
 
     std::vector<std::string> directMembers();
     std::string statusLine();
@@ -137,6 +144,8 @@ private:
     // Host mode.
     std::map<std::string, Link> clients_;
     uint64_t lastRosterMs_ = 0;
+    std::vector<std::string> lastRoster_;  // what the clients were last told
+    bool active_ = true;
     uint64_t rosterBurstUntilMs_ = 0;
 
     // Join mode.

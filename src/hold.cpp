@@ -156,7 +156,7 @@ bool LobbyStatusHold::offer(const std::string& remote, bool reachable, uint64_t 
     for (const auto& h : held_)
         if (h.remote == remote) return true;  // a repeat; the first one is still hidden
     if (!reachable) return false;
-    held_.push_back(Held{remote, nowMs, std::move(deliver)});
+    held_.push_back(Held{remote, nowMs, false, std::move(deliver)});
     return true;
 }
 
@@ -172,6 +172,16 @@ bool LobbyStatusHold::onStatus(const std::string& remote, int32_t status) {
     }
     if (due) due();
     return status == kJoined;
+}
+
+bool LobbyStatusHold::abandon(const std::string& remote) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& h : held_)
+        if (h.remote == remote) {
+            h.abandoned = true;
+            return true;
+        }
+    return false;
 }
 
 size_t LobbyStatusHold::releaseAll() {
@@ -219,7 +229,7 @@ std::vector<std::string> LobbyStatusHold::poll(uint64_t nowMs,
         std::lock_guard<std::mutex> lock(mu_);
         for (auto it = held_.begin(); it != held_.end();) {
             if (alive.count(it->remote)) it->reachableAtMs = nowMs;
-            if (nowMs - it->reachableAtMs < graceMs_) {
+            if (!it->abandoned && nowMs - it->reachableAtMs < graceMs_) {
                 ++it;
                 continue;
             }

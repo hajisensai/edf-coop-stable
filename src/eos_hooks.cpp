@@ -25,6 +25,7 @@ constexpr uint64_t kMinQueueBytes = 64ull * 1024 * 1024;
 
 using PFN_EOS_Platform_Tick = void (*)(EOS_HPlatform);
 using PFN_EOS_P2P_RemoveNotify = void (*)(EOS_HP2P, EOS_NotificationId);
+using PFN_EOS_Lobby_RemoveNotify = void (*)(EOS_HLobby, EOS_NotificationId);
 using PFN_EOS_EResult_IsOperationComplete = int32_t (*)(EOS_EResult);
 
 struct Api {
@@ -52,6 +53,7 @@ struct Api {
     PFN_EOS_P2P_CloseConnection gameClose = nullptr;
     PFN_EOS_P2P_CloseConnections gameCloseAll = nullptr;
     PFN_EOS_Lobby_AddNotifyMemberStatus gameAddMemberStatus = nullptr;
+    PFN_EOS_Lobby_RemoveNotify gameRemoveMemberStatus = nullptr;
     PFN_EOS_Lobby_AddNotifyMemberUpdate gameAddMemberUpdate = nullptr;
     PFN_EOS_Lobby_CreateLobby gameCreateLobby = nullptr;
     PFN_EOS_Lobby_JoinLobby gameJoinLobby = nullptr;
@@ -73,6 +75,8 @@ struct ClosedHandler {
 struct MemberStatusHandler {
     EOS_Lobby_OnLobbyMemberStatusReceivedCallback callback;
     void* clientData;
+    EOS_NotificationId id = 0;
+    std::atomic<bool> removed{false};  // the game unregistered it; a status we still hold must not reach it
 };
 
 struct MemberUpdateHandler {
@@ -118,11 +122,13 @@ struct State {
     std::unique_ptr<LobbyStatusHold> lobbyHold;
     LobbyMarker marker;
     bool markerReady = false;
+    bool lobbyTracked = false;  // we see entering and leaving rooms: direct links follow the room
     std::mutex markedMutex;
     std::unordered_set<std::string> markedPeers;  // logged once as plugin users
     std::string loggedHostAddress;
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
+    std::vector<MemberStatusHandler*> statusHandlers;
     std::atomic<EOS_HP2P> p2p{nullptr};  // written on the game's send/receive thread, read on the tick
     std::atomic<EOS_HP2P> configuredHandle{nullptr};
     std::atomic<EOS_ProductUserId> localUser{nullptr};
@@ -345,6 +351,7 @@ struct LobbyStatusEvent {
 
 void deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
     applyLobbyStatus(e->target, e->self, e->info.CurrentStatus);
+    if (e->handler->removed) return;  // the game unregistered; its clientData may be freed
     e->info.LobbyId = e->lobbyId.c_str();
     e->handler->callback(&e->info);
 }
@@ -389,7 +396,20 @@ EOS_NotificationId hookAddNotifyMemberStatus(EOS_HLobby h, const EOS_Lobby_AddNo
                                              void* clientData, EOS_Lobby_OnLobbyMemberStatusReceivedCallback cb) {
     if (!cb || g_shutdown) return g.api.gameAddMemberStatus(h, o, clientData, cb);
     auto* handler = new MemberStatusHandler{cb, clientData};  // never freed, same reason as ClosedHandler
-    return g.api.gameAddMemberStatus(h, o, handler, memberStatusWrapper);
+    EOS_NotificationId id = g.api.gameAddMemberStatus(h, o, handler, memberStatusWrapper);
+    handler->id = id;
+    std::lock_guard<std::mutex> lock(g.handlerMutex);
+    g.statusHandlers.push_back(handler);
+    return id;
+}
+
+void hookRemoveNotifyMemberStatus(EOS_HLobby h, EOS_NotificationId id) {
+    if (!g_shutdown) {
+        std::lock_guard<std::mutex> lock(g.handlerMutex);
+        for (MemberStatusHandler* handler : g.statusHandlers)
+            if (handler->id == id) handler->removed = true;
+    }
+    g.api.gameRemoveMemberStatus(h, id);
 }
 
 // Diagnostics for a lobby member whose attributes changed: plugin users (once each) and the
@@ -434,6 +454,7 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     if (!g_shutdown && i->ResultCode == EOS_Success) {
         g.lobbyUser = call->localUser;
         g.marker.entered(call->lobby, i->LobbyId, call->localUser, call->owner);
+        if (g.baseNet) g.baseNet->setActive(true);
     }
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
@@ -482,6 +503,7 @@ void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.marker.left();
     if (g.lobbyHold) g.lobbyHold->clear();  // the game left too; other members' statuses are moot
+    if (g.baseNet && g.lobbyTracked) g.baseNet->setActive(false);
     {
         std::lock_guard<std::mutex> lock(g.markedMutex);
         g.loggedHostAddress.clear();
@@ -501,6 +523,10 @@ void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* cl
              net && net->heardFromRecently(target, kDirectDataFreshMs) ? "recent" : "none for 10 s",
              g.hold && g.hold->isHeld(target) ? "held by us" : "not held",
              g.lobbyHold && g.lobbyHold->isHeld(target) ? "hidden by us" : "normal");
+        // The game gave up on this member: a disconnect we are hiding must reach it now, or the member
+        // would stay in the game (EOS already dropped it, so the kick itself may produce no status).
+        if (g.lobbyHold && g.lobbyHold->abandon(target))
+            logf("RESILIENCE the game kicks %s: its hidden lobby disconnect goes to the game", shortId(target).c_str());
     }
     g.api.gameKick(h, o, clientData, cb);
 }
@@ -721,7 +747,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     }
     if (g.lobbyHold && g.lobbyHold->heldCount()) {
         for (const auto& remote : g.lobbyHold->poll(GetTickCount64(), reachableDirectly))
-            logf("RESILIENCE %s: direct link silent for %u s; its lobby disconnect handed to the game",
+            logf("RESILIENCE %s: lobby disconnect handed to the game (direct link silent for %u s, or kicked)",
                  shortId(remote).c_str(), g.config.graceMs / 1000);
     }
 }
@@ -856,9 +882,11 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     g.markerReady = g.marker.init(eos) && hook(game, "EOS_Lobby_CreateLobby", hookCreateLobby, g.api.gameCreateLobby) &&
                     hook(game, "EOS_Lobby_JoinLobby", hookJoinLobby, g.api.gameJoinLobby);
     hook(game, "EOS_Lobby_AddNotifyLobbyMemberUpdateReceived", hookAddNotifyMemberUpdate, g.api.gameAddMemberUpdate);
-    hook(game, "EOS_Lobby_LeaveLobby", hookLeaveLobby, g.api.gameLeaveLobby);
-    hook(game, "EOS_Lobby_DestroyLobby", hookDestroyLobby, g.api.gameDestroyLobby);
+    bool leave = hook(game, "EOS_Lobby_LeaveLobby", hookLeaveLobby, g.api.gameLeaveLobby);
+    bool destroy = hook(game, "EOS_Lobby_DestroyLobby", hookDestroyLobby, g.api.gameDestroyLobby);
     hook(game, "EOS_Lobby_KickMember", hookKickMember, g.api.gameKick);
+    hook(game, "EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived", hookRemoveNotifyMemberStatus,
+         g.api.gameRemoveMemberStatus);
     hook(game, "EOS_Lobby_UpdateLobby", hookUpdateLobby, g.api.gameUpdateLobby);
     logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
     if (config.hold != Config::Hold::Off) {
@@ -878,6 +906,8 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     // A half-hooked transport would send direct packets that the game can never receive.
     g.net = ok ? net : nullptr;
     g.baseNet = g.net;
+    g.lobbyTracked = g.markerReady && lobby && leave && destroy;
+    if (g.baseNet && g.lobbyTracked) g.baseNet->setActive(false);  // opened on entering a room
     g.autoJoinOn = ok && g.markerReady && config.autoJoin && config.direct.mode != Mode::Join;
     if (ok && config.autoJoin && config.direct.mode != Mode::Join)
         logf("DIRECT auto-connect %s", g.autoJoinOn ? "on: in other players' rooms we connect directly to a host "

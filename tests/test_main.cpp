@@ -577,6 +577,58 @@ void testLobbyStatusHold() {
     CHECK(!h.onStatus(kA, 1) && delivered == 6 && h.heldCount() == 0);
     CHECK(h.offer(kA, true, 0, leave));
     CHECK(h.poll(40000, reachable).size() == 1 && delivered == 7);
+
+    // The game kicking a hidden member: delivered on the next poll even though the link is up.
+    up = true;
+    CHECK(!h.abandon(kA));
+    CHECK(h.offer(kA, true, 0, deliver) && h.abandon(kA) && h.isHeld(kA) && delivered == 7);
+    CHECK(h.poll(1, reachable).size() == 1 && delivered == 8 && !h.isHeld(kA));
+}
+
+void testRosterDropsQuietMember() {
+    printf("direct: other joiners learn within seconds that a member's link went quiet\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.rosterFreshMs = 1500;
+    ho.linkTimeoutMs = 60000;  // long: the roster, not the timeout, must tell them
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    std::string port = std::to_string(host.boundPort());
+    dn::DirectNet a, b;
+    CHECK(a.start(joinOptions("127.0.0.1:" + port, 0)));
+    CHECK(b.start(joinOptions("127.0.0.1:" + port, 0)));
+    a.setLocalUser(kA);
+    b.setLocalUser(kB);
+    CHECK(waitFor([&] { return b.linkAlive(kA, 5000) && a.linkAlive(kB, 5000); }, 10000));
+    a.setTestBlackhole(true);
+    CHECK(waitFor([&] { return !b.linkAlive(kA, 5000) && b.linkAlive(kHost, 5000); }, 6000));
+    CHECK(host.canRoute(kA));  // the host still holds the link (it only times out after 60 s)
+    a.setTestBlackhole(false);
+    CHECK(waitFor([&] { return b.linkAlive(kA, 5000); }, 6000));
+}
+
+void testLinksFollowTheRoom() {
+    printf("direct: not in a room, a host welcomes nobody and a joiner dials nobody\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    host.setActive(false);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2000));  // host not in a room
+    host.setActive(true);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    host.setActive(false);  // the host left its room: its clients are told at once
+    CHECK(waitFor([&] { return !a.canRoute(kHost) && !host.canRoute(kA); }, 2000));
+    CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2000));
+    host.setActive(true);
+    CHECK(waitFor([&] { return a.canRoute(kHost); }, 5000));
+    a.setActive(false);  // the joiner left: it closes the link and does not dial again
+    CHECK(waitFor([&] { return !host.canRoute(kA) && !a.anyLinkAlive(5000); }, 2000));
+    CHECK(!waitFor([&] { return host.canRoute(kA); }, 2000));
+    a.setActive(true);
+    CHECK(waitFor([&] { return host.canRoute(kA) && a.canRoute(kHost); }, 5000));
 }
 
 void testDisconnectHold() {
@@ -804,6 +856,8 @@ int wmain(int argc, wchar_t** argv) {
     testDirectUpgradesUnreliable();
     testDisconnectHold();
     testLobbyStatusHold();
+    testRosterDropsQuietMember();
+    testLinksFollowTheRoom();
     testHostRestart();
     testStalledLinkSurvives();
     testReplyFromOtherAddress();

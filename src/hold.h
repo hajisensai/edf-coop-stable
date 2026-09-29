@@ -99,6 +99,10 @@ public:
     // again while its disconnect was hidden. A promotion ends the hold and still reaches the game.
     // Anything else (left, kicked) delivers the hidden disconnect first, in the order EOS reported.
     bool onStatus(const std::string& remote, int32_t status);
+    // The game itself gave up on `remote` (it is kicking it): deliver its hidden disconnect on the next
+    // poll whatever the direct link says. Not delivered right here: the caller runs inside the game's
+    // own call. Returns false when nothing was hidden.
+    bool abandon(const std::string& remote);
     // Delivers every hidden disconnect (the room was closed). Returns the number delivered.
     size_t releaseAll();
     // We left the room: forget the hidden disconnects without delivering them.
@@ -115,6 +119,7 @@ private:
     struct Held {
         std::string remote;
         uint64_t reachableAtMs = 0;  // last time the direct link showed the member alive
+        bool abandoned = false;
         std::function<void()> deliver;
     };
 

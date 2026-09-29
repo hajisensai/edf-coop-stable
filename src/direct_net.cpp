@@ -306,6 +306,29 @@ bool DirectNet::anyLinkAlive(uint64_t windowMs) {
     return hostLink_ && hostLink_->up && now - hostLink_->lastRecvMs <= windowMs;
 }
 
+void DirectNet::setActive(bool active) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (active == active_) return;
+    active_ = active;
+    if (active) {
+        logf("DIRECT links open again (in a room)");
+        return;
+    }
+    Message bye;
+    bye.type = MsgType::Bye;
+    for (int copy = 0; copy < 3; ++copy) {  // one lost datagram must not leave a stale link behind
+        for (auto& [id, link] : clients_) sendMsg(bye, link.addr, link.addrLen);
+        if (hostLink_) sendMsg(bye, hostLink_->addr, hostLink_->addrLen);
+    }
+    size_t closed = clients_.size() + (hostLink_ ? 1 : 0);
+    clients_.clear();
+    hostLink_.reset();
+    roster_.clear();
+    lastRoster_.clear();
+    localNonce_ = randomNonce();  // a later room starts fresh sessions
+    logf("DIRECT closed %zu direct link(s): not in a room", closed);
+}
+
 std::vector<std::string> DirectNet::directMembers() {
     std::lock_guard<std::mutex> lock(mu_);
     return rosterLocked();
@@ -315,8 +338,9 @@ std::vector<std::string> DirectNet::rosterLocked() const {
     if (opt_.mode == Mode::Join) return roster_;
     std::vector<std::string> r;
     if (!localPuid_.empty()) r.push_back(localPuid_);
+    uint64_t now = nowMs();
     for (const auto& [id, link] : clients_)
-        if (link.up) r.push_back(id);
+        if (link.up && now - link.lastRecvMs <= opt_.rosterFreshMs) r.push_back(id);
     return r;
 }
 
@@ -450,7 +474,7 @@ DirectNet::Link* DirectNet::hostClientByAddr(const sockaddr_storage& addr, int l
 
 void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
     if (m.type == MsgType::Hello) {
-        if (localPuid_.empty()) return;  // not signed in yet; the client keeps retrying
+        if (localPuid_.empty() || !active_) return;  // not signed in yet / not in a room; the client keeps retrying
         const std::string& id = m.hello.puid;
         if (id.empty() || id == localPuid_) {
             logRateLimited("hello-self", 10000, "DIRECT rejected hello with own/empty id from %s",
@@ -637,6 +661,7 @@ void DirectNet::broadcastRoster() {
     r.type = MsgType::Roster;
     r.roster.hostNonce = localNonce_;
     r.roster.roster = rosterLocked();
+    lastRoster_ = r.roster.roster;
     for (auto& [id, link] : clients_) sendMsg(r, link.addr, link.addrLen);
     lastRosterMs_ = nowMs();
 }
@@ -703,6 +728,7 @@ void DirectNet::tick(uint64_t now) {
             pollLink(it->second);
             ++it;
         }
+        if (!changed && rosterLocked() != lastRoster_) changed = true;  // a client went quiet or came back
         bool burst = now < rosterBurstUntilMs_ && now - lastRosterMs_ >= kRosterBurstIntervalMs;
         if (changed)
             rosterChanged();
@@ -721,7 +747,7 @@ void DirectNet::tick(uint64_t now) {
         pollLink(*hostLink_);
         return;
     }
-    if (!localPuid_.empty() && hostAddrLen_ > 0 && now - lastHelloMs_ >= kHelloIntervalMs) {
+    if (active_ && !localPuid_.empty() && hostAddrLen_ > 0 && now - lastHelloMs_ >= kHelloIntervalMs) {
         Message h;
         h.type = MsgType::Hello;
         h.hello.nonce = localNonce_;

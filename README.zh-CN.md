@@ -1,12 +1,14 @@
-# edf6-coop-stable
+# edf-coop-stable
 
 [English](README.md) | **中文** | [日本語](README.ja.md)
 
 EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) 插件形式运行。
 
+地球防卫军系列的联机稳定 Mod。目前支持：**EDF6**。EDF6 稳定后计划支持 EDF5 等其他作品。
+
 > 非官方 Mod，与 D3 PUBLISHER / SANDLOT / Epic Games 无关。只在本机进程内接管网络调用，不改动任何游戏文件；`Enabled=0` 或删掉 DLL 即恢复原版。
 >
-> **状态：实验性。** 900+ 项自动化测试通过；自动直连已在两台电脑的真实联机中验证（0.3.2）；跨两台电脑的断线宽限尚未实测。出问题请附日志提 [Issue](https://github.com/hajisensai/edf6-coop-stable/issues)。
+> **状态：实验性。** 900+ 项自动化测试通过；自动直连已在两台电脑的真实联机中验证（0.3.2）；跨两台电脑的断线宽限尚未实测。出问题请附日志提 [Issue](https://github.com/hajisensai/edf-coop-stable/issues)。
 
 ## 它解决什么
 
@@ -21,7 +23,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 ## 安装
 
-1. 到 [Releases](https://github.com/hajisensai/edf6-coop-stable/releases/latest) 下载 `EDF6DirectNet-v*.zip`，**完整解压**到任意文件夹。
+1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载 `EDF6DirectNet-v*.zip`，**完整解压**到任意文件夹。
 2. 双击 **`INSTALL.bat`**：从 Steam 库自动找到 EDF6 并安装。
    - 没有 EDFModLoader 时会装上附带的官方版（[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10，MIT）；已有的 `winmm.dll` 不会覆盖。
    - 找不到游戏时会让你粘贴游戏目录（Steam 库里右键 EDF6 → 管理 → 浏览本地文件）。

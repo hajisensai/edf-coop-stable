@@ -1,5 +1,5 @@
 EDF6DirectNet 0.3.3 ―― 地球防衛軍6 オンライン安定化プラグイン
-プロジェクトページ：https://github.com/hajisensai/edf6-coop-stable
+プロジェクトページ：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6DirectNet.txt / 中文: README_EDF6DirectNet_zh.txt
 （実験版：自動直接接続は2台のPCで実際に動作確認済み。回線落ち対策は2台での実機確認がまだです。
   問題があればログを添えて Issue を立ててください）

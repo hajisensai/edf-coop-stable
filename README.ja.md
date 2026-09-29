@@ -1,12 +1,14 @@
-# edf6-coop-stable
+# edf-coop-stable
 
 [English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
 EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協力プレイ安定化プラグイン **EDF6DirectNet** です。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグインとして動作します。
 
+地球防衛軍シリーズ向けのオンライン安定化 Mod です。現在の対応作品：**EDF6**。EDF6 が安定したら EDF5 などほかの作品にも対応する予定です。
+
 > 非公式 Mod です。D3 PUBLISHER / SANDLOT / Epic Games とは一切関係ありません。ゲームプロセス内でネットワーク呼び出しを横取りするだけで、ゲームファイルは一切改変しません。`Enabled=0` にするか DLL を削除すればバニラに戻ります。
 >
-> **ステータス：実験的。** 900 件以上の自動テストに合格。自動直結は 2 台の PC による実際のオンラインプレイで検証済み（0.3.2）。2 台の PC をまたいだ切断猶予はまだ実機検証していません。問題があればログを添えて [Issue](https://github.com/hajisensai/edf6-coop-stable/issues) を立ててください。
+> **ステータス：実験的。** 900 件以上の自動テストに合格。自動直結は 2 台の PC による実際のオンラインプレイで検証済み（0.3.2）。2 台の PC をまたいだ切断猶予はまだ実機検証していません。問題があればログを添えて [Issue](https://github.com/hajisensai/edf-coop-stable/issues) を立ててください。
 
 ## 何を解決するか
 
@@ -21,7 +23,7 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 
 ## インストール
 
-1. [Releases](https://github.com/hajisensai/edf6-coop-stable/releases/latest) から `EDF6DirectNet-v*.zip` をダウンロードし、任意のフォルダに**すべて展開**します。
+1. [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) から `EDF6DirectNet-v*.zip` をダウンロードし、任意のフォルダに**すべて展開**します。
 2. **`INSTALL.bat`** をダブルクリック：Steam ライブラリから EDF6 を自動で見つけてインストールします。
    - EDFModLoader が入っていない場合は同梱の公式版（[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10、MIT）を導入します。既存の `winmm.dll` は上書きしません。
    - ゲームが見つからない場合はゲームフォルダのパスを貼り付けるよう求められます（Steam ライブラリで EDF6 を右クリック → 管理 → ローカルファイルを閲覧）。

@@ -1,5 +1,5 @@
 EDF6DirectNet 0.3.3 —— EDF6 联机稳定插件
-项目主页：https://github.com/hajisensai/edf6-coop-stable
+项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6DirectNet.txt / 日本語: README_EDF6DirectNet_ja.txt
 （实验性：自动直连已在两台电脑实测通过；掉线不重来还没实测。遇到问题请带日志提 Issue）
 

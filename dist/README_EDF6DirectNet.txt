@@ -1,5 +1,5 @@
 EDF6DirectNet 0.3.3 - online stability plugin for EARTH DEFENSE FORCE 6
-Project page: https://github.com/hajisensai/edf6-coop-stable
+Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6DirectNet_zh.txt / 日本語: README_EDF6DirectNet_ja.txt
 (Experimental: auto-connect has been verified between two PCs; surviving drops has not been
 tested between two PCs yet. If something goes wrong, open an Issue and attach the log.)

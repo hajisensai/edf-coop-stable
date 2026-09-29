@@ -1,12 +1,14 @@
-# edf6-coop-stable
+# edf-coop-stable
 
 **English** | [中文](README.zh-CN.md) | [日本語](README.ja.md)
 
 **EDF6DirectNet** is an online co-op stability plugin for EARTH DEFENSE FORCE 6 (PC / Steam). It runs as an [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) plugin.
 
+Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: **EDF6**. Support for EDF5 and other titles is planned once EDF6 is stable.
+
 > Unofficial mod, not affiliated with D3 PUBLISHER / SANDLOT / Epic Games. It only intercepts network calls inside the game process and never modifies any game files; set `Enabled=0` or delete the DLL to get the vanilla game back.
 >
-> **Status: experimental.** 900+ automated tests pass; auto direct connect has been verified in real online play between two PCs (0.3.2); the disconnect grace period has not yet been tested across two PCs. If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf6-coop-stable/issues) with your log attached.
+> **Status: experimental.** 900+ automated tests pass; auto direct connect has been verified in real online play between two PCs (0.3.2); the disconnect grace period has not yet been tested across two PCs. If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf-coop-stable/issues) with your log attached.
 
 ## What it fixes
 
@@ -21,7 +23,7 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 ## Install
 
-1. Download `EDF6DirectNet-v*.zip` from [Releases](https://github.com/hajisensai/edf6-coop-stable/releases/latest) and **extract the whole archive** to any folder.
+1. Download `EDF6DirectNet-v*.zip` from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
 2. Double-click **`INSTALL.bat`**: it finds EDF6 in your Steam library automatically and installs.
    - If EDFModLoader is not present, the bundled official build is installed ([BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10, MIT); an existing `winmm.dll` is never overwritten.
    - If the game cannot be found, you will be asked to paste the game folder (in your Steam library, right-click EDF6 → Manage → Browse local files).

@@ -18,12 +18,13 @@ At game start the plugin fetches a newer release from GitHub; it runs from the n
 - Releases are signed (ECDSA P-256) with a key held only by the release pipeline; the public key is inside the
   plugin. A file without a valid signature (or with the wrong version / SHA-256) is never installed.
 - Rollback: the replaced DLL stays as EDF6DirectNet.dll.old until the new version has run for 20 seconds after the game reaches its title screen. If the
-  game ends before that, the next start restores the old version by itself, remembers the failed one
-  (EDF6DirectNet.dll.bad, not installed again) and runs that session without the plugin.
-- An ini without an AutoUpdate line (older versions did not write it) counts as OFF. To turn it on, add at the
-  end of Mods\Plugins\EDF6DirectNet.ini:
+  game crashes or is killed before that, the next start restores the old version by itself, remembers the
+  failed one (EDF6DirectNet.dll.bad, not installed again) and runs that session without the plugin.
+  Quitting normally before then is no failure: the new version stays on trial at the next start.
+- An ini without an AutoUpdate line (older versions did not write it) keeps updates ON, as 0.3.6 did.
+  To turn them off, add at the end of Mods\Plugins\EDF6DirectNet.ini:
       [Update]
-      AutoUpdate=1
+      AutoUpdate=0
   A newly created ini has it on. AutoUpdate=0 turns downloading off (rollback still works).
 - The UPnP mapping is removed at the next game start that does not host, and by UNINSTALL.bat.
 

@@ -38,12 +38,12 @@ The zip contains README_EDF6DirectNet.txt (English), README_EDF6DirectNet_zh.txt
 Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll` and the signed manifest `EDF6DirectNet.dll.sig` and puts the DLL in place, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
 
 - **Signed releases.** The manifest (version and SHA-256 of the DLL) is signed with ECDSA P-256 by a key that only the release pipeline holds; the matching public key is built into the plugin. A download is rejected unless the signature verifies, the signed version is the release being installed and newer than the running one, and the DLL has the signed SHA-256 and says it is that version. Files without a valid signature are never installed, and downloads only come from this repository's release URLs. Someone who can alter the release assets or your connection but cannot sign gets nothing installed.
-- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6DirectNet.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game ends before that, the next start puts the old version back by itself, remembers the failed version (`EDF6DirectNet.dll.bad`, it is not installed again) and runs that session without the plugin.
-- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) counts as **off**: it does not update until you enable it by adding these two lines at the end of `Mods\Plugins\EDF6DirectNet.ini`:
+- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6DirectNet.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game crashes or is killed before that, the next start puts the old version back by itself, remembers the failed version (`EDF6DirectNet.dll.bad`, it is not installed again) and runs that session without the plugin. Quitting the game normally before then is no failure: the new version simply stays on trial at the next start.
+- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) keeps automatic updates **on**, as 0.3.6 did; the log says so at every start. To turn them off, add these two lines at the end of `Mods\Plugins\EDF6DirectNet.ini`:
 
   ```
   [Update]
-  AutoUpdate=1
+  AutoUpdate=0
   ```
 
   A settings file created by a current version has `AutoUpdate=1`. `AutoUpdate=0` turns downloading off (rollback still works).
@@ -100,7 +100,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `[Sync] ReliableGameTraffic` | `1` | Desync prevention (reliable sending). `0` = vanilla |
 | `[Resilience] HoldDisconnects` | `auto` | Disconnect grace: `auto` only for players with the plugin / `off` vanilla / `all` no detection, grace for everyone (only if you are sure everyone has the plugin) |
 | `GraceSeconds` | `30` | Maximum number of seconds a disconnect is hidden (1–600) |
-| `[Update] AutoUpdate` | `1` | Install newer signed releases from GitHub automatically (they run from the next game start). A settings file without this line counts as `0`; one created by a current version has `1` |
+| `[Update] AutoUpdate` | `1` | Install newer signed releases from GitHub automatically (they run from the next game start). A settings file without this line counts as `1` too |
 
 ## How it works
 

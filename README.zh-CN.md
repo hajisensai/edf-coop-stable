@@ -38,12 +38,12 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 升级：插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载 `EDF6DirectNet.dll` 和带签名的清单 `EDF6DirectNet.dll.sig`，把 DLL 放到原位，下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。可以依赖的保证：
 
 - **发布带签名。** 清单（版本号和 DLL 的 SHA-256）用 ECDSA P-256 签名，私钥只在发布流水线里；对应的公钥编译在插件里。只有签名校验通过、签名里的版本就是正在安装的那个发布且比当前运行的更新、DLL 的 SHA-256 与签名一致且里面写的版本号相符，才会安装；没有有效签名的文件一律不安装，下载也只来自本仓库的发布地址。能改发布文件或你的网络连接、但无法签名的人，装不上任何东西。
-- **自动回滚。** 被替换的 DLL 会以 `EDF6DirectNet.dll.old` 留在旁边，直到游戏进入标题画面后新版本又运行满 20 秒。如果游戏在这之前结束，下次启动会自动把旧版本放回去，记下失败的版本（`EDF6DirectNet.dll.bad`，不会再装它），这一次游戏不加载插件。
-- **旧版本的设置文件。** 没有 `AutoUpdate` 这一行的设置文件（旧版本不写这一行）视为**关闭**：在你手动开启之前不会更新。开启方法：在 `Mods\Plugins\EDF6DirectNet.ini` 末尾加上这两行：
+- **自动回滚。** 被替换的 DLL 会以 `EDF6DirectNet.dll.old` 留在旁边，直到游戏进入标题画面后新版本又运行满 20 秒。如果游戏在这之前崩溃或被强制结束，下次启动会自动把旧版本放回去，记下失败的版本（`EDF6DirectNet.dll.bad`，不会再装它），这一次游戏不加载插件。在这之前正常退出游戏不算失败：下次启动新版本继续试用。
+- **旧版本的设置文件。** 没有 `AutoUpdate` 这一行的设置文件（旧版本不写这一行）和 0.3.6 一样视为**开启**，每次启动日志都会写明。要关闭，在 `Mods\Plugins\EDF6DirectNet.ini` 末尾加上这两行：
 
   ```
   [Update]
-  AutoUpdate=1
+  AutoUpdate=0
   ```
 
   当前版本新生成的设置文件里已经是 `AutoUpdate=1`。`AutoUpdate=0` 关闭下载（回滚仍然有效）。
@@ -100,7 +100,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `[Sync] ReliableGameTraffic` | `1` | 防不同步（可靠发送）。`0` = 原版 |
 | `[Resilience] HoldDisconnects` | `auto` | 断线宽限：`auto` 只对装了插件的人 / `off` 原版 / `all` 不识别、对所有人宽限（仅当确定全员都装了插件） |
 | `GraceSeconds` | `30` | 断线最多隐瞒多少秒（1–600） |
-| `[Update] AutoUpdate` | `1` | 自动从 GitHub 安装带签名的新版本（下次启动游戏生效）。没有这一行的设置文件视为 `0`；当前版本新生成的设置文件是 `1` |
+| `[Update] AutoUpdate` | `1` | 自动从 GitHub 安装带签名的新版本（下次启动游戏生效）。没有这一行的设置文件同样视为 `1` |
 
 ## 工作原理
 

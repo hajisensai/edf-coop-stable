@@ -15,11 +15,12 @@ EDFModLoader 和其他 Mod 不动。
 启动游戏时插件会从 GitHub 下载新版，下次启动生效。
 ・发布带签名（ECDSA P-256），私钥只在发布流水线里，公钥编译在插件里。没有有效签名（或版本号 / SHA-256 不符）
   的文件一律不安装。
-・自动回滚：被替换的 DLL 会以 EDF6DirectNet.dll.old 留着，直到游戏进入标题画面后新版本又运行满 20 秒。在这之前游戏就结束的话，
+・自动回滚：被替换的 DLL 会以 EDF6DirectNet.dll.old 留着，直到游戏进入标题画面后新版本又运行满 20 秒。在这之前游戏崩溃或被强制结束的话，
   下次启动会自动换回旧版，记下失败的版本（EDF6DirectNet.dll.bad，不再安装它），这一次不加载插件。
-・没有 AutoUpdate 这一行的 ini（旧版本不写）视为关闭。要开启，在 Mods\Plugins\EDF6DirectNet.ini 末尾加上：
+  在这之前正常退出游戏不算失败，下次启动继续试用。
+・没有 AutoUpdate 这一行的 ini（旧版本不写）和 0.3.6 一样视为开启。要关闭，在 Mods\Plugins\EDF6DirectNet.ini 末尾加上：
       [Update]
-      AutoUpdate=1
+      AutoUpdate=0
   新生成的 ini 默认开启。AutoUpdate=0 关闭下载（回滚仍有效）。
 ・UPnP 映射会在之后第一次不做房主的启动时删除，UNINSTALL.bat 也会删除。
 

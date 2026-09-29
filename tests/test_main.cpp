@@ -612,6 +612,8 @@ void testUpdater() {
     CHECK(parseVersion("EDF6DirectNet 1.12.0 x").minor == 12 && !parseVersion("v1.2").valid());
     CHECK(parseVersion("v0.3.10").newerThan(parseVersion("0.3.9")) && !parseVersion("0.3.5").newerThan(parseVersion("0.3.5")));
     CHECK(parseVersion("1.0.0").newerThan(parseVersion("0.9.9")) && !parseVersion("0.3.4").newerThan(parseVersion("0.4.0")));
+    CHECK(!parseVersion("1. 2. 3").valid() && !parseVersion("v99999999999.0.0").valid() && !parseVersion("1.2.-3").valid());
+    CHECK(parseVersion("v1.2.3.4").patch == 3 && parseVersion("x 12.0.999999").patch == 999999);
 
     std::string json = R"({"tag_name": "v0.3.6", "assets": [
         {"name":"EDF6DirectNet-v0.3.6.zip","browser_download_url":"https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet-v0.3.6.zip"},
@@ -621,6 +623,21 @@ void testUpdater() {
     CHECK(dn::assetUrl(json, "EDF6DirectNet.dll") == "https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet.dll");
     CHECK(dn::assetUrl(json, "EDF6DirectNet.dll.sha256").empty());  // not GitHub: refused
     CHECK(dn::assetUrl(json, "missing.dll").empty());
+    // The shape GitHub actually returns: release name/author before the assets, label and uploader inside
+    // each asset after its name, a body with quotes after them.
+    std::string real = R"({"url":"https://api.github.com/repos/o/r/releases/1","assets_url":"https://api.github.com/x",
+        "tag_name":"v0.3.7","name":"EDF6DirectNet.dll","author":{"login":"o","name":"EDF6DirectNet.dll"},"assets":[
+        {"url":"https://api.github.com/a/1","id":1,"name":"EDF6DirectNet.dll.sha256","label":null,
+         "uploader":{"login":"github-actions[bot]","id":2},"content_type":"text/plain","size":84,
+         "digest":"sha256:00","browser_download_url":"https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll.sha256"},
+        {"url":"https://api.github.com/a/2","id":3,"name":"EDF6DirectNet.dll","label":"",
+         "uploader":{"login":"github-actions[bot]","id":2},"content_type":"application/x-msdownload","size":400000,
+         "digest":"sha256:11","browser_download_url":"https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll"}],
+        "body":"see \"name\": \"EDF6DirectNet.dll\" https://evil.example/x"})";
+    CHECK(dn::parseVersion(dn::jsonString(real, "tag_name")).patch == 7);
+    CHECK(dn::assetUrl(real, "EDF6DirectNet.dll") == "https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll");
+    CHECK(dn::assetUrl(real, "EDF6DirectNet.dll.sha256") ==
+          "https://github.com/o/r/releases/download/v0.3.7/EDF6DirectNet.dll.sha256");
 
     std::vector<uint8_t> abc = {'a', 'b', 'c'};
     CHECK(dn::sha256Hex(abc) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -670,7 +687,15 @@ void testUpdater() {
     if (loaded) FreeLibrary(loaded);
     dn::removeOldUpdate(installed);  // the next game start: gone
     CHECK(GetFileAttributesW((installed + L".old").c_str()) == INVALID_FILE_ATTRIBUTES);
-    CHECK(GetFileAttributesW((installed + L".new").c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(GetFileAttributesW((installed + L".new" + std::to_wstring(GetCurrentProcessId())).c_str()) ==
+          INVALID_FILE_ATTRIBUTES);
+    // A game that quit between writing its download and renaming it leaves installed.new<pid>.
+    std::wstring stale = installed + L".new4242", other = installed + L".newer";
+    CHECK(CopyFileW(built.c_str(), stale.c_str(), FALSE) && CopyFileW(built.c_str(), other.c_str(), FALSE));
+    dn::removeOldUpdate(installed);
+    CHECK(GetFileAttributesW(stale.c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(GetFileAttributesW(other.c_str()) != INVALID_FILE_ATTRIBUTES);  // not ours: left alone
+    DeleteFileW(other.c_str());
     DeleteFileW(installed.c_str());
     RemoveDirectoryW(dir.c_str());
 }

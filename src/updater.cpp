@@ -113,8 +113,10 @@ bool writeFile(const std::wstring& path, const std::vector<uint8_t>& data) {
     DWORD written = 0;
     bool ok = WriteFile(f, data.data(), static_cast<DWORD>(data.size()), &written, nullptr) && written == data.size() &&
               FlushFileBuffers(f);
+    DWORD error = ok ? 0 : GetLastError();
     CloseHandle(f);
     if (!ok) DeleteFileW(path.c_str());
+    SetLastError(error);  // the caller reports the write's error, not the cleanup's
     return ok;
 }
 
@@ -169,11 +171,29 @@ bool Version::newerThan(const Version& o) const {
     return patch > o.patch;
 }
 
+namespace {
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+// A run of 1-6 digits at `at` (nothing else, no sign or space), moving `at` past it; -1 when there is none.
+int readNumber(const std::string& text, size_t& at) {
+    size_t start = at;
+    int n = 0;
+    while (at < text.size() && isDigit(text[at]) && at - start < 6) n = n * 10 + (text[at++] - '0');
+    return at == start || (at < text.size() && isDigit(text[at])) ? -1 : n;
+}
+}  // namespace
+
 Version parseVersion(const std::string& text) {
     for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] < '0' || text[i] > '9' || (i > 0 && text[i - 1] >= '0' && text[i - 1] <= '9')) continue;
-        int a = -1, b = -1, c = -1;
-        if (sscanf_s(text.c_str() + i, "%d.%d.%d", &a, &b, &c) == 3 && a >= 0 && b >= 0 && c >= 0) return {a, b, c};
+        if (!isDigit(text[i]) || (i > 0 && isDigit(text[i - 1]))) continue;
+        size_t at = i;
+        int part[3];
+        int k = 0;
+        for (; k < 3; ++k) {
+            if (k > 0 && (at >= text.size() || text[at++] != '.')) break;
+            if ((part[k] = readNumber(text, at)) < 0) break;
+        }
+        if (k == 3) return {part[0], part[1], part[2]};
     }
     return {};
 }
@@ -257,7 +277,8 @@ bool verifyUpdate(const std::vector<uint8_t>& dll, const std::string& shaText, c
 }
 
 bool installOver(const std::wstring& installed, const std::vector<uint8_t>& data, std::string* why) {
-    std::wstring fresh = installed + L".new", old = installed + L".old";
+    // Per process, so two game instances updating at once never touch each other's download.
+    std::wstring fresh = installed + L".new" + std::to_wstring(GetCurrentProcessId()), old = installed + L".old";
     if (!writeFile(fresh, data)) {
         *why = "cannot write " + std::to_string(data.size()) + " bytes next to the plugin (error " +
                std::to_string(GetLastError()) + ")";
@@ -271,7 +292,9 @@ bool installOver(const std::wstring& installed, const std::vector<uint8_t>& data
     }
     if (!MoveFileExW(fresh.c_str(), installed.c_str(), 0)) {
         *why = "cannot put the new plugin in place (error " + std::to_string(GetLastError()) + ")";
-        MoveFileExW(old.c_str(), installed.c_str(), 0);  // back to what was there
+        if (!MoveFileExW(old.c_str(), installed.c_str(), 0))  // back to what was there
+            *why += "; EDF6DirectNet.dll is now MISSING: rename EDF6DirectNet.dll.old back to EDF6DirectNet.dll (error " +
+                    std::to_string(GetLastError()) + ")";
         DeleteFileW(fresh.c_str());
         return false;
     }
@@ -281,6 +304,19 @@ bool installOver(const std::wstring& installed, const std::vector<uint8_t>& data
 void removeOldUpdate(const std::wstring& installed) {
     std::wstring old = installed + L".old";
     if (DeleteFileW(old.c_str())) logf("UPDATE removed the previous version's leftover file");
+    // Downloads a game that quit mid-install left behind: installed.new<pid>.
+    std::wstring dir = installed.substr(0, installed.find_last_of(L"\\/") + 1);
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW((installed + L".new*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring name = found.cFileName;
+        size_t tail = name.rfind(L".new");
+        if (tail != std::wstring::npos && tail + 4 < name.size() &&
+            name.find_first_not_of(L"0123456789", tail + 4) == std::wstring::npos)
+            DeleteFileW((dir + name).c_str());
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
 }
 
 std::string updateOnce(const std::wstring& installed, const std::string& current) {

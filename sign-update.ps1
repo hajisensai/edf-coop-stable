@@ -6,19 +6,26 @@
 param(
     [Parameter(Mandatory)] [string]$Dll,
     [Parameter(Mandatory)] [string]$Version,
-    [Parameter(Mandatory)] [string]$Updater
+    [string]$Updater = (Join-Path $PSScriptRoot 'src\updater.cpp'),
+    # Test hook only: base64 CNG ECCPUBLIC blob used instead of the kReleaseKey in $Updater. The release
+    # workflow never passes it, so releases are always checked against the key clients have compiled in.
+    [string]$TestPublicKeyBase64
 )
 $ErrorActionPreference = 'Stop'
 $crypto = 'System.Security.Cryptography'
 if (-not $env:EDF6DN_UPDATE_SIGNING_KEY) { throw 'EDF6DN_UPDATE_SIGNING_KEY is not set; a release is never published unsigned' }
 if ($Version -notmatch '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$') { throw "not a plain x.y.z version: $Version" }
 
-$source = Get-Content -LiteralPath $Updater -Raw
-$match = [regex]::Match($source, 'kReleaseKey\[72\] = \{([^}]*)\}')
-if (-not $match.Success) { throw "no kReleaseKey in $Updater" }
-$public = [byte[]]@($match.Groups[1].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
-    ForEach-Object { [Convert]::ToByte($_, 16) })
-if ($public.Length -ne 72) { throw "kReleaseKey in $Updater has $($public.Length) bytes, not 72" }
+if ($TestPublicKeyBase64) {
+    $public = [Convert]::FromBase64String($TestPublicKeyBase64)
+} else {
+    $source = Get-Content -LiteralPath $Updater -Raw
+    $match = [regex]::Match($source, 'kReleaseKey\[72\] = \{([^}]*)\}')
+    if (-not $match.Success) { throw "no kReleaseKey in $Updater" }
+    $public = [byte[]]@($match.Groups[1].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
+        ForEach-Object { [Convert]::ToByte($_, 16) })
+}
+if ($public.Length -ne 72) { throw "public key has $($public.Length) bytes, not 72" }
 
 $dllBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Dll).Path)
 $marker = [Text.Encoding]::ASCII.GetBytes("EDF6DN_VERSION=$Version")

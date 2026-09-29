@@ -33,6 +33,7 @@ constexpr char kNote[] = "[... older lines were dropped to keep this log under 2
 constexpr std::size_t kFillerLine = 64;
 
 std::string ReadText(const std::wstring& path) {
+    LogFlush();  // lines are queued for the writer thread (log.h); everything logged so far goes out first
     std::ifstream in(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
@@ -187,6 +188,33 @@ int wmain(int argc, wchar_t** argv) {
     }
     Check(whole, "no line is broken or mixed with another");
     Check(duplicates == 0 && seen.size() == static_cast<std::size_t>(kThreads * kPerThread), "every thread line arrives exactly once");
+
+    // Logging does not touch the file on the thread that logs: lines go out in batches, not one open each.
+    WriteText(big, std::string());
+    LogOpen(big.c_str());
+    const std::size_t opensBefore = LogFileOpens();
+    for (int i = 0; i < 2000; ++i) Log("batched %05d", i);
+    LogFlush();
+    const std::size_t opens = LogFileOpens() - opensBefore;
+    Check(opens >= 1 && opens <= 10, "2000 lines are written in a few batches, not 2000 opens of the file");
+    const auto batched = Lines(ReadText(big), 0);
+    bool inOrder = batched.size() == 2000;
+    for (std::size_t i = 0; inOrder && i < batched.size(); ++i) {
+        char expected[32];
+        std::snprintf(expected, sizeof(expected), "batched %05zu", i);
+        inOrder = batched[i].find(expected) != std::string::npos;
+    }
+    Check(inOrder, "batched lines arrive whole and in order");
+
+    // A line larger than the whole queue still arrives, after everything queued before it.
+    Log("before the big one");
+    const std::string huge(300 * 1024, 'z');
+    LogWrite(huge.data(), huge.size());
+    Log("after the big one");
+    const std::string withHuge = ReadText(big);
+    const std::size_t before = withHuge.find("before the big one"), bigAt = withHuge.find(huge), after = withHuge.find("after the big one");
+    Check(before != std::string::npos && bigAt != std::string::npos && after != std::string::npos && before < bigAt && bigAt < after,
+          "a line larger than the queue keeps its place");
 
     DeleteFileW(small.c_str());
     DeleteFileW(big.c_str());

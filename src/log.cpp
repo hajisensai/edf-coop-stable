@@ -29,11 +29,29 @@ char lastBody[512]{};
 std::size_t lastBodyLength = 0;
 std::uint64_t repeats = 0;
 
-// Writers share the lock, a trim takes it exclusively. The trimming thread writes without it, so a
-// crash reported from inside a trim cannot deadlock.
-SRWLOCK fileLock = SRWLOCK_INIT;
-std::atomic<DWORD> trimThread{0};
-// Used only under the exclusive lock: trimming needs no heap.
+// Lines are queued here and written to the file by a writer thread, so the game's threads never wait on the
+// disk: before 1.5.13 every line opened, appended to and closed the file on the thread that logged it - the
+// game's UI thread and the EOS callbacks among them - and a trim copied 1.5 MB right there. The queue is
+// static (no heap), so a line can still be queued from an exception handler.
+constexpr std::size_t kQueueBytes = 256 * 1024;
+SRWLOCK queueLock = SRWLOCK_INIT;
+char queue[kQueueBytes];
+std::size_t queued = 0;
+
+// Held while a batch goes to the file and while the file is trimmed, so batches land in the order they were
+// queued. The thread holding it is remembered: a crash reported from inside a write or a trim writes without
+// it instead of deadlocking on the lock it already holds.
+SRWLOCK drainLock = SRWLOCK_INIT;
+std::atomic<DWORD> drainThread{0};
+char batch[kQueueBytes];  // used only under drainLock
+
+// The writer thread wakes when the queue is half full, and otherwise drains it this often.
+constexpr DWORD kDrainIntervalMs = 200;
+HANDLE wakeWriter = nullptr;
+std::atomic<bool> writerStarted{false};
+std::atomic<std::size_t> fileOpens{0};
+
+// Used only under drainLock: trimming needs no heap.
 char trimBuffer[256 * 1024];
 constexpr char kDroppedNote[] = "[... older lines were dropped to keep this log under 2 MB ...]\r\n";
 
@@ -86,11 +104,65 @@ bool TrimLocked(const wchar_t* path, LONGLONG cap, LONGLONG keep) {
     return trimmed;
 }
 
-bool TrimExclusive(const wchar_t* path, LONGLONG cap, LONGLONG keep) {
-    trimThread.store(GetCurrentThreadId());
-    const bool trimmed = TrimLocked(path, cap, keep);
-    trimThread.store(0);
-    return trimmed;
+// Appends `text` to the log and returns the file's size afterwards (0 when it could not be written).
+LONGLONG AppendToFile(const char* text, std::size_t length) {
+    fileOpens.fetch_add(1);
+    HANDLE file = CreateFileW(logPath, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    DWORD written = 0;
+    WriteFile(file, text, static_cast<DWORD>(length), &written, nullptr);
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size)) size.QuadPart = 0;
+    CloseHandle(file);
+    return size.QuadPart;
+}
+
+// Caller holds drainLock (or is the thread that does). Writes out everything queued so far, one batch at a time.
+void DrainHeld() {
+    for (;;) {
+        AcquireSRWLockExclusive(&queueLock);
+        const std::size_t length = queued;
+        if (length) std::memcpy(batch, queue, length);
+        queued = 0;
+        ReleaseSRWLockExclusive(&queueLock);
+        if (!length || !logPath[0]) return;
+        if (AppendToFile(batch, length) > kLogCapBytes) TrimLocked(logPath, kLogCapBytes, kLogKeepBytes);
+    }
+}
+
+// Runs `work` under drainLock, or straight away on the thread that already holds it.
+template <typename Work>
+void WithDrainLock(Work work) {
+    const DWORD self = GetCurrentThreadId();
+    if (drainThread.load() == self) {
+        work();
+        return;
+    }
+    AcquireSRWLockExclusive(&drainLock);
+    drainThread.store(self);
+    work();
+    drainThread.store(0);
+    ReleaseSRWLockExclusive(&drainLock);
+}
+
+void Drain() { WithDrainLock(&DrainHeld); }
+
+DWORD WINAPI WriterMain(void*) {
+    for (;;) {
+        WaitForSingleObject(wakeWriter, kDrainIntervalMs);
+        Drain();
+    }
+}
+
+// Started by the first line, not at load: LogOpen may run where a new thread must not be waited on, and
+// nothing here ever waits for this one (LogFlush drains on the calling thread).
+void StartWriter() {
+    if (writerStarted.load() || writerStarted.exchange(true)) return;
+    wakeWriter = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!wakeWriter) return;  // lines then go out whenever the queue fills or LogFlush runs
+    if (HANDLE thread = CreateThread(nullptr, 64 * 1024, &WriterMain, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr))
+        CloseHandle(thread);
 }
 }  // namespace
 
@@ -98,11 +170,14 @@ void SetDetailLog(bool on) { detailLog.store(on); }
 bool DetailLog() { return detailLog.load(); }
 
 bool TrimLogFile(const wchar_t* path, long long cap, long long keep) {
-    AcquireSRWLockExclusive(&fileLock);
-    const bool trimmed = TrimExclusive(path, cap, keep);
-    ReleaseSRWLockExclusive(&fileLock);
+    bool trimmed = false;
+    WithDrainLock([&] { trimmed = TrimLocked(path, cap, keep); });
     return trimmed;
 }
+
+void LogFlush() { Drain(); }
+
+std::size_t LogFileOpens() { return fileOpens.load(); }
 
 // Looks at the file this session is about to append to and reports how the run before it ended. The file
 // is capped at 2 MB, so it is read whole; this runs once, at load.
@@ -140,9 +215,13 @@ void LogOpen(const wchar_t* path) {
     // Lengths are checked by hand: *_s string functions end the process when something does not fit.
     const std::size_t length = wcslen(path);
     if (length >= MAX_PATH) return;
-    wmemcpy(logPath, path, length + 1);
-    // One file across sessions, so a crash report survives restarts; only its oldest lines go.
-    TrimLogFile(logPath, kLogCapBytes, kLogKeepBytes);
+    // Lines queued for the previous file go there first.
+    WithDrainLock([&] {
+        DrainHeld();
+        wmemcpy(logPath, path, length + 1);
+        // One file across sessions, so a crash report survives restarts; only its oldest lines go.
+        TrimLocked(logPath, kLogCapBytes, kLogKeepBytes);
+    });
     lastRun = ReadLastRun(logPath);
 }
 
@@ -154,6 +233,20 @@ void LogShutdown(const char* why) {
     // possibly while holding the log's lock. So the line is appended straight to the file: no lock, no repeat
     // collapsing, no trim. A hang at exit would be blamed on the mod, and this is the last write anyway.
     if (!logPath[0]) return;
+    // Queued lines go first, if the locks can be had: a thread that was terminated while holding one never
+    // lets go, and waiting for it would hang the exit.
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (TryAcquireSRWLockExclusive(&drainLock)) {
+            if (TryAcquireSRWLockExclusive(&queueLock)) {
+                if (queued) AppendToFile(queue, queued);
+                queued = 0;
+                ReleaseSRWLockExclusive(&queueLock);
+            }
+            ReleaseSRWLockExclusive(&drainLock);
+            break;
+        }
+        Sleep(2);
+    }
     SYSTEMTIME now{};
     GetLocalTime(&now);
     char line[256]{};
@@ -171,24 +264,28 @@ void LogShutdown(const char* why) {
 
 void LogWrite(const char* text, std::size_t length) {
     if (!logPath[0] || !length) return;
-    const bool locked = trimThread.load() != GetCurrentThreadId();
-    if (locked) AcquireSRWLockShared(&fileLock);
-    HANDLE file = CreateFileW(logPath, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    LARGE_INTEGER size{};
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(file, text, static_cast<DWORD>(length), &written, nullptr);
-        if (!GetFileSizeEx(file, &size)) size.QuadPart = 0;
-        CloseHandle(file);
+    StartWriter();
+    if (length > kQueueBytes) {
+        // Larger than the whole queue: behind everything already queued, straight to the file.
+        WithDrainLock([&] {
+            DrainHeld();
+            if (AppendToFile(text, length) > kLogCapBytes) TrimLocked(logPath, kLogCapBytes, kLogKeepBytes);
+        });
+        return;
     }
-    if (!locked) return;
-    ReleaseSRWLockShared(&fileLock);
-    // Writers that crossed the cap together trim one after another; the later ones find the log under it.
-    if (size.QuadPart > kLogCapBytes) {
-        AcquireSRWLockExclusive(&fileLock);
-        TrimExclusive(logPath, kLogCapBytes, kLogKeepBytes);
-        ReleaseSRWLockExclusive(&fileLock);
+    for (;;) {
+        AcquireSRWLockExclusive(&queueLock);
+        if (queued + length <= kQueueBytes) {
+            std::memcpy(queue + queued, text, length);
+            queued += length;
+            const bool wake = queued >= kQueueBytes / 2;
+            ReleaseSRWLockExclusive(&queueLock);
+            if (wake && wakeWriter) SetEvent(wakeWriter);
+            return;
+        }
+        ReleaseSRWLockExclusive(&queueLock);
+        // The queue is full (a burst the writer has not caught up with): drain it here rather than lose a line.
+        Drain();
     }
 }
 

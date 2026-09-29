@@ -215,6 +215,8 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     text.Add("  r12=%016llX r13=%016llX r14=%016llX r15=%016llX\r\n", c.R12, c.R13, c.R14, c.R15);
     Stack(text, c);
     LogWrite(text.data, text.length);
+    // The report is on disk before the dump starts: a dump can take long, or never finish.
+    LogFlush();
     // Only an access violation in the game's own code, and only once per launch: everything else the
     // handler sees is either another module's business or a fault the game goes on to handle.
     if (inGame && code == EXCEPTION_ACCESS_VIOLATION && writeDump && dumpPathW[0] &&

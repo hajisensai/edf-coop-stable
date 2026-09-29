@@ -325,7 +325,8 @@ ThunkPage thunks;
 }  // namespace
 }  // namespace multislot
 
-extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
+namespace {
+bool LoadPlugin(PluginInfo* info) {
     using namespace multislot;
     if (!info) return false;
     wchar_t iniPath[MAX_PATH]{};
@@ -597,6 +598,14 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
                 "process memory; set CrashDump=1 in the INI to help chase a crash)");
     }
     return true;  // stays loaded: call stubs, import wrappers and the exception handler point here
+}
+}  // namespace
+
+extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
+    const bool loaded = LoadPlugin(info);
+    // The startup report is on disk as soon as the game goes on; from here on the writer thread keeps up.
+    multislot::LogFlush();
+    return loaded;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {

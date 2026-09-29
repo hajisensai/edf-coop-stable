@@ -93,6 +93,7 @@ int wmain(int argc, wchar_t** argv) {
         Put(room, 0, base + 0x17ECA00);
         ForgetUserSlots();
         NoteUserSlots(6);
+        LogFlush();
         std::ifstream log(argv[1], std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
         const std::string success = "ROOM USERS: occupied=7 ready=6 pending=1 roster=6 slots=8";

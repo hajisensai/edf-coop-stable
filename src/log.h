@@ -4,9 +4,17 @@
 namespace multislot {
 
 // Append-only text log. Safe to call from an exception handler: no heap, no CRT file locks.
+// Lines are queued in memory and a writer thread appends them to the file (at the latest every 200 ms), so
+// logging never waits on the disk on the thread that logs - the game's UI thread and the EOS callbacks among
+// them. A burst that fills the 256 KB queue is written by the thread that logs rather than dropped.
 void LogOpen(const wchar_t* path);
 void LogWrite(const char* text, std::size_t length);
 void Log(const char* format, ...);
+// Writes everything queued so far to the file on the calling thread, and returns when it is there. Crash
+// reports use it before anything that may not finish (a dump), and so do tests before reading the file.
+void LogFlush();
+// How many times the log file has been opened for writing (tests: queued lines go out in batches).
+std::size_t LogFileOpens();
 
 // The log is one file that never grows much past kLogCapBytes: when it is opened or a write takes it over the
 // cap, the oldest lines are dropped so that about the newest kLogKeepBytes remain, starting at a line boundary

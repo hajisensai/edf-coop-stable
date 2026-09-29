@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <cstddef>
 #include <intrin.h>
 
@@ -428,6 +429,11 @@ EOS_EResult HookAcceptConnection(void* handle, const void* options) {
     return result;
 }
 
+// EOS_ELogCategory values (eos_logging_categories.h) of the categories Wanted() keeps at Info: Presence, P2P,
+// Connect, Lobby, RTC, RTCAdmin (its name contains "RTC") and CustomInvites. EOS_ELogLevel Info is 400.
+constexpr std::int32_t kInfoCategories[] = {3, 7, 13, 18, 29, 30, 31};
+constexpr std::int32_t kEosLogInfo = 400;
+
 bool Wanted(const char* category) {
     return std::strstr(category, "Lobby") || std::strstr(category, "P2P") || std::strstr(category, "RTC") ||
            std::strstr(category, "Connect") || std::strstr(category, "Presence") || std::strstr(category, "CustomInvites");
@@ -447,11 +453,20 @@ void OnEosLog(const LogMessage* message) {
 EOS_EResult HookSetLogCallback(LogCallback callback) {
     gameLogCallback = callback;
     const EOS_EResult result = originalSetLogCallback(&OnEosLog);
-    // The game never raises the SDK log level; Info shows lobby membership and P2P connections.
+    // The game never raises the SDK log level (every category defaults to Warning); Info shows lobby membership
+    // and P2P connections. Only the categories OnEosLog keeps at Info are raised: raising all of them (1.5.12 and
+    // before) had the SDK build Info messages for every other category too, on the game's thread, only for
+    // OnEosLog to drop them.
     const HMODULE sdk = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
     const auto setLevel = sdk ? reinterpret_cast<SetLogLevelFn>(GetProcAddress(sdk, "EOS_Logging_SetLogLevel")) : nullptr;
-    const EOS_EResult level = setLevel ? setLevel(0x7FFFFFFF, 400) : -1;
-    Log("EOS logging routed to plugin log (SetCallback result %d, SetLogLevel(all, Info) result %d)", result, level);
+    int raised = 0;
+    EOS_EResult level = -1;
+    for (const std::int32_t category : kInfoCategories) {
+        level = setLevel ? setLevel(category, kEosLogInfo) : -1;
+        if (level == 0) ++raised;
+    }
+    Log("EOS logging routed to plugin log (SetCallback result %d, SetLogLevel(Info) for %d of %zu categories, last result %d)",
+        result, raised, std::size(kInfoCategories), level);
     return result;
 }
 

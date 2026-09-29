@@ -174,8 +174,12 @@ int main() {
     for (const auto& range : ranges) {
         CpuContext search{};
         HostModeHookHandler(range.first)(&search);
-        Check(search.rax == ((range.second << 32) | (2 * kSearchTypeCenter - range.second)),
-              "OFF: the room search lists normal and MultiSlot rooms of the kind");
+        // The 8-player build lists normal and MultiSlot rooms of the kind; a 10- or 12-player build asks what
+        // the game asks, because a range down to its own family would take in every 8-player room.
+        const std::uint64_t offLow = kMaxPlayers == 8 ? 2 * kSearchTypeCenter - range.second : 0x91;
+        Check(search.rax == ((range.second << 32) | offLow),
+              "OFF: the room search lists normal rooms, and MultiSlot rooms in the 8-player build");
+        Check(kMaxPlayers == 8 || offLow > 0x57, "OFF: a larger-room build does not list 8-player rooms");
     }
 
     // ON: every slot in both lobbies and the mirrored family; the room keeps its setting after F2.
@@ -205,7 +209,8 @@ int main() {
     Check(!EightPlayerRooms() && RoomCreatedWithEightPlayers(), "F2 changes the setting, not the room that exists");
     CpuContext searchAfterF2{};
     HostModeHookHandler(0x74AC8A)(&searchAfterF2);
-    Check(searchAfterF2.rax == ((0x91ull << 32) | (2 * kSearchTypeCenter - 0x91)), "the room search follows F2 at once");
+    Check(searchAfterF2.rax == ((0x91ull << 32) | (kMaxPlayers == 8 ? 2 * kSearchTypeCenter - 0x91 : 0x91)),
+          "the room search follows F2 at once");
     HostModeHookHandler(0x749C91)(&update);
     Check(update.rdx == kModRoomCapacity, "an existing MultiSlot room keeps its slots after F2");
     UpdateMenuFrame(nullptr, false, outside);

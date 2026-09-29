@@ -211,12 +211,12 @@ int LobbyMaySearch(const unsigned char* lobby) {
 template <std::uint32_t High>
 void SearchRangeHandler(CpuContext* context) {
     const bool on = eightPlayers.load();
-    const std::uint64_t high = on ? 2 * kSearchTypeCenter - 0x91 : High;
-    context->rax = (high << 32) | (2 * kSearchTypeCenter - High);
+    context->rax = SearchTypeRange(High, on);
     const int mode = on ? 1 : 0;
     if (searchLogged.exchange(mode) != mode)
         Log(on ? "SEARCH %dPlayer MOD ON: the room list shows MultiSlot rooms only"
-               : "SEARCH %dPlayer MOD OFF: the room list shows normal and MultiSlot rooms",
+               : (kModOffListsModRooms ? "SEARCH %dPlayer MOD OFF: the room list shows normal and MultiSlot rooms"
+                                       : "SEARCH %dPlayer MOD OFF: the room list shows normal rooms (ON shows this build's rooms)"),
             kModRoomCapacity);
 }
 

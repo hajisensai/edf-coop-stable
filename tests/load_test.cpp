@@ -409,11 +409,22 @@ int wmain(int argc, wchar_t** argv) {
             const std::uint64_t old = before.range[kind];
             const auto low = static_cast<std::uint32_t>(old), high = static_cast<std::uint32_t>(old >> 32);
             if (low == 0x91 && high >= 0x91 && high <= 0x94) {
-                const std::uint64_t bottom = 2 * kSearchTypeCenter - high;
+                // A 10- or 12-player build with the setting OFF asks exactly what the game asks: its own rooms lie
+                // below the 8-player family, so a range reaching them would list 8-player rooms it cannot join.
+                const bool largerRoom = kMaxPlayers != 8;
+                const std::uint64_t bottom = !eightPlayers && largerRoom ? 0x91 : 2 * kSearchTypeCenter - high;
                 const std::uint64_t top = eightPlayers ? 2 * kSearchTypeCenter - 0x91 : high;
                 Check(after.range[kind] == ((top << 32) | bottom),
-                      eightPlayers ? "8Player MOD ON: the search lists MultiSlot rooms only"
-                                   : "the search lists vanilla and MultiSlot rooms of the kind");
+                      eightPlayers ? "Player MOD ON: the search lists this build's MultiSlot rooms only"
+                                   : "Player MOD OFF: the search lists vanilla rooms, and MultiSlot rooms in the 8-player build");
+                const auto searchedLow = static_cast<std::uint32_t>(after.range[kind]);
+                const auto searchedHigh = static_cast<std::uint32_t>(after.range[kind] >> 32);
+                bool listsEightPlayerRooms = false;
+                for (std::uint32_t v = 0x54; v <= 0x57; ++v) listsEightPlayerRooms = listsEightPlayerRooms || (v >= searchedLow && v <= searchedHigh);
+                Check(!largerRoom || !listsEightPlayerRooms, "a 10- or 12-player build never lists 8-player rooms it cannot join");
+                if (eightPlayers)
+                    Check(searchedLow == 2 * kSearchTypeCenter - high && searchedHigh == 2 * kSearchTypeCenter - 0x91,
+                          "Player MOD ON lists this build's own rooms");
             } else {
                 Check(after.range[kind] == old, "unknown search kinds are unchanged");
             }

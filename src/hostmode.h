@@ -20,6 +20,19 @@ namespace multislot {
 // keys switch the member page (see ComposeLabel).
 constexpr int kModRoomCapacity = kMaxPlayers;
 
+// The SEARCH_TYPE range (high << 32 | low) the room list asks for, for a room kind whose vanilla range is
+// [0x91, high]. ON: this build's MultiSlot rooms only, [mirror(high), mirror(0x91)]. OFF in the 8-player build:
+// normal and MultiSlot rooms, [mirror(high), high]. OFF in a 10- or 12-player build: normal rooms only, as the
+// game asks: its family lies below 0x54, so a range reaching down to it would also list every 8-player room
+// (0x54..0x57), which that build's join check refuses.
+constexpr bool kModOffListsModRooms = kMaxPlayers == 8;
+constexpr std::uint64_t SearchTypeRange(std::uint32_t high, bool on) {
+    const std::uint64_t mirrorHigh = 2 * kSearchTypeCenter - high;
+    const std::uint64_t top = on ? 2 * kSearchTypeCenter - 0x91 : high;
+    const std::uint64_t bottom = on || kModOffListsModRooms ? mirrorHigh : 0x91;
+    return (top << 32) | bottom;
+}
+
 // iniPath may be null (nothing is saved). `key` and `padButton` switch the setting, which only happens
 // outside a room; `hint` is what the label calls them ("F2/LS").
 void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, bool eightPlayers, int key,

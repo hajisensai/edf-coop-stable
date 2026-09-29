@@ -47,8 +47,10 @@ char batch[kQueueBytes];  // used only under drainLock
 
 // The writer thread wakes when the queue is half full, and otherwise drains it this often.
 constexpr DWORD kDrainIntervalMs = 200;
-HANDLE wakeWriter = nullptr;
+std::atomic<HANDLE> wakeWriter{nullptr};
 std::atomic<bool> writerStarted{false};
+// False until the writer thread exists; without one every line is written by the thread that logs it.
+std::atomic<bool> writerRunning{false};
 std::atomic<std::size_t> fileOpens{0};
 
 // Used only under drainLock: trimming needs no heap.
@@ -149,21 +151,30 @@ void WithDrainLock(Work work) {
 void Drain() { WithDrainLock(&DrainHeld); }
 
 DWORD WINAPI WriterMain(void*) {
+    const HANDLE wake = wakeWriter.load();
     for (;;) {
-        WaitForSingleObject(wakeWriter, kDrainIntervalMs);
+        WaitForSingleObject(wake, kDrainIntervalMs);
         Drain();
     }
 }
 
 // Started by the first line, not at load: LogOpen may run where a new thread must not be waited on, and
-// nothing here ever waits for this one (LogFlush drains on the calling thread).
+// nothing here ever waits for this one (LogFlush drains on the calling thread). When it cannot be started,
+// writerRunning stays false and every line is written where it is logged, as before 1.5.13.
 void StartWriter() {
     if (writerStarted.load() || writerStarted.exchange(true)) return;
-    wakeWriter = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!wakeWriter) return;  // lines then go out whenever the queue fills or LogFlush runs
-    if (HANDLE thread = CreateThread(nullptr, 64 * 1024, &WriterMain, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr))
+    const HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!wake) return;
+    wakeWriter.store(wake);
+    if (HANDLE thread = CreateThread(nullptr, 64 * 1024, &WriterMain, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr)) {
         CloseHandle(thread);
+        writerRunning.store(true);
+    }
 }
+
+// The thread that holds drainLock logging again can only be a crash reported from inside a write or a trim:
+// the batch and the trim it interrupted are still in use, so it must not drain or trim again.
+bool InsideDrain() { return drainThread.load() == GetCurrentThreadId(); }
 }  // namespace
 
 void SetDetailLog(bool on) { detailLog.store(on); }
@@ -175,7 +186,10 @@ bool TrimLogFile(const wchar_t* path, long long cap, long long keep) {
     return trimmed;
 }
 
-void LogFlush() { Drain(); }
+void LogFlush() {
+    if (InsideDrain()) return;  // a crash inside a write: its own lines went straight to the file (LogWrite)
+    Drain();
+}
 
 std::size_t LogFileOpens() { return fileOpens.load(); }
 
@@ -230,23 +244,9 @@ LastRun PreviousRun() { return lastRun; }
 void LogShutdown(const char* why) {
     if (shutdownWritten.exchange(true)) return;
     // This runs from DLL_PROCESS_DETACH, where every other thread has already been terminated - one of them
-    // possibly while holding the log's lock. So the line is appended straight to the file: no lock, no repeat
-    // collapsing, no trim. A hang at exit would be blamed on the mod, and this is the last write anyway.
+    // possibly while holding the log's locks - or from the TerminateProcess hook, where the writer thread still
+    // runs. No repeat collapsing, no trim, no heap: a hang at exit would be blamed on the mod.
     if (!logPath[0]) return;
-    // Queued lines go first, if the locks can be had: a thread that was terminated while holding one never
-    // lets go, and waiting for it would hang the exit.
-    for (int attempt = 0; attempt < 50; ++attempt) {
-        if (TryAcquireSRWLockExclusive(&drainLock)) {
-            if (TryAcquireSRWLockExclusive(&queueLock)) {
-                if (queued) AppendToFile(queue, queued);
-                queued = 0;
-                ReleaseSRWLockExclusive(&queueLock);
-            }
-            ReleaseSRWLockExclusive(&drainLock);
-            break;
-        }
-        Sleep(2);
-    }
     SYSTEMTIME now{};
     GetLocalTime(&now);
     char line[256]{};
@@ -254,16 +254,33 @@ void LogShutdown(const char* why) {
                                    now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
                                    now.wMilliseconds, why);
     if (length <= 0) return;
-    HANDLE file = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    DWORD written = 0;
-    WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
-    CloseHandle(file);
+    // Queued lines first, then this one, both under drainLock when it can be had, so a trim by the writer
+    // thread can neither cut the shutdown line nor be under way when it is written. A thread terminated while
+    // holding the lock never lets go, so after about 100 ms the line is written without it.
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (TryAcquireSRWLockExclusive(&drainLock)) {
+            drainThread.store(GetCurrentThreadId());
+            if (TryAcquireSRWLockExclusive(&queueLock)) {
+                if (queued) AppendToFile(queue, queued);
+                queued = 0;
+                ReleaseSRWLockExclusive(&queueLock);
+            }
+            AppendToFile(line, static_cast<std::size_t>(length));
+            drainThread.store(0);
+            ReleaseSRWLockExclusive(&drainLock);
+            return;
+        }
+        Sleep(2);
+    }
+    AppendToFile(line, static_cast<std::size_t>(length));
 }
 
 void LogWrite(const char* text, std::size_t length) {
     if (!logPath[0] || !length) return;
+    if (InsideDrain()) {
+        AppendToFile(text, length);  // no batch, no trim: the interrupted drain still owns both
+        return;
+    }
     StartWriter();
     if (length > kQueueBytes) {
         // Larger than the whole queue: behind everything already queued, straight to the file.
@@ -280,7 +297,11 @@ void LogWrite(const char* text, std::size_t length) {
             queued += length;
             const bool wake = queued >= kQueueBytes / 2;
             ReleaseSRWLockExclusive(&queueLock);
-            if (wake && wakeWriter) SetEvent(wakeWriter);
+            if (!writerRunning.load()) {
+                Drain();  // no writer thread: written here, as before 1.5.13
+            } else if (wake) {
+                SetEvent(wakeWriter.load());
+            }
             return;
         }
         ReleaseSRWLockExclusive(&queueLock);

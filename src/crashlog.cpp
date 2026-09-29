@@ -222,6 +222,8 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     if (inGame && code == EXCEPTION_ACCESS_VIOLATION && writeDump && dumpPathW[0] &&
         dumpBudget.fetch_sub(1) > 0)
         WriteMiniDump(info);
+    // And the dump's own result line ("CRASH DUMP written ..."): the process may end as soon as this returns.
+    LogFlush();
     writerThread.store(0);
     ReleaseSRWLockExclusive(&lock);
     return EXCEPTION_CONTINUE_SEARCH;

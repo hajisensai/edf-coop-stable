@@ -16,9 +16,12 @@ wchar_t logPath[MAX_PATH]{};
 std::atomic<bool> detailLog{false};
 
 // The two marks that say where one run of the game ends and the next begins, as plugin.cpp and
-// LogShutdown write them. Checked against the real banner by the tests.
+// LogShutdown write them. Checked against the real banner by the tests. They count only as the first thing
+// after a line's own timestamp: text inside a line (a member's name, an EOS message) cannot fake one.
 constexpr const char* kBannerMark = "==== EDF6MultiSlot ";
-constexpr const char* kShutdownMark = "] SHUTDOWN ";
+constexpr const char* kShutdownMark = "SHUTDOWN ";
+// "[2026-09-20 00:09:00.000] ": what every line the plugin writes starts with.
+constexpr std::size_t kStampLength = 26;
 LastRun lastRun = LastRun::Unknown;
 std::atomic<bool> shutdownWritten{false};
 
@@ -193,6 +196,23 @@ void LogFlush() {
 
 std::size_t LogFileOpens() { return fileOpens.load(); }
 
+// True when `line` starts with the timestamp Log and LogShutdown write, "[YYYY-MM-DD HH:MM:SS.mmm] ".
+bool Stamped(const char* line, const char* end) {
+    constexpr const char* kShape = "[0000-00-00 00:00:00.000] ";
+    if (static_cast<std::size_t>(end - line) < kStampLength) return false;
+    for (std::size_t i = 0; i < kStampLength; ++i) {
+        const bool digit = kShape[i] == '0';
+        if (digit ? (line[i] < '0' || line[i] > '9') : line[i] != kShape[i]) return false;
+    }
+    return true;
+}
+
+bool Marked(const char* line, const char* end, const char* mark) {
+    const std::size_t length = std::strlen(mark);
+    return Stamped(line, end) && static_cast<std::size_t>(end - line) >= kStampLength + length &&
+           std::memcmp(line + kStampLength, mark, length) == 0;
+}
+
 // Looks at the file this session is about to append to and reports how the run before it ended. The file
 // is capped at 2 MB, so it is read whole; this runs once, at load.
 LastRun ReadLastRun(const wchar_t* path) {
@@ -210,8 +230,14 @@ LastRun ReadLastRun(const wchar_t* path) {
                 // Whichever mark is last in the file is the one that describes the previous run.
                 const char* banner = nullptr;
                 const char* shutdown = nullptr;
-                for (const char* at = text; (at = strstr(at, kBannerMark)) != nullptr; ++at) banner = at;
-                for (const char* at = text; (at = strstr(at, kShutdownMark)) != nullptr; ++at) shutdown = at;
+                const char* const end = text + read;
+                for (const char* line = text; line < end;) {
+                    const char* next = static_cast<const char*>(std::memchr(line, '\n', static_cast<std::size_t>(end - line)));
+                    next = next ? next + 1 : end;
+                    if (Marked(line, next, kBannerMark)) banner = line;
+                    else if (Marked(line, next, kShutdownMark)) shutdown = line;
+                    line = next;
+                }
                 // A missing SHUTDOWN only means the run was cut if this build can write one at all. On
                 // 2026-09-29 it still could not - DLL_PROCESS_DETACH does not run for this game, and
                 // wrapping TerminateProcess did not catch it either - so a file that has never held the
@@ -323,6 +349,12 @@ void Log(const char* format, ...) {
     va_end(args);
     std::size_t length = body < 0 ? sizeof(line) - 1 : static_cast<std::size_t>(used + body);
     if (length > sizeof(line) - 3) length = sizeof(line) - 3;
+    // One call, one line: text that comes from elsewhere (member names, EOS messages) may hold CR, LF or other
+    // controls, which would end this line early and start one that reads as the plugin's own.
+    for (std::size_t i = static_cast<std::size_t>(used); i < length; ++i) {
+        const auto c = static_cast<unsigned char>(line[i]);
+        if ((c < 0x20 && c != '\t') || c == 0x7F) line[i] = '?';
+    }
 
     // The same line again only counts; the count is written when a different line follows.
     const std::size_t bodyLength = length - static_cast<std::size_t>(used);

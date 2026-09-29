@@ -201,7 +201,7 @@ void NoteRoster(const MemberVector* members, std::size_t count, const RoomMember
     int used = 0;
     for (std::size_t i = 0; i < count && used >= 0; ++i) {
         const auto* member = static_cast<const std::uint8_t*>(members->data[i].object);
-        char name[128]{};
+        char name[kNameTextBytes]{};
         if (member && member[kMemberNameOk] != 0) NameText(member + kMemberName, name, sizeof(name));
         const int written =
             _snprintf_s(roster + used, sizeof(roster) - used, _TRUNCATE, "%s%zu %s %s %d", used ? ", " : "", i,

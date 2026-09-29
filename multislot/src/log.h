@@ -9,6 +9,8 @@ namespace multislot {
 // them. A burst that fills the 256 KB queue is written by the thread that logs rather than dropped.
 void LogOpen(const wchar_t* path);
 void LogWrite(const char* text, std::size_t length);
+// One call is one line: control characters in the formatted text (a member's name, an EOS message) are
+// written as '?', so nothing logged can end the line early or start one that reads as the plugin's own.
 void Log(const char* format, ...);
 // Writes everything queued so far to the file on the calling thread, and returns when it is there. Crash
 // reports use it before anything that may not finish (a dump), and so do tests before reading the file.

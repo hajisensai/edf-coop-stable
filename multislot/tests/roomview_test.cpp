@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/identity.h"
 #include "../src/patches.h"
 #include "../src/roomview.h"
 
@@ -215,6 +216,27 @@ int main() {
     Check(KeyName(VK_F12, keyName, 8) == 3 && std::wcscmp(keyName, L"F12") == 0 && KeyName(65, keyName, 8) == 2 &&
               std::wcscmp(keyName, L"65") == 0,
           "key names for the label");
+
+    // The name a member plays under, as the roster logs it (identity.h): a std::wstring of the game's, SSO
+    // capacity 7. The longest name read is 64 characters, and 64 CJK characters are 192 bytes of UTF-8.
+    struct FakeWideString {
+        const wchar_t* chars;
+        std::uint8_t padding[8];
+        std::size_t size;
+        std::size_t capacity;
+    };
+    std::wstring longName(kMaxNameChars, L'\x65E5');  // 日 x 64
+    const FakeWideString wide{longName.c_str(), {}, longName.size(), longName.size()};
+    char name[kNameTextBytes]{};
+    Check(NameText(&wide, name, sizeof(name)) && std::strlen(name) == kMaxNameChars * 3,
+          "a 64-character Japanese name is logged whole, not as (no name)");
+    std::wstring forged = L"x\r\n[2026-09-20 00:09:00.000] SHUTDOWN\x2028\x85";
+    const FakeWideString evil{forged.c_str(), {}, forged.size(), forged.size() > 7 ? forged.size() : 8};
+    Check(NameText(&evil, name, sizeof(name)) && std::strchr(name, '\r') == nullptr && std::strchr(name, '\n') == nullptr &&
+              std::strcmp(name, "x??[2026-09-20 00:09:00.000] SHUTDOWN??") == 0,
+          "control characters and line separators in a name come out as '?'");
+    const FakeWideString tooLong{longName.c_str(), {}, kMaxNameChars + 1, kMaxNameChars + 1};
+    Check(!NameText(&tooLong, name, sizeof(name)) && name[0] == 0, "a longer 'name' is not read at all");
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

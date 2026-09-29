@@ -28,7 +28,14 @@ void PollIdentity();
 const char* ProductUserIdText(const void* id, char* out, std::size_t size);
 
 // A std::wstring the game owns, as UTF-8 in `out`. Empty when it does not read as a string. The log is
-// written byte for byte, so a Japanese name survives; %ls in the C locale would not.
+// written byte for byte, so a Japanese name survives; %ls in the C locale would not. The name is whatever
+// the member typed, so control characters and line separators come out as '?': a name can neither end a log
+// line nor start a new one that looks like the plugin's own.
 bool NameText(const void* wstring, char* out, std::size_t size);
+// Anything longer than this is not a player name and the read is refused rather than trusted.
+constexpr std::size_t kMaxNameChars = 64;
+// `out` bytes that hold any accepted name: UTF-8 takes at most three bytes per UTF-16 unit (a surrogate pair is
+// four bytes for two units), plus the terminator. 1.5.13 used 128, and a long Japanese name came out empty.
+constexpr std::size_t kNameTextBytes = kMaxNameChars * 3 + 1;
 
 }  // namespace multislot

@@ -45,9 +45,6 @@ struct WideString {
     std::size_t capacity;
 };
 
-// Anything longer than this is not a player name and the read is refused rather than trusted.
-constexpr std::size_t kMaxNameChars = 64;
-
 void LogSteamMissing(const char* why) {
     if (told) return;
     told = true;
@@ -81,21 +78,28 @@ bool NameText(const void* wstring, char* out, std::size_t size) {
     if (!out || !size) return false;
     out[0] = 0;
     if (!wstring) return false;
+    wchar_t chars[kMaxNameChars];
+    std::size_t count = 0;
     __try {
         const auto* text = static_cast<const WideString*>(wstring);
-        const std::size_t count = text->size;
+        count = text->size;
         if (!count || count > kMaxNameChars || text->capacity < count) return false;
-        const wchar_t* chars = text->capacity > 7 ? text->heapChars : text->inlineChars;
-        if (!chars) return false;
-        const int written = WideCharToMultiByte(CP_UTF8, 0, chars, static_cast<int>(count), out,
-                                                static_cast<int>(size) - 1, nullptr, nullptr);
-        if (written <= 0) return false;
-        out[written] = 0;
+        const wchar_t* source = text->capacity > 7 ? text->heapChars : text->inlineChars;
+        if (!source) return false;
+        std::memcpy(chars, source, count * sizeof(wchar_t));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        out[0] = 0;
         return false;
     }
-    return out[0] != 0;
+    // C0 and C1 controls (CR and LF among them), DEL and the Unicode line and paragraph separators.
+    for (std::size_t i = 0; i < count; ++i) {
+        const wchar_t c = chars[i];
+        if (c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x2028 || c == 0x2029) chars[i] = L'?';
+    }
+    const int written = WideCharToMultiByte(CP_UTF8, 0, chars, static_cast<int>(count), out,
+                                            static_cast<int>(size) - 1, nullptr, nullptr);
+    if (written <= 0) return false;
+    out[written] = 0;
+    return true;
 }
 
 void PollIdentity() {

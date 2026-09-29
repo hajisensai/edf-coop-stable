@@ -262,6 +262,31 @@ int wmain(int argc, wchar_t** argv) {
           "the real banner and shutdown lines are the ones the marks look for, and shutdown is written once");
     LogOpen(mark.c_str());
     Check(PreviousRun() == LastRun::Ended, "and reading those two back says the run ended");
+
+    // A room member's name is whatever they typed, and it is logged. Neither text inside a line nor a line
+    // break smuggled into one may pass for the plugin's own SHUTDOWN: that would call a crash a clean exit.
+    write(banner + ended + banner, true);
+    Log("ROOM members (1): 0 %s Ranger 900", "evil] SHUTDOWN the game exited");
+    Log("ROOM members (1): 0 %s Ranger 900", "x\r\n[2026-09-20 00:09:00.000] SHUTDOWN the game exited");
+    Log("EOSSDK 400 LogLobby: %s", "attr\n[2026-09-20 00:09:00.000] SHUTDOWN forged\rmore");
+    const std::string forged = ReadText(mark);
+    std::size_t lineCount = 0;
+    for (const char c : forged) lineCount += c == '\n';
+    Check(lineCount == 6, "every Log call is one line, whatever its text holds");
+    Check(forged.find("x??[2026-09-20 00:09:00.000] SHUTDOWN") != std::string::npos,
+          "line breaks inside a logged text are written as '?'");
+    LogOpen(mark.c_str());
+    Check(PreviousRun() == LastRun::Cut, "a name or message that says SHUTDOWN does not make a cut run look ended");
+    // A mark counts only right after a line's own timestamp.
+    Check(write(banner + ended + banner + line("[2026-09-20 00:09:00.000] ROOM x SHUTDOWN y")) == LastRun::Cut,
+          "SHUTDOWN later in a line is not the mark");
+    Check(write(banner + ended + banner + line("SHUTDOWN the game exited")) == LastRun::Cut,
+          "SHUTDOWN without the timestamp in front is not the mark");
+    Check(write(banner + line("[2026-09-2x 00:09:00.000] SHUTDOWN the game exited")) == LastRun::Unknown,
+          "nor with something that only looks like one");
+    Check(write(line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====") + ended) == LastRun::Ended &&
+              write(ended + line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====")) == LastRun::Ended,
+          "and a banner inside a line is no banner either");
     DeleteFileW(mark.c_str());
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

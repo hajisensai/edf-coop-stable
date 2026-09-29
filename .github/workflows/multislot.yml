@@ -1,0 +1,58 @@
+name: MultiSlot
+
+# Builds EDF6MultiSlot for 8, 10 and 12 players and runs every test that needs no game. CI has neither the
+# game's menu layout (assets/LYT_MAINFRAME.SGO, made from Root.cpk) nor EDF.dll: MULTISLOT_CI=ON embeds a
+# placeholder layout that package.ps1 refuses, and the tests against the game's code (PatchTablesMatchEDF,
+# PluginLoad_*) report themselves skipped, which ctest lists at the end of its output.
+on:
+  push:
+    paths:
+      - 'multislot/**'
+      - '.github/workflows/multislot.yml'
+  pull_request:
+    paths:
+      - 'multislot/**'
+      - '.github/workflows/multislot.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        players: [8, 10, 12]
+    name: ${{ matrix.players }} players
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch EDFModLoader (pinned by hash)
+        shell: pwsh
+        run: ./multislot/tools/fetch_modloader.ps1
+
+      - name: Build and test
+        shell: cmd
+        env:
+          PLAYERS: ${{ matrix.players }}
+        run: |
+          call multislot\tools\msvc-x64-env.cmd
+          if errorlevel 1 exit /b 1
+          set VSLANG=1033
+          cmake -S multislot -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMULTISLOT_MAX_PLAYERS=%PLAYERS% -DMULTISLOT_CI=ON
+          if errorlevel 1 exit /b 1
+          cmake --build build-ci
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build-ci --output-on-failure --no-tests=error
+          if errorlevel 1 exit /b 1
+
+      - name: Say which tests were skipped
+        shell: pwsh
+        run: |
+          $listed = & ctest --test-dir build-ci --show-only=json-v1 | ConvertFrom-Json
+          $game = $listed.tests | Where-Object { $_.name -like 'PatchTablesMatchEDF' -or $_.name -like 'PluginLoad_*' }
+          $names = ($game | ForEach-Object { $_.name }) -join ', '
+          Write-Output "::warning title=Game tests skipped::No EDF.dll in CI, so these ran as skipped: $names. Run build.cmd on a machine with the game to cover them."

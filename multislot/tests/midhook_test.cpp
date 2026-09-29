@@ -13,6 +13,7 @@
 
 #include "../src/code.h"
 #include "../src/midhook.h"
+#include "../src/patches.h"
 
 using namespace multislot;
 
@@ -102,6 +103,90 @@ bool InThisModule(DWORD64 address) {
 }
 
 int Seven() { return 7; }
+
+// Enough of an x86-64 decoder for the instructions the hook tables move into thunks: the length of the
+// instruction at `at`, and whether it addresses memory relative to rip (which would point somewhere else once it
+// runs in the thunk). Opcodes it does not know - relative jumps and calls among them - come back unknown, so a new
+// site that displaces one fails here until the decoder is taught it.
+struct Decoded {
+    std::size_t length;
+    bool known;
+    bool ripRelative;
+};
+
+Decoded Decode(const std::uint8_t* at, std::size_t available) {
+    std::size_t i = 0;
+    bool operand16 = false, rexW = false;
+    while (i < available && (at[i] == 0x66 || at[i] == 0xF2 || at[i] == 0xF3)) operand16 = at[i++] == 0x66 || operand16;
+    if (i < available && (at[i] & 0xF0) == 0x40) rexW = (at[i++] & 0x08) != 0;
+    if (i >= available) return {0, false, false};
+    const std::uint8_t opcode = at[i++];
+    bool modrm = false;
+    std::size_t immediate = 0;
+    if (opcode == 0x0F) {
+        if (i >= available) return {0, false, false};
+        switch (at[i++]) {
+            case 0x10: case 0x11: case 0x28: case 0x29: modrm = true; break;  // movups/movss/movaps
+            default: return {0, false, false};
+        }
+    } else if (opcode >= 0xB8 && opcode <= 0xBF) {
+        immediate = rexW ? 8 : operand16 ? 2 : 4;  // mov reg, imm
+    } else {
+        switch (opcode) {
+            case 0x01: case 0x03: case 0x29: case 0x2B: case 0x31: case 0x33: case 0x39: case 0x3B:
+            case 0x85: case 0x89: case 0x8B: case 0x8D:
+                modrm = true;
+                break;
+            case 0x80: case 0x83: case 0xC6:
+                modrm = true;
+                immediate = 1;
+                break;
+            case 0x81: case 0xC7:
+                modrm = true;
+                immediate = operand16 ? 2 : 4;
+                break;
+            default: return {0, false, false};
+        }
+    }
+    bool rip = false;
+    if (modrm) {
+        if (i >= available) return {0, false, false};
+        const std::uint8_t byte = at[i++];
+        const int mod = byte >> 6, rm = byte & 7;
+        if (mod != 3 && rm == 4) {
+            if (i >= available) return {0, false, false};
+            if (mod == 0 && (at[i] & 7) == 5) i += 4;  // [index*scale + disp32]: absolute, not rip
+            ++i;
+        }
+        if (mod == 0 && rm == 5) {
+            rip = true;
+            i += 4;
+        } else if (mod == 1) {
+            i += 1;
+        } else if (mod == 2) {
+            i += 4;
+        }
+    }
+    i += immediate;
+    return {i, i <= available, rip};
+}
+
+// Every instruction a hook table moves into a thunk: whole, known, and free of rip-relative operands.
+void CheckDisplaced(const std::vector<MidSite>& sites, const char* table) {
+    for (const auto& site : sites) {
+        const std::uint8_t* at = site.original.data() + site.displacedOffset;
+        std::size_t used = 0;
+        bool sound = site.displacedOffset + site.displacedSize <= site.original.size();
+        while (sound && used < site.displacedSize) {
+            const Decoded instruction = Decode(at + used, site.displacedSize - used);
+            sound = instruction.known && !instruction.ripRelative && instruction.length > 0;
+            used += instruction.length;
+        }
+        if (!sound || used != site.displacedSize)
+            std::printf("  %s: %s (EDF+%X) moves an instruction that is cut, unknown or rip-relative\n", table, site.name, site.rva);
+        Check(sound && used == site.displacedSize, "the moved instructions of a hook site run the same in a thunk");
+    }
+}
 
 // Installs a hook over `length` bytes at `site` whose displaced instructions are the last
 // `displacedSize` bytes of the site.
@@ -221,6 +306,25 @@ int main() {
     std::uint64_t resume = 0;
     std::memcpy(&resume, code.data() + code.size() - 8, 8);
     Check(resume == 0x1122334455667788ull, "thunk resume address");
+
+    // The decoder on instructions of known shape, then on everything the hook tables move into thunks. It needs
+    // no game: the tables carry the bytes they expect at each site.
+    const std::uint8_t ripLoad[] = {0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00};  // mov rax, [rip+0x10]
+    const std::uint8_t stackLoad[] = {0x48, 0x8B, 0x44, 0x24, 0x40};           // mov rax, [rsp+0x40]
+    const std::uint8_t frameLoad[] = {0x8B, 0x85, 0xE0, 0x00, 0x00, 0x00};     // mov eax, [rbp+0xE0]
+    const std::uint8_t relativeCall[] = {0xE8, 0x00, 0x00, 0x00, 0x00};
+    Check(Decode(ripLoad, sizeof(ripLoad)).length == sizeof(ripLoad) && Decode(ripLoad, sizeof(ripLoad)).ripRelative,
+          "the decoder sees a rip-relative load");
+    Check(Decode(stackLoad, sizeof(stackLoad)).length == sizeof(stackLoad) && !Decode(stackLoad, sizeof(stackLoad)).ripRelative &&
+              Decode(frameLoad, sizeof(frameLoad)).length == sizeof(frameLoad) && !Decode(frameLoad, sizeof(frameLoad)).ripRelative,
+          "and tells rsp- and rbp-relative ones from it");
+    Check(!Decode(relativeCall, sizeof(relativeCall)).known, "and refuses a relative call");
+    CheckDisplaced(HostModeHooks(), "HostModeHooks");
+    CheckDisplaced(MissionHooks(), "MissionHooks");
+    CheckDisplaced(SpawnHooks(), "SpawnHooks");
+    CheckDisplaced(ArmorHooks(), "ArmorHooks");
+    CheckDisplaced(DiagnosticHooks(), "DiagnosticHooks");
+    CheckDisplaced(GhostHooks(), "GhostHooks");
 
     page.Release();
     Check(RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(pThunk)), &imageBase, nullptr) == nullptr,

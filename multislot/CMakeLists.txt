@@ -123,7 +123,7 @@ add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.
 target_compile_options(RoomViewTests PRIVATE ${WARNINGS})
 add_test(NAME RoomViewPaging COMMAND RoomViewTests)
 
-add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp)
+add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
 

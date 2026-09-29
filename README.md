@@ -10,6 +10,10 @@ Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: *
 >
 > **Status: experimental.** 900+ automated tests pass; auto direct connect and the disconnect grace period have been verified in real four-player online play (0.3.2: every player connected directly, and 7 connection drops were hidden from the game). If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf-coop-stable/issues) with your log attached.
 
+## EDF6MultiSlot: 8-player co-op (10 / 12 optional)
+
+The 8-player co-op plugin EDF6MultiSlot (by momotori01, public domain) lives in [multislot/](multislot/README.md), with its own build, package and manual. It works alongside EDF6DirectNet.
+
 ## What it fixes
 
 | Symptom | Cause | What the plugin does | Who needs to install it |
@@ -157,6 +161,7 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 | `src/log.*` | Logging |
 | `dist/` | Install scripts and bundled readmes (Chinese / English / Japanese) |
 | `tests/` | Tests |
+| `multislot/` | EDF6MultiSlot, the 8 / 10 / 12-player co-op plugin (own build and readme) |
 
 ## Known limitations
 

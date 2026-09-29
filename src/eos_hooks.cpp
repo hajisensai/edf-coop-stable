@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "auth.h"
 #include "eos_min.h"
 #include "hold.h"
 #include "iat.h"
@@ -742,6 +743,17 @@ void maybeLogStats() {
          static_cast<unsigned long long>(fail), net ? " | " : "", net ? net->statusLine().c_str() : "");
 }
 
+// A direct-link host lets a player in only as the room member whose published identity it proves
+// (DirectNet::setMemberIdentities). The member list lives in EOS, which we only call from the tick.
+constexpr uint64_t kIdentityRefreshMs = 500;
+void refreshMemberIdentities(uint64_t now) {
+    static uint64_t lastMs = 0;
+    if (now - lastMs < kIdentityRefreshMs) return;
+    lastMs = now;
+    if (g.baseNet && g.markerReady && g.config.direct.mode == Mode::Host)
+        g.baseNet->setMemberIdentities(g.marker.memberIdentities());
+}
+
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
 void hookPlatformTick(EOS_HPlatform platform) {
     g.api.tick(platform);
@@ -753,6 +765,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     }
     maybeLogStats();
     g.marker.tick();
+    refreshMemberIdentities(GetTickCount64());
     if (g.autoJoinOn) autoJoinTick(GetTickCount64());
     if (g.hold && g.hold->heldCount()) {
         for (const auto& remote : g.hold->poll(GetTickCount64(), directAlive))
@@ -880,6 +893,13 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     resolve(eos, "EOS_EResult_IsOperationComplete", g.api.isComplete);
     resolve(eos, "EOS_P2P_AcceptConnection", g.api.accept);
 
+    // Every player publishes its direct-link identity with its plugin marker; hosts check hellos against it.
+    if (auto identity = processIdentity())
+        g.marker.setIdentity(identity->commitment());
+    else
+        logf("DIRECT cannot create our direct-link identity (Windows crypto failed): direct links need it, "
+             "the game stays on EOS");
+
     // Created before the hooks that read it go live (the game may already be ticking). If the hooks it
     // needs cannot be installed it just stays empty: only the connection-closed wrapper ever holds.
     if (config.hold != Config::Hold::Off) {
@@ -905,6 +925,8 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
          g.api.gameRemoveMemberStatus);
     hook(game, "EOS_Lobby_UpdateLobby", hookUpdateLobby, g.api.gameUpdateLobby);
     logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
+    if (!g.markerReady && config.direct.mode == Mode::Host)
+        logf("DIRECT without the lobby functions we cannot check who connects: nobody can connect to us directly");
     if (config.hold != Config::Hold::Off) {
         // Holding needs all of: our closed wrapper, its unregister hook, the tick to expire events,
         // AcceptConnection to reconnect, and lobby status to release players who really left.

@@ -1,5 +1,6 @@
 #include "lobby_marker.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "log.h"
@@ -12,6 +13,14 @@ bool resolve(HMODULE eos, const char* name, T& out) {
     out = reinterpret_cast<T>(GetProcAddress(eos, name));
     if (!out) logf("EOS export %s not found; lobby plugin detection and direct auto-connect are disabled", name);
     return out != nullptr;
+}
+
+constexpr uint32_t kMaxMembersRead = 64;  // EOS lobbies hold at most 64 members
+
+// What Identity::commitment() looks like: 32 lowercase hex digits.
+bool isCommitment(const std::string& s) {
+    return s.size() == 32 &&
+           std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
 
 void onPublished(const EOS_Lobby_LobbyIdCallbackInfo* i) {
@@ -38,6 +47,11 @@ bool LobbyMarker::init(HMODULE eos) {
         GetProcAddress(eos, "EOS_LobbyDetails_GetMemberCount"));
     copyMemberAttributeByIndex_ = reinterpret_cast<PFN_EOS_LobbyDetails_CopyMemberAttributeByIndex>(
         GetProcAddress(eos, "EOS_LobbyDetails_CopyMemberAttributeByIndex"));
+    getMemberByIndex_ = reinterpret_cast<PFN_EOS_LobbyDetails_GetMemberByIndex>(
+        GetProcAddress(eos, "EOS_LobbyDetails_GetMemberByIndex"));
+    if (!getMemberCount_ || !getMemberByIndex_)
+        logf("EOS export EOS_LobbyDetails_GetMemberCount/GetMemberByIndex not found; as a direct-link host we "
+             "cannot check who connects, so nobody can connect to us directly");
     ok &= resolve(eos, "EOS_ProductUserId_ToString", idToString_);
     ready_ = ok;
     return ok;
@@ -57,6 +71,7 @@ void LobbyMarker::left() {
     std::lock_guard<std::mutex> lock(mu_);
     lobbyId_.clear();
     marked_.clear();
+    identities_.clear();
     knownOwner_.clear();
     knownOwnerAddress_.clear();
     owner_ = false;
@@ -78,6 +93,7 @@ void LobbyMarker::memberJoined() {
 void LobbyMarker::memberGone(const std::string& member) {
     std::lock_guard<std::mutex> lock(mu_);
     marked_.erase(member);
+    identities_.erase(member);
     if (member == knownOwner_) {
         knownOwner_.clear();
         knownOwnerAddress_.clear();
@@ -88,6 +104,13 @@ void LobbyMarker::setAddress(const std::string& address) {
     std::lock_guard<std::mutex> lock(mu_);
     if (address_ == address) return;
     address_ = address;
+    dirty_ = !lobbyId_.empty();
+}
+
+void LobbyMarker::setIdentity(const std::string& commitment) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (identity_ == commitment) return;
+    identity_ = commitment;
     dirty_ = !lobbyId_.empty();
 }
 
@@ -117,6 +140,15 @@ void LobbyMarker::tick() {
     seq.ValueType = 1;  // int64
     EOS_LobbyModification_AddMemberAttributeOptions as{1, &seq, 0};
     if (r == EOS_Success) r = addMemberAttribute_(mod, &as);
+    if (r == EOS_Success && !identity_.empty()) {
+        EOS_Lobby_AttributeData id{};
+        id.ApiVersion = 1;
+        id.Key = kIdentityKey;
+        id.Value.AsUtf8 = identity_.c_str();
+        id.ValueType = 3;  // string
+        EOS_LobbyModification_AddMemberAttributeOptions ai{1, &id, 0};
+        r = addMemberAttribute_(mod, &ai);
+    }
     // Only a host advertises an address; a player hosting nothing publishes none.
     if (r == EOS_Success && owner_ && !address_.empty()) {
         EOS_Lobby_AttributeData addr{};
@@ -208,6 +240,24 @@ std::string LobbyMarker::describeOwner() const {
     snprintf(buf, sizeof(buf), "owner %s, plugin marker %s, owner attributes visible %ld [%s], members %ld",
              id ? "known" : "UNKNOWN", marker ? "yes" : "no", attrs, keys.c_str(), members);
     return buf;
+}
+
+std::map<std::string, std::string> LobbyMarker::memberIdentities() {
+    std::lock_guard<std::mutex> lock(mu_);
+    EOS_HLobbyDetails details = copyDetailsLocked();
+    if (!details) return identities_;
+    EOS_LobbyDetails_GetMemberCountOptions mc{1};
+    uint32_t members = getMemberCount_ && getMemberByIndex_ ? getMemberCount_(details, &mc) : 0;
+    for (uint32_t i = 0; i < members && i < kMaxMembersRead; ++i) {
+        EOS_LobbyDetails_GetMemberByIndexOptions mo{1, i};
+        EOS_ProductUserId member = getMemberByIndex_(details, &mo);
+        std::string value;
+        if (!member || !readAttribute(details, member, kIdentityKey, &value) || !isCommitment(value)) continue;
+        std::string id = idString(member);
+        if (!id.empty()) identities_[id] = value;
+    }
+    releaseDetails_(details);
+    return identities_;
 }
 
 std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) {

@@ -26,6 +26,9 @@ constexpr uint64_t kRosterBurstMs = 1000;
 constexpr uint64_t kRosterBurstIntervalMs = 200;
 constexpr uint64_t kResolveIntervalMs = 30000;
 constexpr uint64_t kMigrateQuietMs = 5000;
+// A cookie is valid in the time bucket it was made in and the next one (20-40 s): long enough for a
+// client to answer, short enough that a captured proven hello soon stops being accepted at all.
+constexpr uint64_t kCookieBucketMs = 20000;
 constexpr uint16_t kDefaultPort = 27015;
 // EDF6 has at most 4 players; the cap only bounds what a hello flood with made-up ids can allocate.
 constexpr size_t kMaxClients = 16;
@@ -216,11 +219,24 @@ bool DirectNet::start(const DirectOptions& options) {
         logf("DIRECT UDP port %u is busy; joining from a random port instead", opt_.listenPort);
         opened = openSocket(AF_INET6, 0) || openSocket(AF_INET, 0);
     }
+    std::string secret(32, '\0');
+    if (opened && !randomBytes(reinterpret_cast<uint8_t*>(secret.data()), secret.size())) {
+        logf("DIRECT cannot get random bytes from Windows; direct link disabled");
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+        opened = false;
+    }
     if (!opened) {
         WSACleanup();
         return false;
     }
-    localNonce_ = randomNonce();
+    cookieSecret_ = std::move(secret);
+    memberIds_ = opt_.memberIds;
+    identity_ = opt_.identity ? opt_.identity : processIdentity();
+    if (!identity_ && opt_.mode == Mode::Join)
+        logf("DIRECT cannot create our direct-link identity (Windows crypto failed): hosts cannot check who we "
+             "are and will not accept us, the game stays on EOS");
+    newLocalSession();
     running_ = true;
     thread_ = std::thread([this] { run(); });
     logf("DIRECT started as %s on UDP port %u (%s)%s", opt_.mode == Mode::Host ? "HOST" : "JOIN", boundPort_,
@@ -264,10 +280,23 @@ void DirectNet::setLocalUser(const std::string& puid) {
         clients_.clear();
         hostLink_.reset();
         roster_.clear();
-        localNonce_ = randomNonce();
+        newLocalSession();
     }
     localPuid_ = puid;
     logf("DIRECT local EOS user %s", puid.c_str());
+}
+
+void DirectNet::setMemberIdentities(std::map<std::string, std::string> commitments) {
+    std::lock_guard<std::mutex> lock(mu_);
+    memberIds_ = std::move(commitments);
+    for (auto it = seen_.begin(); it != seen_.end();)  // bounded by the room, not by what anyone claims
+        it = memberIds_.count(it->first) ? std::next(it) : seen_.erase(it);
+}
+
+void DirectNet::newLocalSession() {
+    localNonce_ = randomNonce();
+    localSession_ = identity_ ? identity_->nextSession() : 0;
+    cookie_.reset();
 }
 
 bool DirectNet::canRoute(const std::string& remote) {
@@ -368,7 +397,7 @@ void DirectNet::setActive(bool active) {
     hostLink_.reset();
     roster_.clear();
     lastRoster_.clear();
-    localNonce_ = randomNonce();  // a later room starts fresh sessions
+    newLocalSession();  // a later room starts fresh sessions
     logf("DIRECT closed %zu direct link(s): not in a room", closed);
 }
 
@@ -528,65 +557,119 @@ DirectNet::Link* DirectNet::hostClientByAddr(const sockaddr_storage& addr, int l
     return nullptr;
 }
 
-void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
-    if (m.type == MsgType::Hello) {
-        if (localPuid_.empty() || !active_) return;  // not signed in yet / not in a room; the client keeps retrying
-        const std::string& id = m.hello.puid;
-        if (id.empty() || id == localPuid_) {
-            logRateLimited("hello-self", 10000, "DIRECT rejected hello with own/empty id from %s",
-                           addrToString(from, fromLen).c_str());
-            return;
-        }
-        auto it = clients_.find(id);
-        bool fresh = it == clients_.end() || it->second.peerNonce != m.hello.nonce;
-        bool moved = it != clients_.end() && !sameAddr(it->second.addr, it->second.addrLen, from, fromLen);
-        // A hello for a known player from another address: an old session (replayed) or a new one
-        // (forged: without a Key anyone who knows the player's EOS id can send it). Follow it only once
-        // the old address has gone quiet (a live client pings every second), or it would hijack the link.
-        if (moved && now - it->second.lastRecvMs < kMigrateQuietMs) {
-            logRateLimited("hello-live", 10000, "DIRECT ignored hello for %s from %s: its link is live at %s",
-                           shortId(id).c_str(), addrToString(from, fromLen).c_str(),
-                           addrToString(it->second.addr, it->second.addrLen).c_str());
-            return;
-        }
-        if (!fresh && moved) {
-            logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
-                 addrToString(it->second.addr, it->second.addrLen).c_str(), addrToString(from, fromLen).c_str());
-            it->second.addr = from;
-            it->second.addrLen = fromLen;
-        }
-        if (it == clients_.end() && clients_.size() >= kMaxClients && !hostClientByAddr(from, fromLen)) {
+std::optional<Cookie> DirectNet::cookieFor(const HelloMsg& h, const sockaddr_storage& from, int fromLen,
+                                           uint64_t bucket) {
+    const uint8_t* addr = reinterpret_cast<const uint8_t*>(&from);
+    std::vector<uint8_t> in(addr, addr + fromLen);
+    in.insert(in.end(), h.puid.begin(), h.puid.end());
+    in.insert(in.end(), reinterpret_cast<const uint8_t*>(&h.nonce), reinterpret_cast<const uint8_t*>(&h.nonce) + 4);
+    in.insert(in.end(), reinterpret_cast<const uint8_t*>(&bucket), reinterpret_cast<const uint8_t*>(&bucket) + 8);
+    return hmacTag(cookieSecret_, in.data(), in.size());
+}
+
+// Why a hello with a valid cookie does not prove the EOS id it claims, or nullptr when it does.
+const char* DirectNet::identityRefusal(const HelloMsg& h) {
+    auto member = memberIds_.find(h.puid);
+    if (member == memberIds_.end())
+        return "that player published no direct-link identity in this room (a game without the plugin, "
+               "EDF6DirectNet 0.3.6 or older, or its room info has not reached us yet); it stays on EOS";
+    if (identityCommitment(h.publicKey) != member->second)
+        return "it is not signed by the identity that player published in the room (someone else claiming "
+               "to be that player?)";
+    auto digest = helloDigest(h);
+    if (!digest || !verifySignature(h.publicKey, *digest, h.signature))
+        return "its signature does not verify (someone else claiming to be that player?)";
+    return nullptr;
+}
+
+void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now) {
+    if (localPuid_.empty() || !active_) return;  // not signed in yet / not in a room; the client keeps retrying
+    const std::string& id = h.puid;
+    if (id.empty() || id == localPuid_) {
+        logRateLimited("hello-self", 10000, "DIRECT rejected hello with own/empty id from %s",
+                       addrToString(from, fromLen).c_str());
+        return;
+    }
+    // Return routability first: until a sender echoes the cookie sent to its address it gets nothing
+    // else and nothing is kept for it, so hellos from forged source addresses change nothing and a
+    // flood of them has nothing to fill. The reply is smaller than the hello: no amplification.
+    uint64_t bucket = now / kCookieBucketMs;
+    auto current = cookieFor(h, from, fromLen, bucket);
+    auto previous = cookieFor(h, from, fromLen, bucket - 1);
+    if (!current) return;  // no crypto: nobody can be let in
+    if (h.cookie != *current && (!previous || h.cookie != *previous)) {
+        Message c;
+        c.type = MsgType::Challenge;
+        c.challenge.clientNonce = h.nonce;
+        c.challenge.cookie = *current;
+        sendMsg(c, from, fromLen);
+        return;
+    }
+    // Then identity: the hello must be signed by the key whose commitment this EOS id published in
+    // the room, which nobody but that EOS user can do. A shared Key does not stand in for this.
+    if (const char* why = identityRefusal(h)) {
+        logRateLimited(why, 10000, "DIRECT refused hello for %s from %s: %s", shortId(id).c_str(),
+                       addrToString(from, fromLen).c_str(), why);
+        return;
+    }
+    const std::string commitment = memberIds_[id];
+    auto it = clients_.find(id);
+    bool sameSession = it != clients_.end() && it->second.session == h.session && it->second.peerNonce == h.nonce;
+    auto seen = seen_.find(id);
+    if (!sameSession && seen != seen_.end() && seen->second.commitment == commitment &&
+        h.session <= seen->second.session) {
+        // Signed, but for a session this member has already replaced: a captured hello played back.
+        logRateLimited("hello-replay", 10000, "DIRECT ignored a replayed hello of an earlier session of %s from %s",
+                       shortId(id).c_str(), addrToString(from, fromLen).c_str());
+        return;
+    }
+    if (sameSession && !sameAddr(it->second.addr, it->second.addrLen, from, fromLen)) {
+        // Proven from the new address (the cookie is bound to it): the client itself moved.
+        logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
+             addrToString(it->second.addr, it->second.addrLen).c_str(), addrToString(from, fromLen).c_str());
+        it->second.addr = from;
+        it->second.addrLen = fromLen;
+    }
+    if (!sameSession) {
+        Link* other = hostClientByAddr(from, fromLen);
+        if (it == clients_.end() && clients_.size() >= kMaxClients && !other) {
             logRateLimited("clients-full", 10000, "DIRECT ignored hello from %s: already %zu direct clients",
                            addrToString(from, fromLen).c_str(), clients_.size());
             return;
         }
-        if (fresh) {
-            // New client or a restarted one: start its reliable streams from scratch.
-            if (Link* other = hostClientByAddr(from, fromLen); other && other->puid != id) {
-                std::string stale = other->puid;  // copy: erase must not take a key owned by the node
-                clients_.erase(stale);
-            }
-            Link link;
-            link.addr = from;
-            link.addrLen = fromLen;
-            link.puid = id;
-            link.peerNonce = m.hello.nonce;
-            link.epoch = linkEpoch(m.hello.nonce, localNonce_);
-            link.up = true;
-            link.lastRecvMs = now;
-            clients_[id] = std::move(link);
-            logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(id).c_str(),
-                 addrToString(from, fromLen).c_str(), clients_.size());
+        // New client or a new session of a known one: start its reliable streams from scratch.
+        if (other && other->puid != id) {
+            std::string stale = other->puid;  // copy: erase must not take a key owned by the node
+            clients_.erase(stale);
         }
-        clients_[id].lastRecvMs = now;
-        Message w;
-        w.type = MsgType::Welcome;
-        w.welcome.hostNonce = localNonce_;
-        w.welcome.clientNonce = m.hello.nonce;
-        w.welcome.hostPuid = localPuid_;
-        w.welcome.roster = rosterLocked();
-        sendMsg(w, from, fromLen);
-        if (fresh) rosterChanged();
+        Link link;
+        link.addr = from;
+        link.addrLen = fromLen;
+        link.puid = id;
+        link.peerNonce = h.nonce;
+        link.session = h.session;
+        link.epoch = linkEpoch(h.nonce, localNonce_);
+        link.up = true;
+        link.lastRecvMs = now;
+        clients_[id] = std::move(link);
+        seen_[id] = Seen{commitment, h.session};
+        logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(id).c_str(),
+             addrToString(from, fromLen).c_str(), clients_.size());
+    }
+    clients_[id].lastRecvMs = now;
+    Message w;
+    w.type = MsgType::Welcome;
+    w.welcome.hostNonce = localNonce_;
+    w.welcome.clientNonce = h.nonce;
+    w.welcome.hostPuid = localPuid_;
+    w.welcome.roster = rosterLocked();
+    sendMsg(w, from, fromLen);
+    if (!sameSession) rosterChanged();
+}
+
+void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
+    if (m.type == MsgType::Hello) {
+        onHostHello(m.hello, from, fromLen, now);
         return;
     }
     Link* link = hostClientByAddr(from, fromLen);
@@ -644,6 +727,14 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
     bool fromHost = sameAddr(from, fromLen, hostAddr_, hostAddrLen_) ||
                     (hostReplyAddrLen_ > 0 && sameAddr(from, fromLen, hostReplyAddr_, hostReplyAddrLen_));
     switch (m.type) {
+        case MsgType::Challenge: {
+            // The host keeps nothing for us until we echo this cookie in a hello signed with our identity.
+            if (hostLink_ || hostAddrLen_ == 0 || m.challenge.clientNonce != localNonce_) return;
+            bool fresh = !cookie_ || *cookie_ != m.challenge.cookie;
+            cookie_ = m.challenge.cookie;
+            if (fresh && active_ && !localPuid_.empty()) sendHello(now);  // a repeat waits for the next retry
+            return;
+        }
         case MsgType::Welcome: {
             if (hostAddrLen_ == 0 || m.welcome.clientNonce != localNonce_) return;  // not an answer to our hello
             if (!hostLink_ || hostLink_->peerNonce != m.welcome.hostNonce) {
@@ -678,7 +769,7 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
                 logf("DIRECT host closed the direct link, reconnecting");
                 hostLink_.reset();
                 roster_.clear();
-                localNonce_ = randomNonce();
+                newLocalSession();
                 lastHelloMs_ = 0;
             }
             return;
@@ -694,6 +785,15 @@ void DirectNet::processDatagram(const uint8_t* data, size_t size, const sockaddr
                                 uint64_t now) {
     DecodeError err;
     auto msg = decode(data, size, opt_.key, &err);
+    if (!msg && err == DecodeError::BadProtocol) {
+        uint16_t theirs = 0;
+        memcpy(&theirs, data + 6, 2);
+        logRateLimited("protocol", 30000,
+                       "DIRECT %s speaks direct-link protocol %u, we speak %u: it runs another EDF6DirectNet version "
+                       "(0.3.6 and older speak 2). No direct link with it; the game talks to it over EOS as usual",
+                       addrToString(from, fromLen).c_str(), theirs, kProtocol);
+        return;
+    }
     if (!msg) {
         if (err != DecodeError::BadMagic)
             logRateLimited("decode", 10000, "DIRECT rejected datagram from %s: %s",
@@ -820,20 +920,31 @@ void DirectNet::tick(uint64_t now) {
         logf("DIRECT reconnecting to the host");
         hostLink_.reset();
         roster_.clear();
-        localNonce_ = randomNonce();
+        newLocalSession();
     }
     if (hostLink_) {
         pollLink(*hostLink_);
         return;
     }
-    if (active_ && !localPuid_.empty() && hostAddrLen_ > 0 && now - lastHelloMs_ >= kHelloIntervalMs) {
-        Message h;
-        h.type = MsgType::Hello;
-        h.hello.nonce = localNonce_;
-        h.hello.puid = localPuid_;
-        sendMsg(h, hostAddr_, hostAddrLen_);
-        lastHelloMs_ = now;
+    if (active_ && !localPuid_.empty() && hostAddrLen_ > 0 && now - lastHelloMs_ >= kHelloIntervalMs) sendHello(now);
+}
+
+// Our hello: plain until the host sent a cookie, then signed with our identity.
+void DirectNet::sendHello(uint64_t now) {
+    Message h;
+    h.type = MsgType::Hello;
+    h.hello.nonce = localNonce_;
+    h.hello.session = localSession_;
+    h.hello.puid = localPuid_;
+    if (cookie_ && identity_) {
+        h.hello.cookie = *cookie_;
+        h.hello.publicKey = identity_->publicKey();
+        auto digest = helloDigest(h.hello);
+        auto signature = digest ? identity_->sign(*digest) : std::nullopt;
+        if (signature) h.hello.signature = *signature;
     }
+    sendMsg(h, hostAddr_, hostAddrLen_);
+    lastHelloMs_ = now;
 }
 
 void DirectNet::run() {

@@ -39,6 +39,8 @@ public:
     uint16_t u16() { uint16_t v = 0; raw(&v, 2); return v; }
     uint32_t u32() { uint32_t v = 0; raw(&v, 4); return v; }
     uint64_t u64() { uint64_t v = 0; raw(&v, 8); return v; }
+    template <size_t N>
+    void fixed(std::array<uint8_t, N>& out) { raw(out.data(), N); }
     std::string str() {
         size_t n = u8();
         if (n > kMaxString) reject();
@@ -94,7 +96,15 @@ void writeBody(Writer& w, const Message& m) {
     switch (m.type) {
         case MsgType::Hello:
             w.u32(m.hello.nonce);
+            w.u64(m.hello.session);
             w.str(m.hello.puid);
+            w.raw(m.hello.cookie.data(), m.hello.cookie.size());
+            w.raw(m.hello.publicKey.data(), m.hello.publicKey.size());
+            w.raw(m.hello.signature.data(), m.hello.signature.size());
+            break;
+        case MsgType::Challenge:
+            w.u32(m.challenge.clientNonce);
+            w.raw(m.challenge.cookie.data(), m.challenge.cookie.size());
             break;
         case MsgType::Welcome:
             w.u32(m.welcome.hostNonce);
@@ -134,7 +144,15 @@ bool readBody(Reader& r, Message& m) {
     switch (m.type) {
         case MsgType::Hello:
             m.hello.nonce = r.u32();
+            m.hello.session = r.u64();
             m.hello.puid = r.str();
+            r.fixed(m.hello.cookie);
+            r.fixed(m.hello.publicKey);
+            r.fixed(m.hello.signature);
+            return true;
+        case MsgType::Challenge:
+            m.challenge.clientNonce = r.u32();
+            r.fixed(m.challenge.cookie);
             return true;
         case MsgType::Welcome:
             m.welcome.hostNonce = r.u32();
@@ -220,6 +238,16 @@ std::optional<Message> decode(const uint8_t* data, size_t size, const std::strin
     if (!known || body.malformed()) return fail(DecodeError::Malformed);
     if (!body.ok()) return fail(DecodeError::Truncated);
     return m;
+}
+
+std::optional<Digest> helloDigest(const HelloMsg& hello) {
+    Writer w;
+    w.raw("EDF6DN hello 3", 14);
+    w.raw(hello.cookie.data(), hello.cookie.size());
+    w.u32(hello.nonce);
+    w.u64(hello.session);
+    w.str(hello.puid);
+    return sha256(w.buf.data(), w.buf.size());
 }
 
 const char* decodeErrorName(DecodeError e) {

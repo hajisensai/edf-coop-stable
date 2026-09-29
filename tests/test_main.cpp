@@ -3,16 +3,19 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "../src/auth.h"
 #include "../src/config.h"
 #include "../src/direct_net.h"
 #include "../src/hold.h"
@@ -115,7 +118,16 @@ std::vector<dn::Message> sampleMessages() {
     dn::Message m;
     m.type = dn::MsgType::Hello;
     m.hello.nonce = 77;
+    m.hello.session = 12;
     m.hello.puid = kA;
+    m.hello.cookie.fill(3);
+    m.hello.publicKey.fill(4);
+    m.hello.signature.fill(5);
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Challenge;
+    m.challenge.clientNonce = 77;
+    m.challenge.cookie.fill(6);
     all.push_back(m);
     m = {};
     m.type = dn::MsgType::Welcome;
@@ -316,6 +328,8 @@ dn::DirectOptions hostOptions(uint16_t port, double drop, const std::string& key
     o.mode = dn::Mode::Host;
     o.listenPort = port;
     o.key = key;
+    // A and B published this process's identity, which every test client proves by default.
+    o.memberIds = {{kA, dn::processIdentity()->commitment()}, {kB, dn::processIdentity()->commitment()}};
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     return o;
@@ -418,7 +432,7 @@ void sendTo(RawPeer& peer, uint16_t port, const dn::Message& m, const std::strin
 }
 
 // The next datagram of `type` arriving at `peer` within `ms`.
-std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms) {
+std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms, const std::string& key = "") {
     auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < end) {
         uint8_t buf[2048];
@@ -427,35 +441,56 @@ std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms) 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
-        auto m = dn::decode(buf, static_cast<size_t>(got), "", nullptr);
+        auto m = dn::decode(buf, static_cast<size_t>(got), key, nullptr);
         if (m && m->type == type) return m;
     }
     return std::nullopt;
 }
 
-// A hand-driven client: says hello as `puid` and keeps the link epoch the host welcomed it with.
+// A hand-driven client: says hello as `puid`, proves it with `identity` once the host sent a cookie,
+// and keeps the link epoch the host welcomed it with.
 struct RawClient {
     RawPeer peer;
+    std::shared_ptr<const dn::Identity> identity = dn::processIdentity();
+    std::string key;
     uint16_t port = 0;
     std::string puid;
     uint32_t nonce = 0;
     uint32_t epoch = 0;
+    dn::Message lastHello;  // the last proven hello sent
 
+    // A hello of session `session`; signed when `cookie` is given.
+    dn::Message hello(uint64_t session, const dn::Cookie* cookie) const {
+        dn::Message h;
+        h.type = dn::MsgType::Hello;
+        h.hello.nonce = nonce;
+        h.hello.session = session;
+        h.hello.puid = puid;
+        if (cookie) {
+            h.hello.cookie = *cookie;
+            h.hello.publicKey = identity->publicKey();
+            h.hello.signature = identity->sign(*dn::helloDigest(h.hello)).value();
+        }
+        return h;
+    }
+    bool welcomed(const dn::Message& h, int ms) {
+        sendTo(peer, port, h, key);
+        auto w = receiveFrom(peer, dn::MsgType::Welcome, ms, key);
+        if (!w || w->welcome.clientNonce != h.hello.nonce) return false;
+        epoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        return true;
+    }
     bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce) {
         port = hostPort;
         puid = id;
         nonce = sessionNonce;
-        dn::Message h;
-        h.type = dn::MsgType::Hello;
-        h.hello.nonce = nonce;
-        h.hello.puid = puid;
+        uint64_t session = identity->nextSession();
         for (int attempt = 0; attempt < 5; ++attempt) {
-            sendTo(peer, port, h);
-            auto w = receiveFrom(peer, dn::MsgType::Welcome, 500);
-            if (w && w->welcome.clientNonce == nonce) {
-                epoch = dn::linkEpoch(nonce, w->welcome.hostNonce);
-                return true;
-            }
+            sendTo(peer, port, hello(session, nullptr), key);
+            auto c = receiveFrom(peer, dn::MsgType::Challenge, 500, key);
+            if (!c || c->challenge.clientNonce != nonce) continue;
+            lastHello = hello(session, &c->challenge.cookie);
+            if (welcomed(lastHello, 500)) return true;
         }
         return false;
     }
@@ -470,7 +505,7 @@ struct RawClient {
         m.data.channel = 1;
         m.data.reliability = seq ? 1 : 0;
         m.data.payload = payload;
-        sendTo(peer, port, m);
+        sendTo(peer, port, m, key);
     }
 };
 
@@ -487,6 +522,263 @@ void testNoReflectionToSender() {
     c.data(51, kHost, payloadFor(51));  // the link still works for real traffic
     dn::Delivered d;
     CHECK(waitFor([&] { return host.pop(nullptr, 1170, d); }, 2000) && d.src == kA && d.data == payloadFor(51));
+}
+
+void testIdentityCrypto() {
+    printf("identity: commitments, signatures and session numbers\n");
+    auto a = dn::Identity::generate(), b = dn::Identity::generate();
+    CHECK(a && b && dn::processIdentity() && dn::processIdentity() == dn::processIdentity());
+    if (!a || !b) return;
+    CHECK(a->commitment().size() == 32 && a->commitment() != b->commitment());
+    CHECK(a->commitment() == dn::identityCommitment(a->publicKey()));
+    dn::HelloMsg h;
+    h.nonce = 5;
+    h.session = 1;
+    h.puid = kA;
+    h.cookie.fill(9);
+    auto digest = dn::helloDigest(h);
+    CHECK(digest.has_value());
+    auto sig = a->sign(*digest);
+    CHECK(sig && dn::verifySignature(a->publicKey(), *digest, *sig));
+    CHECK(!dn::verifySignature(b->publicKey(), *digest, *sig));  // someone else's key
+    for (auto change : {0, 1, 2, 3}) {  // every signed field matters
+        dn::HelloMsg t = h;
+        if (change == 0) t.nonce ^= 1;
+        if (change == 1) ++t.session;
+        if (change == 2) t.puid = kB;
+        if (change == 3) t.cookie[0] ^= 1;
+        CHECK(!dn::verifySignature(a->publicKey(), *dn::helloDigest(t), *sig));
+    }
+    dn::PublicKey offCurve{};
+    offCurve.fill(1);
+    CHECK(!dn::verifySignature(offCurve, *digest, *sig));
+    uint64_t s1 = a->nextSession(), s2 = a->nextSession();
+    CHECK(s2 > s1);
+}
+
+void testHelloNeedsCookieAndIdentity() {
+    printf("direct: a hello proves its EOS id: a cookie for its address, signed by the id's published identity\n");
+    for (const std::string key : {"", "roomkey"}) {  // a shared Key lets nobody claim someone else
+        auto idA = dn::Identity::generate(), idB = dn::Identity::generate();
+        dn::DirectOptions ho = hostOptions(0, 0, key);
+        ho.memberIds = {{kA, idA->commitment()}, {kB, idB->commitment()}};  // kC: a player without the plugin
+        dn::DirectNet host;
+        CHECK(host.start(ho));
+        host.setLocalUser(kHost);
+        const std::string kC = "0002dddddddddddddddddddddddddddd";
+
+        RawClient plain;  // no cookie: answered with a challenge only
+        plain.key = key;
+        plain.port = host.boundPort();
+        plain.puid = kA;
+        plain.nonce = 0x10;
+        sendTo(plain.peer, plain.port, plain.hello(1, nullptr), key);
+        auto c = receiveFrom(plain.peer, dn::MsgType::Challenge, 500, key);
+        CHECK(c && c->challenge.clientNonce == 0x10);
+        CHECK(receiveFrom(plain.peer, dn::MsgType::Welcome, 200, key) == std::nullopt);
+        dn::Cookie forged{};
+        forged.fill(0x42);
+        CHECK(!plain.welcomed(plain.hello(1, &forged), 300));  // a made-up cookie: another challenge
+
+        RawClient memberB;  // B, a room member, claims to be A: right cookie, wrong identity
+        memberB.identity = idB;
+        memberB.key = key;
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x20));
+        RawClient vanilla;  // someone claims kC, who published nothing
+        vanilla.identity = idB;
+        vanilla.key = key;
+        CHECK(!vanilla.connect(host.boundPort(), kC, 0x30));
+        CHECK(!host.canRoute(kA) && !host.canRoute(kC) && host.directMembers().size() == 1);
+
+        RawClient realA;
+        realA.identity = idA;
+        realA.key = key;
+        CHECK(realA.connect(host.boundPort(), kA, 0x40));
+        CHECK(host.canRoute(kA));
+        auto p = payloadFor(1);
+        CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+        auto d = receiveFrom(realA.peer, dn::MsgType::Data, 1000, key);
+        CHECK(d && d->epoch == realA.epoch && d->data.payload == p);
+        // B still cannot take A's place, now that A is connected.
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x21));
+        CHECK(memberB.peer.count(dn::MsgType::Data, 300) == 0);
+    }
+}
+
+void testIdentityPublishedLate() {
+    printf("direct: a client connects soon after its identity reaches the host's copy of the room\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.memberIds.clear();  // the room info has not arrived yet
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2500));
+    host.setMemberIdentities({{kA, dn::processIdentity()->commitment()}});
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 3000));
+    printf("  connected %lld ms after the identity arrived\n",
+           static_cast<long long>(
+               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()));
+    CHECK(streamInOrder(a, kHost, host, kA, 100));
+}
+
+void testJunkHellosDoNotBlockPlayers() {
+    printf("direct: floods of hellos from many addresses keep nothing and do not keep a player out\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    for (int i = 0; i < 40; ++i) {  // even ids that are room members: without their key nothing sticks
+        char id[40];
+        snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+        ho.memberIds[id] = dn::Identity::generate()->commitment();
+    }
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    std::vector<RawClient> junk(40);
+    std::atomic<bool> flooding{true};
+    std::thread flood([&] {
+        dn::Cookie made{};
+        for (uint32_t round = 0; flooding; ++round) {
+            for (int i = 0; i < 40; ++i) {
+                char id[40];
+                snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+                junk[i].port = host.boundPort();
+                junk[i].puid = id;
+                junk[i].nonce = round * 64 + i + 1;
+                made.fill(static_cast<uint8_t>(round));
+                sendTo(junk[i].peer, junk[i].port, junk[i].hello(round, (round & 1) ? &made : nullptr));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    flooding = false;
+    flood.join();
+    CHECK(host.directMembers() == std::vector<std::string>({kHost, kA}));
+    CHECK(host.statusLine().rfind("HOST clients=1 ", 0) == 0);
+}
+
+void testSpoofedHelloFromVictimAddress() {
+    printf("direct: a hello for a new id sent from a connected player's address does not end its link\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    // Same source address and port as A: what an attacker forging A's address sends.
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    BOOL reuse = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_port = htons(a.boundPort());
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+        printf("  SKIP: cannot share A's port (error %d)\n", WSAGetLastError());
+        closesocket(s);
+        return;
+    }
+    {
+        RawClient spoof;  // while it exists it also takes the datagrams sent to A
+        closesocket(spoof.peer.s);
+        spoof.peer.s = s;
+        spoof.port = host.boundPort();
+        spoof.puid = kB;  // a fresh id: the old host dropped A's link for it
+        spoof.nonce = 0x77;
+        dn::Cookie made{};
+        for (int i = 0; i < 5; ++i) {
+            sendTo(spoof.peer, spoof.port, spoof.hello(1, nullptr));
+            sendTo(spoof.peer, spoof.port, spoof.hello(1, &made));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(host.canRoute(kA) && !host.canRoute(kB));
+    CHECK(streamInOrder(host, kA, a, kHost, 100));
+}
+
+void testReplayedHelloIgnored() {
+    printf("direct: a captured hello of an earlier session does not replace the live one\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawClient c;
+    CHECK(c.connect(host.boundPort(), kA, 0x100));
+    dn::Message first = c.lastHello;
+    CHECK(c.connect(host.boundPort(), kA, 0x200));  // a newer session replaces the first
+    uint32_t live = c.epoch;
+    CHECK(!c.welcomed(first, 500));  // same address, cookie still valid: still refused
+    RawClient elsewhere;             // from another address the old cookie is worthless anyway
+    elsewhere.port = host.boundPort();
+    CHECK(!elsewhere.welcomed(first, 300));
+    CHECK(c.welcomed(c.lastHello, 500) && c.epoch == live);  // the live session's own hello: just welcomed again
+    auto p = payloadFor(2);
+    CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+    auto d = receiveFrom(c.peer, dn::MsgType::Data, 1000);
+    CHECK(d && d->epoch == live);
+}
+
+void testOlderPluginStaysOnEos() {
+    printf("direct: peers speaking the 0.3.6 protocol are ignored both ways, nothing breaks\n");
+    // A 0.3.6 hello: header with protocol 2, nonce, id.
+    std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, 2, 0, 7, 0, 0, 0, static_cast<uint8_t>(kA.size())};
+    old.insert(old.end(), kA.begin(), kA.end());
+    dn::DecodeError err;
+    CHECK(!dn::decode(old.data(), old.size(), "", &err) && err == dn::DecodeError::BadProtocol);
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawPeer oldClient;
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(host.boundPort());
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    for (int i = 0; i < 3; ++i)
+        sendto(oldClient.s, reinterpret_cast<const char*>(old.data()), static_cast<int>(old.size()), 0,
+               reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    int replies = 0;
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        if (recv(oldClient.s, reinterpret_cast<char*>(buf), sizeof(buf), 0) > 0) ++replies;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(replies == 0 && !host.canRoute(kA));
+
+    // A 0.3.6 host: it cannot read our hello, whatever it sends back is not a protocol-3 answer.
+    RawPeer oldHost;
+    sockaddr_in bound{};
+    int len = sizeof(bound);
+    getsockname(oldHost.s, reinterpret_cast<sockaddr*>(&bound), &len);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(ntohs(bound.sin_port)), 0)));
+    a.setLocalUser(kA);
+    int hellos = 0;
+    end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        sockaddr_storage from{};
+        int fromLen = sizeof(from);
+        int got = recvfrom(oldHost.s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from),
+                           &fromLen);
+        if (got <= 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        ++hellos;
+        // 0.3.6 answers a hello it understood with a protocol-2 Welcome; send one anyway.
+        std::vector<uint8_t> welcome = {0x45, 0x44, 0x4E, 0x31, 2, 0, 2, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
+        sendto(oldHost.s, reinterpret_cast<const char*>(welcome.data()), static_cast<int>(welcome.size()), 0,
+               reinterpret_cast<sockaddr*>(&from), fromLen);
+    }
+    CHECK(hellos >= 2 && !a.canRoute(kHost));
 }
 
 void testReplyFromOtherAddress() {
@@ -1281,6 +1573,13 @@ int wmain(int argc, wchar_t** argv) {
     testReliableBacklogLimit();
     testUnacknowledgedLinkIsDropped();
     testNoReflectionToSender();
+    testIdentityCrypto();
+    testHelloNeedsCookieAndIdentity();
+    testIdentityPublishedLate();
+    testJunkHellosDoNotBlockPlayers();
+    testSpoofedHelloFromVictimAddress();
+    testReplayedHelloIgnored();
+    testOlderPluginStaysOnEos();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

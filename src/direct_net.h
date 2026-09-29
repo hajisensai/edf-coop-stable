@@ -11,12 +11,14 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "auth.h"
 #include "reliable.h"
 #include "wire.h"
 
@@ -33,6 +35,12 @@ struct DirectOptions {
     // targets are refused, also after DNS, so a host cannot aim its joiners at themselves or others.
     bool advertisedHost = false;
     std::string key;              // optional shared secret; must be identical for everyone
+    // join: proves our EOS id to the host (see setMemberIdentities). null: processIdentity(), the one
+    // this process publishes in the room.
+    std::shared_ptr<const Identity> identity;
+    // host: the room members' published identity commitments (EOS id -> Identity::commitment()) to
+    // start with; setMemberIdentities() replaces them.
+    std::map<std::string, std::string> memberIds;
     uint32_t ifIndexV4 = 0;       // IP_UNICAST_IF: force egress through this adapter (0 = OS routing)
     uint32_t ifIndexV6 = 0;
     // A stalled link keeps buffering/retransmitting this long. Kept short on purpose: while game data
@@ -77,6 +85,11 @@ public:
 
     // The local EOS ProductUserId as a string. Joining players say hello once it is known.
     void setLocalUser(const std::string& puid);
+    // host: who may connect. A hello claiming EOS id X is accepted only when it is signed by the
+    // identity whose commitment X published in the room (EOS id -> commitment): only X itself can set
+    // X's lobby member attributes. Members that published none (vanilla players, plugin 0.3.6 and
+    // older) can never be claimed; their traffic stays on EOS.
+    void setMemberIdentities(std::map<std::string, std::string> commitments);
     // True when packets to `remote` can go over the direct transport right now.
     bool canRoute(const std::string& remote);
     // Sends a game packet over the direct transport. Returns false when `remote` is not routable.
@@ -111,6 +124,7 @@ private:
         int addrLen = 0;
         std::string puid;
         uint32_t peerNonce = 0;
+        uint64_t session = 0;  // host: the client's HelloMsg::session
         uint32_t epoch = 0;  // linkEpoch(client nonce, host nonce)
         bool up = false;
         uint64_t lastRecvMs = 0;
@@ -125,6 +139,11 @@ private:
     void run();
     void processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void onHostHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);
+    std::optional<Cookie> cookieFor(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t bucket);
+    const char* identityRefusal(const HelloMsg& h);
+    void sendHello(uint64_t now);
+    void newLocalSession();
     void onClientDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onLinkCommon(Link& link, const Message& m, uint64_t now);
     void routeData(DataMsg msg);
@@ -153,11 +172,19 @@ private:
 
     std::string localPuid_;
     uint32_t localNonce_ = 0;
+    std::shared_ptr<const Identity> identity_;
     std::deque<Delivered> inbox_;
     std::map<std::string, uint64_t> lastDataMs_;  // per source: last game packet received
 
     // Host mode.
     std::map<std::string, Link> clients_;
+    std::string cookieSecret_;  // random per instance: cookies need no state and cannot be forged
+    std::map<std::string, std::string> memberIds_;  // see setMemberIdentities
+    struct Seen {
+        std::string commitment;
+        uint64_t session = 0;
+    };
+    std::map<std::string, Seen> seen_;  // newest session accepted per member: older hellos are replays
     uint64_t lastRosterMs_ = 0;
     std::vector<std::string> lastRoster_;  // what the clients were last told
     bool active_ = true;
@@ -165,6 +192,8 @@ private:
 
     // Join mode.
     std::optional<Link> hostLink_;
+    uint64_t localSession_ = 0;  // HelloMsg::session of our current session
+    std::optional<Cookie> cookie_;  // the host's cookie for our current session
     std::vector<std::string> roster_;
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;

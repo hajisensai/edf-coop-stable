@@ -285,6 +285,12 @@ struct EOS_LobbyDetails_GetMemberCountOptions {  // ApiVersion 1
 using PFN_EOS_LobbyDetails_GetMemberAttributeCount = uint32_t (*)(EOS_HLobbyDetails,
                                                                   const EOS_LobbyDetails_GetMemberAttributeCountOptions*);
 using PFN_EOS_LobbyDetails_GetMemberCount = uint32_t (*)(EOS_HLobbyDetails, const EOS_LobbyDetails_GetMemberCountOptions*);
+struct EOS_LobbyDetails_GetMemberByIndexOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+    uint32_t MemberIndex;
+};
+using PFN_EOS_LobbyDetails_GetMemberByIndex = EOS_ProductUserId (*)(EOS_HLobbyDetails,
+                                                                    const EOS_LobbyDetails_GetMemberByIndexOptions*);
 struct EOS_LobbyDetails_CopyMemberAttributeByIndexOptions {  // ApiVersion 1
     int32_t ApiVersion;
     EOS_ProductUserId TargetUserId;

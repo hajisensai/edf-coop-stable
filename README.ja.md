@@ -1,6 +1,6 @@
 # edf6-coop-stable
 
-[中文](README.md) | [English](README.en.md) | **日本語**
+[English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
 EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協力プレイ安定化プラグイン **EDF6DirectNet** です。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグインとして動作します。
 
@@ -27,7 +27,7 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
    - ゲームが見つからない場合はゲームフォルダのパスを貼り付けるよう求められます（Steam ライブラリで EDF6 を右クリック → 管理 → ローカルファイルを閲覧）。
 3. いつも通り Steam からゲームを起動します。初回起動後に `Mods\Plugins\EDF6DirectNet.ini`（設定）と `EDF6DirectNet.log`（ログ）が生成されます。
 
-zip には README_EDF6DirectNet.txt（中文）、README_EDF6DirectNet_en.txt（English）、README_EDF6DirectNet_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
+zip には README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
 
 アップデート：新しいバージョンの `INSTALL.bat` を再実行します。設定ファイルはそのまま残ります。
 アンインストール：`UNINSTALL.bat` をダブルクリック（EDFModLoader や他の Mod には触れません）。以前ファイアウォール規則を追加していた場合は、アンインストーラーが削除コマンドを表示します。

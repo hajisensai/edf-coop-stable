@@ -10,7 +10,7 @@ $entries = [ordered]@{
     'UNINSTALL.bat'                     = 'dist\UNINSTALL.bat'
     'install.ps1'                       = 'dist\install.ps1'
     'README_EDF6DirectNet.txt'          = 'dist\README_EDF6DirectNet.txt'
-    'README_EDF6DirectNet_en.txt'       = 'dist\README_EDF6DirectNet_en.txt'
+    'README_EDF6DirectNet_zh.txt'       = 'dist\README_EDF6DirectNet_zh.txt'
     'README_EDF6DirectNet_ja.txt'       = 'dist\README_EDF6DirectNet_ja.txt'
     'EDF6DirectNet_AllowFirewall.bat'   = 'dist\EDF6DirectNet_AllowFirewall.bat'
     'Mods/Plugins/EDF6DirectNet.dll'    = 'build\EDF6DirectNet.dll'
@@ -34,7 +34,7 @@ $numbers = [regex]::Match($pluginSource, 'kVersionMajor = (\d+), kVersionMinor =
 $numericVersion = '{0}.{1}.{2}' -f $numbers.Groups[1].Value, $numbers.Groups[2].Value, $numbers.Groups[3].Value
 if ($numericVersion -ne $pluginVersion) { throw "src\plugin.cpp: kVersionText $pluginVersion but kVersionMajor/Minor/Patch $numericVersion" }
 if ($pluginVersion -ne $Version) { throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion" }
-foreach ($readme in 'README_EDF6DirectNet.txt', 'README_EDF6DirectNet_en.txt', 'README_EDF6DirectNet_ja.txt') {
+foreach ($readme in 'README_EDF6DirectNet.txt', 'README_EDF6DirectNet_zh.txt', 'README_EDF6DirectNet_ja.txt') {
     $readmeVersion = [regex]::Match((Get-Content (Join-Path $root "dist\$readme") -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value
     if ($readmeVersion -ne $Version) { throw "version mismatch: -Version $Version, dist\$readme $readmeVersion" }
 }

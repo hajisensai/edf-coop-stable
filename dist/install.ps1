@@ -6,7 +6,7 @@ $gameFolder = 'EARTH DEFENSE FORCE 6'
 # Messages follow the Windows display language: Chinese, Japanese, otherwise English.
 $lang = switch ((Get-UICulture).TwoLetterISOLanguageName) { 'zh' { 0 } 'ja' { 1 } default { 2 } }
 function T([string]$zh, [string]$ja, [string]$en) { return @($zh, $ja, $en)[$lang] }
-$readme = @('README_EDF6DirectNet.txt', 'README_EDF6DirectNet_ja.txt', 'README_EDF6DirectNet_en.txt')[$lang]
+$readme = @('README_EDF6DirectNet_zh.txt', 'README_EDF6DirectNet_ja.txt', 'README_EDF6DirectNet.txt')[$lang]
 
 function Find-SteamLibraries {
     $roots = @()
@@ -62,7 +62,7 @@ $plugins = Join-Path $game 'Mods\Plugins'
 $files = @(
     @{ From = 'Mods\Plugins\EDF6DirectNet.dll'; To = 'Mods\Plugins\EDF6DirectNet.dll' },
     @{ From = 'README_EDF6DirectNet.txt'; To = 'README_EDF6DirectNet.txt' },
-    @{ From = 'README_EDF6DirectNet_en.txt'; To = 'README_EDF6DirectNet_en.txt' },
+    @{ From = 'README_EDF6DirectNet_zh.txt'; To = 'README_EDF6DirectNet_zh.txt' },
     @{ From = 'README_EDF6DirectNet_ja.txt'; To = 'README_EDF6DirectNet_ja.txt' },
     @{ From = 'EDF6DirectNet_AllowFirewall.bat'; To = 'EDF6DirectNet_AllowFirewall.bat' }
 )
@@ -71,6 +71,9 @@ if (Get-Process EDF6 -ErrorAction SilentlyContinue) {
     Write-Host (T '请先退出游戏再运行。' 'ゲームを終了してから実行してください。' 'Quit the game first, then run this again.') -ForegroundColor Red
     exit 1
 }
+
+# 0.3.3 shipped the English readme as _en; it is README_EDF6DirectNet.txt now.
+Remove-Item -LiteralPath (Join-Path $game 'README_EDF6DirectNet_en.txt') -ErrorAction SilentlyContinue
 
 if ($Uninstall) {
     foreach ($f in $files) { Remove-Item -LiteralPath (Join-Path $game $f.To) -ErrorAction SilentlyContinue }

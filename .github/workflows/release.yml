@@ -75,7 +75,7 @@ jobs:
           $official = Join-Path $dir 'winmm.dll'
           $hash = (Get-FileHash $official -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne $env:MODLOADER_DLL_SHA256) { throw "official winmm.dll hash $hash does not match the pinned one" }
-          python -m pip install --disable-pip-version-check pefile==2024.8.26 capstone==5.0.7
+          python -m pip install --disable-pip-version-check --require-hashes -r .github/loader-fix-requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
           $fixed = Join-Path $env:RUNNER_TEMP 'winmm-fixed.dll'
           python multislot/tools/fix_winmm_proxy.py $official $fixed --manifest (Join-Path $env:RUNNER_TEMP 'loader-fix.json')

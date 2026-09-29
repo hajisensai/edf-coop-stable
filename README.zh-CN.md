@@ -29,14 +29,25 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载 `EDF6DirectNet-v*.zip`，**完整解压**到任意文件夹。
 2. 双击 **`INSTALL.bat`**：从 Steam 库自动找到 EDF6 并安装。
-   - 没有 EDFModLoader 时会装上附带的官方版（[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10，MIT）；已有的 `winmm.dll` 不会覆盖。
+   - 没有 EDFModLoader 时会装上附带的加载器：[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10（MIT），且**修复了官方版的一个多线程问题**（它的函数转发口共用同一个跳转目标变量，多个线程同时调用时可能跳到错误的函数；详见 [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)）。已有的 `winmm.dll` 不会覆盖，只有一个例外：如果它与官方 v1.0.10 的文件逐字节相同，就换成修复版，原文件备份为 `winmm.dll.bak-official`。其他加载器（更新的或打过补丁的）一律不动。
    - 找不到游戏时会让你粘贴游戏目录（Steam 库里右键 EDF6 → 管理 → 浏览本地文件）。
 3. 从 Steam 正常启动游戏。第一次启动后生成 `Mods\Plugins\EDF6DirectNet.ini`（设置）和 `EDF6DirectNet.log`（日志）。
 
 zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）；默认设置文件的注释按 Windows 显示语言写成中文 / 日文 / 其他语言一律英文。
 
-升级：从 0.3.6 起插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载 `EDF6DirectNet.dll`，校验（与发布的 SHA-256 一致、是真正的 DLL、里面写的版本号和发布版本一致）后放到原位，下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。`[Update] AutoUpdate=0` 可以关掉；手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。
-卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动）。若当初添加过防火墙规则，卸载程序会提示删除命令。
+升级：插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载 `EDF6DirectNet.dll` 和带签名的清单 `EDF6DirectNet.dll.sig`，把 DLL 放到原位，下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。可以依赖的保证：
+
+- **发布带签名。** 清单（版本号和 DLL 的 SHA-256）用 ECDSA P-256 签名，私钥只在发布流水线里；对应的公钥编译在插件里。只有签名校验通过、签名里的版本就是正在安装的那个发布且比当前运行的更新、DLL 的 SHA-256 与签名一致且里面写的版本号相符，才会安装；没有有效签名的文件一律不安装，下载也只来自本仓库的发布地址。能改发布文件或你的网络连接、但无法签名的人，装不上任何东西。
+- **自动回滚。** 被替换的 DLL 会以 `EDF6DirectNet.dll.old` 留在旁边，直到新版本运行满 2 分钟。如果游戏在这之前结束，下次启动会自动把旧版本放回去，记下失败的版本（`EDF6DirectNet.dll.bad`，不会再装它），这一次游戏不加载插件。
+- **旧版本的设置文件。** 没有 `AutoUpdate` 这一行的设置文件（旧版本不写这一行）视为**关闭**：在你手动开启之前不会更新。开启方法：在 `Mods\Plugins\EDF6DirectNet.ini` 末尾加上这两行：
+
+  ```
+  [Update]
+  AutoUpdate=1
+  ```
+
+  当前版本新生成的设置文件里已经是 `AutoUpdate=1`。`AutoUpdate=0` 关闭下载（回滚仍然有效）。
+卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动，安装程序升级过的加载器也保留，备份 `winmm.dll.bak-official` 留在原处）。它会删除插件、设置、日志和更新留下的文件（`EDF6DirectNet.dll.old` 等），以及插件在路由器上建立的 UPnP 映射（只删指向本机、名为 `EDF6DirectNet` 的那一条；路由器不支持 UPnP 就直接跳过）。若当初添加过防火墙规则，请以管理员身份运行 `UNINSTALL.bat` 一并删除；没有管理员权限时它会显示删除命令。
 
 也可以手动把 zip 内容解压到游戏目录（`EDF6.exe` 所在文件夹）。
 
@@ -45,7 +56,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 只有房主需要设置；加入者只要装了插件、`AutoJoin=1`（默认），进房后就会自动直连。
 
 1. 打开 `Mods\Plugins\EDF6DirectNet.ini`，改 `Mode=host`。
-2. 右键游戏目录里的 `EDF6DirectNet_AllowFirewall.bat` → **以管理员身份运行**（只需一次）。
+2. 右键游戏目录里的 `EDF6DirectNet_AllowFirewall.bat` → **以管理员身份运行**（只需一次）。这条规则只放行 `EDF6.exe` 在 ini 里 `ListenPort` 指定的 UDP 端口（没设置则为 27015），而不是所有 UDP 端口；改了 `ListenPort` 之后请再运行一次。
 3. 让外网能连到你，二选一：
    - **自动**：`PublicAddress` 留空。插件用路由器 UPnP 映射 UDP 27015，并自动带上本机公网 IPv6。
    - **手动**：在路由器把 UDP 端口映射到本机，然后填 `PublicAddress=公网IP:外部端口`（也可以填 DDNS 域名，如 `myroom.ddns.net:40000`）。
@@ -89,7 +100,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `[Sync] ReliableGameTraffic` | `1` | 防不同步（可靠发送）。`0` = 原版 |
 | `[Resilience] HoldDisconnects` | `auto` | 断线宽限：`auto` 只对装了插件的人 / `off` 原版 / `all` 不识别、对所有人宽限（仅当确定全员都装了插件） |
 | `GraceSeconds` | `30` | 断线最多隐瞒多少秒（1–600） |
-| `[Update] AutoUpdate` | `1` | 自动从 GitHub 安装新版本（下次启动游戏生效） |
+| `[Update] AutoUpdate` | `1` | 自动从 GitHub 安装带签名的新版本（下次启动游戏生效）。没有这一行的设置文件视为 `0`；当前版本新生成的设置文件是 `1` |
 
 ## 工作原理
 
@@ -172,7 +183,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 - 断线宽限期间其他玩家可能在同步点等待，最多 `GraceSeconds` 秒。
 - 直连由房主转发：某个加入者的直连在重连的那一瞬间，房主正替他转发、尚未被确认的少量数据会丢失（游戏随后回落到 EOS）。
 - 不设 `Key=` 时直连没有身份认证：知道房主地址和某玩家 EOS ID 的人可以伪造该玩家的数据。设了 Key 能防伪造，但仍不能防截获后的 `Bye`/成员表重放（需要升级协议版本，留待下个大版本）。
-- UPnP 映射是永久的，游戏退出后不会自动删除（端口上没有程序监听时无害）；需要时在路由器管理页删除名为 `EDF6DirectNet` 的映射。
+- 游戏退出时不会删除 UPnP 映射（那时没有安全的时机做网络调用）：插件会在之后第一次不做房主的启动（`Mode` 不是 `host`，或 `UPnP=0`）时删掉它建立的那一条，`UNINSTALL.bat` 也会删。它不会动别的设备建立的映射。在此之前，端口上没有程序监听时无害；也可以在路由器管理页删除名为 `EDF6DirectNet` 的映射。
 - 直连本身断了就什么都瞒不住：某个玩家自己的网络断开超过 `GraceSeconds` 秒，游戏照原版处理。
 
 ## 许可证

@@ -29,14 +29,25 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 1. Download `EDF6DirectNet-v*.zip` from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
 2. Double-click **`INSTALL.bat`**: it finds EDF6 in your Steam library automatically and installs.
-   - If EDFModLoader is not present, the bundled official build is installed ([BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10, MIT); an existing `winmm.dll` is never overwritten.
+   - If EDFModLoader is not present, the bundled loader is installed: [BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10 (MIT) **with a fix for a multithread bug in the official build** (its call forwarders shared one target variable, so a call from several threads at once could jump to the wrong function; details in [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)). An existing `winmm.dll` is never overwritten, with one exception: if it is byte-for-byte the official v1.0.10 file, it is replaced by the fixed build and the original is kept as `winmm.dll.bak-official`. Any other (newer or patched) loader is left alone.
    - If the game cannot be found, you will be asked to paste the game folder (in your Steam library, right-click EDF6 → Manage → Browse local files).
 3. Start the game from Steam as usual. The first launch creates `Mods\Plugins\EDF6DirectNet.ini` (settings) and `EDF6DirectNet.log` (log).
 
 The zip contains README_EDF6DirectNet.txt (English), README_EDF6DirectNet_zh.txt (中文) and README_EDF6DirectNet_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
 
-Upgrade: from 0.3.6 on the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll`, checks it (published SHA-256, a real DLL, the release's version inside) and puts it in place, and it runs from the next game start. The log says `UPDATE installed ...`. Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). `[Update] AutoUpdate=0` turns it off; running a newer `INSTALL.bat` still works as before and keeps your settings.
-Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone). If you added the firewall rule earlier, the uninstaller shows you the command to remove it.
+Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll` and the signed manifest `EDF6DirectNet.dll.sig` and puts the DLL in place, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
+
+- **Signed releases.** The manifest (version and SHA-256 of the DLL) is signed with ECDSA P-256 by a key that only the release pipeline holds; the matching public key is built into the plugin. A download is rejected unless the signature verifies, the signed version is the release being installed and newer than the running one, and the DLL has the signed SHA-256 and says it is that version. Files without a valid signature are never installed, and downloads only come from this repository's release URLs. Someone who can alter the release assets or your connection but cannot sign gets nothing installed.
+- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6DirectNet.dll.old` until the new version has run for 2 minutes. If the game ends before that, the next start puts the old version back by itself, remembers the failed version (`EDF6DirectNet.dll.bad`, it is not installed again) and runs that session without the plugin.
+- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) counts as **off**: it does not update until you enable it by adding these two lines at the end of `Mods\Plugins\EDF6DirectNet.ini`:
+
+  ```
+  [Update]
+  AutoUpdate=1
+  ```
+
+  A settings file created by a current version has `AutoUpdate=1`. `AutoUpdate=0` turns downloading off (rollback still works).
+Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone, including a loader the installer upgraded; its backup `winmm.dll.bak-official` stays). It removes the plugin, settings, log and update leftovers (`EDF6DirectNet.dll.old` and friends), and the UPnP mapping the plugin made on your router (only one that points to this PC and is named `EDF6DirectNet`; a router without UPnP is simply skipped). If you added the firewall rule, run `UNINSTALL.bat` as administrator to remove it too; without administrator rights it shows the command to remove it.
 
 You can also extract the zip contents into the game folder (the folder containing `EDF6.exe`) by hand.
 
@@ -45,7 +56,7 @@ You can also extract the zip contents into the game folder (the folder containin
 Only the host needs to set this up; joiners who have the plugin installed with `AutoJoin=1` (the default) connect directly on their own after joining the room.
 
 1. Open `Mods\Plugins\EDF6DirectNet.ini` and set `Mode=host`.
-2. Right-click `EDF6DirectNet_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once).
+2. Right-click `EDF6DirectNet_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once). The rule allows inbound UDP for `EDF6.exe` on the `ListenPort` from your ini only (27015 if unset), not every UDP port; run it again after changing `ListenPort`.
 3. Make yourself reachable from the internet, pick one:
    - **Automatic**: leave `PublicAddress` empty. The plugin maps UDP 27015 via your router's UPnP and also advertises this PC's public IPv6 automatically.
    - **Manual**: forward the UDP port to this PC on your router, then set `PublicAddress=public IP:external port` (a DDNS hostname also works, e.g. `myroom.ddns.net:40000`).
@@ -89,7 +100,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `[Sync] ReliableGameTraffic` | `1` | Desync prevention (reliable sending). `0` = vanilla |
 | `[Resilience] HoldDisconnects` | `auto` | Disconnect grace: `auto` only for players with the plugin / `off` vanilla / `all` no detection, grace for everyone (only if you are sure everyone has the plugin) |
 | `GraceSeconds` | `30` | Maximum number of seconds a disconnect is hidden (1–600) |
-| `[Update] AutoUpdate` | `1` | Install newer releases from GitHub automatically (they run from the next game start) |
+| `[Update] AutoUpdate` | `1` | Install newer signed releases from GitHub automatically (they run from the next game start). A settings file without this line counts as `0`; one created by a current version has `1` |
 
 ## How it works
 
@@ -172,7 +183,7 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 - During the disconnect grace period other players may wait at a sync point, for at most `GraceSeconds` seconds.
 - Direct connect is relayed by the host: at the moment a joiner's direct link reconnects, the small amount of data the host is relaying for them that has not been acknowledged yet is lost (the game then falls back to EOS).
 - Without `Key=`, direct connect has no authentication: someone who knows the host address and a player's EOS ID can forge that player's data. Setting a Key prevents forgery, but still does not prevent replay of captured `Bye` / member-list packets (this needs a protocol version bump, left for the next major version).
-- UPnP mappings are permanent and are not removed automatically when the game exits (harmless while nothing is listening on the port); if needed, delete the mapping named `EDF6DirectNet` in your router's admin page.
+- UPnP mappings are not removed when the game exits (there is no safe point for the network calls then): the plugin removes the one it made at the next game start that does not host (`Mode` not `host`, or `UPnP=0`), and `UNINSTALL.bat` removes it too. It never touches mappings that belong to other devices. Until then it is harmless while nothing listens on the port; you can also delete the mapping named `EDF6DirectNet` in your router's admin page.
 - Nothing can be hidden when the direct link itself is down: if a player's own internet drops for longer than `GraceSeconds`, the game handles it as usual.
 
 ## License

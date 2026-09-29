@@ -1,45 +1,92 @@
 name: Release
 
-# Push a tag vX.Y.Z to build, test, package and publish EDF6DirectNet-vX.Y.Z.zip as a GitHub Release.
-# The release text is release-notes/X.Y.Z.md (required). Run manually to build and package only.
+# Push a tag vX.Y.Z to build, test, package, sign and publish EDF6DirectNet-vX.Y.Z.zip as a GitHub Release.
+# The tagged commit must already be on main. The release text is release-notes/X.Y.Z.md (required).
+# Run manually to build and package only (no signing key, no publishing).
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # Official EDFModLoader bundled for players who do not have it yet (MIT). Pinned by hash.
   MODLOADER_ZIP_URL: https://github.com/BlueAmulet/EDFModLoader/releases/download/v1.0.10/EDFModLoader.zip
   MODLOADER_ZIP_SHA256: 850be7567954ee319dc2b65e9174d1eec70791ba9a43d2508a40b22b98bb4b08
   MODLOADER_LICENSE_URL: https://raw.githubusercontent.com/BlueAmulet/EDFModLoader/v1.0.10/LICENSE
+  MODLOADER_LICENSE_SHA256: 26b9e0fe18dda0cd4e9521993b389c1a9bf9cdefcc304fe035246536112511a8
+  # The official v1.0.10 winmm.dll (B80E4DA6...) has a multithread race in its export thunks
+  # (multislot/packaging/LOADER_FIX_JA.md); the package ships the patched one (BE94E1FA...).
+  MODLOADER_DLL_SHA256: b80e4da6ae7264f0e9774c992de3c5f9b6e9bc9422146adeeb5bb2bd681e112e
+  MODLOADER_FIXED_DLL_SHA256: be94e1fac0ca12c41b6924e2eb168851641c999ce951d2a5a9faea5161b0f9a3
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tagged commit must be on main
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "tag $env:GITHUB_REF_NAME is not vX.Y.Z"
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "$env:GITHUB_SHA is not an ancestor of origin/main; release from main only" }
+
+      - name: Release notes exist
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $notes = "release-notes/$($env:GITHUB_REF_NAME -replace '^v', '').md"
+          if (-not (Test-Path $notes)) { throw "missing ${notes}: write the release text before tagging" }
 
       - name: Build and test
         shell: pwsh
         run: ./build.ps1 -Test
 
-      - name: Fetch official EDFModLoader
+      - name: Fetch official EDFModLoader and apply the race fix
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'EDFModLoader'
           New-Item -ItemType Directory -Force $dir | Out-Null
           $zip = Join-Path $env:RUNNER_TEMP 'EDFModLoader.zip'
           Invoke-WebRequest $env:MODLOADER_ZIP_URL -OutFile $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne $env:MODLOADER_ZIP_SHA256) { throw "EDFModLoader.zip hash $hash does not match the pinned one" }
           Expand-Archive $zip -DestinationPath $dir -Force
-          Invoke-WebRequest $env:MODLOADER_LICENSE_URL -OutFile (Join-Path $dir 'LICENSE.txt')
+          $license = Join-Path $dir 'LICENSE.txt'
+          Invoke-WebRequest $env:MODLOADER_LICENSE_URL -OutFile $license
+          $hash = (Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:MODLOADER_LICENSE_SHA256) { throw "EDFModLoader LICENSE hash $hash does not match the pinned one" }
+
+          $official = Join-Path $dir 'winmm.dll'
+          $hash = (Get-FileHash $official -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:MODLOADER_DLL_SHA256) { throw "official winmm.dll hash $hash does not match the pinned one" }
+          python -m pip install --disable-pip-version-check pefile==2024.8.26 capstone==5.0.7
+          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
+          $fixed = Join-Path $env:RUNNER_TEMP 'winmm-fixed.dll'
+          python multislot/tools/fix_winmm_proxy.py $official $fixed --manifest (Join-Path $env:RUNNER_TEMP 'loader-fix.json')
+          if ($LASTEXITCODE -ne 0) { throw 'fix_winmm_proxy.py failed' }
+          $hash = (Get-FileHash $fixed -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:MODLOADER_FIXED_DLL_SHA256) { throw "fixed winmm.dll hash $hash does not match the pinned one" }
+          Copy-Item $fixed $official -Force
           "MODLOADER_DIR=$dir" >> $env:GITHUB_ENV
 
       - name: Package
+        id: package
         shell: pwsh
         run: |
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -49,24 +96,68 @@ jobs:
             $version = [regex]::Match((Get-Content src/plugin.cpp -Raw), 'kVersionText = "([^"]+)"').Groups[1].Value
           }
           ./package.ps1 -Version $version -ModLoaderDir $env:MODLOADER_DIR
-          "VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v4
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $out = 'build/release-files'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "build/EDF6DirectNet-v$env:VERSION.zip" $out
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            Copy-Item build/EDF6DirectNet.dll $out
+            # The auto-updater downloads the DLL itself and checks it against this digest.
+            $hash = (Get-FileHash build/EDF6DirectNet.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+            Set-Content -Path "$out/EDF6DirectNet.dll.sha256" -Value "$hash  EDF6DirectNet.dll" -NoNewline -Encoding ascii
+            Copy-Item "release-notes/$env:VERSION.md" $out
+          }
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+
+      # The signing key reaches this step only; it fails (and so does the job) when the key is missing
+      # or does not match the updater's public key or the signature does not verify.
+      - name: Sign the update manifest
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          ./sign-update.ps1 -Dll build/EDF6DirectNet.dll -Version $env:VERSION -Updater src/updater.cpp
+          Copy-Item build/EDF6DirectNet.dll.sig build/release-files
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+          EDF6DN_UPDATE_SIGNING_KEY: ${{ secrets.EDF6DN_UPDATE_SIGNING_KEY }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: EDF6DirectNet-v${{ env.VERSION }}
-          path: build/EDF6DirectNet-v${{ env.VERSION }}.zip
+          name: release-files
+          path: build/release-files/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: release-files
 
       - name: Publish release
-        if: github.ref_type == 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          $notes = "release-notes/$env:VERSION.md"
-          if (-not (Test-Path $notes)) { throw "missing ${notes}: write the release text before tagging" }
-          # The auto-updater downloads the DLL itself and checks it against this digest.
-          $hash = (Get-FileHash build/EDF6DirectNet.dll -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -Path build/EDF6DirectNet.dll.sha256 -Value "$hash  EDF6DirectNet.dll" -NoNewline -Encoding ascii
-          gh release create $env:GITHUB_REF_NAME "build/EDF6DirectNet-v$env:VERSION.zip" build/EDF6DirectNet.dll `
-            build/EDF6DirectNet.dll.sha256 `
-            --title "EDF6DirectNet v$env:VERSION" --notes-file $notes --verify-tag
+          $dir = 'release-files'
+          $files = @("EDF6DirectNet-v$env:VERSION.zip", 'EDF6DirectNet.dll', 'EDF6DirectNet.dll.sha256', 'EDF6DirectNet.dll.sig', "$env:VERSION.md")
+          foreach ($f in $files) { if (-not (Test-Path (Join-Path $dir $f))) { throw "missing $f in the build artifact; never publish without the signed manifest" } }
+          # The signature covers the hash of exactly this DLL.
+          $hash = (Get-FileHash "$dir/EDF6DirectNet.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sig = (Get-Content "$dir/EDF6DirectNet.dll.sig" -Raw).Split("`n")
+          if ($sig[0] -ne "EDF6DirectNet $env:VERSION" -or $sig[1] -ne $hash) { throw 'EDF6DirectNet.dll.sig does not belong to this DLL and version' }
+          gh release create $env:GITHUB_REF_NAME `
+            "$dir/EDF6DirectNet-v$env:VERSION.zip" "$dir/EDF6DirectNet.dll" "$dir/EDF6DirectNet.dll.sha256" "$dir/EDF6DirectNet.dll.sig" `
+            --repo $env:GITHUB_REPOSITORY --title "EDF6DirectNet v$env:VERSION" --notes-file "$dir/$env:VERSION.md" --verify-tag
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }

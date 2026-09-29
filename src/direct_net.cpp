@@ -27,6 +27,11 @@ constexpr uint64_t kRosterBurstIntervalMs = 200;
 constexpr uint64_t kResolveIntervalMs = 30000;
 constexpr uint64_t kMigrateQuietMs = 5000;
 constexpr uint16_t kDefaultPort = 27015;
+// EDF6 has at most 4 players; the cap only bounds what a hello flood with made-up ids can allocate.
+constexpr size_t kMaxClients = 16;
+// Largest game packet carried: EOS_P2P_MAX_PACKET_SIZE, which keeps a Data datagram (headers, three
+// ids, tag) well inside kMaxDatagram.
+constexpr size_t kMaxPayload = 1170;
 
 uint64_t nowMs() { return GetTickCount64(); }
 
@@ -162,7 +167,13 @@ bool DirectNet::start(const DirectOptions& options) {
     opt_ = options;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
-    if (!openSocket(AF_INET6, opt_.listenPort) && !openSocket(AF_INET, opt_.listenPort)) {
+    bool opened = openSocket(AF_INET6, opt_.listenPort) || openSocket(AF_INET, opt_.listenPort);
+    if (!opened && opt_.mode == Mode::Join && opt_.listenPort != 0) {
+        // A joining player's local port is a preference, not something anyone connects to.
+        logf("DIRECT UDP port %u is busy; joining from a random port instead", opt_.listenPort);
+        opened = openSocket(AF_INET6, 0) || openSocket(AF_INET, 0);
+    }
+    if (!opened) {
         WSACleanup();
         return false;
     }
@@ -229,7 +240,7 @@ bool DirectNet::canRoute(const std::string& remote) {
 bool DirectNet::send(const std::string& remote, const std::string& socketName, uint8_t channel, uint8_t reliability,
                      const uint8_t* data, size_t size) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (localPuid_.empty() || remote == localPuid_) return false;
+    if (localPuid_.empty() || remote == localPuid_ || size > kMaxPayload) return false;
     Link* link = nullptr;
     if (opt_.mode == Mode::Host) {
         auto it = clients_.find(remote);
@@ -425,15 +436,26 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
         }
         auto it = clients_.find(id);
         bool fresh = it == clients_.end() || it->second.peerNonce != m.hello.nonce;
-        if (!fresh && !sameAddr(it->second.addr, it->second.addrLen, from, fromLen)) {
-            // Same session from a new address. Hellos can be replayed by anyone who saw one, so only
-            // follow it when the old address has gone quiet (a live client pings every second);
-            // otherwise a replay would hijack the link.
-            if (now - it->second.lastRecvMs < kMigrateQuietMs) return;
+        bool moved = it != clients_.end() && !sameAddr(it->second.addr, it->second.addrLen, from, fromLen);
+        // A hello for a known player from another address: an old session (replayed) or a new one
+        // (forged: without a Key anyone who knows the player's EOS id can send it). Follow it only once
+        // the old address has gone quiet (a live client pings every second), or it would hijack the link.
+        if (moved && now - it->second.lastRecvMs < kMigrateQuietMs) {
+            logRateLimited("hello-live", 10000, "DIRECT ignored hello for %s from %s: its link is live at %s",
+                           shortId(id).c_str(), addrToString(from, fromLen).c_str(),
+                           addrToString(it->second.addr, it->second.addrLen).c_str());
+            return;
+        }
+        if (!fresh && moved) {
             logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
                  addrToString(it->second.addr, it->second.addrLen).c_str(), addrToString(from, fromLen).c_str());
             it->second.addr = from;
             it->second.addrLen = fromLen;
+        }
+        if (it == clients_.end() && clients_.size() >= kMaxClients && !hostClientByAddr(from, fromLen)) {
+            logRateLimited("clients-full", 10000, "DIRECT ignored hello from %s: already %zu direct clients",
+                           addrToString(from, fromLen).c_str(), clients_.size());
+            return;
         }
         if (fresh) {
             // New client or a restarted one: start its reliable streams from scratch.
@@ -512,19 +534,28 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
 }
 
 void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
-    if (!sameAddr(from, fromLen, hostAddr_, hostAddrLen_)) return;  // only the configured host talks to us
+    // A host on a wildcard socket answers from the source address its OS picks, which need not be the
+    // one we dialled (IPv6 hosts prefer a temporary address). So the host's packets are recognised by
+    // their session (our hello nonce, the host nonce, the link epoch), not by their source address,
+    // and we keep sending to the address we dialled.
+    bool fromHost = sameAddr(from, fromLen, hostAddr_, hostAddrLen_) ||
+                    (hostReplyAddrLen_ > 0 && sameAddr(from, fromLen, hostReplyAddr_, hostReplyAddrLen_));
     switch (m.type) {
         case MsgType::Welcome: {
-            if (m.welcome.clientNonce != localNonce_) return;  // answer to an older session
+            if (hostAddrLen_ == 0 || m.welcome.clientNonce != localNonce_) return;  // not an answer to our hello
             if (!hostLink_ || hostLink_->peerNonce != m.welcome.hostNonce) {
                 hostLink_.emplace();
-                hostLink_->addr = from;
-                hostLink_->addrLen = fromLen;
+                hostLink_->addr = hostAddr_;
+                hostLink_->addrLen = hostAddrLen_;
                 hostLink_->peerNonce = m.welcome.hostNonce;
                 hostLink_->epoch = linkEpoch(localNonce_, m.welcome.hostNonce);
-                logf("DIRECT connected to host %s at %s", shortId(m.welcome.hostPuid).c_str(),
-                     addrToString(from, fromLen).c_str());
+                bool other = !sameAddr(from, fromLen, hostAddr_, hostAddrLen_);
+                logf("DIRECT connected to host %s at %s%s%s", shortId(m.welcome.hostPuid).c_str(),
+                     addrToString(hostAddr_, hostAddrLen_).c_str(), other ? ", it answers from " : "",
+                     other ? addrToString(from, fromLen).c_str() : "");
             }
+            hostReplyAddr_ = from;
+            hostReplyAddrLen_ = fromLen;
             hostLink_->puid = m.welcome.hostPuid;
             hostLink_->up = true;
             hostLink_->lastRecvMs = now;
@@ -540,7 +571,7 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
             }
             return;
         case MsgType::Bye:
-            if (hostLink_) {
+            if (hostLink_ && fromHost) {  // carries no session: accepted only from the host's addresses
                 logf("DIRECT host closed the direct link, reconnecting");
                 hostLink_.reset();
                 roster_.clear();
@@ -549,7 +580,9 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
             }
             return;
         default:
-            if (hostLink_) onLinkCommon(*hostLink_, m, now);
+            // From elsewhere only a packet of the current session counts; stray ones are not even logged.
+            if (hostLink_ && (fromHost || (isLinkScoped(m.type) && m.epoch == hostLink_->epoch)))
+                onLinkCommon(*hostLink_, m, now);
             return;
     }
 }
@@ -612,6 +645,7 @@ bool DirectNet::resolveHost() {
         logf("DIRECT host address %s -> %s", opt_.hostAddress.c_str(), addrToString(addr, len).c_str());
         hostAddr_ = addr;
         hostAddrLen_ = len;
+        hostReplyAddrLen_ = 0;
         hostLink_.reset();
         roster_.clear();
     }

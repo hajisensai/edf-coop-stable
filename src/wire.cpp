@@ -170,7 +170,8 @@ std::vector<uint8_t> encode(const Message& msg, const std::string& key) {
     w.u16(kProtocol);
     writeBody(w, msg);
     if (!key.empty()) {
-        auto tag = hmacTag(key, w.buf.data(), w.buf.size());
+        // Without a tag (crypto failure) the zero bytes simply fail verification on the other side.
+        auto tag = hmacTag(key, w.buf.data(), w.buf.size()).value_or(std::array<uint8_t, kTagBytes>{});
         w.raw(tag.data(), tag.size());
     }
     return std::move(w.buf);
@@ -198,7 +199,9 @@ std::optional<Message> decode(const uint8_t* data, size_t size, const std::strin
         if (size < kHeaderBytes + kTagBytes) return fail(DecodeError::Truncated);
         bodyEnd = size - kTagBytes;
         auto expect = hmacTag(key, data, bodyEnd);
-        if (memcmp(expect.data(), data + bodyEnd, kTagBytes) != 0) return fail(DecodeError::TagMismatch);
+        uint8_t diff = expect ? 0 : 1;  // no tag computed: reject
+        for (size_t i = 0; expect && i < kTagBytes; ++i) diff |= (*expect)[i] ^ data[bodyEnd + i];  // constant time
+        if (diff) return fail(DecodeError::TagMismatch);
     }
     Reader body(data + kHeaderBytes, bodyEnd - kHeaderBytes);
     if (!readBody(body, m) || !body.ok()) return fail(DecodeError::Truncated);

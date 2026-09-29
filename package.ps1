@@ -21,7 +21,7 @@ $sources = [ordered]@{}
 foreach ($name in $entries.Keys) {
     $src = $entries[$name]
     if (-not [System.IO.Path]::IsPathRooted($src)) { $src = Join-Path $root $src }
-    if (-not (Test-Path -LiteralPath $src)) { throw "missing $src (run build.ps1 first?)" }
+    if (-not (Test-Path -LiteralPath $src)) { throw "missing input file $src" }
     $sources[$name] = $src
 }
 # The version is written in three places; a mismatch ships a zip whose log and readme lie about it.

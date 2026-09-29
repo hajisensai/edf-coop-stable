@@ -29,6 +29,8 @@ public:
     void entered(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId localUser, bool owner);
     // The local user left its lobby. Thread-safe.
     void left();
+    // The local user became the owner of its lobby (the previous owner left). Thread-safe.
+    void promoted();
     // The direct-link address this player hosts on ("" = not hosting). Thread-safe.
     void setAddress(const std::string& address);
 

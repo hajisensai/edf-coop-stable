@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -24,6 +25,7 @@ constexpr uint64_t kMinQueueBytes = 64ull * 1024 * 1024;
 
 using PFN_EOS_Platform_Tick = void (*)(EOS_HPlatform);
 using PFN_EOS_P2P_RemoveNotify = void (*)(EOS_HP2P, EOS_NotificationId);
+using PFN_EOS_EResult_IsOperationComplete = int32_t (*)(EOS_EResult);
 
 struct Api {
     PFN_EOS_Platform_GetP2PInterface getP2P = nullptr;  // original targets (IAT)
@@ -42,6 +44,7 @@ struct Api {
     PFN_EOS_ProductUserId_ToString idToString = nullptr;
     PFN_EOS_ProductUserId_FromString idFromString = nullptr;
     PFN_EOS_EResult_ToString resultToString = nullptr;
+    PFN_EOS_EResult_IsOperationComplete isComplete = nullptr;
     PFN_EOS_P2P_AcceptConnection accept = nullptr;
     // Original targets of the game's own imports we wrap (may point at another mod's hook).
     PFN_EOS_P2P_AddNotifyClosed gameAddClosed = nullptr;
@@ -115,9 +118,11 @@ struct State {
     std::string loggedHostAddress;
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
-    EOS_HP2P p2p = nullptr;
+    std::atomic<EOS_HP2P> p2p{nullptr};  // written on the game's send/receive thread, read on the tick
     std::atomic<EOS_HP2P> configuredHandle{nullptr};
     std::atomic<EOS_ProductUserId> localUser{nullptr};
+    std::mutex notifyMutex;
+    std::unordered_set<std::string> notifiedUsers;  // local users whose connection events we log
     std::mutex idMutex;
     std::unordered_map<std::string, EOS_ProductUserId> idCache;
     std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0}, eosUpgraded{0};
@@ -217,10 +222,11 @@ void forwardClose(const std::shared_ptr<HeldClose>& h) {
 }
 
 void reacceptPeer(const std::shared_ptr<HeldClose>& h) {
-    if (!g.api.accept || !g.p2p || g_shutdown) return;
+    EOS_HP2P p2p = g.p2p;
+    if (!g.api.accept || !p2p || g_shutdown) return;
     EOS_P2P_PeerConnectionOptions o{1, h->info.LocalUserId, h->info.RemoteUserId,
                                     h->hasSocket ? &h->socket : nullptr};
-    EOS_EResult r = g.api.accept(g.p2p, &o);
+    EOS_EResult r = g.api.accept(p2p, &o);
     logRateLimited("reaccept", 10000, "RESILIENCE asking EOS to reconnect %s: %s",
                    shortId(idString(h->info.RemoteUserId)).c_str(), resultName(r));
 }
@@ -309,6 +315,7 @@ void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* 
         if (g.hold && s == 5) released = g.hold->releaseAll();
         std::string target = idString(i->TargetUserId);
         bool self = !target.empty() && target == idString(g.lobbyUser.load());
+        if (self && s == 4) g.marker.promoted();
         if (s == 5 || (self && (s == 1 || s == 2 || s == 3)))
             leftLobby(s == 5 ? "the room was closed" : s == 2 ? "we lost the lobby service" : "we left the room");
         if (released)
@@ -373,7 +380,9 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
-    delete call;
+    // EOS runs the callback again after a non-final result (EOS_OperationWillRetry): keep the call
+    // until the final one, or the next run reads freed memory.
+    if (!g.api.isComplete || g.api.isComplete(i->ResultCode)) delete call;
     cb(&copy);
 }
 
@@ -388,6 +397,13 @@ void hookJoinLobby(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* 
     g.api.gameJoinLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId, false}, lobbyEnteredWrapper);
 }
 
+// Stops a replaced AutoJoin instance off the game thread: its worker may sit in a blocking DNS lookup
+// of the host's name, and joining it here would freeze the game. Never deleted: other threads may
+// still hold the pointer; calls through it just fail and the game falls back to EOS.
+void retire(DirectNet* net) {
+    std::thread([net] { net->stop(); }).detach();
+}
+
 // Stops an AutoJoin link: we left the room, or its host cannot be reached directly.
 void stopAutoJoinLocked(const char* why) {
     AutoJoin& a = g.autoJoin;
@@ -396,8 +412,9 @@ void stopAutoJoinLocked(const char* why) {
     if (!a.net) return;
     DirectNet* net = a.net;
     a.net = nullptr;
-    g.net.compare_exchange_strong(net, g.baseNet);  // a host's own listener takes over again
-    net->stop();  // later calls through a stale pointer just fail: the game falls back to EOS
+    DirectNet* expected = net;  // compare_exchange overwrites its first argument on failure
+    g.net.compare_exchange_strong(expected, g.baseNet);  // a host's own listener takes over again
+    retire(net);
     logf("DIRECT auto-connect stopped (%s)", why);
 }
 
@@ -441,7 +458,7 @@ void startAutoJoinAttemptLocked(uint64_t now) {
     DirectNet* old = a.net;
     a.net = net;
     g.net = net;
-    if (old) old->stop();
+    if (old) retire(old);
     a.attemptMs = now;
     a.connected = false;
     logf("DIRECT auto-connecting to the room host %s at %s", shortId(a.hostPuid).c_str(), o.hostAddress.c_str());
@@ -459,7 +476,8 @@ void autoJoinTick(uint64_t now) {
     if (!g.marker.inLobby() || g.marker.isOwner()) return;
     EOS_ProductUserId owner = nullptr;
     std::string advertised = g.marker.ownerAddress(&owner);
-    if (advertised.empty()) return;
+    // Our own address (we were promoted to room owner) is nothing to connect to.
+    if (advertised.empty() || !owner || idString(owner) == idString(g.lobbyUser.load())) return;
     if (advertised != a.advertised) {  // new room, or the host's address list changed
         a.advertised = advertised;
         a.candidates = orderHostCandidates(advertised);
@@ -512,7 +530,7 @@ void onNatType(const EOS_P2P_OnQueryNATTypeCompleteInfo* i) {
 // Applies EOS tuning once per P2P handle. Runs on the game thread.
 void configureHandle(EOS_HP2P h) {
     if (!h || g.configuredHandle.exchange(h) == h) return;
-    g.p2p = h;
+    g.p2p = h;  // atomic store
     if (g.config.eosFixedPort && g.api.setPortRange) {
         EOS_P2P_SetPortRangeOptions o{1, g.config.eosFixedPort, 7};
         EOS_EResult r = g.api.setPortRange(h, &o);
@@ -554,7 +572,18 @@ void noteLocalUser(EOS_HP2P h, EOS_ProductUserId id) {
     if (!id || g.localUser.exchange(id) == id) return;
     std::string s = idString(id);
     logf("WHOAMI local EOS ProductUserId %s (thread %lu)", s.c_str(), GetCurrentThreadId());
-    if (DirectNet* net = g.net; net && !s.empty()) net->setLocalUser(s);
+    if (!s.empty()) {
+        // The Mode=host/join transport as well as the current one: AutoJoin may have swapped in its
+        // own instance, and the host listener without our id would ignore every hello once it is back.
+        if (g.baseNet) g.baseNet->setLocalUser(s);
+        if (DirectNet* net = g.net; net && net != g.baseNet) net->setLocalUser(s);
+    }
+    {
+        // Notifications are per local user and stay registered: switching back and forth between
+        // accounts must not register them twice (every event would be logged and counted twice).
+        std::lock_guard<std::mutex> lock(g.notifyMutex);
+        if (s.empty() || !g.notifiedUsers.insert(s).second) return;
+    }
     EOS_P2P_AddNotifyOptions o{1, id, nullptr};
     if (g.api.addEstablished) g.api.addEstablished(h, &o, nullptr, onEstablished);
     if (g.api.addInterrupted) g.api.addInterrupted(h, &o, nullptr, onInterrupted);
@@ -706,7 +735,14 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     resolve(eos, "EOS_ProductUserId_ToString", g.api.idToString);
     resolve(eos, "EOS_ProductUserId_FromString", g.api.idFromString);
     resolve(eos, "EOS_EResult_ToString", g.api.resultToString);
+    resolve(eos, "EOS_EResult_IsOperationComplete", g.api.isComplete);
     resolve(eos, "EOS_P2P_AcceptConnection", g.api.accept);
+
+    // Created before the hooks that read it go live (the game may already be ticking). If the hooks it
+    // needs cannot be installed it just stays empty: only the connection-closed wrapper ever holds.
+    if (config.hold != Config::Hold::Off)
+        g.hold = std::make_unique<DisconnectHold>(
+            DisconnectHold::Options{config.graceMs, 2000, config.hold == Config::Hold::All});
 
     // Diagnostics and resilience are optional: failing here must not disable the rest.
     hook(game, "EOS_P2P_CloseConnection", hookCloseConnection, g.api.gameClose);
@@ -728,9 +764,6 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
                     hook(game, "EOS_P2P_RemoveNotifyPeerConnectionClosed", hookRemoveNotifyClosed,
                          g.api.gameRemoveClosed) &&
                     hook(game, "EOS_P2P_AddNotifyPeerConnectionClosed", hookAddNotifyClosed, g.api.gameAddClosed);
-        if (held)
-            g.hold = std::make_unique<DisconnectHold>(
-                DisconnectHold::Options{config.graceMs, 2000, config.hold == Config::Hold::All});
         logf("RESILIENCE disconnect hold %s (mode %s, grace %u s)", held ? "enabled" : "UNAVAILABLE",
              config.hold == Config::Hold::All ? "all" : "auto (players running the plugin)", config.graceMs / 1000);
     }

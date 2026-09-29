@@ -22,6 +22,7 @@ EDF6DirectNet 0.3.0 —— EDF6 联机稳定插件
    a) PublicAddress 留空：插件自动用路由器 UPnP 映射 UDP 27015，并自动带上本机公网 IPv6。
    b) 自己在路由器上把 UDP 端口映射到本机，然后在 ini 里填 PublicAddress=你的公网IP:外部端口
       例：PublicAddress=120.1.2.3:27015
+   电脑直接拨号上网（PPPoE，没有路由器）的，插件认不出网卡，请用 b) 填 PublicAddress。
 4. 重启游戏，正常建房。别人进房后你的日志出现 DIRECT client ... connected 就是连上了。
 日志里的提示：
    UPNP no router ... / UPNP port mapping failed   → 路由器没开 UPnP，改用 b)

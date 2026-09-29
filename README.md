@@ -39,6 +39,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 3. 让外网能连到你，二选一：
    - **自动**：`PublicAddress` 留空。插件用路由器 UPnP 映射 UDP 27015，并自动带上本机公网 IPv6。
    - **手动**：在路由器把 UDP 端口映射到本机，然后填 `PublicAddress=公网IP:外部端口`（也可以填 DDNS 域名，如 `myroom.ddns.net:40000`）。
+   - **电脑直接拨号上网（PPPoE，没有路由器）**：插件识别不到这类网卡，不会自动公布地址，请手动填 `PublicAddress=公网IP:27015`。
 4. 重启游戏，正常建房。
 
 怎么确认成功（看日志 `Mods\Plugins\EDF6DirectNet.log`）：
@@ -49,6 +50,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 | `UPNP router now forwards UDP ...` | UPnP 映射成功 |
 | `UPNP no router with UPnP port mapping found` / `UPNP port mapping failed` | 路由器不支持或没开 UPnP，改用手动端口映射 |
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | 你在运营商大内网里，没有公网 IPv4，IPv4 直连不可能；只能靠 IPv6 或找运营商要公网 IP |
+| `UPNP UDP 27015 is already forwarded to ...; left alone` | 路由器上这个端口已经映射给了局域网里别的设备，插件不会删它；换一个 `ListenPort`，或手动映射 |
 | `DIRECT client ... connected from ...`（房主） / `DIRECT connected to host ...`（加入者） | 直连已建立 |
 | `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 加入者连不上房主（防火墙/端口映射/Key 不一致），游戏照常走 Epic，60 秒后重试 |
 
@@ -107,6 +109,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `EOS incoming packet queue FULL`：EOS 队列满开始丢包，请附日志提 Issue。
 - `RESILIENCE ... RECOVERED` 表示一次断线被成功隐藏；`did not come back within` 表示超时后交给了游戏。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
+- `DIRECT ignored hello for ... its link is live`：有人用某个在线玩家的身份从别的地址发起连接，已被拒绝。偶尔一条可能是对方换了网络（5 秒后会自动接受）；频繁出现说明有人在捣乱，建议设 `Key=`。
 
 ## 构建
 
@@ -143,6 +146,9 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.0 -ModLoaderDi
 - 不支持任务中途加入（游戏本身没有这个功能）。
 - 只解决丢包造成的不同步；游戏逻辑本身的不同步需要具体症状再逆向定位。
 - 断线宽限期间其他玩家可能在同步点等待，最多 `GraceSeconds` 秒。
+- 直连由房主转发：某个加入者的直连在重连的那一瞬间，房主正替他转发、尚未被确认的少量数据会丢失（游戏随后回落到 EOS）。
+- 不设 `Key=` 时直连没有身份认证：知道房主地址和某玩家 EOS ID 的人可以伪造该玩家的数据。设了 Key 能防伪造，但仍不能防截获后的 `Bye`/成员表重放（需要升级协议版本，留待下个大版本）。
+- UPnP 映射是永久的，游戏退出后不会自动删除（端口上没有程序监听时无害）；需要时在路由器管理页删除名为 `EDF6DirectNet` 的映射。
 - 尚未在真实多人联机中验证，欢迎提交带日志的 Issue。
 
 ## 许可证

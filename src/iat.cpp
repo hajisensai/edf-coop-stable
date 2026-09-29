@@ -32,8 +32,14 @@ bool patchImport(HMODULE module, const char* dll, const char* function, void* ho
     if (!slot) return false;
     DWORD oldProtect = 0;
     if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProtect)) return false;
-    // Keep whatever is there (maybe another mod's hook) so calls chain through it.
-    *original = InterlockedExchangePointer(slot, hook);
+    // Keep whatever is there (maybe another mod's hook) so calls chain through it. `original` is
+    // written before the slot changes: a game thread may call the hook the instant it is installed.
+    for (void* current = *slot;;) {
+        *original = current;
+        void* seen = InterlockedCompareExchangePointer(slot, hook, current);
+        if (seen == current) break;
+        current = seen;
+    }
     VirtualProtect(slot, sizeof(void*), oldProtect, &oldProtect);
     return true;
 }

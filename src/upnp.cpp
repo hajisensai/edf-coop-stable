@@ -46,10 +46,29 @@ void mapPort(uint16_t port, const std::string& localIpv4, const std::function<vo
     HRESULT hr = CoCreateInstance(__uuidof(UPnPNAT), nullptr, CLSCTX_ALL, __uuidof(IUPnPNAT),
                                   reinterpret_cast<void**>(&nat));
     if (SUCCEEDED(hr)) hr = nat->get_StaticPortMappingCollection(&mappings);
+    bool taken = false;
     if (SUCCEEDED(hr) && mappings) {
-        // Replace an older mapping of the same port (it may point at a previous LAN address).
-        mappings->Remove(port, proto);
-        hr = mappings->Add(port, proto, port, client, VARIANT_TRUE, desc, &mapping);
+        // Replace an older mapping of the same port only when it is ours (it may point at a previous LAN
+        // address of this PC). Someone else's, e.g. another PC in the house hosting on the same port,
+        // must not be deleted.
+        IStaticPortMapping* existing = nullptr;
+        if (SUCCEEDED(mappings->get_Item(port, proto, &existing)) && existing) {
+            BSTR owner = nullptr, what = nullptr;
+            existing->get_InternalClient(&owner);
+            existing->get_Description(&what);
+            std::string ownerIp = narrow(owner), ownerDesc = narrow(what);
+            SysFreeString(owner);
+            SysFreeString(what);
+            existing->Release();
+            taken = ownerIp != localIpv4 && ownerDesc != "EDF6DirectNet";
+            if (taken)
+                logf("UPNP UDP %u is already forwarded to %s (\"%s\"); left alone. Set another ListenPort, "
+                     "or forward a port manually and set PublicAddress.",
+                     port, ownerIp.c_str(), ownerDesc.c_str());
+            else
+                mappings->Remove(port, proto);
+        }
+        if (!taken) hr = mappings->Add(port, proto, port, client, VARIANT_TRUE, desc, &mapping);
     }
     if (SUCCEEDED(hr) && mapping) {
         BSTR external = nullptr;
@@ -65,6 +84,8 @@ void mapPort(uint16_t port, const std::string& localIpv4, const std::function<vo
         else if (!ext.empty() && onPublicIpv4)
             onPublicIpv4(ext);
         SysFreeString(external);
+    } else if (taken) {
+        // already logged
     } else if (SUCCEEDED(hr)) {
         // The UPnP API itself worked but found no router offering a port-mapping service.
         logf("UPNP no router with UPnP port mapping found (UPnP disabled or unsupported on the router). "

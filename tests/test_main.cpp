@@ -221,6 +221,105 @@ bool streamInOrder(dn::DirectNet& from, const std::string& toId, dn::DirectNet& 
     return ok && next == count;
 }
 
+// A plain UDP socket that speaks the wire format, for playing an attacker against a host.
+struct RawPeer {
+    SOCKET s = INVALID_SOCKET;
+    RawPeer(const RawPeer&) = delete;
+    RawPeer& operator=(const RawPeer&) = delete;
+    RawPeer() {
+        s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in any{};
+        any.sin_family = AF_INET;
+        bind(s, reinterpret_cast<sockaddr*>(&any), sizeof(any));
+        u_long nonBlocking = 1;
+        ioctlsocket(s, FIONBIO, &nonBlocking);
+    }
+    ~RawPeer() { closesocket(s); }
+    void hello(uint16_t port, const std::string& puid, uint32_t nonce) {
+        dn::Message m;
+        m.type = dn::MsgType::Hello;
+        m.hello.nonce = nonce;
+        m.hello.puid = puid;
+        auto dg = dn::encode(m, "");
+        sockaddr_in to{};
+        to.sin_family = AF_INET;
+        to.sin_port = htons(port);
+        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sendto(s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+               reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    }
+    // Counts datagrams of `type` received until `ms` elapse.
+    int count(dn::MsgType type, int ms) {
+        int n = 0;
+        auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (std::chrono::steady_clock::now() < end) {
+            uint8_t buf[2048];
+            int got = recv(s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+            if (got <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+            auto m = dn::decode(buf, static_cast<size_t>(got), "", nullptr);
+            if (m && m->type == type) ++n;
+        }
+        return n;
+    }
+};
+
+void testReplyFromOtherAddress() {
+    // A host bound to the wildcard address answers from whatever source address the OS picks for the
+    // client. With IPv6 privacy addresses that is usually not the (stable) address the client sent to;
+    // on loopback the same happens with 127.0.0.2 -> reply from 127.0.0.1.
+    printf("direct: host answering from a different address than the client dialled still connects\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.2:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    CHECK(streamInOrder(a, kHost, host, kA, 200));
+    CHECK(streamInOrder(host, kA, a, kHost, 200));
+}
+
+void testHelloCannotHijackLiveLink() {
+    printf("direct: a forged hello for a connected player does not take over its link\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    RawPeer attacker;
+    attacker.hello(host.boundPort(), kA, 0x1234567);  // A's id, a session nonce A never used
+    CHECK(attacker.count(dn::MsgType::Welcome, 300) == 0);
+    auto p = payloadFor(1);
+    CHECK(host.send(kA, "EDF6", 1, 2, p.data(), p.size()));
+    CHECK(attacker.count(dn::MsgType::Data, 300) == 0);  // the host still talks to the real A...
+    dn::Delivered d;
+    uint8_t ch = 1;
+    CHECK(waitFor([&] { return a.pop(&ch, 1170, d); }, 2000) && d.data == p);  // ...which gets the packet
+    CHECK(streamInOrder(host, kA, a, kHost, 100));
+}
+
+void testHelloFloodIsBounded() {
+    printf("direct: a hello flood with made-up ids cannot grow the host's member list without bound\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    std::vector<RawPeer> attackers(40);  // one source port each: a single address only replaces itself
+    char id[40];
+    for (int i = 0; i < 40; ++i) {
+        snprintf(id, sizeof(id), "0002ffffffffffffffffffffffff%04d", i);
+        attackers[i].hello(host.boundPort(), id, 100 + i);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    size_t members = host.directMembers().size();
+    printf("  members after the flood: %zu\n", members);
+    CHECK(members <= 1 + 16);
+}
+
 void testThreeNodesOverLoopback() {
     printf("direct: host + 2 clients on loopback (IPv4 and IPv6), 20%% loss everywhere\n");
     dn::DirectNet host;
@@ -607,6 +706,9 @@ int wmain(int argc, wchar_t** argv) {
     testDisconnectHold();
     testHostRestart();
     testStalledLinkSurvives();
+    testReplyFromOtherAddress();
+    testHelloCannotHijackLiveLink();
+    testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

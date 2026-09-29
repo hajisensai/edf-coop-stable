@@ -51,6 +51,13 @@ void LobbyMarker::left() {
     dirty_ = false;
 }
 
+void LobbyMarker::promoted() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (lobbyId_.empty() || owner_) return;
+    owner_ = true;
+    dirty_ = !address_.empty();  // now we advertise our address, if we host one
+}
+
 void LobbyMarker::setAddress(const std::string& address) {
     std::lock_guard<std::mutex> lock(mu_);
     if (address_ == address) return;

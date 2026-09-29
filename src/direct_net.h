@@ -136,8 +136,10 @@ private:
     // Join mode.
     std::optional<Link> hostLink_;
     std::vector<std::string> roster_;
-    sockaddr_storage hostAddr_{};
+    sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;
+    sockaddr_storage hostReplyAddr_{};  // where the host's Welcome came from (may differ, see onClientDatagram)
+    int hostReplyAddrLen_ = 0;
     uint64_t lastHelloMs_ = 0;
     uint64_t lastResolveMs_ = 0;
 };

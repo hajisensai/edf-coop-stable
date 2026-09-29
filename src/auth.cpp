@@ -19,16 +19,17 @@ BCRYPT_ALG_HANDLE hmacAlgorithm() {
 
 }  // namespace
 
-std::array<uint8_t, 8> hmacTag(const std::string& key, const uint8_t* data, size_t size) {
-    std::array<uint8_t, 8> tag{};
+std::optional<std::array<uint8_t, 8>> hmacTag(const std::string& key, const uint8_t* data, size_t size) {
     uint8_t digest[32] = {};
     BCRYPT_HASH_HANDLE hash = nullptr;
     BCRYPT_ALG_HANDLE alg = hmacAlgorithm();
-    if (alg && BCryptCreateHash(alg, &hash, nullptr, 0, (PUCHAR)key.data(), (ULONG)key.size(), 0) == 0) {
-        BCryptHashData(hash, (PUCHAR)data, (ULONG)size, 0);
-        BCryptFinishHash(hash, digest, sizeof(digest), 0);
-        BCryptDestroyHash(hash);
-    }
+    if (!alg || BCryptCreateHash(alg, &hash, nullptr, 0, (PUCHAR)key.data(), (ULONG)key.size(), 0) != 0)
+        return std::nullopt;
+    bool ok = BCryptHashData(hash, (PUCHAR)data, (ULONG)size, 0) == 0 &&
+              BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
+    BCryptDestroyHash(hash);
+    if (!ok) return std::nullopt;
+    std::array<uint8_t, 8> tag{};
     memcpy(tag.data(), digest, tag.size());
     return tag;
 }

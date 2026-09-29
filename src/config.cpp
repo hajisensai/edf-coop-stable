@@ -6,14 +6,14 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace dn {
 namespace {
 
 // The default settings file. Keys and defaults are written once; only the comments are translated
 // (Chinese, Japanese, English), so the three files can never disagree on a setting. Written as UTF-8
-// with BOM so Notepad shows the comments; the first line is a comment, so the BOM never ends up in a
-// key name.
+// with BOM so Notepad shows the comments (Ini skips the BOM).
 struct IniEntry {
     const char* setting;     // "Key=default", or "[Section]"
     const char* comment[3];  // zh, ja, en; lines separated by '\n'
@@ -111,18 +111,101 @@ int iniLanguage(unsigned short langId) {
     }
 }
 
-std::wstring readString(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
-    wchar_t buf[512] = {};
-    GetPrivateProfileStringW(section, key, def, buf, 512, ini.c_str());
-    std::wstring s = buf;
-    auto notSpace = [](wchar_t c) { return c != L' ' && c != L'\t'; };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
-    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+std::wstring lower(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     return s;
 }
 
-int readInt(const std::wstring& ini, const wchar_t* section, const wchar_t* key, int def) {
-    return static_cast<int>(GetPrivateProfileIntW(section, key, def, ini.c_str()));
+// The settings file as the plugin reads it. GetPrivateProfileString is not used: it reads UTF-8 as the
+// ANSI code page (garbling non-ASCII values), treats a UTF-8 BOM as part of the first line (a file that
+// starts with [DirectNet] loses that whole section) and keeps comments after a value
+// ("Mode=host ; me" is not host).
+class Ini {
+public:
+    explicit Ini(const std::wstring& path) {
+        std::wstring text = decode(readAll(path));
+        std::wstring section;
+        for (size_t at = 0; at < text.size();) {
+            size_t end = text.find(L'\n', at);
+            if (end == std::wstring::npos) end = text.size();
+            std::wstring line = trim(text.substr(at, end - at));
+            at = end + 1;
+            if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+            if (line[0] == L'[') {
+                size_t close = line.find(L']');
+                section = lower(trim(line.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1)));
+                continue;
+            }
+            size_t eq = line.find(L'=');
+            if (eq == std::wstring::npos) continue;
+            entries_.push_back({section, lower(trim(line.substr(0, eq))), value(line.substr(eq + 1))});
+        }
+    }
+
+    // The first value of `key` in `section` (both case-insensitive, like Windows); nullptr when absent.
+    const std::wstring* find(const wchar_t* section, const wchar_t* key) const {
+        std::wstring s = lower(section), k = lower(key);
+        for (const Entry& e : entries_)
+            if (e.section == s && e.key == k) return &e.value;
+        return nullptr;
+    }
+
+private:
+    struct Entry {
+        std::wstring section, key, value;
+    };
+    std::vector<Entry> entries_;
+
+    static std::string readAll(const std::wstring& path) {
+        std::string bytes;
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        if (!f) return bytes;
+        char buf[4096];
+        for (size_t n; bytes.size() < 1024 * 1024 && (n = fread(buf, 1, sizeof(buf), f)) > 0;) bytes.append(buf, n);
+        fclose(f);
+        return bytes;
+    }
+
+    // UTF-16LE with BOM; else UTF-8 (BOM optional); else the ANSI code page (saved by an old editor).
+    static std::wstring decode(const std::string& bytes) {
+        if (bytes.size() >= 2 && bytes[0] == '\xFF' && bytes[1] == '\xFE')
+            return std::wstring(reinterpret_cast<const wchar_t*>(bytes.data() + 2), (bytes.size() - 2) / 2);
+        size_t skip = bytes.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+        const char* p = bytes.data() + skip;
+        int size = static_cast<int>(bytes.size() - skip);
+        UINT codePage = CP_UTF8;
+        int n = MultiByteToWideChar(codePage, MB_ERR_INVALID_CHARS, p, size, nullptr, 0);
+        if (n <= 0 && size > 0) n = MultiByteToWideChar(codePage = CP_ACP, 0, p, size, nullptr, 0);
+        std::wstring w(n > 0 ? n : 0, L'\0');
+        if (n > 0) MultiByteToWideChar(codePage, 0, p, size, w.data(), n);
+        return w;
+    }
+
+    static std::wstring trim(const std::wstring& s) {
+        size_t begin = s.find_first_not_of(L" \t\r");
+        if (begin == std::wstring::npos) return {};
+        return s.substr(begin, s.find_last_not_of(L" \t\r") - begin + 1);
+    }
+
+    // A value without its comment (a ';' or '#' at the start or after a space) and, like Windows, without
+    // surrounding double quotes.
+    static std::wstring value(const std::wstring& raw) {
+        std::wstring v = raw;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if ((v[i] == L';' || v[i] == L'#') && (i == 0 || v[i - 1] == L' ' || v[i - 1] == L'\t')) {
+                v.resize(i);
+                break;
+            }
+        }
+        v = trim(v);
+        if (v.size() >= 2 && v.front() == L'"' && v.back() == L'"') v = v.substr(1, v.size() - 2);
+        return v;
+    }
+};
+
+std::wstring readString(const Ini& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
+    const std::wstring* v = ini.find(section, key);
+    return v ? *v : def;
 }
 
 std::string toUtf8(const std::wstring& w) {
@@ -132,12 +215,26 @@ std::string toUtf8(const std::wstring& w) {
     return s;
 }
 
-std::wstring lower(std::wstring s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-    return s;
+// An integer from `min` to `max` written as plain decimal digits. Absent or empty: `def`. Anything else
+// (letters, "0x10", "27015abc", out of range) also keeps `def` and says so in `warnings`: a typo must
+// not silently become 0, e.g. a random port or a setting turned off.
+int readInt(const Ini& ini, const wchar_t* section, const wchar_t* key, int def, int min, int max,
+            std::vector<std::string>& warnings) {
+    const std::wstring* v = ini.find(section, key);
+    if (!v || v->empty()) return def;
+    bool digits = v->size() <= 9 && v->find_first_not_of(L"0123456789") == std::wstring::npos;
+    long long n = digits ? std::wcstoll(v->c_str(), nullptr, 10) : 0;
+    if (digits && n >= min && n <= max) return static_cast<int>(n);
+    char line[512];
+    snprintf(line, sizeof(line), "CONFIG [%s] %s=%s is not a number from %d to %d; using %d", toUtf8(section).c_str(),
+             toUtf8(key).c_str(), toUtf8(*v).c_str(), min, max, def);
+    warnings.push_back(line);
+    return def;
 }
 
-uint16_t clampPort(int v, uint16_t def) { return v >= 0 && v <= 65535 ? static_cast<uint16_t>(v) : def; }
+bool readBool(const Ini& ini, const wchar_t* section, const wchar_t* key, bool def, std::vector<std::string>& warnings) {
+    return readInt(ini, section, key, def ? 1 : 0, 0, 1, warnings) != 0;
+}
 
 }  // namespace
 
@@ -171,31 +268,40 @@ Config loadConfig(const std::wstring& iniPath) {
             fclose(f);
         }
     }
+    Ini ini(iniPath);
     Config c;
+    std::vector<std::string>& w = c.warnings;
     const wchar_t* s = L"DirectNet";
-    c.enabled = readInt(iniPath, s, L"Enabled", 1) != 0;
-    std::wstring mode = lower(readString(iniPath, s, L"Mode", L"off"));
+    c.enabled = readBool(ini, s, L"Enabled", true, w);
+    std::wstring mode = lower(readString(ini, s, L"Mode", L"off"));
     c.direct.mode = mode == L"host" ? Mode::Host : mode == L"join" ? Mode::Join : Mode::Off;
-    c.direct.listenPort = clampPort(readInt(iniPath, s, L"ListenPort", 27015), 27015);
-    if (c.direct.mode == Mode::Join && readString(iniPath, s, L"ListenPort", L"").empty()) c.direct.listenPort = 0;
-    c.direct.hostAddress = toUtf8(readString(iniPath, s, L"HostAddress", L""));
-    c.direct.key = toUtf8(readString(iniPath, s, L"Key", L""));
-    c.direct.linkTimeoutMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, s, L"LinkTimeoutMs", 60000), 3000, 300000));
-    c.publicAddress = toUtf8(readString(iniPath, s, L"PublicAddress", L""));
-    c.autoJoin = readInt(iniPath, s, L"AutoJoin", 1) != 0;
-    c.upnp = readInt(iniPath, s, L"UPnP", 1) != 0;
-    c.bindPhysicalInterface = readInt(iniPath, s, L"BindPhysicalInterface", 1) != 0;
+    c.direct.listenPort = static_cast<uint16_t>(readInt(ini, s, L"ListenPort", 27015, 0, 65535, w));
+    if (c.direct.mode == Mode::Join && readString(ini, s, L"ListenPort", L"").empty()) c.direct.listenPort = 0;
+    c.direct.hostAddress = toUtf8(readString(ini, s, L"HostAddress", L""));
+    c.direct.key = toUtf8(readString(ini, s, L"Key", L""));
+    c.direct.linkTimeoutMs =
+        static_cast<uint32_t>(std::clamp(readInt(ini, s, L"LinkTimeoutMs", 60000, 0, 999999999, w), 3000, 300000));
+    c.publicAddress = toUtf8(readString(ini, s, L"PublicAddress", L""));
+    c.autoJoin = readBool(ini, s, L"AutoJoin", true, w);
+    c.upnp = readBool(ini, s, L"UPnP", true, w);
+    c.bindPhysicalInterface = readBool(ini, s, L"BindPhysicalInterface", true, w);
 
-    c.eosFixedPort = clampPort(readInt(iniPath, L"EOS", L"FixedPort", 0), 0);
-    std::wstring relay = lower(readString(iniPath, L"EOS", L"Relay", L"default"));
+    c.eosFixedPort = static_cast<uint16_t>(readInt(ini, L"EOS", L"FixedPort", 0, 0, 65535, w));
+    std::wstring relay = lower(readString(ini, L"EOS", L"Relay", L"default"));
     c.eosRelay = relay == L"norelay" ? 0 : relay == L"allow" ? 1 : relay == L"force" ? 2 : -1;
 
-    std::wstring hold = lower(readString(iniPath, L"Resilience", L"HoldDisconnects", L"auto"));
+    std::wstring hold = lower(readString(ini, L"Resilience", L"HoldDisconnects", L"auto"));
     c.hold = hold == L"all" ? Config::Hold::All : (hold == L"off" || hold == L"0") ? Config::Hold::Off : Config::Hold::Auto;
-    c.reliableGameTraffic = readInt(iniPath, L"Sync", L"ReliableGameTraffic", 1) != 0;
+    c.reliableGameTraffic = readBool(ini, L"Sync", L"ReliableGameTraffic", true, w);
     c.direct.upgradeUnreliable = c.reliableGameTraffic;
-    c.autoUpdate = readInt(iniPath, L"Update", L"AutoUpdate", 1) != 0;
-    c.graceMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, L"Resilience", L"GraceSeconds", 30), 1, 600)) * 1000u;
+    // Every settings file written since auto-update exists has this line; an older one means off (see Config).
+    bool autoUpdateWritten = ini.find(L"Update", L"AutoUpdate") != nullptr;
+    c.autoUpdate = autoUpdateWritten && readBool(ini, L"Update", L"AutoUpdate", false, w);
+    if (!autoUpdateWritten)
+        w.push_back("UPDATE automatic updates are off: EDF6DirectNet.ini was written by an older version and has no "
+                    "AutoUpdate line. To turn them on, add the two lines [Update] and AutoUpdate=1 at its end");
+    c.graceMs =
+        static_cast<uint32_t>(std::clamp(readInt(ini, L"Resilience", L"GraceSeconds", 30, 0, 999999999, w), 1, 600)) * 1000u;
     return c;
 }
 

@@ -62,11 +62,11 @@ How to confirm it worked (check the log `Mods\Plugins\EDF6DirectNet.log`):
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | You are behind carrier-grade NAT (common with many ISPs) and have no public IPv4, so IPv4 direct connect is impossible; you can only rely on IPv6 or ask your ISP for a public IP |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | This port on the router is already forwarded to another device on your LAN; the plugin will not delete it. Pick a different `ListenPort`, or forward manually |
 | `DIRECT client ... connected from ...` (host) / `DIRECT connected to host ...` (joiner) | Direct connection established |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch); the game keeps using Epic as usual and retries after 60 seconds |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch / a different EDF6DirectNet version); the game keeps using Epic as usual and retries after 60 seconds |
 
 Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works they stay on EOS, and normal play is not affected.
 
-**About `Key=`**: an optional passphrase that stops someone who knows your address and a player's EOS ID from forging direct-connect data. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset (the host log will show a `hosting without Key=` reminder).
+**About `Key=`**: an optional passphrase. You no longer need it to be safe from impersonation: every plugin player publishes, in its own lobby member info, the fingerprint of a key made for this game session, and the host lets someone connect as player X only after they prove they hold X's key (and receive replies at the address they send from). So nobody, not even another player in the room, can connect as someone else or take over their direct link, and players without the plugin can never be claimed. What the Key adds is a tag on every direct-link packet, so someone on the network path between you cannot alter or inject packets. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset.
 
 **Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it.
 
@@ -113,6 +113,8 @@ EDF6 parses every EOS packet it receives as game data (`ReceivePacket` is called
 
 The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separated address list). Other members read it every 2 seconds and try each address for 10 seconds in IPv4, IPv6 order; if all fail they retry after 60 seconds. The transport is a custom UDP protocol: selective acknowledgement, token-bucket rate-limited retransmission, session epochs (packets from an old session never leak into the new session after a reconnect), and an optional `Key=` passphrase (truncated HMAC-SHA256 tag, prevents forgery, no encryption); `IP_UNICAST_IF` binds to the physical adapter to prevent TUN hijacking.
 
+Every plugin player also writes `EDF6DN_ID`: the fingerprint (SHA-256) of an ECDSA P-256 key made for this game session. Connecting starts with a cookie round trip: the host answers a hello with a cookie bound to the sender's address and keeps nothing until the cookie comes back (so forged sender addresses and hello floods achieve nothing), then the joiner repeats the hello with the cookie, signed with that key. The host accepts it for EOS ID X only if X is in the room and published that key's fingerprint; a signed hello of an earlier session is rejected as a replay. Only the host checks this; a joiner trusts the host whose address the room owner advertises. EDF6DirectNet versions with different protocols (0.3.6 and older speak protocol 2) ignore each other's packets and keep using EOS with each other.
+
 ## Troubleshooting
 
 - **Check the log first**: `Mods\Plugins\EDF6DirectNet.log` (rotated to `.log.1` once it exceeds 2MB). A first line `==== EDF6DirectNet x.y.z starting` means the plugin loaded; if that line is missing, EDFModLoader is not installed correctly.
@@ -124,7 +126,8 @@ The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separat
 - `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
 - `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
 - `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, and what the direct link really uses, including what the host relays for others.
-- `DIRECT ignored hello for ... its link is live`: someone tried to connect from a different address using the identity of a player who is online, and was rejected. An occasional line may just mean that player switched networks (it is accepted automatically after 5 seconds); if it shows up often, someone is messing with you and setting `Key=` is recommended.
+- `DIRECT refused hello for ...`: someone tried to connect directly as a player and could not prove it. `published no direct-link identity` for a second or two after a player joins is normal (their room info has not reached the host yet; they retry every second); for a player without the plugin, or with 0.3.6 and older, it means they stay on EOS. `not signed by the identity that player published` means someone else claimed to be that player; they were rejected and cannot disturb that player.
+- `DIRECT ... speaks direct-link protocol 2, we speak 3`: that player runs a different EDF6DirectNet version (0.3.6 or older). There is no direct link between you, the game keeps working over EOS; update both to the same version.
 
 ## Build
 
@@ -171,7 +174,7 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 - Only desync caused by packet loss is fixed; desync in the game logic itself needs concrete symptoms before it can be reverse-engineered.
 - During the disconnect grace period other players may wait at a sync point, for at most `GraceSeconds` seconds.
 - Direct connect is relayed by the host: at the moment a joiner's direct link reconnects, the small amount of data the host is relaying for them that has not been acknowledged yet is lost (the game then falls back to EOS).
-- Without `Key=`, direct connect has no authentication: someone who knows the host address and a player's EOS ID can forge that player's data. Setting a Key prevents forgery, but still does not prevent replay of captured `Bye` / member-list packets (this needs a protocol version bump, left for the next major version).
+- Without `Key=`, direct-link packets carry no authentication tag: nobody can connect as another player or take over their link (see the identity check above), but someone on the network path who sees a link's traffic can alter or inject packets on it. Setting a Key prevents that, but still does not prevent replay of captured `Bye` / member-list packets within the same session (not fixed yet).
 - UPnP mappings are permanent and are not removed automatically when the game exits (harmless while nothing is listening on the port); if needed, delete the mapping named `EDF6DirectNet` in your router's admin page.
 - Nothing can be hidden when the direct link itself is down: if a player's own internet drops for longer than `GraceSeconds`, the game handles it as usual.
 

@@ -62,11 +62,11 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | 你在运营商大内网里，没有公网 IPv4，IPv4 直连不可能；只能靠 IPv6 或找运营商要公网 IP |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | 路由器上这个端口已经映射给了局域网里别的设备，插件不会删它；换一个 `ListenPort`，或手动映射 |
 | `DIRECT client ... connected from ...`（房主） / `DIRECT connected to host ...`（加入者） | 直连已建立 |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 加入者连不上房主（防火墙/端口映射/Key 不一致），游戏照常走 Epic，60 秒后重试 |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 加入者连不上房主（防火墙/端口映射/Key 不一致/EDF6DirectNet 版本不同），游戏照常走 Epic，60 秒后重试 |
 
 加入者按 IPv4 → IPv6 顺序每个地址试 10 秒，都不通就留在 EOS，不影响正常游戏。
 
-**关于 `Key=`**：可选暗号，用来防止知道你地址和玩家 EOS ID 的人伪造直连数据。它**不会**写进房间信息——房主设了 Key，每个加入者都必须在自己的 ini 里填同样的 Key，否则自动直连失败、回落到 EOS。只和熟人玩可以不设（房主日志会有一条 `hosting without Key=` 的提醒）。
+**关于 `Key=`**：可选暗号。防冒充已经不靠它了：每个装了插件的玩家都会在自己的大厅成员信息里公布一把本局游戏专用密钥的指纹，房主只有在对方证明自己持有玩家 X 的密钥（并且能在发包的地址上收到回包）后，才允许他以 X 的身份直连。所以谁都——包括同房间的其他玩家——无法冒充别人直连、抢走别人的直连，没装插件的玩家也永远不会被冒名。Key 额外提供的是给每个直连包加认证标签，防止你们之间网络路径上的人篡改或注入数据包。它**不会**写进房间信息——房主设了 Key，每个加入者都必须在自己的 ini 里填同样的 Key，否则自动直连失败、回落到 EOS。只和熟人玩可以不设。
 
 **隐私**：房主的公网地址写在大厅成员属性里，能看到这个房间的人都读得到。
 
@@ -113,6 +113,8 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 房主另写成员属性 `EDF6DN_ADDR`（空格分隔的地址列表）。其他成员每 2 秒读一次，按 IPv4、IPv6 顺序每个地址试 10 秒，全失败则 60 秒后重试。传输层是自己的 UDP 协议：选择确认、令牌桶限速重传、会话 epoch（旧会话的包不会串进重连后的新会话）、可选 `Key=` 暗号（HMAC-SHA256 截断标签，防伪造，不加密）；用 `IP_UNICAST_IF` 绑定物理网卡防 TUN 劫持。
 
+每个装插件的玩家还会写 `EDF6DN_ID`：本局游戏生成的 ECDSA P-256 密钥的指纹（SHA-256）。建立连接先走一次 cookie 往返：房主对 hello 回一个绑定发送方地址的 cookie，cookie 回来之前什么都不保存（所以伪造源地址、hello 洪泛都没有用）；加入者带上 cookie、用这把密钥签名后再发一次 hello。房主只有在 EOS ID X 在房间里、且公布的指纹与这把密钥一致时才接受；更早会话的签名 hello 当作重放拒绝。只有房主做这项检查，加入者信任房间所有者公布的地址上的房主。协议版本不同的 EDF6DirectNet（0.3.6 及更早是协议 2）互相忽略对方的包，彼此照常走 EOS。
+
 ## 排障
 
 - **先看日志**：`Mods\Plugins\EDF6DirectNet.log`（超过 2MB 轮转为 `.log.1`）。开头一行 `==== EDF6DirectNet x.y.z starting` 说明插件已加载；没有这一行说明 EDFModLoader 没装好。
@@ -124,7 +126,8 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
 - `TRAFFIC last 60s: ...`：游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据，以及直连实际占用的上传 / 下载，含房主替别人转发的部分。
-- `DIRECT ignored hello for ... its link is live`：有人用某个在线玩家的身份从别的地址发起连接，已被拒绝。偶尔一条可能是对方换了网络（5 秒后会自动接受）；频繁出现说明有人在捣乱，建议设 `Key=`。
+- `DIRECT refused hello for ...`：有人想以某个玩家的身份直连，但证明不了。玩家刚进房的一两秒内出现 `published no direct-link identity` 是正常的（他的房间信息还没到房主这里，对方每秒重试）；对没装插件或 0.3.6 及更早版本的玩家，意思是他继续走 EOS。`not signed by the identity that player published` 说明有人冒充该玩家，已被拒绝，影响不到那个玩家。
+- `DIRECT ... speaks direct-link protocol 2, we speak 3`：对方的 EDF6DirectNet 版本不同（0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
 
 ## 构建
 
@@ -171,7 +174,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 - 只解决丢包造成的不同步；游戏逻辑本身的不同步需要具体症状再逆向定位。
 - 断线宽限期间其他玩家可能在同步点等待，最多 `GraceSeconds` 秒。
 - 直连由房主转发：某个加入者的直连在重连的那一瞬间，房主正替他转发、尚未被确认的少量数据会丢失（游戏随后回落到 EOS）。
-- 不设 `Key=` 时直连没有身份认证：知道房主地址和某玩家 EOS ID 的人可以伪造该玩家的数据。设了 Key 能防伪造，但仍不能防截获后的 `Bye`/成员表重放（需要升级协议版本，留待下个大版本）。
+- 不设 `Key=` 时直连包没有认证标签：谁都无法冒充别的玩家直连、抢走别人的直连（见上面的身份校验），但网络路径上能看到某条链路流量的人可以篡改或注入这条链路上的包。设了 Key 能防这一点，但仍不能防同一会话内截获的 `Bye`/成员表重放（尚未解决）。
 - UPnP 映射是永久的，游戏退出后不会自动删除（端口上没有程序监听时无害）；需要时在路由器管理页删除名为 `EDF6DirectNet` 的映射。
 - 直连本身断了就什么都瞒不住：某个玩家自己的网络断开超过 `GraceSeconds` 秒，游戏照原版处理。
 

@@ -8,6 +8,9 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(MULTISLOT_MAX_PLAYERS 8 CACHE STRING "Largest room this build supports (8, 10 or 12)")
 set_property(CACHE MULTISLOT_MAX_PLAYERS PROPERTY STRINGS 8 10 12)
 add_compile_definitions(MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
+# The version EDFModLoader is told (PluginInfo) and the one kVersion must start with (plugin.cpp) come from here.
+add_compile_definitions(MULTISLOT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MULTISLOT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+                        MULTISLOT_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 if(MULTISLOT_MAX_PLAYERS EQUAL 8)
     set(MULTISLOT_DIST "${CMAKE_SOURCE_DIR}/dist")
 else()

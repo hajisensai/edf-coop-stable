@@ -37,9 +37,18 @@ namespace multislot {
 namespace {
 
 constexpr const char* kVersion = "1.5.13";
-// Which room-size build this is (patches.h); empty for the distributed eight.
+// CMake's project VERSION is the one EDFModLoader is told (PluginInfo); kVersion adds only a pre-release tag to it.
 #define MULTISLOT_TEXT2(x) #x
 #define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)
+constexpr const char* kProjectVersion =
+    MULTISLOT_TEXT(MULTISLOT_VERSION_MAJOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_MINOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_PATCH);
+constexpr bool SameRelease(const char* version, const char* project) {
+    for (; *project; ++version, ++project)
+        if (*version != *project) return false;
+    return *version == 0 || *version == '-';
+}
+static_assert(SameRelease(kVersion, kProjectVersion), "kVersion must be CMakeLists.txt's project VERSION (plus a -tag)");
+// Which room-size build this is (patches.h); empty for the distributed eight.
 #if MULTISLOT_MAX_PLAYERS == 8
 constexpr const char* kRoomTag = "";
 #else
@@ -349,7 +358,7 @@ bool LoadPlugin(PluginInfo* info) {
     LogOpen(logPath);
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDF6 MultiSlot";
-    info->version = PLUG_VER(1, 5, 5, 0);
+    info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
 
     Log("==== EDF6MultiSlot %s%s ====", kVersion, kRoomTag);
     const auto loader = GetModuleHandleW(L"winmm.dll");

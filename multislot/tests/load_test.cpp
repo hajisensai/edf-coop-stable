@@ -309,6 +309,9 @@ int wmain(int argc, wchar_t** argv) {
         Check(loaded, "EML6_Load succeeds against the supported EDF.dll");
         Check(info.infoVersion == PluginInfo::MaxInfoVer && info.name && std::strcmp(info.name, "EDF6 MultiSlot") == 0,
               "PluginInfo is filled in");
+        Check(info.version.major == MULTISLOT_VERSION_MAJOR && info.version.minor == MULTISLOT_VERSION_MINOR &&
+                  info.version.patch == MULTISLOT_VERSION_PATCH && info.version.build == 0,
+              "PluginInfo carries CMakeLists.txt's project version");
         Check(Applied(base, guest) == static_cast<int>(guest.size()), "every guest patch is written");
         Check(Applied(base, sessions) == static_cast<int>(sessions.size()), "room user slots and packet sessions are sized for eight");
         Check(Contains(log, ("Rooms: " + std::to_string(kMaxPlayers) + " user slots, packet sessions and voice chat HUD records").c_str()),

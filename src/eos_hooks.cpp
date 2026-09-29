@@ -6,11 +6,13 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "eos_min.h"
 #include "hold.h"
 #include "iat.h"
+#include "lobby_marker.h"
 #include "log.h"
 
 namespace dn {
@@ -47,6 +49,9 @@ struct Api {
     PFN_EOS_P2P_CloseConnection gameClose = nullptr;
     PFN_EOS_P2P_CloseConnections gameCloseAll = nullptr;
     PFN_EOS_Lobby_AddNotifyMemberStatus gameAddMemberStatus = nullptr;
+    PFN_EOS_Lobby_AddNotifyMemberUpdate gameAddMemberUpdate = nullptr;
+    PFN_EOS_Lobby_CreateLobby gameCreateLobby = nullptr;
+    PFN_EOS_Lobby_JoinLobby gameJoinLobby = nullptr;
 };
 
 // The game's connection-closed handler, which we sit in front of. Never freed: its address is the
@@ -63,11 +68,28 @@ struct MemberStatusHandler {
     void* clientData;
 };
 
+struct MemberUpdateHandler {
+    EOS_Lobby_OnLobbyMemberUpdateReceivedCallback callback;
+    void* clientData;
+};
+
+// A pending CreateLobby / JoinLobby call; EOS runs its completion callback exactly once.
+struct LobbyCall {
+    EOS_Lobby_OnLobbyIdCallback callback;
+    void* clientData;
+    EOS_HLobby lobby;
+    EOS_ProductUserId localUser;
+};
+
 struct State {
     Api api;
     Config config;
     DirectNet* net = nullptr;
     std::unique_ptr<DisconnectHold> hold;
+    LobbyMarker marker;
+    bool markerReady = false;
+    std::mutex markedMutex;
+    std::unordered_set<std::string> markedPeers;  // logged once as plugin users
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
     EOS_HP2P p2p = nullptr;
@@ -193,7 +215,8 @@ void closedWrapper(const EOS_P2P_OnRemoteConnectionClosedInfo* i) {
     std::string remote = idString(i->RemoteUserId);
     if (!g_shutdown && g.hold && !remote.empty()) {
         bool direct = directAlive(remote);
-        if (g.hold->offer(remote, i->Reason, direct, GetTickCount64(), [held] { forwardClose(held); },
+        bool plugin = g.markerReady && g.marker.hasMarker(i->RemoteUserId);
+        if (g.hold->offer(remote, i->Reason, direct, plugin, GetTickCount64(), [held] { forwardClose(held); },
                           [held] { reacceptPeer(held); })) {
             if (direct)
                 logf("RESILIENCE EOS link to %s closed (%s) but the direct link is up: hidden from the game",
@@ -272,6 +295,51 @@ EOS_NotificationId hookAddNotifyMemberStatus(EOS_HLobby h, const EOS_Lobby_AddNo
     if (!cb || g_shutdown) return g.api.gameAddMemberStatus(h, o, clientData, cb);
     auto* handler = new MemberStatusHandler{cb, clientData};  // never freed, same reason as ClosedHandler
     return g.api.gameAddMemberStatus(h, o, handler, memberStatusWrapper);
+}
+
+void memberUpdateWrapper(const EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo* i) {
+    if (!g_shutdown && g.markerReady && g.marker.hasMarker(i->TargetUserId)) {
+        std::string remote = idString(i->TargetUserId);
+        bool first;
+        {
+            std::lock_guard<std::mutex> lock(g.markedMutex);
+            first = g.markedPeers.insert(remote).second;
+        }
+        if (first) logf("LOBBY member %s runs EDF6DirectNet: its disconnects can be held", shortId(remote).c_str());
+    }
+    auto* handler = static_cast<MemberUpdateHandler*>(i->ClientData);
+    EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo copy = *i;
+    copy.ClientData = handler->clientData;
+    handler->callback(&copy);
+}
+
+EOS_NotificationId hookAddNotifyMemberUpdate(EOS_HLobby h, const EOS_Lobby_AddNotifyLobbyMemberUpdateReceivedOptions* o,
+                                             void* clientData, EOS_Lobby_OnLobbyMemberUpdateReceivedCallback cb) {
+    if (!cb || g_shutdown) return g.api.gameAddMemberUpdate(h, o, clientData, cb);
+    auto* handler = new MemberUpdateHandler{cb, clientData};  // never freed, same reason as ClosedHandler
+    return g.api.gameAddMemberUpdate(h, o, handler, memberUpdateWrapper);
+}
+
+// Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
+void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
+    auto* call = static_cast<LobbyCall*>(i->ClientData);
+    if (!g_shutdown && i->ResultCode == EOS_Success) g.marker.entered(call->lobby, i->LobbyId, call->localUser);
+    EOS_Lobby_LobbyIdCallbackInfo copy = *i;
+    copy.ClientData = call->clientData;
+    EOS_Lobby_OnLobbyIdCallback cb = call->callback;
+    delete call;
+    cb(&copy);
+}
+
+void hookCreateLobby(EOS_HLobby h, const EOS_Lobby_CreateLobbyOptionsHead* o, void* clientData,
+                     EOS_Lobby_OnLobbyIdCallback cb) {
+    if (!cb || !o || g_shutdown) return g.api.gameCreateLobby(h, o, clientData, cb);
+    g.api.gameCreateLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId}, lobbyEnteredWrapper);
+}
+
+void hookJoinLobby(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* clientData, EOS_Lobby_OnLobbyIdCallback cb) {
+    if (!cb || !o || g_shutdown) return g.api.gameJoinLobby(h, o, clientData, cb);
+    g.api.gameJoinLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId}, lobbyEnteredWrapper);
 }
 
 void onQueueFull(const EOS_P2P_OnIncomingPacketQueueFullInfo* i) {
@@ -485,6 +553,11 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     bool lobby = hook(game, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived", hookAddNotifyMemberStatus,
                       g.api.gameAddMemberStatus);
     bool tick = hook(game, "EOS_Platform_Tick", hookPlatformTick, g.api.tick);
+    // Plugin detection: publish our marker on entering a lobby, read the other members' markers.
+    g.markerReady = g.marker.init(eos) && hook(game, "EOS_Lobby_CreateLobby", hookCreateLobby, g.api.gameCreateLobby) &&
+                    hook(game, "EOS_Lobby_JoinLobby", hookJoinLobby, g.api.gameJoinLobby);
+    hook(game, "EOS_Lobby_AddNotifyLobbyMemberUpdateReceived", hookAddNotifyMemberUpdate, g.api.gameAddMemberUpdate);
+    logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
     if (config.hold != Config::Hold::Off) {
         // Holding needs all of: our closed wrapper, its unregister hook, the tick to expire events,
         // AcceptConnection to reconnect, and lobby status to release players who really left.
@@ -496,7 +569,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
             g.hold = std::make_unique<DisconnectHold>(
                 DisconnectHold::Options{config.graceMs, 2000, config.hold == Config::Hold::All});
         logf("RESILIENCE disconnect hold %s (mode %s, grace %u s)", held ? "enabled" : "UNAVAILABLE",
-             config.hold == Config::Hold::All ? "all" : "auto (direct-link members only)", config.graceMs / 1000);
+             config.hold == Config::Hold::All ? "all" : "auto (players running the plugin)", config.graceMs / 1000);
     }
 
     bool ok = hook(game, "EOS_Platform_GetP2PInterface", hookGetP2PInterface, g.api.getP2P) &&

@@ -16,7 +16,7 @@ $libs = 'ws2_32.lib iphlpapi.lib bcrypt.lib ole32.lib oleaut32.lib'
 $steps = @(
     "call `"$vcvars`" >nul",
     "cd /d `"$root`"",
-    "cl $common /LD $core src\upnp.cpp src\eos_hooks.cpp src\plugin.cpp /Fobuild\ /Febuild\EDF6DirectNet.dll /link $libs",
+    "cl $common /LD $core src\upnp.cpp src\lobby_marker.cpp src\eos_hooks.cpp src\plugin.cpp /Fobuild\ /Febuild\EDF6DirectNet.dll /link $libs",
     "cl $common $core tests\test_main.cpp /Fobuild\ /Febuild\edf6_directnet_tests.exe /link $libs",
     "cl $common $core tests\probe_join.cpp /Fobuild\ /Febuild\probe_join.exe /link $libs"
 )

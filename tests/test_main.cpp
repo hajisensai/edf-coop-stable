@@ -430,12 +430,12 @@ void testDisconnectHold() {
 
     // mode "all": any previously connected peer
     dn::DisconnectHold all({30000, 2000, true});
-    CHECK(!all.offer(kA, 3, false, 0, fwd, re));  // never connected: a failed first handshake must reach the game
+    CHECK(!all.offer(kA, 3, false, false, 0, fwd, re));  // never connected: a failed first handshake must reach the game
     all.onEstablished(kA);
-    CHECK(!all.offer(kA, 2, false, 0, fwd, re));    // ClosedByPeer: the player really left
-    CHECK(!all.offer(kA, 1, false, 0, fwd, re));    // ClosedByLocalUser
+    CHECK(!all.offer(kA, 2, false, false, 0, fwd, re));    // ClosedByPeer: the player really left
+    CHECK(!all.offer(kA, 1, false, false, 0, fwd, re));    // ClosedByLocalUser
     all.onEstablished(kA);
-    CHECK(all.offer(kA, 3, false, 1000, fwd, re));  // TimedOut: held
+    CHECK(all.offer(kA, 3, false, false, 1000, fwd, re));  // TimedOut: held
     CHECK(all.isHeld(kA) && reaccepts == 0);        // no EOS call from inside the EOS callback
     all.poll(1001, noDirect);
     CHECK(reaccepts == 1);
@@ -445,43 +445,51 @@ void testDisconnectHold() {
     CHECK(reaccepts == 2);
     CHECK(all.onEstablished(kA) == 1 && !all.isHeld(kA) && forwarded == 0);  // recovered, game saw nothing
 
-    CHECK(all.offer(kA, 7, false, 10000, fwd, re));  // ConnectionFailed
+    CHECK(all.offer(kA, 7, false, false, 10000, fwd, re));  // ConnectionFailed
     CHECK(all.poll(39999, noDirect).empty() && forwarded == 0);
     auto expired = all.poll(40000, noDirect);
     CHECK(expired.size() == 1 && forwarded == 1 && !all.isHeld(kA));
-    CHECK(!all.offer(kA, 3, false, 50000, fwd, re));  // after expiry the peer is gone until re-established
+    CHECK(!all.offer(kA, 3, false, false, 50000, fwd, re));  // after expiry the peer is gone until re-established
 
     all.onEstablished(kB);
-    CHECK(all.offer(kB, 3, false, 0, fwd, re));
+    CHECK(all.offer(kB, 3, false, false, 0, fwd, re));
     CHECK(all.onGameClosed(kB) == 1 && !all.isHeld(kB));
     all.poll(100000, noDirect);
     CHECK(forwarded == 1);  // the game closed it itself: nothing forwarded
 
     // a deliberate close supersedes a held transient one (the game gets exactly one event)
     all.onEstablished(kB);
-    CHECK(all.offer(kB, 3, false, 0, fwd, re));
-    CHECK(!all.offer(kB, 2, false, 10, fwd, re) && !all.isHeld(kB));
+    CHECK(all.offer(kB, 3, false, false, 0, fwd, re));
+    CHECK(!all.offer(kB, 2, false, false, 10, fwd, re) && !all.isHeld(kB));
     all.poll(100000, noDirect);
     CHECK(forwarded == 1);
 
     // the lobby says the player left: held events reach the game at once, even with a live direct link
     all.onEstablished(kA);
-    CHECK(all.offer(kA, 3, true, 0, fwd, re));
+    CHECK(all.offer(kA, 3, true, false, 0, fwd, re));
     CHECK(all.release(kA) == 1 && forwarded == 2 && !all.isHeld(kA));
     CHECK(all.release(kA) == 0);
     all.onEstablished(kA);
     all.onEstablished(kB);
-    CHECK(all.offer(kA, 3, false, 0, fwd, re) && all.offer(kB, 8, false, 0, fwd, re));
+    CHECK(all.offer(kA, 3, false, false, 0, fwd, re) && all.offer(kB, 8, false, false, 0, fwd, re));
     CHECK(all.releaseAll() == 2 && forwarded == 4 && all.heldCount() == 0);
     forwarded = 1;
 
     // mode "auto": plain EOS peers are never held (they may not run the plugin)
     dn::DisconnectHold autoHold({30000, 2000, false});
     autoHold.onEstablished(kA);
-    CHECK(!autoHold.offer(kA, 3, false, 0, fwd, re));
+    CHECK(!autoHold.offer(kA, 3, false, false, 0, fwd, re));
+    // players carrying the plugin's lobby marker are held for the grace period like mode "all"
+    CHECK(autoHold.offer(kA, 3, false, true, 0, fwd, re) && autoHold.isHeld(kA));
+    CHECK(autoHold.poll(29999, noDirect).empty() && autoHold.isHeld(kA));
+    CHECK(autoHold.poll(30000, noDirect).size() == 1 && !autoHold.isHeld(kA) && forwarded == 2);
+    forwarded = 1;
+    // ...but, like mode "all", only after a working connection: a failed first handshake reaches the game
+    dn::DisconnectHold fresh({30000, 2000, false});
+    CHECK(!fresh.offer(kA, 3, false, true, 0, fwd, re));
     // direct-link members are held, even without a prior EOS connection, and never expire while
     // the direct link is alive
-    CHECK(autoHold.offer(kB, 3, true, 0, fwd, re));
+    CHECK(autoHold.offer(kB, 3, true, false, 0, fwd, re));
     bool directUp = true;
     auto direct = [&](const std::string& r) { return directUp && r == kB; };
     CHECK(autoHold.poll(100000, direct).empty() && autoHold.isHeld(kB));

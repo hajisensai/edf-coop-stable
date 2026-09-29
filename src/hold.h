@@ -7,11 +7,11 @@
 //
 // Holding is only safe when the other side does the same: a player without the plugin drops us for
 // real, and hiding that would leave a ghost player on our side. EDF6 reads every EOS channel as game
-// data, so there is no safe way to probe for the plugin over EOS. Eligible peers are therefore:
+// data, so the plugin is detected through the lobby instead (see lobby_marker.h). Eligible peers:
 //   * direct-link members (they run the plugin by definition), held for as long as the direct link
 //     is alive because the game's traffic to them no longer flows over EOS at all;
-//   * with `holdAll` (the players promise everyone runs the plugin): any peer that had a working
-//     EOS connection before, held for `graceMs`.
+//   * peers that carry the plugin's lobby marker, or any peer with `holdAll`, provided they had a
+//     working EOS connection before; held for `graceMs`.
 // All methods are thread-safe; callbacks run without the internal lock held.
 #pragma once
 #include <cstdint>
@@ -42,7 +42,7 @@ public:
     // Offers a close event. Returns true when it is held; `forward` then runs later only if the
     // connection does not come back, `reaccept` runs periodically to ask EOS to reconnect.
     // A non-transient close supersedes (discards) events already held for `remote`.
-    bool offer(const std::string& remote, int32_t reason, bool directPeer, uint64_t nowMs,
+    bool offer(const std::string& remote, int32_t reason, bool directPeer, bool pluginPeer, uint64_t nowMs,
                std::function<void()> forward, std::function<void()> reaccept);
 
     // Authoritative news that `remote` is gone (it left or was removed from the lobby): hand its held

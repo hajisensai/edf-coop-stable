@@ -31,7 +31,7 @@ size_t DisconnectHold::onEstablished(const std::string& remote) {
     return dropLocked(remote);
 }
 
-bool DisconnectHold::offer(const std::string& remote, int32_t reason, bool directPeer, uint64_t nowMs,
+bool DisconnectHold::offer(const std::string& remote, int32_t reason, bool directPeer, bool pluginPeer, uint64_t nowMs,
                            std::function<void()> forward, std::function<void()> reaccept) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!isTransient(reason)) {
@@ -42,7 +42,7 @@ bool DisconnectHold::offer(const std::string& remote, int32_t reason, bool direc
         return false;
     }
     // A first handshake that fails must reach the game, so plain EOS peers need a prior connection.
-    bool eligible = directPeer || (opt_.holdAll && established_.count(remote));
+    bool eligible = directPeer || ((pluginPeer || opt_.holdAll) && established_.count(remote));
     if (!eligible) return false;
     Held h;
     h.remote = remote;

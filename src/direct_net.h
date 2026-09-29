@@ -28,6 +28,10 @@ struct DirectOptions {
     Mode mode = Mode::Off;
     uint16_t listenPort = 27015;  // host: UDP port to listen on; join: local port (0 = any)
     std::string hostAddress;      // join: "1.2.3.4:27015", "[2408::1]:27015" or "name.ddns.net:27015"
+    // join: hostAddress was advertised by a room host (AutoJoin), not typed in by this player. Then it
+    // must name a real remote machine: loopback, unspecified, multicast, broadcast and link-local
+    // targets are refused, also after DNS, so a host cannot aim its joiners at themselves or others.
+    bool advertisedHost = false;
     std::string key;              // optional shared secret; must be identical for everyone
     uint32_t ifIndexV4 = 0;       // IP_UNICAST_IF: force egress through this adapter (0 = OS routing)
     uint32_t ifIndexV6 = 0;
@@ -174,7 +178,10 @@ std::string shortId(const std::string& puid);
 std::string addrToString(const sockaddr_storage& addr, int len);
 
 // Splits a host's advertised address list ("v4:port [v6]:port ...") into the order to try:
-// IPv4 and host names first, IPv6 last.
+// IPv4 and host names first, IPv6 last. Anything a joiner must not dial is left out (see
+// DirectOptions::advertisedHost; numeric-looking names like "127.1" count as addresses, not names),
+// and at most kMaxHostCandidates entries are kept, which also bounds the DNS lookups a host can cause.
+constexpr size_t kMaxHostCandidates = 4;
 std::vector<std::string> orderHostCandidates(const std::string& advertised);
 
 }  // namespace dn

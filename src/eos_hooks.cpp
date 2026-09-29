@@ -556,6 +556,7 @@ void startAutoJoinAttemptLocked(uint64_t now) {
     o.mode = Mode::Join;
     o.listenPort = 0;
     o.hostAddress = a.candidates[a.next++];
+    o.advertisedHost = true;  // the room host chose it, not this player
     auto* net = new DirectNet();
     if (!net->start(o)) {
         logf("DIRECT auto-connect could not open a UDP socket; game traffic stays on EOS");

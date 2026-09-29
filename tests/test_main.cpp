@@ -1155,6 +1155,33 @@ void testHostCandidates() {
     CHECK(dn::orderHostCandidates("").empty());
 }
 
+void testHostCandidateFilter() {
+    printf("auto-connect: a room host cannot aim joiners at loopback, broadcast, multicast or link-local\n");
+    using V = std::vector<std::string>;
+    CHECK(dn::orderHostCandidates("127.0.0.1:1 0.0.0.0:1 224.0.0.1:1 255.255.255.255:1 169.254.1.1:1 [::1]:1 [::]:1 "
+                                  "[fe80::1]:1 [ff02::1]:1 [::ffff:127.0.0.1]:1 [fe80::1%3]:1 127.1:1 2130706433:1 "
+                                  "bad_name:1 1.2.3.4:0 1.2.3.4:99999 [2408::1")
+              .empty());
+    CHECK(dn::orderHostCandidates("[fd00::1]:5 192.168.1.5:27015 10.0.0.2:1 my.ddns.net:40000") ==
+          V({"192.168.1.5:27015", "10.0.0.2:1", "my.ddns.net:40000", "[fd00::1]:5"}));  // LAN play is fine
+    CHECK(dn::orderHostCandidates("1.1.1.1:1 1.1.1.2:1 127.0.0.1:1 1.1.1.3:1 [2408::5]:1 1.1.1.4:1 1.1.1.5:1") ==
+          V({"1.1.1.1:1", "1.1.1.2:1", "1.1.1.3:1", "[2408::5]:1"}));  // at most 4, refused ones not counted
+    CHECK(dn::orderHostCandidates("2408::5").size() == 1);
+
+    // Names are checked again after DNS: "localhost" is a fine-looking name for a loopback address.
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    for (std::string target : {"127.0.0.1", "localhost"}) {
+        dn::DirectOptions o = joinOptions(target + ":" + std::to_string(host.boundPort()), 0);
+        o.advertisedHost = true;
+        dn::DirectNet a;
+        CHECK(a.start(o));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost) || host.canRoute(kA); }, 1500));
+    }
+}
+
 void testConfig() {
     printf("config\n");
     wchar_t tmp[MAX_PATH];
@@ -1232,6 +1259,7 @@ int wmain(int argc, wchar_t** argv) {
     testReliableUnderLoss();
     testConfig();
     testHostCandidates();
+    testHostCandidateFilter();
     testNetif();
     testIat(edf);
     testKeyMismatch();

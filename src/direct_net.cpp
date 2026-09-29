@@ -84,6 +84,51 @@ void toDualStack(sockaddr_storage& addr, int& len) {
     len = sizeof(v6);
 }
 
+// Whether a room host may send its joiners to this address (see DirectOptions::advertisedHost).
+// Private LAN ranges are allowed: LAN play is real.
+bool dialableV4(const uint8_t* b) {
+    return b[0] != 0 && b[0] != 127 && b[0] < 224 && !(b[0] == 169 && b[1] == 254);
+}
+
+bool dialable(const sockaddr_storage& addr) {
+    if (addr.ss_family == AF_INET)
+        return dialableV4(reinterpret_cast<const uint8_t*>(&reinterpret_cast<const sockaddr_in*>(&addr)->sin_addr));
+    if (addr.ss_family != AF_INET6) return false;
+    const uint8_t* b = reinterpret_cast<const sockaddr_in6*>(&addr)->sin6_addr.u.Byte;
+    static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    if (memcmp(b, mapped, 12) == 0) return dialableV4(b + 12);
+    bool zeroHead = std::all_of(b, b + 15, [](uint8_t x) { return x == 0; });
+    bool linkLocal = b[0] == 0xfe && (b[1] & 0xc0) == 0x80;
+    return !(zeroHead && b[15] <= 1) && b[0] != 0xff && !linkLocal;  // ::, ::1, multicast, fe80::/10
+}
+
+// A literal IPv4/IPv6 address as a socket address; false for anything else.
+bool parseLiteral(const std::string& host, sockaddr_storage& addr) {
+    memset(&addr, 0, sizeof(addr));
+    auto* v4 = reinterpret_cast<sockaddr_in*>(&addr);
+    auto* v6 = reinterpret_cast<sockaddr_in6*>(&addr);
+    if (inet_pton(AF_INET, host.c_str(), &v4->sin_addr) == 1) {
+        addr.ss_family = AF_INET;
+        return true;
+    }
+    if (inet_pton(AF_INET6, host.c_str(), &v6->sin6_addr) == 1) {
+        addr.ss_family = AF_INET6;
+        return true;
+    }
+    return false;
+}
+
+// A DNS name made of letters, digits, '-' and '.', whose last label has a letter: getaddrinfo reads
+// all-numeric strings such as "127.1" or "2130706433" as IPv4 addresses.
+bool plausibleHostName(const std::string& host) {
+    if (host.empty() || host.size() > 253) return false;
+    for (char c : host)
+        if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '.') return false;
+    size_t dot = host.find_last_of('.', host.size() - 2);
+    std::string last = host.substr(dot == std::string::npos ? 0 : dot + 1);
+    return std::any_of(last.begin(), last.end(), [](char c) { return isalpha(static_cast<unsigned char>(c)) != 0; });
+}
+
 bool contains(const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
@@ -694,9 +739,21 @@ bool DirectNet::resolveHost() {
         return false;
     }
     sockaddr_storage addr{};
-    int len = static_cast<int>(res->ai_addrlen);
-    memcpy(&addr, res->ai_addr, res->ai_addrlen);
+    int len = 0;
+    for (const addrinfo* r = res; r && len == 0; r = r->ai_next) {
+        if (r->ai_addrlen > sizeof(addr)) continue;
+        memcpy(&addr, r->ai_addr, r->ai_addrlen);
+        len = static_cast<int>(r->ai_addrlen);
+        if (opt_.advertisedHost && !dialable(addr)) len = 0;
+    }
     freeaddrinfo(res);
+    if (len == 0) {
+        logRateLimited("resolve-refused", 60000,
+                       "DIRECT refused host '%s': the room host advertises an address that is not a remote "
+                       "machine (loopback, multicast, broadcast or link-local)",
+                       host.c_str());
+        return false;
+    }
     if (family_ == AF_INET6) toDualStack(addr, len);
 
     std::lock_guard<std::mutex> lock(mu_);
@@ -819,12 +876,17 @@ void DirectNet::run() {
 std::vector<std::string> orderHostCandidates(const std::string& advertised) {
     std::vector<std::string> first, v6;
     size_t pos = 0;
-    while (pos < advertised.size()) {
+    while (pos < advertised.size() && first.size() + v6.size() < kMaxHostCandidates) {
         size_t end = advertised.find(' ', pos);
         if (end == std::string::npos) end = advertised.size();
         std::string a = advertised.substr(pos, end - pos);
-        if (!a.empty()) (a[0] == '[' ? v6 : first).push_back(a);
         pos = end + 1;
+        std::string host;
+        uint16_t port = 0;
+        if (a.empty() || !splitHostPort(a, host, port)) continue;
+        sockaddr_storage literal;
+        bool ok = parseLiteral(host, literal) ? dialable(literal) : plausibleHostName(host);
+        if (ok) (literal.ss_family == AF_INET6 ? v6 : first).push_back(a);
     }
     first.insert(first.end(), v6.begin(), v6.end());
     return first;

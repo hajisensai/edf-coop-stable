@@ -122,6 +122,7 @@ The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separat
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`: Epic's lobby service dropped a player and let them back in; the game never saw it. `direct link silent for ...` means the player really was gone and the game was told.
 - `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
 - `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
+- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, and what the direct link really uses, including what the host relays for others.
 - `DIRECT ignored hello for ... its link is live`: someone tried to connect from a different address using the identity of a player who is online, and was rejected. An occasional line may just mean that player switched networks (it is accepted automatically after 5 seconds); if it shows up often, someone is messing with you and setting `Key=` is recommended.
 
 ## Build

@@ -10,7 +10,7 @@ $env:PATH = "$(Split-Path $vswhere);$env:PATH"  # vcvars calls vswhere itself
 New-Item -ItemType Directory -Force (Join-Path $root 'build') | Out-Null
 
 $common = '/nologo /std:c++20 /O2 /MT /EHsc /W4 /WX /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS'
-$core = 'src\log.cpp src\auth.cpp src\wire.cpp src\reliable.cpp src\direct_net.cpp src\netif.cpp src\config.cpp src\iat.cpp src\hold.cpp'
+$core = 'src\log.cpp src\auth.cpp src\wire.cpp src\reliable.cpp src\direct_net.cpp src\netif.cpp src\config.cpp src\iat.cpp src\hold.cpp src\traffic.cpp'
 $libs = 'ws2_32.lib iphlpapi.lib bcrypt.lib ole32.lib oleaut32.lib'
 
 $steps = @(

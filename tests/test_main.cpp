@@ -18,6 +18,7 @@
 #include "../src/iat.h"
 #include "../src/netif.h"
 #include "../src/reliable.h"
+#include "../src/traffic.h"
 #include "../src/wire.h"
 
 namespace {
@@ -585,6 +586,24 @@ void testLobbyStatusHold() {
     CHECK(h.poll(1, reachable).size() == 1 && delivered == 8 && !h.isHeld(kA));
 }
 
+void testTrafficMeter() {
+    printf("traffic: the game's own send rate, busiest second, peers and copies\n");
+    dn::TrafficMeter m;
+    uint8_t x[100] = {1}, y[100] = {2};
+    uint64_t hx = dn::TrafficMeter::hash(x, sizeof(x)), hy = dn::TrafficMeter::hash(y, sizeof(y));
+    CHECK(hx != hy && dn::TrafficMeter::hash(x, sizeof(x)) == hx);
+    m.record(kA, 100, hx, 1000);
+    m.record(kB, 100, hx, 1001);  // the same data to another player: a copy
+    m.record(kB, 100, hx, 1002);  // the same data to the same player again: not a copy
+    m.record(kA, 100, hy, 1500);
+    m.record(kA, 400, hy, 2100);  // next second
+    dn::TrafficSummary s = m.take();
+    CHECK(s.bytes == 800 && s.packets == 5 && s.peers == 2 && s.copyBytes == 100);
+    CHECK(s.busiestSecondBytes == 400 && s.largestPacket == 400);
+    s = m.take();
+    CHECK(s.bytes == 0 && s.packets == 0 && s.peers == 0 && s.busiestSecondBytes == 0);
+}
+
 void testRosterDropsQuietMember() {
     printf("direct: other joiners learn within seconds that a member's link went quiet\n");
     dn::DirectOptions ho = hostOptions(0, 0);
@@ -856,6 +875,7 @@ int wmain(int argc, wchar_t** argv) {
     testDirectUpgradesUnreliable();
     testDisconnectHold();
     testLobbyStatusHold();
+    testTrafficMeter();
     testRosterDropsQuietMember();
     testLinksFollowTheRoom();
     testHostRestart();

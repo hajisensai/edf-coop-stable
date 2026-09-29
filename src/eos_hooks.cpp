@@ -15,6 +15,7 @@
 #include "iat.h"
 #include "lobby_marker.h"
 #include "log.h"
+#include "traffic.h"
 
 namespace dn {
 namespace {
@@ -137,6 +138,7 @@ struct State {
     std::mutex idMutex;
     std::unordered_map<std::string, EOS_ProductUserId> idCache;
     std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0}, eosUpgraded{0};
+    TrafficMeter gameOut;  // everything the game sends, whichever way it goes
     ULONGLONG lastStatsMs = 0;
 };
 
@@ -720,8 +722,19 @@ void maybeLogStats() {
     uint64_t dOut = g.directOut.exchange(0), dIn = g.directIn.exchange(0);
     uint64_t eOut = g.eosOut.exchange(0), eIn = g.eosIn.exchange(0), fail = g.eosSendFail.exchange(0);
     uint64_t upg = g.eosUpgraded.exchange(0);
-    if (!(dOut | dIn | eOut | eIn | fail)) return;
+    TrafficSummary t = g.gameOut.take();
     DirectNet* net = g.net;
+    WireTraffic w = net ? net->takeWireTraffic() : WireTraffic{};
+    if (!(dOut | dIn | eOut | eIn | fail)) return;
+    // kbps = bytes * 8 / 1000 / seconds
+    auto kbps = [](uint64_t bytes, double seconds) { return static_cast<double>(bytes) * 8.0 / 1000.0 / seconds; };
+    logf("TRAFFIC last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
+         "(largest %u), %.0f%% copies of the same data to another player | direct link up %.0f kbps down %.0f kbps, "
+         "relayed for others %.0f kbps",
+         kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
+         t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
+         t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0, kbps(w.out, 60.0),
+         kbps(w.in, 60.0), kbps(w.relayed, 60.0));
     logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
          static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
@@ -763,6 +776,8 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
+    if (o && o->Data)
+        g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
     DirectNet* net = g.net;
     if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
         net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),

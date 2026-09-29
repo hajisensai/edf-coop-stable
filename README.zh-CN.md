@@ -122,6 +122,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic 房间服务把某人踢掉又放了回来，游戏没察觉。`direct link silent for ...` 表示他真的掉了，已交给游戏。
 - `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
+- `TRAFFIC last 60s: ...`：游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据，以及直连实际占用的上传 / 下载，含房主替别人转发的部分。
 - `DIRECT ignored hello for ... its link is live`：有人用某个在线玩家的身份从别的地址发起连接，已被拒绝。偶尔一条可能是对方换了网络（5 秒后会自动接受）；频繁出现说明有人在捣乱，建议设 `Key=`。
 
 ## 构建

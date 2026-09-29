@@ -344,6 +344,10 @@ std::vector<std::string> DirectNet::rosterLocked() const {
     return r;
 }
 
+WireTraffic DirectNet::takeWireTraffic() {
+    return WireTraffic{wireOut_.exchange(0), wireIn_.exchange(0), relayed_.exchange(0)};
+}
+
 std::string DirectNet::statusLine() {
     std::lock_guard<std::mutex> lock(mu_);
     char buf[256];
@@ -367,6 +371,7 @@ std::string DirectNet::statusLine() {
 
 void DirectNet::sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen) {
     if (testBlackhole_) return;
+    wireOut_ += dg.size();
     if (opt_.testDropRate > 0.0) {
         static thread_local std::mt19937 rng(12345);
         if (std::uniform_real_distribution<double>(0.0, 1.0)(rng) < opt_.testDropRate) return;
@@ -419,6 +424,7 @@ void DirectNet::routeData(DataMsg msg) {
                        shortId(msg.src).c_str(), shortId(msg.dst).c_str());
         return;
     }
+    relayed_ += msg.payload.size();
     sendData(it->second, std::move(msg), nowMs());
 }
 
@@ -785,6 +791,7 @@ void DirectNet::run() {
             int n = recvfrom(sock_, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0,
                              reinterpret_cast<sockaddr*>(&from), &fromLen);
             if (n <= 0) break;
+            wireIn_ += static_cast<uint64_t>(n);
             processDatagram(buf.data(), static_cast<size_t>(n), from, fromLen, nowMs());
         }
         std::lock_guard<std::mutex> lock(mu_);

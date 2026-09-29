@@ -45,6 +45,13 @@ struct DirectOptions {
     double testDropRate = 0.0;  // tests only: drop this fraction of outgoing datagrams
 };
 
+// UDP payload bytes on our socket since the last takeWireTraffic(), retransmits and pings included.
+struct WireTraffic {
+    uint64_t out = 0;
+    uint64_t in = 0;
+    uint64_t relayed = 0;  // host: game data forwarded from one client to another
+};
+
 struct Delivered {
     std::string src;
     std::string socketName;
@@ -89,6 +96,7 @@ public:
 
     std::vector<std::string> directMembers();
     std::string statusLine();
+    WireTraffic takeWireTraffic();
 
     // Tests only: silently drop every outgoing datagram (simulates a total network outage).
     void setTestBlackhole(bool on) { testBlackhole_ = on; }
@@ -133,6 +141,7 @@ private:
     uint16_t boundPort_ = 0;
     std::atomic<bool> running_{false};
     std::atomic<bool> testBlackhole_{false};
+    std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0};
     std::thread thread_;
     std::mutex mu_;
 

@@ -59,7 +59,7 @@ EDF6DirectNet 0.2.0 —— EDF6 联机稳定插件（EDFModLoader 插件）
        ListenPort=27015
 2. 右键「EDF6DirectNet_AllowFirewall.bat」→ 以管理员身份运行（只需一次）。
 3. 让别人能访问到你（二选一）：
-   a) IPv6（推荐，国内家宽大多有公网 IPv6，一般不用设置路由器）：
+   a) IPv6：
       启动游戏后看日志里的这一行，把地址发给朋友：
           NET public IPv6 for friends: HostAddress=[2408:....]:27015
    b) IPv4：插件会自动让路由器做端口映射（UPnP），日志里会写：

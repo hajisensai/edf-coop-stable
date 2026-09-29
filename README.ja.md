@@ -10,6 +10,10 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 >
 > **ステータス：実験的。** 900 件以上の自動テストに合格。自動直結と切断猶予は実際の 4 人オンラインプレイで検証済み（0.3.2：全員が直結し、7 回の接続切れをゲームに気付かせませんでした）。問題があればログを添えて [Issue](https://github.com/hajisensai/edf-coop-stable/issues) を立ててください。
 
+## EDF6MultiSlot：8人協力プレイ（10 / 12人は任意）
+
+8人協力プレイのプラグイン EDF6MultiSlot（作者 momotori01、パブリックドメイン）は [multislot/](multislot/README.md) にあり、ビルド・パッケージ・説明書も独立しています。EDF6DirectNet と一緒に使えます。
+
 ## 何を解決するか
 
 | 症状 | 原因 | プラグインの対処 | 導入が必要な人 |
@@ -157,6 +161,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 | `src/log.*` | ログ |
 | `dist/` | インストールスクリプトと同梱説明書（中 / 英 / 日） |
 | `tests/` | テスト |
+| `multislot/` | EDF6MultiSlot：8 / 10 / 12人協力プレイのプラグイン（ビルドと説明書は独立） |
 
 ## 既知の制限
 

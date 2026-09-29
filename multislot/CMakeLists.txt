@@ -17,7 +17,16 @@ endif()
 math(EXPR MULTISLOT_MAX_GHOSTS "${MULTISLOT_MAX_PLAYERS} - 1")
 
 # PluginAPI.h from EDFModLoader (BlueAmulet, MIT), next to the other projects.
-set(MODLOADER_INCLUDE "${CMAKE_SOURCE_DIR}/../_VRDEV/EDFModLoader-src/EDFModLoader")
+set(MODLOADER_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/EDFModLoader")
+
+# The installed game this build reads from (read-only): EDF.dll for the patch-table and load tests, Root.cpk
+# for tools/make_menu_label.py. Pass -DEDF6_GAME_DIR=... or set the EDF6_GAME_DIR environment variable.
+if(DEFINED ENV{EDF6_GAME_DIR})
+    set(EDF6_GAME_DIR_DEFAULT "$ENV{EDF6_GAME_DIR}")
+else()
+    set(EDF6_GAME_DIR_DEFAULT "${CMAKE_SOURCE_DIR}/..")
+endif()
+set(EDF6_GAME_DIR "${EDF6_GAME_DIR_DEFAULT}" CACHE PATH "EARTH DEFENSE FORCE 6 install folder (holds EDF.dll)")
 set(WARNINGS /W4 /WX /utf-8 /permissive-)
 
 # The default settings the plugin writes when no INI exists come from EDF6MultiSlot.ini itself.
@@ -28,6 +37,11 @@ configure_file(src/default_ini.h.in "${CMAKE_BINARY_DIR}/generated/default_ini.h
 # The menu frame layout with the 8Player MOD label field (tools/make_menu_label.py); the plugin writes it
 # to Mods/UI while it is active.
 set(MENU_LAYOUT "${CMAKE_SOURCE_DIR}/assets/LYT_MAINFRAME.SGO")
+if(NOT EXISTS "${MENU_LAYOUT}")
+    # Made from the game's own UI/LYT_MAINFRAME.SGO, so it is not in the repository.
+    message(FATAL_ERROR "assets/LYT_MAINFRAME.SGO is missing: run `python -B tools/make_menu_label.py` with "
+                        "EDF6_GAME_DIR set to the game folder first (it reads Root.cpk there)")
+endif()
 file(READ "${MENU_LAYOUT}" MENU_LAYOUT_HEX HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," MENU_LAYOUT_BYTES "${MENU_LAYOUT_HEX}")
 set(BYTE "0x[0-9a-f][0-9a-f],")
@@ -69,11 +83,17 @@ add_test(NAME HandshakeUserSnapshots COMMAND HandshakeTests "${CMAKE_BINARY_DIR}
 add_executable(NetLogForwardTests tests/netlog_forward_test.cpp src/joinlog.cpp src/identity.cpp src/log.cpp)
 target_compile_options(NetLogForwardTests PRIVATE ${WARNINGS})
 add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests)
-set(EDF_DLL "${CMAKE_SOURCE_DIR}/../EDF.dll")
+set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
+if(NOT EXISTS "${EDF_DLL}")
+    message(WARNING "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): the tests against the game's code "
+                    "(PatchTablesMatchEDF, PluginLoad_*) are not registered")
+endif()
 
 add_executable(MultiSlotTests tests/tests.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
-add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
+if(EXISTS "${EDF_DLL}")
+    add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
+endif()
 
 add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
@@ -125,9 +145,11 @@ add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6MultiSlot)
-foreach(mode off host4 host8 fresh nomission recoveryoff quiet smooth)
-    add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
-             "${CMAKE_BINARY_DIR}/loadtest" ${mode})
-endforeach()
+if(EXISTS "${EDF_DLL}")
+    foreach(mode off host4 host8 fresh nomission recoveryoff quiet smooth)
+        add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
+                 "${CMAKE_BINARY_DIR}/loadtest" ${mode})
+    endforeach()
+endif()
 
 configure_file(EDF6MultiSlot.ini "${MULTISLOT_DIST}/EDF6MultiSlot.ini" @ONLY)

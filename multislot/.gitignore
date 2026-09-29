@@ -1,0 +1,10 @@
+build/
+build-*/
+dist/
+dist-*/
+release/
+# Made from the game's own files (tools/make_menu_label.py), so never committed.
+assets/
+# Official EDFModLoader, fetched and hash-checked by tools/fetch_modloader.ps1.
+third_party/EDFModLoader/winmm.dll
+__pycache__/

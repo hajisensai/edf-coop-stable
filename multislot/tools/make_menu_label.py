@@ -18,7 +18,8 @@ from cpk import Cpk  # noqa: E402
 import crilayla  # noqa: E402
 import sgo_write  # noqa: E402
 
-GAME = HERE.parents[1]
+# The game folder: EDF6_GAME_DIR, or the folder above this project (the layout next to the game).
+GAME = pathlib.Path(os.environ['EDF6_GAME_DIR']) if os.environ.get('EDF6_GAME_DIR') else HERE.parents[1]
 # UI/LYT_MAINFRAME.SGO of the install this was made for (EDF.dll build 678CCB46).
 ORIGINAL_SHA256 = '1a1d6dc5653cf46468556ce154899381b8c108b82064990402b07090192eb7cb'
 

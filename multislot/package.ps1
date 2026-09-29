@@ -14,7 +14,6 @@
 param([ValidateSet(8, 10, 12)][int]$Players = 8)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$game = Split-Path -Parent $root
 
 $cmake = Get-Content -LiteralPath (Join-Path $root 'CMakeLists.txt') -Raw
 if ($cmake -notmatch 'project\(EDF6MultiSlot VERSION (\d+\.\d+\.\d+)') { throw 'Version not found in CMakeLists.txt' }
@@ -36,12 +35,9 @@ $release = Join-Path $root 'release'
 $out = Join-Path $release $name
 $zip = Join-Path $release "$name.zip"
 
-# The research and References folders are not in the published source; the build writes the same
-# loader-fix.json, and the EDF6VR package carries the same EDFModLoader license text.
-$license = Join-Path $root 'References\EDFModLoader-master\LICENSE'
-if (-not (Test-Path -LiteralPath $license)) { $license = Join-Path $game '_VRDEV\EDF6VR\packaging\Licenses\EDFModLoader.txt' }
-$loaderFix = Join-Path $root 'research\crashes-20260922\loader-fix.json'
-if (-not (Test-Path -LiteralPath $loaderFix)) { $loaderFix = Join-Path $root "$buildName\loader-fix.json" }
+# EDFModLoader's license (MIT) is kept next to its header; loader-fix.json is written by the build.
+$license = Join-Path $root 'third_party\EDFModLoader\LICENSE.txt'
+$loaderFix = Join-Path $root "$buildName\loader-fix.json"
 $sources = @{
     'winmm.dll'                      = $loaderSource
     'EDFModLoader_LICENSE.txt'       = $license

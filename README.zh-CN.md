@@ -10,6 +10,10 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 >
 > **状态：实验性。** 900+ 项自动化测试通过；自动直连和断线宽限已在真实的四人联机中验证（0.3.2：所有人都走直连，7 次连接中断都没让游戏察觉）。出问题请附日志提 [Issue](https://github.com/hajisensai/edf-coop-stable/issues)。
 
+## EDF6MultiSlot：8 人联机（可选 10 / 12 人）
+
+8 人联机插件 EDF6MultiSlot（原作者 momotori01，公有领域）在 [multislot/](multislot/README.zh-CN.md) 目录，有自己的构建、打包和说明，可以和 EDF6DirectNet 一起用。
+
 ## 它解决什么
 
 | 症状 | 原因 | 插件的做法 | 需要谁装 |
@@ -157,6 +161,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 | `src/log.*` | 日志 |
 | `dist/` | 安装脚本与随包说明书（中 / 英 / 日） |
 | `tests/` | 测试 |
+| `multislot/` | EDF6MultiSlot：8 / 10 / 12 人联机插件（独立构建和说明） |
 
 ## 已知限制
 

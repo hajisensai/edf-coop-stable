@@ -117,13 +117,21 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1 -Test
-# 打发布包：需要官方 EDFModLoader.zip 解压后的目录（含 winmm.dll、ModLoader.ini、LICENSE.txt）
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.0 -ModLoaderDir <目录>
+# 手动打发布包：需要官方 EDFModLoader.zip 解压后的目录（含 winmm.dll、ModLoader.ini，外加它的 LICENSE.txt）
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDir <目录>
 ```
 
 产物：`build\EDF6DirectNet.dll`（静态 CRT，只依赖系统 DLL）、`build\edf6_directnet_tests.exe`（单元测试 + 本机回环多节点测试，含 20%～40% 丢包、断网、重启场景；`EDF.dll` 导入表测试需要本机装有游戏，否则跳过）、`build\probe_join.exe`（手动联调用的直连探针）。
 
-发版时版本号写在三处，`package.ps1` 会校验它们一致：`src/plugin.cpp`（`kVersion*`）、`dist/README_EDF6DirectNet.txt` 第一行、`-Version` 参数。
+## 发布
+
+发布由 GitHub Actions（`.github/workflows/release.yml`）自动完成：
+
+1. 改版本号：`src/plugin.cpp` 的 `kVersionMajor/Minor/Patch` 与 `kVersionText`、`dist/README_EDF6DirectNet.txt` 第一行。
+2. 写发布说明 `release-notes/<版本>.md`（就是 Release 页面的正文，没有它流水线会失败）。
+3. 提交到 `main`，推送 tag：`git tag v0.3.2 && git push origin v0.3.2`。
+
+流水线会构建、跑测试、下载官方 EDFModLoader v1.0.10（按 SHA-256 校验）、打包 `EDF6DirectNet-v<版本>.zip` 并创建 Release。tag、源码版本号、说明书版本号三者不一致时 `package.ps1` 会拒绝打包。在 Actions 页面手动运行只构建打包（产物在运行记录的 Artifacts 里），不发布。
 
 ## 目录
 

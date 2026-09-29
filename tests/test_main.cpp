@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <random>
 #include <string>
@@ -643,6 +644,10 @@ void testIat(const wchar_t* edfPath) {
 void testNetif() {
     printf("netif: physical adapter\n");
     auto pi = dn::findPhysicalInterface();
+    if (!pi && getenv("GITHUB_ACTIONS")) {  // CI runners are Hyper-V VMs: no physical adapter to find
+        printf("  skipped: no physical adapter on this CI machine\n");
+        return;
+    }
     CHECK(pi.has_value());
     if (pi) {
         printf("  %s | %s | ipv4=%s v4idx=%u v6idx=%u ipv6=%zu\n", pi->name.c_str(), pi->description.c_str(),

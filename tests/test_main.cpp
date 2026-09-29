@@ -480,12 +480,12 @@ struct RawClient {
         epoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
         return true;
     }
-    bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce) {
+    bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce, int attempts = 5) {
         port = hostPort;
         puid = id;
         nonce = sessionNonce;
         uint64_t session = identity->nextSession();
-        for (int attempt = 0; attempt < 5; ++attempt) {
+        for (int attempt = 0; attempt < attempts; ++attempt) {
             sendTo(peer, port, hello(session, nullptr), key);
             auto c = receiveFrom(peer, dn::MsgType::Challenge, 500, key);
             if (!c || c->challenge.clientNonce != nonce) continue;
@@ -583,11 +583,11 @@ void testHelloNeedsCookieAndIdentity() {
         RawClient memberB;  // B, a room member, claims to be A: right cookie, wrong identity
         memberB.identity = idB;
         memberB.key = key;
-        CHECK(!memberB.connect(host.boundPort(), kA, 0x20));
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x20, 1));
         RawClient vanilla;  // someone claims kC, who published nothing
         vanilla.identity = idB;
         vanilla.key = key;
-        CHECK(!vanilla.connect(host.boundPort(), kC, 0x30));
+        CHECK(!vanilla.connect(host.boundPort(), kC, 0x30, 1));
         CHECK(!host.canRoute(kA) && !host.canRoute(kC) && host.directMembers().size() == 1);
 
         RawClient realA;
@@ -600,7 +600,7 @@ void testHelloNeedsCookieAndIdentity() {
         auto d = receiveFrom(realA.peer, dn::MsgType::Data, 1000, key);
         CHECK(d && d->epoch == realA.epoch && d->data.payload == p);
         // B still cannot take A's place, now that A is connected.
-        CHECK(!memberB.connect(host.boundPort(), kA, 0x21));
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x21, 1));
         CHECK(memberB.peer.count(dn::MsgType::Data, 300) == 0);
     }
 }

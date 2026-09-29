@@ -12,7 +12,7 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 
 ## EDF6MultiSlot：8人協力プレイ（10 / 12人は任意）
 
-8人協力プレイのプラグイン EDF6MultiSlot（作者 momotori01、パブリックドメイン）は [multislot/](multislot/README.md) にあり、ビルド・パッケージ・説明書も独立しています。EDF6DirectNet と一緒に使えます。
+8人協力プレイのプラグイン EDF6MultiSlot は [multislot/](multislot/README.md) にあり、ビルド・パッケージ・説明書も独立しています。EDF6DirectNet と一緒に使えます。
 
 ## 何を解決するか
 
@@ -176,3 +176,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 ## ライセンス
 
 MIT、[LICENSE](LICENSE) を参照。同梱の EDFModLoader は MIT で、ライセンスはパッケージ内の `EDFModLoader\LICENSE.txt` にあります。
+
+## 謝辞
+
+- EDF6MultiSlot の原作者は momotori01 です：[EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD)（パブリックドメイン）。

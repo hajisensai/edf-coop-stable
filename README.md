@@ -12,7 +12,7 @@ Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: *
 
 ## EDF6MultiSlot: 8-player co-op (10 / 12 optional)
 
-The 8-player co-op plugin EDF6MultiSlot (by momotori01, public domain) lives in [multislot/](multislot/README.md), with its own build, package and manual. It works alongside EDF6DirectNet.
+The 8-player co-op plugin EDF6MultiSlot lives in [multislot/](multislot/README.md), with its own build, package and manual. It works alongside EDF6DirectNet.
 
 ## What it fixes
 
@@ -176,3 +176,7 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 ## License
 
 MIT, see [LICENSE](LICENSE). The bundled EDFModLoader is MIT; its license is included in the package as `EDFModLoader\LICENSE.txt`.
+
+## Acknowledgements
+
+- EDF6MultiSlot was originally written by momotori01: [EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD) (public domain).

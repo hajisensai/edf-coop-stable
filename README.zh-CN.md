@@ -12,7 +12,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 ## EDF6MultiSlot：8 人联机（可选 10 / 12 人）
 
-8 人联机插件 EDF6MultiSlot（原作者 momotori01，公有领域）在 [multislot/](multislot/README.zh-CN.md) 目录，有自己的构建、打包和说明，可以和 EDF6DirectNet 一起用。
+8 人联机插件 EDF6MultiSlot 在 [multislot/](multislot/README.zh-CN.md) 目录，有自己的构建、打包和说明，可以和 EDF6DirectNet 一起用。
 
 ## 它解决什么
 
@@ -176,3 +176,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。附带的 EDFModLoader 为 MIT，许可证随包在 `EDFModLoader\LICENSE.txt`。
+
+## 致谢
+
+- EDF6MultiSlot 原作者 momotori01：[EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD)（公有领域）。

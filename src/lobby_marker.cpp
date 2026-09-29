@@ -36,6 +36,9 @@ bool LobbyMarker::init(HMODULE eos) {
         GetProcAddress(eos, "EOS_LobbyDetails_GetMemberAttributeCount"));
     getMemberCount_ = reinterpret_cast<PFN_EOS_LobbyDetails_GetMemberCount>(
         GetProcAddress(eos, "EOS_LobbyDetails_GetMemberCount"));
+    copyMemberAttributeByIndex_ = reinterpret_cast<PFN_EOS_LobbyDetails_CopyMemberAttributeByIndex>(
+        GetProcAddress(eos, "EOS_LobbyDetails_CopyMemberAttributeByIndex"));
+    ok &= resolve(eos, "EOS_ProductUserId_ToString", idToString_);
     ready_ = ok;
     return ok;
 }
@@ -53,6 +56,9 @@ void LobbyMarker::entered(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUser
 void LobbyMarker::left() {
     std::lock_guard<std::mutex> lock(mu_);
     lobbyId_.clear();
+    marked_.clear();
+    knownOwner_.clear();
+    knownOwnerAddress_.clear();
     owner_ = false;
     dirty_ = false;
 }
@@ -67,6 +73,15 @@ void LobbyMarker::promoted() {
 void LobbyMarker::memberJoined() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!lobbyId_.empty()) dirty_ = true;
+}
+
+void LobbyMarker::memberGone(const std::string& member) {
+    std::lock_guard<std::mutex> lock(mu_);
+    marked_.erase(member);
+    if (member == knownOwner_) {
+        knownOwner_.clear();
+        knownOwnerAddress_.clear();
+    }
 }
 
 void LobbyMarker::setAddress(const std::string& address) {
@@ -132,6 +147,13 @@ bool LobbyMarker::isOwner() const {
     return owner_;
 }
 
+std::string LobbyMarker::idString(EOS_ProductUserId id) const {
+    if (!id || !idToString_) return {};
+    char buf[EOS_PRODUCTUSERID_MAX_LENGTH + 1] = {};
+    int32_t len = sizeof(buf);
+    return idToString_(id, buf, &len) == EOS_Success ? std::string(buf) : std::string();
+}
+
 EOS_HLobbyDetails LobbyMarker::copyDetailsLocked() const {
     if (!ready_ || !lobby_ || lobbyId_.empty()) return nullptr;
     EOS_Lobby_CopyLobbyDetailsHandleOptions o{1, lobbyId_.c_str(), localUser_};
@@ -149,14 +171,17 @@ bool LobbyMarker::readAttribute(EOS_HLobbyDetails details, EOS_ProductUserId mem
     return found;
 }
 
-bool LobbyMarker::hasMarker(EOS_ProductUserId remote) const {
+bool LobbyMarker::hasMarker(EOS_ProductUserId remote) {
     if (!remote) return false;
+    std::string id = idString(remote);
     std::lock_guard<std::mutex> lock(mu_);
     EOS_HLobbyDetails details = copyDetailsLocked();
     if (!details) return false;
     bool found = readAttribute(details, remote, kKey, nullptr);
     releaseDetails_(details);
-    return found;
+    if (id.empty()) return found;
+    if (found) marked_.insert(id);
+    return marked_.count(id) != 0;
 }
 
 std::string LobbyMarker::describeOwner() const {
@@ -170,14 +195,22 @@ std::string LobbyMarker::describeOwner() const {
     EOS_LobbyDetails_GetMemberCountOptions mc{1};
     long attrs = id && getMemberAttributeCount_ ? static_cast<long>(getMemberAttributeCount_(details, &ac)) : -1;
     long members = getMemberCount_ ? static_cast<long>(getMemberCount_(details, &mc)) : -1;
+    std::string keys;
+    for (long n = 0; id && copyMemberAttributeByIndex_ && n < attrs; ++n) {
+        EOS_LobbyDetails_CopyMemberAttributeByIndexOptions io{1, id, static_cast<uint32_t>(n)};
+        EOS_Lobby_Attribute* attr = nullptr;
+        if (copyMemberAttributeByIndex_(details, &io, &attr) == EOS_Success && attr && attr->Data && attr->Data->Key)
+            keys += std::string(keys.empty() ? "" : " ") + attr->Data->Key;
+        if (attr) releaseAttribute_(attr);
+    }
     releaseDetails_(details);
     char buf[160];
-    snprintf(buf, sizeof(buf), "owner %s, plugin marker %s, owner attributes visible %ld, members %ld",
-             id ? "known" : "UNKNOWN", marker ? "yes" : "no", attrs, members);
+    snprintf(buf, sizeof(buf), "owner %s, plugin marker %s, owner attributes visible %ld [%s], members %ld",
+             id ? "known" : "UNKNOWN", marker ? "yes" : "no", attrs, keys.c_str(), members);
     return buf;
 }
 
-std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) const {
+std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) {
     std::lock_guard<std::mutex> lock(mu_);
     EOS_HLobbyDetails details = copyDetailsLocked();
     if (!details) return {};
@@ -187,6 +220,13 @@ std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) const {
     if (id) readAttribute(details, id, kAddressKey, &address);
     releaseDetails_(details);
     if (owner) *owner = id;
+    std::string ownerId = idString(id);
+    if (!address.empty() && !ownerId.empty()) {
+        knownOwner_ = ownerId;
+        knownOwnerAddress_ = address;
+    } else if (address.empty() && !ownerId.empty() && ownerId == knownOwner_) {
+        address = knownOwnerAddress_;  // our copy lost it; the owner still advertises it
+    }
     return address;
 }
 

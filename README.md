@@ -8,7 +8,7 @@ Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: *
 
 > Unofficial mod, not affiliated with D3 PUBLISHER / SANDLOT / Epic Games. It only intercepts network calls inside the game process and never modifies any game files; set `Enabled=0` or delete the DLL to get the vanilla game back.
 >
-> **Status: experimental.** 900+ automated tests pass; auto direct connect has been verified in real online play between two PCs (0.3.2); the disconnect grace period has not yet been tested across two PCs. If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf-coop-stable/issues) with your log attached.
+> **Status: experimental.** 900+ automated tests pass; auto direct connect and the disconnect grace period have been verified in real four-player online play (0.3.2: every player connected directly, and 7 connection drops were hidden from the game). If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf-coop-stable/issues) with your log attached.
 
 ## What it fixes
 
@@ -100,7 +100,8 @@ EDF6 parses every EOS packet it receives as game data (`ReceivePacket` is called
 
 - Marker present and the connection was established before → grace, calling `AcceptConnection` every 2 seconds to request a reconnect;
 - No marker → handled like vanilla;
-- Public direct-connect member → grace for as long as the direct link is alive (its game data does not go through EOS anyway);
+- Public direct-connect member → grace for as long as the direct link answers (it pings every second, in menus too); its game data does not go through EOS anyway;
+- Epic's lobby service reports a member as disconnected (`DISCONNECTED`: it lost Epic's lobby service, not the game) while that member's direct link answers → hidden from the game. When EOS puts the member back into the lobby (`JOINED`), both events are swallowed and the game never learns about it. The game is told only once the direct link has been silent for `GraceSeconds`, or the member leaves or is kicked for real. The same applies to ourselves;
 - The other player actually left the lobby → the disconnect is handed to the game immediately.
 
 ### Public direct connect
@@ -114,6 +115,8 @@ The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separat
 - `LOBBY plugin detection UNAVAILABLE`: the plugin cannot tell whether the other player has it installed, so disconnect grace only applies to direct-connect members.
 - `EOS incoming packet queue FULL`: the EOS queue is full and packets are being dropped. Please open an Issue with your log attached.
 - `RESILIENCE ... RECOVERED` means a disconnect was hidden successfully; `did not come back within` means it was handed to the game after the timeout.
+- `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`: Epic's lobby service dropped a player and let them back in; the game never saw it. `direct link silent for ...` means the player really was gone and the game was told.
+- `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
 - `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
 - `DIRECT ignored hello for ... its link is live`: someone tried to connect from a different address using the identity of a player who is online, and was rejected. An occasional line may just mean that player switched networks (it is accepted automatically after 5 seconds); if it shows up often, someone is messing with you and setting `Key=` is recommended.
 
@@ -163,7 +166,7 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 - Direct connect is relayed by the host: at the moment a joiner's direct link reconnects, the small amount of data the host is relaying for them that has not been acknowledged yet is lost (the game then falls back to EOS).
 - Without `Key=`, direct connect has no authentication: someone who knows the host address and a player's EOS ID can forge that player's data. Setting a Key prevents forgery, but still does not prevent replay of captured `Bye` / member-list packets (this needs a protocol version bump, left for the next major version).
 - UPnP mappings are permanent and are not removed automatically when the game exits (harmless while nothing is listening on the port); if needed, delete the mapping named `EDF6DirectNet` in your router's admin page.
-- Disconnect grace has not yet been verified in real multiplayer sessions; Issues with logs attached are welcome.
+- Nothing can be hidden when the direct link itself is down: if a player's own internet drops for longer than `GraceSeconds`, the game handles it as usual.
 
 ## License
 

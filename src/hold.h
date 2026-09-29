@@ -80,4 +80,47 @@ private:
     std::vector<Held> held_;
 };
 
+// Hides "member disconnected" lobby statuses while the direct link shows the member still plays.
+//
+// That status means the member lost Epic's lobby service, not the game: its game traffic runs over
+// the direct link and may be perfectly fine, yet the game removes it at once. EOS puts such a member
+// back into the lobby (a new "joined") when its lobby connection recovers; that pair is swallowed and
+// the game never learns about it. The disconnect reaches the game only after the member's direct link
+// has been silent for `graceMs`, or when the member leaves or is kicked for real.
+// All methods are thread-safe; `deliver` callbacks run without the internal lock held.
+class LobbyStatusHold {
+public:
+    explicit LobbyStatusHold(uint32_t graceMs) : graceMs_(graceMs) {}
+
+    // A "disconnected" status for `remote`. Held (true) when `reachable` over the direct link, or when
+    // one is already held (the first one stays); `deliver` then runs later only if it does not return.
+    bool offer(const std::string& remote, bool reachable, uint64_t nowMs, std::function<void()> deliver);
+    // Any other status for `remote`. Returns true when that status must be swallowed: the member joined
+    // again while its disconnect was hidden. A promotion ends the hold and still reaches the game.
+    // Anything else (left, kicked) delivers the hidden disconnect first, in the order EOS reported.
+    bool onStatus(const std::string& remote, int32_t status);
+    // Delivers every hidden disconnect (the room was closed). Returns the number delivered.
+    size_t releaseAll();
+    // We left the room: forget the hidden disconnects without delivering them.
+    size_t clear();
+
+    bool isHeld(const std::string& remote) const;
+    size_t heldCount() const;
+
+    // Delivers the disconnects of members `reachable` has reported unreachable for `graceMs`.
+    // Returns those members.
+    std::vector<std::string> poll(uint64_t nowMs, const std::function<bool(const std::string&)>& reachable);
+
+private:
+    struct Held {
+        std::string remote;
+        uint64_t reachableAtMs = 0;  // last time the direct link showed the member alive
+        std::function<void()> deliver;
+    };
+
+    uint32_t graceMs_;
+    mutable std::mutex mu_;
+    std::vector<Held> held_;
+};
+
 }  // namespace dn

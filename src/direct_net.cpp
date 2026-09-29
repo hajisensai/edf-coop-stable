@@ -283,6 +283,29 @@ bool DirectNet::heardFromRecently(const std::string& remote, uint64_t windowMs) 
     return it != lastDataMs_.end() && nowMs() - it->second <= windowMs;
 }
 
+bool DirectNet::linkAlive(const std::string& remote, uint64_t windowMs) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (localPuid_.empty() || remote.empty() || remote == localPuid_) return false;
+    uint64_t now = nowMs();
+    if (opt_.mode == Mode::Host) {
+        auto it = clients_.find(remote);
+        return it != clients_.end() && it->second.up && now - it->second.lastRecvMs <= windowMs;
+    }
+    return hostLink_ && hostLink_->up && now - hostLink_->lastRecvMs <= windowMs &&
+           (remote == hostLink_->puid || contains(roster_, remote));
+}
+
+bool DirectNet::anyLinkAlive(uint64_t windowMs) {
+    std::lock_guard<std::mutex> lock(mu_);
+    uint64_t now = nowMs();
+    if (opt_.mode == Mode::Host) {
+        for (const auto& [id, link] : clients_)
+            if (link.up && now - link.lastRecvMs <= windowMs) return true;
+        return false;
+    }
+    return hostLink_ && hostLink_->up && now - hostLink_->lastRecvMs <= windowMs;
+}
+
 std::vector<std::string> DirectNet::directMembers() {
     std::lock_guard<std::mutex> lock(mu_);
     return rosterLocked();

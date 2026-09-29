@@ -337,6 +337,10 @@ void testThreeNodesOverLoopback() {
     CHECK(waitFor([&] { return a.canRoute(kB) && b.canRoute(kA) && host.canRoute(kA) && host.canRoute(kB); }, 10000));
     CHECK(a.canRoute(kHost) && !a.canRoute("0002dddddddddddddddddddddddddddd"));
     CHECK(host.directMembers().size() == 3);
+    // Link liveness: the host sees its clients, a client sees the host and, through it, the others.
+    CHECK(host.linkAlive(kA, 5000) && host.linkAlive(kB, 5000) && !host.linkAlive(kHost, 5000));
+    CHECK(a.linkAlive(kHost, 5000) && a.linkAlive(kB, 5000) && !a.linkAlive("0002dddddddddddddddddddddddddddd", 5000));
+    CHECK(host.anyLinkAlive(5000) && a.anyLinkAlive(5000));
 
     CHECK(streamInOrder(a, kB, b, kA, 3000));      // forwarded by the host
     CHECK(streamInOrder(host, kA, a, kHost, 2000));
@@ -351,6 +355,8 @@ void testThreeNodesOverLoopback() {
 
     printf("direct: client restart with the same id resets its streams\n");
     a.stop();
+    // Stopped: nothing more from it (its BYE may be lost to the simulated loss).
+    CHECK(waitFor([&] { return !host.linkAlive(kA, 1500) && host.linkAlive(kB, 1500); }, 4000));
     dn::DirectNet a2;
     CHECK(a2.start(joinOptions("127.0.0.1:" + port, 0.2)));
     a2.setLocalUser(kA);
@@ -400,7 +406,11 @@ void testStalledLinkSurvives() {
     }
     std::this_thread::sleep_for(std::chrono::seconds(3));
     CHECK(a.canRoute(kHost) && host.canRoute(kA));  // still connected during the outage
+    // ...but the host hears nothing from the client any more, while the client still hears the host.
+    CHECK(!host.linkAlive(kA, 2000) && host.linkAlive(kA, 5000) && a.linkAlive(kHost, 2000));
+    CHECK(!host.anyLinkAlive(2000));
     a.setTestBlackhole(false);
+    CHECK(waitFor([&] { return host.linkAlive(kA, 2000); }, 3000));
     uint32_t next = 0;
     bool ok = true;
     waitFor(
@@ -523,6 +533,52 @@ void testRetransmitBudget() {
     CHECK(sent >= 1900 && sent <= 2100);
 }
 
+void testLobbyStatusHold() {
+    printf("hold: a member Epic's lobby service drops is hidden while its direct link is up\n");
+    int delivered = 0;
+    auto deliver = [&] { ++delivered; };
+    bool up = true;
+    auto reachable = [&](const std::string&) { return up; };
+    dn::LobbyStatusHold h(30000);
+
+    CHECK(!h.offer(kA, false, 0, deliver) && !h.isHeld(kA));  // no direct link: the game is told
+    CHECK(h.offer(kA, true, 0, deliver) && h.isHeld(kA));
+    CHECK(h.offer(kA, false, 0, deliver) && h.heldCount() == 1);  // a repeat keeps the first one
+    CHECK(h.onStatus(kA, 0) && !h.isHeld(kA) && delivered == 0);  // it joined again: both swallowed
+    CHECK(!h.onStatus(kA, 0));                                    // a normal join reaches the game
+
+    CHECK(h.offer(kA, true, 0, deliver));
+    CHECK(!h.onStatus(kA, 1) && delivered == 1 && !h.isHeld(kA));  // left for real: disconnect first
+    CHECK(h.offer(kA, true, 0, deliver));
+    CHECK(!h.onStatus(kA, 3) && delivered == 2);  // kicked
+    CHECK(h.offer(kA, true, 0, deliver));
+    CHECK(!h.onStatus(kA, 4) && delivered == 2 && !h.isHeld(kA));  // promoted: it is there after all
+    CHECK(!h.onStatus(kB, 1) && delivered == 2);                   // someone else's status
+
+    // Expiry: only after the direct link has been silent for the whole grace period.
+    CHECK(h.offer(kA, true, 1000, deliver));
+    CHECK(h.poll(100000, reachable).empty() && h.isHeld(kA));  // link still up: never expires
+    up = false;
+    CHECK(h.poll(129999, reachable).empty() && h.isHeld(kA));
+    auto gone = h.poll(130000, reachable);
+    CHECK(gone.size() == 1 && gone[0] == kA && delivered == 3 && !h.isHeld(kA));
+
+    CHECK(h.offer(kA, true, 0, deliver) && h.offer(kB, true, 0, deliver));
+    CHECK(h.releaseAll() == 2 && delivered == 5 && h.heldCount() == 0);  // room closed
+    CHECK(h.offer(kA, true, 0, deliver));
+    CHECK(h.clear() == 1 && delivered == 5 && h.heldCount() == 0);  // we left: nothing to tell
+
+    // A delivery may call straight back into the hold (leaving the room clears it) without deadlock.
+    auto leave = [&] {
+        ++delivered;
+        h.clear();
+    };
+    CHECK(h.offer(kA, true, 0, leave) && h.offer(kB, true, 0, deliver));
+    CHECK(!h.onStatus(kA, 1) && delivered == 6 && h.heldCount() == 0);
+    CHECK(h.offer(kA, true, 0, leave));
+    CHECK(h.poll(40000, reachable).size() == 1 && delivered == 7);
+}
+
 void testDisconnectHold() {
     printf("hold: transient disconnects are hidden from the game and recovered\n");
     int forwarded = 0, reaccepts = 0;
@@ -634,6 +690,11 @@ void testIat(const wchar_t* edfPath) {
     CHECK(dn::findImportSlot(edf, dll, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived") != nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_Platform_Tick") != nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_RemoveNotifyPeerConnectionClosed") != nullptr);
+    // Lobby hooks: plugin detection, the host's address, room-level disconnect hiding, diagnostics.
+    for (const char* name : {"EOS_Lobby_CreateLobby", "EOS_Lobby_JoinLobby", "EOS_Lobby_LeaveLobby",
+                             "EOS_Lobby_DestroyLobby", "EOS_Lobby_AddNotifyLobbyMemberUpdateReceived",
+                             "EOS_Lobby_KickMember", "EOS_Lobby_UpdateLobby"})
+        CHECK(dn::findImportSlot(edf, dll, name) != nullptr);
     // The receive hook relies on the game reading packets only through ReceivePacket.
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_GetNextReceivedPacketSize") == nullptr);
     CHECK(dn::findImportSlot(edf, dll, "EOS_P2P_NoSuchFunction") == nullptr);
@@ -742,6 +803,7 @@ int wmain(int argc, wchar_t** argv) {
     testRetransmitBudget();
     testDirectUpgradesUnreliable();
     testDisconnectHold();
+    testLobbyStatusHold();
     testHostRestart();
     testStalledLinkSurvives();
     testReplyFromOtherAddress();

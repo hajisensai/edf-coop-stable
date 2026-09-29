@@ -11,6 +11,7 @@
 
 #include <mutex>
 #include <string>
+#include <unordered_set>
 
 #include "eos_min.h"
 
@@ -36,6 +37,8 @@ public:
     // member attributes set before it joined until they change, so without this it would never see
     // our marker or the host's address. Thread-safe.
     void memberJoined();
+    // `member` left the room (or was removed): forget what we learnt about it. Thread-safe.
+    void memberGone(const std::string& member);
     // The direct-link address this player hosts on ("" = not hosting). Thread-safe.
     void setAddress(const std::string& address);
 
@@ -44,10 +47,13 @@ public:
 
     bool inLobby() const;
     bool isOwner() const;
-    // True when `remote` carries the marker in our current lobby.
-    bool hasMarker(EOS_ProductUserId remote) const;
+    // What we learnt about a member stays true for as long as it is in the room: our copy of the
+    // lobby has been seen to lose other members' attributes (a joiner saw the host's marker and
+    // address vanish seconds after joining), and a member's plugin or a host's address never change.
+    // True when `remote` carries the marker in our current lobby, or did since it joined.
+    bool hasMarker(EOS_ProductUserId remote);
     // The lobby owner and the address it advertises ("" when none). Owner may be null.
-    std::string ownerAddress(EOS_ProductUserId* owner) const;
+    std::string ownerAddress(EOS_ProductUserId* owner);
     // Diagnostics: what our copy of the lobby shows about its owner.
     std::string describeOwner() const;
 
@@ -55,6 +61,7 @@ private:
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.
     bool readAttribute(EOS_HLobbyDetails details, EOS_ProductUserId member, const char* key, std::string* value) const;
     EOS_HLobbyDetails copyDetailsLocked() const;
+    std::string idString(EOS_ProductUserId id) const;
 
     PFN_EOS_Lobby_UpdateLobbyModification updateModification_ = nullptr;
     PFN_EOS_Lobby_UpdateLobby update_ = nullptr;
@@ -65,6 +72,8 @@ private:
     PFN_EOS_LobbyDetails_GetLobbyOwner getOwner_ = nullptr;
     PFN_EOS_LobbyDetails_GetMemberAttributeCount getMemberAttributeCount_ = nullptr;  // optional
     PFN_EOS_LobbyDetails_GetMemberCount getMemberCount_ = nullptr;                    // optional
+    PFN_EOS_LobbyDetails_CopyMemberAttributeByIndex copyMemberAttributeByIndex_ = nullptr;  // optional
+    PFN_EOS_ProductUserId_ToString idToString_ = nullptr;
     PFN_EOS_LobbyDetails_Release releaseDetails_ = nullptr;
     PFN_EOS_Lobby_Attribute_Release releaseAttribute_ = nullptr;
     bool ready_ = false;
@@ -77,6 +86,8 @@ private:
     std::string address_;
     bool dirty_ = false;  // our attributes differ from what the lobby has
     int64_t seq_ = 0;     // EDF6DN_SEQ: makes every publish a real change that EOS sends to everyone
+    std::unordered_set<std::string> marked_;  // members seen with the marker since they joined
+    std::string knownOwner_, knownOwnerAddress_;  // the last address seen advertised, and by whom
 };
 
 }  // namespace dn

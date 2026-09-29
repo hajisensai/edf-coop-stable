@@ -57,6 +57,8 @@ struct Api {
     PFN_EOS_Lobby_JoinLobby gameJoinLobby = nullptr;
     PFN_EOS_Lobby_LeaveOrDestroy gameLeaveLobby = nullptr;
     PFN_EOS_Lobby_LeaveOrDestroy gameDestroyLobby = nullptr;
+    PFN_EOS_Lobby_KickMember gameKick = nullptr;
+    PFN_EOS_Lobby_UpdateLobby gameUpdateLobby = nullptr;
 };
 
 // The game's connection-closed handler, which we sit in front of. Never freed: its address is the
@@ -113,6 +115,7 @@ struct State {
     AutoJoin autoJoin;
     std::atomic<EOS_ProductUserId> lobbyUser{nullptr};
     std::unique_ptr<DisconnectHold> hold;
+    std::unique_ptr<LobbyStatusHold> lobbyHold;
     LobbyMarker marker;
     bool markerReady = false;
     std::mutex markedMutex;
@@ -169,13 +172,23 @@ EOS_ProductUserId idHandle(const std::string& s) {
     return id;
 }
 
-// A held peer stays hidden only while it demonstrably still plays: the direct link is up AND game
-// data from it arrived recently. A peer whose plugin keeps pinging after its game stopped (left,
-// crashed to menu) must not stay held, or everyone would wait for it at the next sync point.
-constexpr uint64_t kDirectDataFreshMs = 10000;
+// A held peer stays hidden while its direct link answers: the game's traffic to it no longer flows over
+// EOS, so what EOS says about it does not matter. The link pings every second, also in menus where
+// the game itself sends next to nothing. A peer whose game stopped does not linger: leaving the room
+// reaches us as a lobby "left" (which releases it), and its plugin closes the link with it.
+constexpr uint64_t kDirectDataFreshMs = 10000;  // diagnostics: game data counts as recent
+constexpr uint64_t kLinkAliveMs = 5000;
 bool directAlive(const std::string& remote) {
     DirectNet* net = g.net;
-    return net && !remote.empty() && net->canRoute(remote) && net->heardFromRecently(remote, kDirectDataFreshMs);
+    return net && !remote.empty() && net->canRoute(remote) && net->linkAlive(remote, kLinkAliveMs);
+}
+
+// Whether the direct link says `remote` still plays (see directAlive). For ourselves: any of our
+// direct links answers.
+bool reachableDirectly(const std::string& remote) {
+    DirectNet* net = g.net;
+    if (!net || remote.empty()) return false;
+    return remote == idString(g.lobbyUser.load()) ? net->anyLinkAlive(kLinkAliveMs) : net->linkAlive(remote, kLinkAliveMs);
 }
 
 std::string peerLabel(EOS_ProductUserId id) {
@@ -302,32 +315,74 @@ EOS_EResult hookCloseConnections(EOS_HP2P h, const EOS_P2P_CloseConnectionsOptio
 
 void leftLobby(const char* why);
 
+enum : int32_t { kJoined = 0, kLeft = 1, kDisconnected = 2, kKicked = 3, kPromoted = 4, kClosed = 5 };
+
+// What a lobby status means for us, applied when the game gets to see it.
+void applyLobbyStatus(const std::string& target, bool self, int32_t s) {
+    bool gone = s == kLeft || s == kDisconnected || s == kKicked;
+    // The lobby is authoritative about who is still in the room. A held disconnect of someone who
+    // left must reach the game now; a live direct link would otherwise keep it held forever.
+    // Delivered before the lobby event, the same order the game sees without the plugin.
+    size_t released = 0;
+    if (g.hold && gone) released = g.hold->release(target);
+    if (g.hold && s == kClosed) released = g.hold->releaseAll();
+    if (gone && !self) g.marker.memberGone(target);
+    if (self && s == kPromoted) g.marker.promoted();
+    if (!self && s == kJoined) g.marker.memberJoined();
+    if (s == kClosed || (self && gone))
+        leftLobby(s == kClosed ? "the room was closed" : s == kDisconnected ? "we lost the lobby service" : "we left the room");
+    if (released) logf("RESILIENCE handed %zu held disconnect(s) to the game because of the lobby change", released);
+}
+
+// A lobby status copied out of the EOS callback so it can reach the game later.
+struct LobbyStatusEvent {
+    MemberStatusHandler* handler;
+    EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo info;
+    std::string lobbyId;
+    std::string target;
+    bool self;
+};
+
+void deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
+    applyLobbyStatus(e->target, e->self, e->info.CurrentStatus);
+    e->info.LobbyId = e->lobbyId.c_str();
+    e->handler->callback(&e->info);
+}
+
 void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* i) {
-    if (!g_shutdown) {
-        static const char* names[] = {"JOINED", "LEFT", "DISCONNECTED", "KICKED", "PROMOTED", "CLOSED"};
-        int32_t s = i->CurrentStatus;
-        logf("LOBBY member %s -> %s%s", shortId(idString(i->TargetUserId)).c_str(),
-             s >= 0 && s < 6 ? names[s] : "?",
-             s == 2 ? " (lost its connection to Epic's lobby service, not the P2P link)" : "");
-        // The lobby is authoritative about who is still in the room. A held disconnect of someone who
-        // left must reach the game now; a live direct link would otherwise keep it held forever.
-        // Delivered before the lobby event, the same order the game sees without the plugin.
-        size_t released = 0;
-        if (g.hold && (s == 1 || s == 2 || s == 3)) released = g.hold->release(idString(i->TargetUserId));
-        if (g.hold && s == 5) released = g.hold->releaseAll();
-        std::string target = idString(i->TargetUserId);
-        bool self = !target.empty() && target == idString(g.lobbyUser.load());
-        if (self && s == 4) g.marker.promoted();
-        if (!self && s == 0) g.marker.memberJoined();
-        if (s == 5 || (self && (s == 1 || s == 2 || s == 3)))
-            leftLobby(s == 5 ? "the room was closed" : s == 2 ? "we lost the lobby service" : "we left the room");
-        if (released)
-            logf("RESILIENCE handed %zu held disconnect(s) to the game because of the lobby change", released);
-    }
     auto* handler = static_cast<MemberStatusHandler*>(i->ClientData);
-    EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo copy = *i;
-    copy.ClientData = handler->clientData;
-    handler->callback(&copy);
+    auto e = std::make_shared<LobbyStatusEvent>();
+    e->handler = handler;
+    e->info = *i;
+    e->info.ClientData = handler->clientData;
+    if (g_shutdown) {
+        handler->callback(&e->info);
+        return;
+    }
+    static const char* names[] = {"JOINED", "LEFT", "DISCONNECTED", "KICKED", "PROMOTED", "CLOSED"};
+    int32_t s = i->CurrentStatus;
+    e->lobbyId = i->LobbyId ? i->LobbyId : "";
+    e->target = idString(i->TargetUserId);
+    e->self = !e->target.empty() && e->target == idString(g.lobbyUser.load());
+    logf("LOBBY member %s -> %s%s", shortId(e->target).c_str(), s >= 0 && s < 6 ? names[s] : "?",
+         s == kDisconnected ? " (lost its connection to Epic's lobby service, not the P2P link)" : "");
+
+    // Epic's lobby service dropping someone says nothing about the game when its traffic runs over
+    // our direct link: while that link shows the member (or us) still playing, the game is not told.
+    if (s == kDisconnected && g.lobbyHold && !e->target.empty() &&
+        g.lobbyHold->offer(e->target, reachableDirectly(e->target), GetTickCount64(), [e] { deliverLobbyStatus(e); })) {
+        logf("RESILIENCE %s lost Epic's lobby service but the direct link is up: hidden from the game",
+             e->self ? "we" : shortId(e->target).c_str());
+        return;
+    }
+    if (g.lobbyHold && !e->target.empty() && g.lobbyHold->onStatus(e->target, s)) {
+        logf("RESILIENCE %s back in Epic's lobby service; the game never saw the drop",
+             e->self ? "we are" : (shortId(e->target) + " is").c_str());
+        g.marker.memberJoined();  // a member coming back needs our attributes (and ours may be gone)
+        return;
+    }
+    if (s == kClosed && g.lobbyHold) g.lobbyHold->releaseAll();
+    deliverLobbyStatus(e);
 }
 
 EOS_NotificationId hookAddNotifyMemberStatus(EOS_HLobby h, const EOS_Lobby_AddNotifyLobbyMemberStatusReceivedOptions* o,
@@ -426,12 +481,35 @@ void stopAutoJoinLocked(const char* why) {
 void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.marker.left();
+    if (g.lobbyHold) g.lobbyHold->clear();  // the game left too; other members' statuses are moot
     {
         std::lock_guard<std::mutex> lock(g.markedMutex);
         g.loggedHostAddress.clear();
     }
     std::lock_guard<std::mutex> lock(g.autoJoin.mu);
     stopAutoJoinLocked(why);
+}
+
+// Diagnostics: the game removes a player from the room by itself (the local player kicking someone
+// goes through here too). Tells whether the direct link still showed that player playing.
+void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) {
+    if (o && !g_shutdown) {
+        std::string target = idString(o->TargetUserId);
+        DirectNet* net = g.net;
+        logf("GAME kicks %s from the room (direct link %s, game data from it %s, P2P disconnect %s, lobby status %s)",
+             shortId(target).c_str(), reachableDirectly(target) ? "up" : "down",
+             net && net->heardFromRecently(target, kDirectDataFreshMs) ? "recent" : "none for 10 s",
+             g.hold && g.hold->isHeld(target) ? "held by us" : "not held",
+             g.lobbyHold && g.lobbyHold->isHeld(target) ? "hidden by us" : "normal");
+    }
+    g.api.gameKick(h, o, clientData, cb);
+}
+
+// Diagnostics: when the game rewrites the room info, for correlating with members' attributes
+// vanishing from other players' copies of the lobby.
+void hookUpdateLobby(EOS_HLobby h, const EOS_Lobby_UpdateLobbyOptions* o, void* clientData, EOS_Lobby_OnLobbyIdCallback cb) {
+    if (!g_shutdown) logRateLimited("game-update-lobby", 30000, "GAME updated the room info");
+    g.api.gameUpdateLobby(h, o, clientData, cb);
 }
 
 void hookLeaveLobby(EOS_HLobby h, const void* o, void* clientData, void* cb) {
@@ -641,6 +719,11 @@ void hookPlatformTick(EOS_HPlatform platform) {
             logf("RESILIENCE %s did not come back within %u s; disconnect handed to the game",
                  shortId(remote).c_str(), g.config.graceMs / 1000);
     }
+    if (g.lobbyHold && g.lobbyHold->heldCount()) {
+        for (const auto& remote : g.lobbyHold->poll(GetTickCount64(), reachableDirectly))
+            logf("RESILIENCE %s: direct link silent for %u s; its lobby disconnect handed to the game",
+                 shortId(remote).c_str(), g.config.graceMs / 1000);
+    }
 }
 
 EOS_HP2P hookGetP2PInterface(EOS_HPlatform platform) {
@@ -757,9 +840,11 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
 
     // Created before the hooks that read it go live (the game may already be ticking). If the hooks it
     // needs cannot be installed it just stays empty: only the connection-closed wrapper ever holds.
-    if (config.hold != Config::Hold::Off)
+    if (config.hold != Config::Hold::Off) {
         g.hold = std::make_unique<DisconnectHold>(
             DisconnectHold::Options{config.graceMs, 2000, config.hold == Config::Hold::All});
+        g.lobbyHold = std::make_unique<LobbyStatusHold>(config.graceMs);
+    }
 
     // Diagnostics and resilience are optional: failing here must not disable the rest.
     hook(game, "EOS_P2P_CloseConnection", hookCloseConnection, g.api.gameClose);
@@ -773,6 +858,8 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     hook(game, "EOS_Lobby_AddNotifyLobbyMemberUpdateReceived", hookAddNotifyMemberUpdate, g.api.gameAddMemberUpdate);
     hook(game, "EOS_Lobby_LeaveLobby", hookLeaveLobby, g.api.gameLeaveLobby);
     hook(game, "EOS_Lobby_DestroyLobby", hookDestroyLobby, g.api.gameDestroyLobby);
+    hook(game, "EOS_Lobby_KickMember", hookKickMember, g.api.gameKick);
+    hook(game, "EOS_Lobby_UpdateLobby", hookUpdateLobby, g.api.gameUpdateLobby);
     logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
     if (config.hold != Config::Hold::Off) {
         // Holding needs all of: our closed wrapper, its unregister hook, the tick to expire events,

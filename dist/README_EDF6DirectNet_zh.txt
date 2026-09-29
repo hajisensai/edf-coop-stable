@@ -1,7 +1,7 @@
-EDF6DirectNet 0.3.3 —— EDF6 联机稳定插件
+EDF6DirectNet 0.3.4 —— EDF6 联机稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6DirectNet.txt / 日本語: README_EDF6DirectNet_ja.txt
-（实验性：自动直连已在两台电脑实测通过；掉线不重来还没实测。遇到问题请带日志提 Issue）
+（实验性：已在真实的四人联机中验证。遇到问题请带日志提 Issue）
 
 【安装 / 卸载】
 先把 zip 完整解压，再双击 INSTALL.bat，然后从 Steam 正常启动游戏。
@@ -12,6 +12,7 @@ English: README_EDF6DirectNet.txt / 日本語: README_EDF6DirectNet_ja.txt
 ・防不同步：联机数据丢包后自动重发。只要你装了，你发出的数据就不会丢；大家都装效果最好。
 ・掉线不重来：网络抖一下断开时，插件先不让游戏踢人，后台自动重连，最多等 30 秒。
   只对同样装了插件的人生效（自动识别），和没装的人一起玩时照原版处理。
+  只要直连还通，Epic 房间服务自己的抽风也踢不掉任何人。
 ・自动直连：进别人的房间时，如果房主开了公网直连，自动直接连房主，不用填任何东西。
 ・掉线日志：Mods\Plugins\EDF6DirectNet.log。掉线了把它发出来就能查原因。
 

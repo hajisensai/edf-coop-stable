@@ -1,8 +1,8 @@
-EDF6DirectNet 0.3.3 - online stability plugin for EARTH DEFENSE FORCE 6
+EDF6DirectNet 0.3.4 - online stability plugin for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6DirectNet_zh.txt / 日本語: README_EDF6DirectNet_ja.txt
-(Experimental: auto-connect has been verified between two PCs; surviving drops has not been
-tested between two PCs yet. If something goes wrong, open an Issue and attach the log.)
+(Experimental, verified in real four-player online play. If something goes wrong, open an Issue
+and attach the log.)
 
 [Install / uninstall]
 Extract the whole zip first, double-click INSTALL.bat, then start the game from Steam as usual.
@@ -15,6 +15,7 @@ If EDFModLoader is missing, the official build is installed too; an existing one
 - Survive drops: when the connection hiccups, the plugin keeps the game from kicking the player and
   reconnects in the background, for up to 30 seconds. Only for players who also run the plugin
   (detected automatically); players without it are handled like the original game.
+  While the direct link works, Epic's own room-service hiccups cannot drop anyone either.
 - Auto-connect: when you join a room whose host enabled the direct link, you connect straight to the
   host. Nothing to enter.
 - Log: Mods\Plugins\EDF6DirectNet.log. Share it after a disconnect to find the cause.

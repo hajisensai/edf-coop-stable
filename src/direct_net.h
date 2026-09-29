@@ -73,6 +73,12 @@ public:
 
     // True when a game packet from `remote` arrived over the direct link within `windowMs`.
     bool heardFromRecently(const std::string& remote, uint64_t windowMs);
+    // True when the direct link that carries `remote`'s traffic answered within `windowMs` (links
+    // ping every second, in menus too). A joiner reaches other members through the host, which drops
+    // them from its roster once their own link to it times out.
+    bool linkAlive(const std::string& remote, uint64_t windowMs);
+    // True when any of our direct links answered within `windowMs`.
+    bool anyLinkAlive(uint64_t windowMs);
 
     std::vector<std::string> directMembers();
     std::string statusLine();

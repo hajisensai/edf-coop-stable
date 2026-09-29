@@ -8,7 +8,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 > 非官方 Mod，与 D3 PUBLISHER / SANDLOT / Epic Games 无关。只在本机进程内接管网络调用，不改动任何游戏文件；`Enabled=0` 或删掉 DLL 即恢复原版。
 >
-> **状态：实验性。** 900+ 项自动化测试通过；自动直连已在两台电脑的真实联机中验证（0.3.2）；跨两台电脑的断线宽限尚未实测。出问题请附日志提 [Issue](https://github.com/hajisensai/edf-coop-stable/issues)。
+> **状态：实验性。** 900+ 项自动化测试通过；自动直连和断线宽限已在真实的四人联机中验证（0.3.2：所有人都走直连，7 次连接中断都没让游戏察觉）。出问题请附日志提 [Issue](https://github.com/hajisensai/edf-coop-stable/issues)。
 
 ## 它解决什么
 
@@ -100,7 +100,8 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 - 有标记，且之前连通过 → 宽限，期间每 2 秒调用 `AcceptConnection` 请求重连；
 - 没有标记 → 原版处理；
-- 公网直连成员 → 只要直连还活着就一直宽限（它的游戏数据本就不走 EOS）；
+- 公网直连成员 → 只要直连还有回应就一直宽限（每秒一次心跳，菜单里也有）；它的游戏数据本就不走 EOS；
+- Epic 房间服务报告某成员掉线（`DISCONNECTED`：他和 Epic 房间服务断了，不是和游戏断了），而他的直连还有回应 → 不告诉游戏。EOS 之后把他放回房间（`JOINED`）时，两条通知一起吞掉，游戏完全察觉不到。只有直连连续 `GraceSeconds` 秒没回应，或者他真的离开、被踢，才告诉游戏。对自己也一样；
 - 对方真的离开大厅 → 立即把断线交给游戏。
 
 ### 公网直连
@@ -114,6 +115,8 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `LOBBY plugin detection UNAVAILABLE`：无法识别对方是否装了插件，断线宽限只对直连成员生效。
 - `EOS incoming packet queue FULL`：EOS 队列满开始丢包，请附日志提 Issue。
 - `RESILIENCE ... RECOVERED` 表示一次断线被成功隐藏；`did not come back within` 表示超时后交给了游戏。
+- `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic 房间服务把某人踢掉又放了回来，游戏没察觉。`direct link silent for ...` 表示他真的掉了，已交给游戏。
+- `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
 - `DIRECT ignored hello for ... its link is live`：有人用某个在线玩家的身份从别的地址发起连接，已被拒绝。偶尔一条可能是对方换了网络（5 秒后会自动接受）；频繁出现说明有人在捣乱，建议设 `Key=`。
 
@@ -163,7 +166,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 - 直连由房主转发：某个加入者的直连在重连的那一瞬间，房主正替他转发、尚未被确认的少量数据会丢失（游戏随后回落到 EOS）。
 - 不设 `Key=` 时直连没有身份认证：知道房主地址和某玩家 EOS ID 的人可以伪造该玩家的数据。设了 Key 能防伪造，但仍不能防截获后的 `Bye`/成员表重放（需要升级协议版本，留待下个大版本）。
 - UPnP 映射是永久的，游戏退出后不会自动删除（端口上没有程序监听时无害）；需要时在路由器管理页删除名为 `EDF6DirectNet` 的映射。
-- 断线宽限尚未在真实多人联机中验证，欢迎提交带日志的 Issue。
+- 直连本身断了就什么都瞒不住：某个玩家自己的网络断开超过 `GraceSeconds` 秒，游戏照原版处理。
 
 ## 许可证
 

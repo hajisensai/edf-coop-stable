@@ -151,4 +151,88 @@ std::vector<std::string> DisconnectHold::poll(uint64_t nowMs,
     return expired;
 }
 
+bool LobbyStatusHold::offer(const std::string& remote, bool reachable, uint64_t nowMs, std::function<void()> deliver) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& h : held_)
+        if (h.remote == remote) return true;  // a repeat; the first one is still hidden
+    if (!reachable) return false;
+    held_.push_back(Held{remote, nowMs, std::move(deliver)});
+    return true;
+}
+
+bool LobbyStatusHold::onStatus(const std::string& remote, int32_t status) {
+    constexpr int32_t kJoined = 0, kPromoted = 4;
+    std::function<void()> due;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = std::find_if(held_.begin(), held_.end(), [&](const Held& h) { return h.remote == remote; });
+        if (it == held_.end()) return false;
+        if (status != kJoined && status != kPromoted) due = std::move(it->deliver);
+        held_.erase(it);
+    }
+    if (due) due();
+    return status == kJoined;
+}
+
+size_t LobbyStatusHold::releaseAll() {
+    std::vector<Held> due;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        due.swap(held_);
+    }
+    for (auto& h : due)
+        if (h.deliver) h.deliver();
+    return due.size();
+}
+
+size_t LobbyStatusHold::clear() {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t n = held_.size();
+    held_.clear();
+    return n;
+}
+
+bool LobbyStatusHold::isHeld(const std::string& remote) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return std::any_of(held_.begin(), held_.end(), [&](const Held& h) { return h.remote == remote; });
+}
+
+size_t LobbyStatusHold::heldCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return held_.size();
+}
+
+std::vector<std::string> LobbyStatusHold::poll(uint64_t nowMs,
+                                               const std::function<bool(const std::string&)>& reachable) {
+    std::vector<std::string> remotes;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& h : held_) remotes.push_back(h.remote);
+    }
+    // Ask the direct transport outside our lock (it has its own).
+    std::unordered_set<std::string> alive;
+    for (const auto& r : remotes)
+        if (reachable && reachable(r)) alive.insert(r);
+
+    std::vector<Held> due;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto it = held_.begin(); it != held_.end();) {
+            if (alive.count(it->remote)) it->reachableAtMs = nowMs;
+            if (nowMs - it->reachableAtMs < graceMs_) {
+                ++it;
+                continue;
+            }
+            due.push_back(std::move(*it));
+            it = held_.erase(it);
+        }
+    }
+    std::vector<std::string> delivered;
+    for (auto& h : due) {
+        delivered.push_back(h.remote);
+        if (h.deliver) h.deliver();  // unlocked: it may call straight back into us
+    }
+    return delivered;
+}
+
 }  // namespace dn

@@ -226,3 +226,7 @@ The auto-updater of every installed copy downloads `EDF6Coop.dll` / `.dll.sig` f
 ## License
 
 MIT, see [LICENSE](LICENSE). The bundled EDFModLoader is MIT; its license is included in the package as `EDFModLoader_LICENSE.txt`. The room part (`multislot/`, by momotori01) is public domain ([Unlicense](multislot/LICENSE)).
+
+## Acknowledgements
+
+- EDF6MultiSlot was originally written by momotori01: [EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD) (public domain).

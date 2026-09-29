@@ -226,3 +226,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1        # -> release\EDF6Coo
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。附带的 EDFModLoader 为 MIT，许可证随包在 `EDFModLoader_LICENSE.txt`。房间部分（`multislot/`，momotori01 作）为公有领域（[Unlicense](multislot/LICENSE)）。
+
+## 致谢
+
+- EDF6MultiSlot 原作者 momotori01：[EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD)（公有领域）。

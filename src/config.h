@@ -18,7 +18,7 @@ struct Config {
     uint16_t eosFixedPort = 0;  // 0 = leave EOS on random ports
     int eosRelay = -1;          // -1 = leave default, 0 = no relays, 1 = allow, 2 = force
     // Hide transient EOS connection loss from the game while reconnecting (see hold.h):
-    // off, auto (direct-link members only), all (every member runs the plugin).
+    // off, auto (direct-link members and members carrying the lobby marker), all (every member runs the plugin).
     enum class Hold { Off, Auto, All } hold = Hold::Auto;
     uint32_t graceMs = 30000;  // bounded: a hidden disconnect may make everyone wait at a sync point
     // Send EDF6's UnreliableUnordered game packets as ReliableUnordered (EOS and direct link).

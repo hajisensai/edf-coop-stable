@@ -17,7 +17,8 @@ function Find-SteamLibraries {
         $libs += $root
         $vdf = Join-Path $root 'steamapps\libraryfolders.vdf'
         if (Test-Path $vdf) {
-            foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) {
+            # The vdf is UTF-8 without BOM: PowerShell 5.1 would read it as ANSI and garble non-ASCII library paths.
+            foreach ($m in [regex]::Matches((Get-Content $vdf -Raw -Encoding UTF8), '"path"\s+"([^"]+)"')) {
                 $libs += ($m.Groups[1].Value -replace '\\\\', '\')
             }
         }
@@ -43,7 +44,11 @@ if (-not $game) {
     Write-Host '没有自动找到 EDF6 的安装位置。' -ForegroundColor Yellow
     Write-Host '在 Steam 库里右键 EDF6 → 管理 → 浏览本地文件，把打开的文件夹路径粘贴到这里：'
     $game = (Read-Host '游戏文件夹').Trim('"', ' ')
-    if (-not (Test-Path (Join-Path $game 'EDF6.exe'))) { Write-Host '这个文件夹里没有 EDF6.exe。' -ForegroundColor Red; exit 1 }
+}
+# Also covers -GameDir and an empty answer (Join-Path rejects an empty path with a raw error).
+if (-not $game -or -not (Test-Path -LiteralPath (Join-Path $game 'EDF6.exe'))) {
+    Write-Host "这个文件夹里没有 EDF6.exe：$game" -ForegroundColor Red
+    exit 1
 }
 Write-Host "游戏位置：$game"
 
@@ -65,6 +70,11 @@ if ($Uninstall) {
         Remove-Item -LiteralPath (Join-Path $plugins $f) -ErrorAction SilentlyContinue
     }
     Write-Host '已卸载 EDF6DirectNet。游戏恢复原样（EDFModLoader 和其他 Mod 没有动）。' -ForegroundColor Green
+    # Deleting a firewall rule needs administrator rights; reading it does not.
+    if (Get-NetFirewallRule -DisplayName 'EDF6 DirectNet (UDP in)' -ErrorAction SilentlyContinue) {
+        Write-Host '之前添加的防火墙放行规则还在。不需要的话，以管理员身份打开命令提示符运行：'
+        Write-Host '  netsh advfirewall firewall delete rule name="EDF6 DirectNet (UDP in)"'
+    }
     exit 0
 }
 

@@ -17,14 +17,29 @@ $entries = [ordered]@{
     'EDFModLoader/LICENSE.txt'          = (Join-Path $ModLoaderDir 'LICENSE.txt')
     'LICENSE.txt'                       = 'LICENSE'
 }
+$sources = [ordered]@{}
+foreach ($name in $entries.Keys) {
+    $src = $entries[$name]
+    if (-not [System.IO.Path]::IsPathRooted($src)) { $src = Join-Path $root $src }
+    if (-not (Test-Path -LiteralPath $src)) { throw "missing $src (run build.ps1 first?)" }
+    $sources[$name] = $src
+}
+# The version is written in three places; a mismatch ships a zip whose log and readme lie about it.
+$pluginVersion = [regex]::Match((Get-Content (Join-Path $root 'src\plugin.cpp') -Raw), 'kVersionText = "([^"]+)"').Groups[1].Value
+$readmeVersion = [regex]::Match((Get-Content (Join-Path $root 'dist\README_EDF6DirectNet.txt') -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value
+if ($pluginVersion -ne $Version -or $readmeVersion -ne $Version) {
+    throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion, dist\README_EDF6DirectNet.txt $readmeVersion"
+}
+$newestSource = Get-ChildItem (Join-Path $root 'src') -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ((Get-Item $sources['Mods/Plugins/EDF6DirectNet.dll']).LastWriteTime -lt $newestSource.LastWriteTime) {
+    throw "build\EDF6DirectNet.dll is older than src\$($newestSource.Name); run build.ps1 first"
+}
 if (Test-Path $zipPath) { Remove-Item $zipPath }
 $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
 try {
-    foreach ($name in $entries.Keys) {
-        $src = $entries[$name]
-        if (-not [System.IO.Path]::IsPathRooted($src)) { $src = Join-Path $root $src }
+    foreach ($name in $sources.Keys) {
         # Forward slashes: backslash entry names break extraction in many tools.
-        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $src, $name, 'Optimal') | Out-Null
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $sources[$name], $name, 'Optimal') | Out-Null
     }
 } finally { $zip.Dispose() }
 Get-Item $zipPath | Select-Object Name, Length

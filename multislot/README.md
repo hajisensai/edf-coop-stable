@@ -8,7 +8,18 @@ Originally written by **momotori01** and published as part of [EARTH-DEFENSE-FOR
 
 The player-facing manual (Japanese) is [packaging/README_EDF6MultiSlot.txt](packaging/README_EDF6MultiSlot.txt); it ships in the package.
 
-## What changed here (1.5.13)
+## What changed here (1.5.14)
+
+- **Crash after refusing to load (1.5.13 regression):** with `Enabled=0`, or when a game update or another mod made the plugin back out without changing anything, the game crashed about 0.2 s later: the log writer thread outlived the unloaded DLL. The writer now starts only once the plugin stays loaded, and an unload is logged as `UNLOADED`, not `SHUTDOWN`.
+- **Rooms above this build's size:** the member list is cut to the build's player count, so a larger room (another mod, or a hostile host) can no longer crash everyone.
+- **Log survives a hard kill:** lines are queued in a memory-mapped `EDF6MultiSlot.log.queue` that the next start replays, so a task-manager kill or `__fastfail` no longer loses the last lines. Member names can no longer forge log lines, and long CJK names are no longer shown as `(no name)`.
+- **Copy armor:** the pickup count is computed in at most 24 steps and absurd values reported by other members are ignored, so they can no longer freeze the game.
+- **Crash reports:** thunks and call stubs register unwind data (stack walks and exceptions pass through hooks), the plugin's own guarded probes no longer count as crashes, and faults inside the plugin get a dump too.
+- **CI:** `.github/workflows/multislot.yml` builds 8/10/12 and runs every test that does not need the game (`-DMULTISLOT_CI=ON`, a marked placeholder layout that `package.ps1` refuses to package).
+
+The game-dependent tests (`PatchTablesMatchEDF`, `PluginLoad_*`) have not been run on this version yet; run `build.cmd 8/10/12` on a machine with the game before packaging.
+
+## 1.5.13
 
 - **Less stutter:** log lines no longer open, write and close the log file on the game's own threads. They are queued and written in batches by a writer thread; crash reports and the shutdown line are still written at once.
 - **Less EOS work:** with `NetLog=1` the EOS SDK log level is raised only for the seven categories the log keeps (lobby, P2P, voice chat, ...), not for all of them. The log content is unchanged.

@@ -15,14 +15,14 @@
 
 namespace {
 
-constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 6;
-constexpr const char* kVersionText = "0.3.6";
+constexpr uint32_t kVersionMajor = 0, kVersionMinor = 4, kVersionPatch = 0;
+constexpr const char* kVersionText = "0.4.0";
 
 }  // namespace
 
 // The version as the auto-updater of an older build checks it inside a downloaded file (exported,
 // so the linker keeps it). package.ps1 checks that it matches kVersionText.
-extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.3.6";
+extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.4.0";
 
 namespace {
 

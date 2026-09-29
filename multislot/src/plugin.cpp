@@ -36,7 +36,7 @@
 namespace multislot {
 namespace {
 
-constexpr const char* kVersion = "1.5.13";
+constexpr const char* kVersion = "1.5.14";
 // CMake's project VERSION is the one EDFModLoader is told (PluginInfo); kVersion adds only a pre-release tag to it.
 #define MULTISLOT_TEXT2(x) #x
 #define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)

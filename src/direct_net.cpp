@@ -230,9 +230,9 @@ bool DirectNet::canRoute(const std::string& remote) {
     if (localPuid_.empty() || remote == localPuid_) return false;
     if (opt_.mode == Mode::Host) {
         auto it = clients_.find(remote);
-        return it != clients_.end() && it->second.up;
+        return it != clients_.end() && usable(it->second);
     }
-    return hostLink_ && hostLink_->up && (remote == hostLink_->puid || contains(roster_, remote));
+    return hostLink_ && usable(*hostLink_) && (remote == hostLink_->puid || contains(roster_, remote));
 }
 
 bool DirectNet::send(const std::string& remote, const std::string& socketName, uint8_t channel, uint8_t reliability,
@@ -242,8 +242,8 @@ bool DirectNet::send(const std::string& remote, const std::string& socketName, u
     Link* link = nullptr;
     if (opt_.mode == Mode::Host) {
         auto it = clients_.find(remote);
-        if (it != clients_.end() && it->second.up) link = &it->second;
-    } else if (hostLink_ && hostLink_->up && (remote == hostLink_->puid || contains(roster_, remote))) {
+        if (it != clients_.end() && usable(it->second)) link = &it->second;
+    } else if (hostLink_ && usable(*hostLink_) && (remote == hostLink_->puid || contains(roster_, remote))) {
         link = &*hostLink_;
     }
     if (!link) return false;
@@ -416,8 +416,15 @@ void DirectNet::routeData(DataMsg msg) {
         return;
     }
     if (opt_.mode != Mode::Host) return;
+    if (msg.dst == msg.src) {
+        // Bounced back over the sender's own link, every packet would sit in our retransmit queue for
+        // as long as the sender cares not to acknowledge it.
+        logRateLimited("forward-self", 5000, "DIRECT dropped a packet %s addressed to itself",
+                       shortId(msg.src).c_str());
+        return;
+    }
     auto it = clients_.find(msg.dst);
-    if (it == clients_.end() || !it->second.up) {
+    if (it == clients_.end() || !usable(it->second)) {
         logRateLimited("forward-miss", 5000, "DIRECT cannot forward %s -> %s: destination not connected directly",
                        shortId(msg.src).c_str(), shortId(msg.dst).c_str());
         return;
@@ -718,13 +725,24 @@ void DirectNet::tick(uint64_t now) {
     auto timedOut = [&](const Link& link) {
         return now - link.lastRecvMs > opt_.linkTimeoutMs || link.tx.oldestPendingAgeMs(now) > opt_.linkTimeoutMs;
     };
+    // True (and logged) when `link` has to close: silent too long, or holding more unacknowledged data
+    // than a working peer ever lets pile up.
+    auto closing = [&](const Link& link, const char* who) {
+        if (link.tx.overloaded()) {
+            logf("DIRECT %s dropped: %zu packets (%zu KB) sent but never acknowledged", who, link.tx.pendingCount(),
+                 link.tx.pendingBytes() / 1024);
+            return true;
+        }
+        if (!timedOut(link)) return false;
+        logf("DIRECT %s timed out (no reply for %u ms, %zu packets unacknowledged)", who, opt_.linkTimeoutMs,
+             link.tx.pendingCount());
+        return true;
+    };
 
     if (opt_.mode == Mode::Host) {
         bool changed = false;
         for (auto it = clients_.begin(); it != clients_.end();) {
-            if (timedOut(it->second)) {
-                logf("DIRECT client %s timed out (no reply for %u ms, %zu packets unacknowledged)",
-                     shortId(it->first).c_str(), opt_.linkTimeoutMs, it->second.tx.pendingCount());
+            if (closing(it->second, ("client " + shortId(it->first)).c_str())) {
                 it = clients_.erase(it);
                 changed = true;
                 continue;
@@ -741,8 +759,8 @@ void DirectNet::tick(uint64_t now) {
         return;
     }
 
-    if (hostLink_ && timedOut(*hostLink_)) {
-        logf("DIRECT host link timed out (no reply for %u ms), reconnecting", opt_.linkTimeoutMs);
+    if (hostLink_ && closing(*hostLink_, "host link")) {
+        logf("DIRECT reconnecting to the host");
         hostLink_.reset();
         roster_.clear();
         localNonce_ = randomNonce();

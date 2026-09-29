@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -404,6 +405,89 @@ struct RawPeer {
         return n;
     }
 };
+
+// Sends `m` to 127.0.0.1:`port` from `peer`'s socket.
+void sendTo(RawPeer& peer, uint16_t port, const dn::Message& m, const std::string& key = "") {
+    auto dg = dn::encode(m, key);
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(peer.s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+           reinterpret_cast<sockaddr*>(&to), sizeof(to));
+}
+
+// The next datagram of `type` arriving at `peer` within `ms`.
+std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms) {
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        int got = recv(peer.s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+        if (got <= 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        auto m = dn::decode(buf, static_cast<size_t>(got), "", nullptr);
+        if (m && m->type == type) return m;
+    }
+    return std::nullopt;
+}
+
+// A hand-driven client: says hello as `puid` and keeps the link epoch the host welcomed it with.
+struct RawClient {
+    RawPeer peer;
+    uint16_t port = 0;
+    std::string puid;
+    uint32_t nonce = 0;
+    uint32_t epoch = 0;
+
+    bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce) {
+        port = hostPort;
+        puid = id;
+        nonce = sessionNonce;
+        dn::Message h;
+        h.type = dn::MsgType::Hello;
+        h.hello.nonce = nonce;
+        h.hello.puid = puid;
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            sendTo(peer, port, h);
+            auto w = receiveFrom(peer, dn::MsgType::Welcome, 500);
+            if (w && w->welcome.clientNonce == nonce) {
+                epoch = dn::linkEpoch(nonce, w->welcome.hostNonce);
+                return true;
+            }
+        }
+        return false;
+    }
+    void data(uint32_t seq, const std::string& dst, const std::vector<uint8_t>& payload) {
+        dn::Message m;
+        m.type = dn::MsgType::Data;
+        m.epoch = epoch;
+        m.data.seq = seq;
+        m.data.src = puid;
+        m.data.dst = dst;
+        m.data.socketName = "EDF6";
+        m.data.channel = 1;
+        m.data.reliability = seq ? 1 : 0;
+        m.data.payload = payload;
+        sendTo(peer, port, m);
+    }
+};
+
+void testNoReflectionToSender() {
+    printf("direct: the host never sends a client's packets back to that client\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawClient c;
+    CHECK(c.connect(host.boundPort(), kA, 0x51));
+    for (uint32_t seq = 1; seq <= 50; ++seq) c.data(seq, kA, payloadFor(seq));  // addressed to itself
+    c.data(0, kA, payloadFor(0));
+    CHECK(c.peer.count(dn::MsgType::Data, 500) == 0);
+    c.data(51, kHost, payloadFor(51));  // the link still works for real traffic
+    dn::Delivered d;
+    CHECK(waitFor([&] { return host.pop(nullptr, 1170, d); }, 2000) && d.src == kA && d.data == payloadFor(51));
+}
 
 void testReplyFromOtherAddress() {
     // A host bound to the wildcard address answers from whatever source address the OS picks for the
@@ -1020,6 +1104,47 @@ void testNetif() {
     }
 }
 
+void testReliableBacklogLimit() {
+    printf("reliable: a peer that never acknowledges makes the link overloaded, by count and by bytes\n");
+    dn::ReliableSender count;
+    for (uint32_t i = 0; i < 8192; ++i) count.track(count.nextSeq(), std::vector<uint8_t>(20), 1);
+    CHECK(!count.overloaded());
+    count.track(count.nextSeq(), std::vector<uint8_t>(20), 1);
+    CHECK(count.overloaded() && count.pendingCount() == 8193);  // nothing dropped: the caller closes the link
+    dn::AckMsg ack;
+    ack.cumulative = 100;
+    count.onAck(ack, 2);
+    CHECK(!count.overloaded() && count.pendingBytes() == 8093 * 20);
+
+    dn::ReliableSender bytes;
+    size_t tracked = 0;
+    while (!bytes.overloaded()) {
+        bytes.track(bytes.nextSeq(), std::vector<uint8_t>(1200), 1);
+        ++tracked;
+    }
+    CHECK(tracked < 8192 && bytes.pendingBytes() > (8u << 20) && bytes.pendingBytes() <= (8u << 20) + 1200);
+}
+
+void testUnacknowledgedLinkIsDropped() {
+    printf("direct: a client that takes data but never acknowledges it is disconnected, not buffered forever\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.linkTimeoutMs = 60000;  // the backlog, not the timeout, must end it
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    a.setTestBlackhole(true);  // receives everything, acknowledges nothing
+    std::vector<uint8_t> p(1100, 1);
+    size_t sent = 0;
+    while (sent < 20000 && host.send(kA, "EDF6", 1, 1, p.data(), p.size())) ++sent;
+    printf("  host stopped taking packets for it after %zu\n", sent);
+    CHECK(sent < 8193);
+    CHECK(waitFor([&] { return !host.canRoute(kA) && host.directMembers().size() == 1; }, 2000));
+}
+
 void testHostCandidates() {
     printf("auto-connect: IPv4 addresses of the room host are tried before IPv6\n");
     using V = std::vector<std::string>;
@@ -1125,6 +1250,9 @@ int wmain(int argc, wchar_t** argv) {
     testHelloCannotHijackLiveLink();
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
+    testReliableBacklogLimit();
+    testUnacknowledgedLinkIsDropped();
+    testNoReflectionToSender();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

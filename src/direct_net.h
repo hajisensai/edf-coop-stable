@@ -116,6 +116,8 @@ private:
         ReliableReceiver rx;
     };
 
+    // A link that carries game packets now: up, and not being closed for an unacknowledged backlog.
+    static bool usable(const Link& link) { return link.up && !link.tx.overloaded(); }
     void run();
     void processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now);

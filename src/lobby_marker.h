@@ -20,6 +20,7 @@ class LobbyMarker {
 public:
     static constexpr const char* kKey = "EDF6DN";           // value: protocol version
     static constexpr const char* kAddressKey = "EDF6DN_ADDR";  // value: space-separated host addresses
+    static constexpr const char* kSeqKey = "EDF6DN_SEQ";       // value: bumped on every publish
     static constexpr int64_t kVersion = 1;
 
     // Resolves the EOS functions it needs. Returns false (unavailable) when any is missing.
@@ -31,6 +32,10 @@ public:
     void left();
     // The local user became the owner of its lobby (the previous owner left). Thread-safe.
     void promoted();
+    // Someone else joined our lobby: publish our attributes again. A joining player does not get
+    // member attributes set before it joined until they change, so without this it would never see
+    // our marker or the host's address. Thread-safe.
+    void memberJoined();
     // The direct-link address this player hosts on ("" = not hosting). Thread-safe.
     void setAddress(const std::string& address);
 
@@ -43,6 +48,8 @@ public:
     bool hasMarker(EOS_ProductUserId remote) const;
     // The lobby owner and the address it advertises ("" when none). Owner may be null.
     std::string ownerAddress(EOS_ProductUserId* owner) const;
+    // Diagnostics: what our copy of the lobby shows about its owner.
+    std::string describeOwner() const;
 
 private:
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.
@@ -56,6 +63,8 @@ private:
     PFN_EOS_Lobby_CopyLobbyDetailsHandle copyDetails_ = nullptr;
     PFN_EOS_LobbyDetails_CopyMemberAttributeByKey copyMemberAttribute_ = nullptr;
     PFN_EOS_LobbyDetails_GetLobbyOwner getOwner_ = nullptr;
+    PFN_EOS_LobbyDetails_GetMemberAttributeCount getMemberAttributeCount_ = nullptr;  // optional
+    PFN_EOS_LobbyDetails_GetMemberCount getMemberCount_ = nullptr;                    // optional
     PFN_EOS_LobbyDetails_Release releaseDetails_ = nullptr;
     PFN_EOS_Lobby_Attribute_Release releaseAttribute_ = nullptr;
     bool ready_ = false;
@@ -67,6 +76,7 @@ private:
     bool owner_ = false;
     std::string address_;
     bool dirty_ = false;  // our attributes differ from what the lobby has
+    int64_t seq_ = 0;     // EDF6DN_SEQ: makes every publish a real change that EOS sends to everyone
 };
 
 }  // namespace dn

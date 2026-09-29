@@ -275,6 +275,16 @@ using PFN_EOS_LobbyDetails_CopyMemberAttributeByKey = EOS_EResult (*)(
     EOS_HLobbyDetails, const EOS_LobbyDetails_CopyMemberAttributeByKeyOptions*, EOS_Lobby_Attribute**);
 using PFN_EOS_LobbyDetails_GetLobbyOwner = EOS_ProductUserId (*)(EOS_HLobbyDetails,
                                                                  const EOS_LobbyDetails_GetLobbyOwnerOptions*);
+struct EOS_LobbyDetails_GetMemberAttributeCountOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+    EOS_ProductUserId TargetUserId;
+};
+struct EOS_LobbyDetails_GetMemberCountOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+};
+using PFN_EOS_LobbyDetails_GetMemberAttributeCount = uint32_t (*)(EOS_HLobbyDetails,
+                                                                  const EOS_LobbyDetails_GetMemberAttributeCountOptions*);
+using PFN_EOS_LobbyDetails_GetMemberCount = uint32_t (*)(EOS_HLobbyDetails, const EOS_LobbyDetails_GetMemberCountOptions*);
 using PFN_EOS_LobbyDetails_Release = void (*)(EOS_HLobbyDetails);
 using PFN_EOS_Lobby_Attribute_Release = void (*)(EOS_Lobby_Attribute*);
 using PFN_EOS_Lobby_AddNotifyMemberUpdate = EOS_NotificationId (*)(

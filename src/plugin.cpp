@@ -14,8 +14,8 @@
 
 namespace {
 
-constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 1;
-constexpr const char* kVersionText = "0.3.1";
+constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 2;
+constexpr const char* kVersionText = "0.3.2";
 
 // EDFModLoader's plugin info block (infoVersion 1): the loader rejects 0 and anything above 1.
 struct PluginInfo {

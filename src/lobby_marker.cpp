@@ -1,5 +1,7 @@
 #include "lobby_marker.h"
 
+#include <cstdio>
+
 #include "log.h"
 
 namespace dn {
@@ -30,6 +32,10 @@ bool LobbyMarker::init(HMODULE eos) {
     ok &= resolve(eos, "EOS_LobbyDetails_GetLobbyOwner", getOwner_);
     ok &= resolve(eos, "EOS_LobbyDetails_Release", releaseDetails_);
     ok &= resolve(eos, "EOS_Lobby_Attribute_Release", releaseAttribute_);
+    getMemberAttributeCount_ = reinterpret_cast<PFN_EOS_LobbyDetails_GetMemberAttributeCount>(
+        GetProcAddress(eos, "EOS_LobbyDetails_GetMemberAttributeCount"));
+    getMemberCount_ = reinterpret_cast<PFN_EOS_LobbyDetails_GetMemberCount>(
+        GetProcAddress(eos, "EOS_LobbyDetails_GetMemberCount"));
     ready_ = ok;
     return ok;
 }
@@ -58,6 +64,11 @@ void LobbyMarker::promoted() {
     dirty_ = !address_.empty();  // now we advertise our address, if we host one
 }
 
+void LobbyMarker::memberJoined() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!lobbyId_.empty()) dirty_ = true;
+}
+
 void LobbyMarker::setAddress(const std::string& address) {
     std::lock_guard<std::mutex> lock(mu_);
     if (address_ == address) return;
@@ -84,6 +95,13 @@ void LobbyMarker::tick() {
     marker.ValueType = 1;  // int64
     EOS_LobbyModification_AddMemberAttributeOptions ao{1, &marker, 0 /* public */};
     r = addMemberAttribute_(mod, &ao);
+    EOS_Lobby_AttributeData seq{};
+    seq.ApiVersion = 1;
+    seq.Key = kSeqKey;
+    seq.Value.AsInt64 = ++seq_;
+    seq.ValueType = 1;  // int64
+    EOS_LobbyModification_AddMemberAttributeOptions as{1, &seq, 0};
+    if (r == EOS_Success) r = addMemberAttribute_(mod, &as);
     // Only a host advertises an address; a player hosting nothing publishes none.
     if (r == EOS_Success && owner_ && !address_.empty()) {
         EOS_Lobby_AttributeData addr{};
@@ -139,6 +157,24 @@ bool LobbyMarker::hasMarker(EOS_ProductUserId remote) const {
     bool found = readAttribute(details, remote, kKey, nullptr);
     releaseDetails_(details);
     return found;
+}
+
+std::string LobbyMarker::describeOwner() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    EOS_HLobbyDetails details = copyDetailsLocked();
+    if (!details) return "no local copy of the lobby";
+    EOS_LobbyDetails_GetLobbyOwnerOptions oo{1};
+    EOS_ProductUserId id = getOwner_(details, &oo);
+    bool marker = id && readAttribute(details, id, kKey, nullptr);
+    EOS_LobbyDetails_GetMemberAttributeCountOptions ac{1, id};
+    EOS_LobbyDetails_GetMemberCountOptions mc{1};
+    long attrs = id && getMemberAttributeCount_ ? static_cast<long>(getMemberAttributeCount_(details, &ac)) : -1;
+    long members = getMemberCount_ ? static_cast<long>(getMemberCount_(details, &mc)) : -1;
+    releaseDetails_(details);
+    char buf[160];
+    snprintf(buf, sizeof(buf), "owner %s, plugin marker %s, owner attributes visible %ld, members %ld",
+             id ? "known" : "UNKNOWN", marker ? "yes" : "no", attrs, members);
+    return buf;
 }
 
 std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) const {

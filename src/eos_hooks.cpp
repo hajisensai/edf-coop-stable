@@ -99,6 +99,8 @@ struct AutoJoin {
     uint64_t attemptMs = 0;
     bool connected = false;  // the current attempt reached the host; DirectNet reconnects by itself
     uint64_t retryAtMs = 0;  // every candidate failed: try the list again from here on
+    uint64_t noAddressSinceMs = 0;  // in someone's room but its host advertises nothing (yet)
+    bool noAddressLogged = false;
     uint64_t lastCheckMs = 0;
 };
 
@@ -316,6 +318,7 @@ void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* 
         std::string target = idString(i->TargetUserId);
         bool self = !target.empty() && target == idString(g.lobbyUser.load());
         if (self && s == 4) g.marker.promoted();
+        if (!self && s == 0) g.marker.memberJoined();
         if (s == 5 || (self && (s == 1 || s == 2 || s == 3)))
             leftLobby(s == 5 ? "the room was closed" : s == 2 ? "we lost the lobby service" : "we left the room");
         if (released)
@@ -407,6 +410,8 @@ void retire(DirectNet* net) {
 // Stops an AutoJoin link: we left the room, or its host cannot be reached directly.
 void stopAutoJoinLocked(const char* why) {
     AutoJoin& a = g.autoJoin;
+    a.noAddressSinceMs = 0;
+    a.noAddressLogged = false;
     a.advertised.clear();
     a.candidates.clear();
     if (!a.net) return;
@@ -477,7 +482,19 @@ void autoJoinTick(uint64_t now) {
     EOS_ProductUserId owner = nullptr;
     std::string advertised = g.marker.ownerAddress(&owner);
     // Our own address (we were promoted to room owner) is nothing to connect to.
-    if (advertised.empty() || !owner || idString(owner) == idString(g.lobbyUser.load())) return;
+    if (!owner || idString(owner) == idString(g.lobbyUser.load())) return;
+    if (advertised.empty()) {
+        // Normal for a vanilla host or one without Mode=host. Logged once per room so a host that
+        // does advertise but whose attributes never reach us shows up in the log.
+        if (!a.noAddressSinceMs) a.noAddressSinceMs = now;
+        if (!a.noAddressLogged && now - a.noAddressSinceMs >= 6000) {
+            a.noAddressLogged = true;
+            logf("DIRECT room host %s advertises no direct-link address (%s)", shortId(idString(owner)).c_str(),
+                 g.marker.describeOwner().c_str());
+        }
+        return;
+    }
+    a.noAddressSinceMs = 0;
     if (advertised != a.advertised) {  // new room, or the host's address list changed
         a.advertised = advertised;
         a.candidates = orderHostCandidates(advertised);

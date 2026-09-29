@@ -144,7 +144,7 @@ PointerSlot RoomViewSlot() {
     return {"HUiRoom OnUpdate", 0x180AC48, 0x8FDFE0};
 }
 
-std::vector<CallSite> FakeMemberCalls() {
+std::vector<CallSite> MemberListCalls() {
     return {
         // eos::RoomInfo::PlayerInfo list builder: the room screen's member vector and the voice chat HUD's
         // records are both built from what it returns, and so is anything else that asks for the members.

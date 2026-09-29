@@ -327,12 +327,10 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : calls) Check(RedirectedInto(base + call.rva, plugin), "member count call reaches the plugin through a stub");
         for (const auto& call : RoomViewCalls()) Check(RedirectedInto(base + call.rva, plugin), "room screen call reaches the plugin through a stub");
         Check(SlotInto(base, RoomViewSlot(), plugin), "HUiRoom OnUpdate vtable slot points into the plugin");
-        // DummyMembers=1 redirects every call to the room member list builder, so fake members reach the
-        // room screen, the voice chat HUD and anything else that asks for the members.
-        for (const auto& call : FakeMemberCalls()) {
-            if (mode == L"host8") Check(RedirectedInto(base + call.rva, plugin), call.name);
-            else Check(CallTargets(base + call.rva, call.rva, call.target), "without dummy members the member list calls are the game's");
-        }
+        // Every call to the room member list builder is redirected, with or without DummyMembers: the list is cut
+        // to this build's room size before the voice chat HUD writes a record per member, and fake members reach
+        // the room screen, the HUD and anything else that asks for the members.
+        for (const auto& call : MemberListCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);
 
         // 8Player MOD: the room sites and the menu frame are hooked whatever the setting; the setting is
         // read when a room is created (hostmode_test covers the handlers).

@@ -152,7 +152,7 @@ struct SlotWrite {
 
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
-bool Apply(unsigned char* base, bool dummies, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
+bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
            float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
@@ -180,8 +180,8 @@ bool Apply(unsigned char* base, bool dummies, bool mission, bool spawns, int gho
     redirects.push_back({room[0], reinterpret_cast<void*>(&BuildPanelsHook)});
     redirects.push_back({room[1], reinterpret_cast<void*>(&BuildPanelsHook)});
     redirects.push_back({room[2], reinterpret_cast<void*>(&UpdateVoiceIconsHook)});
-    if (dummies)
-        for (const auto& call : FakeMemberCalls()) redirects.push_back({call, FakeMemberCallHandler(call.rva)});
+    // Always, not only with dummy members: the member list is cut to this build's room size (fakemembers.h).
+    for (const auto& call : MemberListCalls()) redirects.push_back({call, MemberListCallHandler(call.rva)});
     if (diagnostics)
         for (const auto& call : DiagnosticCalls()) redirects.push_back({call, JoinLogCallHandler(call.rva)});
     if (recovery)
@@ -529,7 +529,7 @@ bool LoadPlugin(PluginInfo* info) {
     InitFinalHello(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
     InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
-    if (!Apply(base, roomView.dummies, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,
+    if (!Apply(base, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,
                smoothing, thunks)) {
         KeepMenuLayout(false);
         return false;

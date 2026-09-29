@@ -92,9 +92,10 @@ std::vector<CallSite> GuestCalls();
 std::vector<CallSite> RoomViewCalls();
 // HUiRoom::OnUpdate, replaced by RoomOnUpdateHook.
 PointerSlot RoomViewSlot();
-// Test mode ([RoomScreen] DummyMembers=1): every call to the room member list builder 7468C0, redirected to
-// MemberListHook (fakemembers.h) so fake members reach every consumer of the list, not just the room screen.
-std::vector<CallSite> FakeMemberCalls();
+// Every call to the room member list builder 7468C0, redirected to MemberListHook (fakemembers.h): the list is
+// cut to kMaxPlayers members for every consumer (the voice chat HUD writes one record per member), and in test
+// mode ([RoomScreen] DummyMembers=1) fake members reach every consumer of the list, not just the room screen.
+std::vector<CallSite> MemberListCalls();
 
 // Instructions at `rva` (`original`, at least 5 bytes, verified) replaced by a jump to a thunk that
 // calls a handler (mission.h) and then runs original[displacedOffset, +displacedSize) before

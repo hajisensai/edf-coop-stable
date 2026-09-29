@@ -29,8 +29,18 @@ using ResizeFn = void(__fastcall*)(RoomMemberList*, std::uint64_t, const RoomMem
 // HUD, anything added later - runs with 5-8 members on one machine. Returns how many were added.
 std::size_t AppendFakeMembers(RoomMemberList* list, std::size_t fakes, std::size_t limit, ReserveFn reserve, ResizeFn resize);
 
+// Lets go of one entry's reference (an MSVC shared_ptr's control block) and empties it.
+using ReleaseMemberFn = void (*)(RoomMember& member);
+// Always: a list of more than `limit` members is cut to `limit`, each dropped entry's reference released, and
+// the number dropped returned. The voice chat HUD's update (961140) writes one record per listed member into a
+// vector of kMaxPlayers (patches.h), so a room larger than this build's - another mod's, reached through the
+// vanilla SEARCH_TYPE family and its capacity of up to 64 - wrote past it and crashed every machine in it, the
+// way a fifth member did on 2026-09-18.
+std::size_t ClampMembers(RoomMemberList* list, std::size_t limit, ReleaseMemberFn release);
+
 void InitFakeMembers(unsigned char* gameBase);
-// Redirects the calls to the member list builder while dummy members are enabled (patches.h).
-void* FakeMemberCallHandler(std::uint32_t rva);
+// Every call to the member list builder is redirected (patches.h MemberListCalls): the list is cut to kMaxPlayers,
+// and with dummy members on the fake ones are added.
+void* MemberListCallHandler(std::uint32_t rva);
 
 }  // namespace multislot

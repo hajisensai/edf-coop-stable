@@ -164,11 +164,11 @@ int main(int argc, char** argv) {
     const auto roomCalls = RoomViewCalls();
     Check(roomCalls.size() == 3, "two panel builder calls and the voice icon call are redirected");
     calls.insert(calls.end(), roomCalls.begin(), roomCalls.end());
-    // Test harness: every call to the member list builder, so fake members reach all of its consumers.
-    const auto fakeMemberCalls = FakeMemberCalls();
-    Check(fakeMemberCalls.size() == 3, "all three member list calls are redirected");
-    for (const auto& call : fakeMemberCalls) Check(call.target == 0x7468C0, "the member list builder is the target", call.rva);
-    calls.insert(calls.end(), fakeMemberCalls.begin(), fakeMemberCalls.end());
+    // Every call to the member list builder: the list is cut to kMaxPlayers, and fake members reach all of its consumers.
+    const auto memberListCalls = MemberListCalls();
+    Check(memberListCalls.size() == 3, "all three member list calls are redirected");
+    for (const auto& call : memberListCalls) Check(call.target == 0x7468C0, "the member list builder is the target", call.rva);
+    calls.insert(calls.end(), memberListCalls.begin(), memberListCalls.end());
     // The helpers the harness uses to grow that list: reserve (748E70) and append-copies (749040), as the
     // builder itself uses them.
     Check(CallTargets(image.At(0x746A30, 5), 0x746A30, 0x748E70) && CallTargets(image.At(0x746B49, 5), 0x746B49, 0x748E70),

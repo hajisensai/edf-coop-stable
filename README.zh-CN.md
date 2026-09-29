@@ -35,7 +35,7 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）；默认设置文件的注释按 Windows 显示语言写成中文 / 日文 / 其他语言一律英文。
 
-升级：重新运行新版的 `INSTALL.bat`，设置文件保留。
+升级：从 0.3.6 起插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载 `EDF6DirectNet.dll`，校验（与发布的 SHA-256 一致、是真正的 DLL、里面写的版本号和发布版本一致）后放到原位，下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。`[Update] AutoUpdate=0` 可以关掉；手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。
 卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动）。若当初添加过防火墙规则，卸载程序会提示删除命令。
 
 也可以手动把 zip 内容解压到游戏目录（`EDF6.exe` 所在文件夹）。
@@ -89,6 +89,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `[Sync] ReliableGameTraffic` | `1` | 防不同步（可靠发送）。`0` = 原版 |
 | `[Resilience] HoldDisconnects` | `auto` | 断线宽限：`auto` 只对装了插件的人 / `off` 原版 / `all` 不识别、对所有人宽限（仅当确定全员都装了插件） |
 | `GraceSeconds` | `30` | 断线最多隐瞒多少秒（1–600） |
+| `[Update] AutoUpdate` | `1` | 自动从 GitHub 安装新版本（下次启动游戏生效） |
 
 ## 工作原理
 

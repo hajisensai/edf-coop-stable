@@ -33,6 +33,9 @@ $pluginVersion = [regex]::Match($pluginSource, 'kVersionText = "([^"]+)"').Group
 $numbers = [regex]::Match($pluginSource, 'kVersionMajor = (\d+), kVersionMinor = (\d+), kVersionPatch = (\d+)')
 $numericVersion = '{0}.{1}.{2}' -f $numbers.Groups[1].Value, $numbers.Groups[2].Value, $numbers.Groups[3].Value
 if ($numericVersion -ne $pluginVersion) { throw "src\plugin.cpp: kVersionText $pluginVersion but kVersionMajor/Minor/Patch $numericVersion" }
+# The auto-updater of older builds only accepts a DLL whose marker names the release's version.
+$markerVersion = [regex]::Match($pluginSource, '"EDF6DN_VERSION=([^"]+)"').Groups[1].Value
+if ($markerVersion -ne $pluginVersion) { throw "src\plugin.cpp: kVersionText $pluginVersion but EDF6DN_VERSION marker $markerVersion" }
 if ($pluginVersion -ne $Version) { throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion" }
 foreach ($readme in 'README_EDF6DirectNet.txt', 'README_EDF6DirectNet_zh.txt', 'README_EDF6DirectNet_ja.txt') {
     $readmeVersion = [regex]::Match((Get-Content (Join-Path $root "dist\$readme") -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value

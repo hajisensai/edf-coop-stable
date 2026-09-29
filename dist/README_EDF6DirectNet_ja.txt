@@ -1,11 +1,12 @@
-EDF6DirectNet 0.3.5 ―― 地球防衛軍6 オンライン安定化プラグイン
+EDF6DirectNet 0.3.6 ―― 地球防衛軍6 オンライン安定化プラグイン
 プロジェクトページ：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6DirectNet.txt / 中文: README_EDF6DirectNet_zh.txt
 （実験版：実際の4人オンラインプレイで動作確認済み。問題があればログを添えて Issue を立ててください）
 
 【インストール / アンインストール】
 zip をすべて展開してから INSTALL.bat をダブルクリックし、Steam からいつも通りゲームを起動します。
-アンインストール：UNINSTALL.bat をダブルクリック。アップデート：新しい版の INSTALL.bat を実行（設定は保持）。
+アンインストール：UNINSTALL.bat をダブルクリック。アップデートは自動：起動時に GitHub から新しい版を取得し、
+次回の起動から有効になります（不要なら ini で [Update] AutoUpdate=0）。
 EDFModLoader が無い場合は公式版も一緒に入ります。すでに入っているものには手を付けません。
 
 【入れるだけで有効、設定不要】

@@ -84,6 +84,11 @@ const IniEntry kIniEntries[] = {
      {"防不同步：联机数据丢包自动重发。1 开 / 0 原版",
       "同期ズレ対策：取りこぼした通信を自動で再送。1 オン / 0 元の動作",
       "Desync fix: lost online packets are resent automatically. 1 on / 0 original"}},
+    {"[Update]", {}},
+    {"AutoUpdate=1",
+     {"自动更新：启动游戏时检查 GitHub 上的新版本，自动下载，下次启动游戏生效。1 开 / 0 关",
+      "自動アップデート：起動時に GitHub の新しい版を確認して自動でダウンロードし、次回の起動から有効。1 オン / 0 オフ",
+      "Auto-update: at startup, check GitHub for a newer version and download it; it runs from the next game start. 1 on / 0 off"}},
     {"[Resilience]", {}},
     {"HoldDisconnects=auto",
      {"掉线不重来：网络抖动断开时先不让游戏踢人，后台自动重连\n"
@@ -189,6 +194,7 @@ Config loadConfig(const std::wstring& iniPath) {
     c.hold = hold == L"all" ? Config::Hold::All : (hold == L"off" || hold == L"0") ? Config::Hold::Off : Config::Hold::Auto;
     c.reliableGameTraffic = readInt(iniPath, L"Sync", L"ReliableGameTraffic", 1) != 0;
     c.direct.upgradeUnreliable = c.reliableGameTraffic;
+    c.autoUpdate = readInt(iniPath, L"Update", L"AutoUpdate", 1) != 0;
     c.graceMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, L"Resilience", L"GraceSeconds", 30), 1, 600)) * 1000u;
     return c;
 }

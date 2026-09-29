@@ -35,7 +35,7 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 The zip contains README_EDF6DirectNet.txt (English), README_EDF6DirectNet_zh.txt (中文) and README_EDF6DirectNet_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
 
-Upgrade: run the new version's `INSTALL.bat` again; your settings file is kept.
+Upgrade: from 0.3.6 on the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll`, checks it (published SHA-256, a real DLL, the release's version inside) and puts it in place, and it runs from the next game start. The log says `UPDATE installed ...`. Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). `[Update] AutoUpdate=0` turns it off; running a newer `INSTALL.bat` still works as before and keeps your settings.
 Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone). If you added the firewall rule earlier, the uninstaller shows you the command to remove it.
 
 You can also extract the zip contents into the game folder (the folder containing `EDF6.exe`) by hand.
@@ -89,6 +89,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `[Sync] ReliableGameTraffic` | `1` | Desync prevention (reliable sending). `0` = vanilla |
 | `[Resilience] HoldDisconnects` | `auto` | Disconnect grace: `auto` only for players with the plugin / `off` vanilla / `all` no detection, grace for everyone (only if you are sure everyone has the plugin) |
 | `GraceSeconds` | `30` | Maximum number of seconds a disconnect is hidden (1–600) |
+| `[Update] AutoUpdate` | `1` | Install newer releases from GitHub automatically (they run from the next game start) |
 
 ## How it works
 

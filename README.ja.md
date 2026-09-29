@@ -35,7 +35,7 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 
 zip には README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
 
-アップデート：新しいバージョンの `INSTALL.bat` を再実行します。設定ファイルはそのまま残ります。
+アップデート：0.3.6 からプラグインが自動で更新されます。ゲーム起動時に裏で GitHub の最新リリースを確認し、新しい版があれば `EDF6DirectNet.dll` をダウンロードして検証（公開された SHA-256 と一致、本物の DLL、中の版番号がリリースと一致）したうえで置き換え、次回の起動から有効になります。ログに `UPDATE installed ...` と出ます。GitHub に接続できなくてもゲームには影響しません（通信はシステムのプロキシ設定に従います）。`[Update] AutoUpdate=0` で無効にできます。新しい版の `INSTALL.bat` を手動で実行する方法も従来どおり使え、設定は保持されます。
 アンインストール：`UNINSTALL.bat` をダブルクリック（EDFModLoader や他の Mod には触れません）。以前ファイアウォール規則を追加していた場合は、アンインストーラーが削除コマンドを表示します。
 
 zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォルダ）に展開してもかまいません。
@@ -89,6 +89,7 @@ zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォル�
 | `[Sync] ReliableGameTraffic` | `1` | 同期ズレ対策（信頼性のある送信）。`0` = バニラ |
 | `[Resilience] HoldDisconnects` | `auto` | 切断猶予：`auto` プラグイン導入者のみ / `off` バニラ / `all` 判別せず全員に猶予（全員が導入済みと確信できる場合のみ） |
 | `GraceSeconds` | `30` | 切断を最大何秒隠すか（1–600） |
+| `[Update] AutoUpdate` | `1` | GitHub の新しいリリースを自動でインストール（次回の起動から有効） |
 
 ## 仕組み
 

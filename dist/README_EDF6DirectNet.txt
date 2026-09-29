@@ -1,4 +1,4 @@
-EDF6DirectNet 0.3.5 - online stability plugin for EARTH DEFENSE FORCE 6
+EDF6DirectNet 0.3.6 - online stability plugin for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6DirectNet_zh.txt / 日本語: README_EDF6DirectNet_ja.txt
 (Experimental, verified in real four-player online play. If something goes wrong, open an Issue
@@ -6,7 +6,8 @@ and attach the log.)
 
 [Install / uninstall]
 Extract the whole zip first, double-click INSTALL.bat, then start the game from Steam as usual.
-Uninstall: double-click UNINSTALL.bat. Upgrade: run INSTALL.bat of the new version; settings are kept.
+Uninstall: double-click UNINSTALL.bat. Updates install themselves: at game start the plugin fetches a newer
+release from GitHub and it runs from the next start ([Update] AutoUpdate=0 in the ini turns this off).
 If EDFModLoader is missing, the official build is installed too; an existing one is left alone.
 
 [Works right away, nothing to set up]

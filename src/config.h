@@ -23,6 +23,8 @@ struct Config {
     uint32_t graceMs = 30000;  // bounded: a hidden disconnect may make everyone wait at a sync point
     // Send EDF6's UnreliableUnordered game packets as ReliableUnordered (EOS and direct link).
     bool reliableGameTraffic = true;
+    // Install newer releases from GitHub by itself (they run from the next game start).
+    bool autoUpdate = true;
 };
 
 // Reads the INI; writes a commented default file first when it does not exist, commented in the

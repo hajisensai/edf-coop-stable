@@ -19,6 +19,7 @@
 #include "../src/netif.h"
 #include "../src/reliable.h"
 #include "../src/traffic.h"
+#include "../src/updater.h"
 #include "../src/wire.h"
 
 namespace {
@@ -604,6 +605,76 @@ void testTrafficMeter() {
     CHECK(s.bytes == 0 && s.packets == 0 && s.peers == 0 && s.busiestSecondBytes == 0);
 }
 
+void testUpdater() {
+    printf("update: versions, release JSON, digest checks, replacing a loaded DLL\n");
+    using dn::parseVersion;
+    CHECK(parseVersion("v0.3.6").valid() && parseVersion("v0.3.6").patch == 6);
+    CHECK(parseVersion("EDF6DirectNet 1.12.0 x").minor == 12 && !parseVersion("v1.2").valid());
+    CHECK(parseVersion("v0.3.10").newerThan(parseVersion("0.3.9")) && !parseVersion("0.3.5").newerThan(parseVersion("0.3.5")));
+    CHECK(parseVersion("1.0.0").newerThan(parseVersion("0.9.9")) && !parseVersion("0.3.4").newerThan(parseVersion("0.4.0")));
+
+    std::string json = R"({"tag_name": "v0.3.6", "assets": [
+        {"name":"EDF6DirectNet-v0.3.6.zip","browser_download_url":"https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet-v0.3.6.zip"},
+        {"name": "EDF6DirectNet.dll", "browser_download_url": "https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet.dll"},
+        {"name":"EDF6DirectNet.dll.sha256","browser_download_url":"https://evil.example/EDF6DirectNet.dll.sha256"}]})";
+    CHECK(dn::jsonString(json, "tag_name") == "v0.3.6");
+    CHECK(dn::assetUrl(json, "EDF6DirectNet.dll") == "https://github.com/o/r/releases/download/v0.3.6/EDF6DirectNet.dll");
+    CHECK(dn::assetUrl(json, "EDF6DirectNet.dll.sha256").empty());  // not GitHub: refused
+    CHECK(dn::assetUrl(json, "missing.dll").empty());
+
+    std::vector<uint8_t> abc = {'a', 'b', 'c'};
+    CHECK(dn::sha256Hex(abc) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    dn::Version v = parseVersion("0.3.6");
+    std::vector<uint8_t> dll(4096, 0);
+    dll[0] = 'M';
+    dll[1] = 'Z';
+    std::string marker = dn::versionMarker(v);
+    std::copy(marker.begin(), marker.end(), dll.begin() + 1000);
+    std::string sha = dn::sha256Hex(dll) + "  EDF6DirectNet.dll\n";
+    std::string why;
+    CHECK(dn::verifyUpdate(dll, sha, v, &why));
+    std::string upper = sha;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](char c) { return static_cast<char>(toupper(c)); });
+    CHECK(dn::verifyUpdate(dll, upper, v, &why));
+    CHECK(!dn::verifyUpdate(dll, sha, parseVersion("0.3.7"), &why));  // another version inside
+    CHECK(!dn::verifyUpdate(dll, "not a digest", v, &why));
+    std::vector<uint8_t> damaged = dll;
+    damaged[2000] ^= 1;
+    CHECK(!dn::verifyUpdate(damaged, sha, v, &why));
+    std::vector<uint8_t> notDll = dll;
+    notDll[0] = 'X';
+    CHECK(!dn::verifyUpdate(notDll, dn::sha256Hex(notDll), v, &why));
+
+    // Replacing a DLL that is loaded, the way the game has the plugin loaded while it updates.
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring dir = std::wstring(tmp) + L"edf6dn_update_test\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring installed = dir + L"EDF6DirectNet.dll";
+    DeleteFileW((installed + L".old").c_str());
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
+    CHECK(CopyFileW(built.c_str(), installed.c_str(), FALSE));
+    HMODULE loaded = LoadLibraryExW(installed.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    CHECK(loaded != nullptr);
+    CHECK(dn::installOver(installed, dll, &why));
+    HANDLE f = CreateFileW(installed.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    DWORD size = f != INVALID_HANDLE_VALUE ? GetFileSize(f, nullptr) : 0;
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    CHECK(size == dll.size());                                                               // the new file is in place
+    CHECK(GetFileAttributesW((installed + L".old").c_str()) != INVALID_FILE_ATTRIBUTES);  // the loaded one moved aside
+    dn::removeOldUpdate(installed);  // still mapped: cannot go yet
+    CHECK(GetFileAttributesW((installed + L".old").c_str()) != INVALID_FILE_ATTRIBUTES);
+    if (loaded) FreeLibrary(loaded);
+    dn::removeOldUpdate(installed);  // the next game start: gone
+    CHECK(GetFileAttributesW((installed + L".old").c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(GetFileAttributesW((installed + L".new").c_str()) == INVALID_FILE_ATTRIBUTES);
+    DeleteFileW(installed.c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
 void testRosterDropsQuietMember() {
     printf("direct: other joiners learn within seconds that a member's link went quiet\n");
     dn::DirectOptions ho = hostOptions(0, 0);
@@ -809,7 +880,7 @@ void testConfig() {
     CHECK(def.enabled && def.direct.mode == dn::Mode::Off && def.direct.listenPort == 27015 && def.eosRelay == -1);
     CHECK(def.hold == dn::Config::Hold::Auto && def.graceMs == 30000 && def.direct.linkTimeoutMs == 60000);
     CHECK(def.reliableGameTraffic && def.direct.upgradeUnreliable);
-    CHECK(def.autoJoin && def.publicAddress.empty());
+    CHECK(def.autoJoin && def.publicAddress.empty() && def.autoUpdate);
 
     // Every language writes the same settings; only the comments differ.
     const unsigned short langs[] = {MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED),
@@ -846,7 +917,7 @@ void testConfig() {
 
     FILE* f = _wfopen(path.c_str(), L"wb");
     fputs("[DirectNet]\r\nMode= Join \r\nHostAddress=[2408:8207::5]:30000\r\nKey=abc\r\n"
-          "PublicAddress= 1.2.3.4:40000 \r\nAutoJoin=0\r\n"
+          "PublicAddress= 1.2.3.4:40000 \r\nAutoJoin=0\r\n[Update]\r\nAutoUpdate=0\r\n"
           "[EOS]\r\nFixedPort=27100\r\nRelay=NoRelay\r\n[Resilience]\r\nHoldDisconnects=ALL\r\nGraceSeconds=45\r\n", f);
     fclose(f);
     dn::Config c = dn::loadConfig(path);
@@ -855,13 +926,20 @@ void testConfig() {
     CHECK(c.direct.listenPort == 0);  // join without ListenPort binds any port
     CHECK(c.direct.key == "abc" && c.eosFixedPort == 27100 && c.eosRelay == 0);
     CHECK(c.hold == dn::Config::Hold::All && c.graceMs == 45000);
-    CHECK(c.publicAddress == "1.2.3.4:40000" && !c.autoJoin);
+    CHECK(c.publicAddress == "1.2.3.4:40000" && !c.autoJoin && !c.autoUpdate);
     DeleteFileW(path.c_str());
 }
 
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    // Manual end-to-end check against the real GitHub release: --live-update <dll path> <pretend version>
+    if (argc == 4 && std::wstring(argv[1]) == L"--live-update") {
+        std::string version;
+        for (const wchar_t* c = argv[3]; *c; ++c) version += static_cast<char>(*c);  // digits and dots
+        printf("%s\n", dn::updateOnce(argv[2], version).c_str());
+        return 0;
+    }
     const wchar_t* edf = argc > 1 ? argv[1] : L"D:\\steam\\steamapps\\common\\EARTH DEFENSE FORCE 6\\EDF.dll";
     testWire();
     testReliableUnderLoss();
@@ -876,6 +954,7 @@ int wmain(int argc, wchar_t** argv) {
     testDisconnectHold();
     testLobbyStatusHold();
     testTrafficMeter();
+    testUpdater();
     testRosterDropsQuietMember();
     testLinksFollowTheRoom();
     testHostRestart();

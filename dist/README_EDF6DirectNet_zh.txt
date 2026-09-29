@@ -1,11 +1,12 @@
-EDF6DirectNet 0.3.5 —— EDF6 联机稳定插件
+EDF6DirectNet 0.3.6 —— EDF6 联机稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6DirectNet.txt / 日本語: README_EDF6DirectNet_ja.txt
 （实验性：已在真实的四人联机中验证。遇到问题请带日志提 Issue）
 
 【安装 / 卸载】
 先把 zip 完整解压，再双击 INSTALL.bat，然后从 Steam 正常启动游戏。
-卸载：双击 UNINSTALL.bat。升级：直接运行新版的 INSTALL.bat，设置保留。
+卸载：双击 UNINSTALL.bat。升级是自动的：启动游戏时插件会从 GitHub 下载新版，下次启动生效
+（不想要可以在 ini 里设 [Update] AutoUpdate=0）。
 没装过 EDFModLoader 会顺便装上官方版；已经装了的不会动。
 
 【装上就生效，不用设置】

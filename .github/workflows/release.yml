@@ -64,5 +64,9 @@ jobs:
         run: |
           $notes = "release-notes/$env:VERSION.md"
           if (-not (Test-Path $notes)) { throw "missing ${notes}: write the release text before tagging" }
-          gh release create $env:GITHUB_REF_NAME "build/EDF6DirectNet-v$env:VERSION.zip" `
+          # The auto-updater downloads the DLL itself and checks it against this digest.
+          $hash = (Get-FileHash build/EDF6DirectNet.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path build/EDF6DirectNet.dll.sha256 -Value "$hash  EDF6DirectNet.dll" -NoNewline -Encoding ascii
+          gh release create $env:GITHUB_REF_NAME "build/EDF6DirectNet-v$env:VERSION.zip" build/EDF6DirectNet.dll `
+            build/EDF6DirectNet.dll.sha256 `
             --title "EDF6DirectNet v$env:VERSION" --notes-file $notes --verify-tag

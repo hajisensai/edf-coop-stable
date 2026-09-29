@@ -10,12 +10,21 @@
 #include "eos_hooks.h"
 #include "log.h"
 #include "netif.h"
+#include "updater.h"
 #include "upnp.h"
 
 namespace {
 
-constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 5;
-constexpr const char* kVersionText = "0.3.5";
+constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 6;
+constexpr const char* kVersionText = "0.3.6";
+
+}  // namespace
+
+// The version as the auto-updater of an older build checks it inside a downloaded file (exported,
+// so the linker keeps it). package.ps1 checks that it matches kVersionText.
+extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.3.6";
+
+namespace {
 
 // EDFModLoader's plugin info block (infoVersion 1): the loader rejects 0 and anything above 1.
 struct PluginInfo {
@@ -28,14 +37,19 @@ struct PluginInfo {
 // lock held) deadlocks or crashes. The OS reclaims the socket; the host times the link out.
 dn::DirectNet* g_net = nullptr;
 
-std::wstring pluginDirectory() {
+// This DLL's own file.
+std::wstring pluginPath() {
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&pluginDirectory), &self);
+                       reinterpret_cast<LPCWSTR>(&pluginPath), &self);
     wchar_t path[MAX_PATH] = {};
     GetModuleFileNameW(self, path, MAX_PATH);
-    std::wstring dir = path;
-    return dir.substr(0, dir.find_last_of(L"\\/") + 1);
+    return path;
+}
+
+std::wstring pluginDirectory() {
+    std::wstring path = pluginPath();
+    return path.substr(0, path.find_last_of(L"\\/") + 1);
 }
 
 void logInterface(const dn::PhysicalInterface& pi) {
@@ -139,6 +153,12 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
         dn::logClose();
         return false;  // the loader unloads us
     }
+
+    dn::removeOldUpdate(pluginPath());
+    if (config.autoUpdate)
+        dn::startAutoUpdate(pluginPath(), kVersionText);
+    else
+        dn::logf("UPDATE automatic updates are off (AutoUpdate=0)");
 
     HMODULE game = GetModuleHandleW(L"EDF.dll");
     HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");

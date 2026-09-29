@@ -434,7 +434,9 @@ std::string DirectNet::statusLine() {
         s = "HOST clients=" + std::to_string(clients_.size());
         for (const auto& [id, link] : clients_) describe(link);
     } else {
-        s = hostLink_ && hostLink_->up ? "JOIN connected" : "JOIN waiting for host";
+        s = hostLink_ && hostLink_->up ? "JOIN connected"
+            : cookie_                  ? "JOIN host answered, waiting for it to accept our identity"
+                                       : "JOIN waiting for host";
         if (hostLink_) describe(*hostLink_);
         s += " roster=" + std::to_string(roster_.size());
     }

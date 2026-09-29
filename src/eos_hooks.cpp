@@ -103,7 +103,7 @@ struct AutoJoin {
     std::vector<std::string> candidates;  // that list, best first
     size_t next = 0;                      // next candidate to try
     std::string hostPuid;
-    DirectNet* net = nullptr;  // never deleted: other threads may still hold the pointer
+    std::shared_ptr<DirectNet> net;  // other threads may still hold a copy; see retire()
     uint64_t attemptMs = 0;
     bool connected = false;  // the current attempt reached the host; DirectNet reconnects by itself
     uint64_t retryAtMs = 0;  // every candidate failed: try the list again from here on
@@ -115,16 +115,21 @@ struct AutoJoin {
 struct State {
     Api api;
     Config config;
-    std::atomic<DirectNet*> net{nullptr};  // current direct transport
-    DirectNet* baseNet = nullptr;          // Mode=host/join transport; AutoJoin swaps in and back out
-    bool autoJoinOn = false;               // AutoJoin active (not with Mode=join: its target is fixed)
+    // Everything below that the hooks read is atomic: the hooks go live one by one while
+    // installEosHooks still fills this in, and the game may already be calling them.
+    // The current direct transport. Hooks copy it for the duration of a call, so an instance AutoJoin
+    // swaps out is freed only once nobody uses it any more.
+    std::atomic<std::shared_ptr<DirectNet>> net;
+    // Mode=host/join transport (owned by plugin.cpp, never freed); AutoJoin swaps in and back out.
+    std::atomic<std::shared_ptr<DirectNet>> baseNet;
+    std::atomic<bool> autoJoinOn{false};  // AutoJoin active (not with Mode=join: its target is fixed)
     AutoJoin autoJoin;
     std::atomic<EOS_ProductUserId> lobbyUser{nullptr};
     std::unique_ptr<DisconnectHold> hold;
     std::unique_ptr<LobbyStatusHold> lobbyHold;
     LobbyMarker marker;
-    bool markerReady = false;
-    bool lobbyTracked = false;  // we see entering and leaving rooms: direct links follow the room
+    std::atomic<bool> markerReady{false};
+    std::atomic<bool> lobbyTracked{false};  // we see entering and leaving rooms: direct links follow the room
     std::mutex markedMutex;
     std::unordered_set<std::string> markedPeers;  // logged once as plugin users
     std::string loggedHostAddress;
@@ -172,12 +177,18 @@ std::string idString(EOS_ProductUserId id) {
     return g.api.idToString(id, buf, &len) == EOS_Success ? std::string(buf) : std::string();
 }
 
+// Direct packets only come from room members whose identity a host checked, so few ids ever get
+// here; the cap still bounds the cache whatever arrives. EOS keeps the handles themselves, so
+// forgetting them costs only a lookup.
+constexpr size_t kMaxIdCache = 256;
 EOS_ProductUserId idHandle(const std::string& s) {
     std::lock_guard<std::mutex> lock(g.idMutex);
     auto it = g.idCache.find(s);
     if (it != g.idCache.end()) return it->second;
     EOS_ProductUserId id = g.api.idFromString ? g.api.idFromString(s.c_str()) : nullptr;
-    if (id) g.idCache.emplace(s, id);
+    if (!id) return id;
+    if (g.idCache.size() >= kMaxIdCache) g.idCache.clear();
+    g.idCache.emplace(s, id);
     return id;
 }
 
@@ -188,14 +199,14 @@ EOS_ProductUserId idHandle(const std::string& s) {
 constexpr uint64_t kDirectDataFreshMs = 10000;  // diagnostics: game data counts as recent
 constexpr uint64_t kLinkAliveMs = 5000;
 bool directAlive(const std::string& remote) {
-    DirectNet* net = g.net;
+    std::shared_ptr<DirectNet> net = g.net.load();
     return net && !remote.empty() && net->canRoute(remote) && net->linkAlive(remote, kLinkAliveMs);
 }
 
 // Whether the direct link says `remote` still plays (see directAlive). For ourselves: any of our
 // direct links answers.
 bool reachableDirectly(const std::string& remote) {
-    DirectNet* net = g.net;
+    std::shared_ptr<DirectNet> net = g.net.load();
     if (!net || remote.empty()) return false;
     return remote == idString(g.lobbyUser.load()) ? net->anyLinkAlive(kLinkAliveMs) : net->linkAlive(remote, kLinkAliveMs);
 }
@@ -457,7 +468,7 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     if (!g_shutdown && i->ResultCode == EOS_Success) {
         g.lobbyUser = call->localUser;
         g.marker.entered(call->lobby, i->LobbyId, call->localUser, call->owner);
-        if (g.baseNet) g.baseNet->setActive(true);
+        if (std::shared_ptr<DirectNet> base = g.baseNet.load()) base->setActive(true);
     }
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
@@ -480,10 +491,11 @@ void hookJoinLobby(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* 
 }
 
 // Stops a replaced AutoJoin instance off the game thread: its worker may sit in a blocking DNS lookup
-// of the host's name, and joining it here would freeze the game. Never deleted: other threads may
-// still hold the pointer; calls through it just fail and the game falls back to EOS.
-void retire(DirectNet* net) {
-    std::thread([net] { net->stop(); }).detach();
+// of the host's name, and joining it here would freeze the game. A hook that copied the pointer just
+// before the swap finishes its call on the stopped instance (it fails, the game falls back to EOS);
+// the last copy to go frees it.
+void retire(std::shared_ptr<DirectNet> net) {
+    std::thread([net = std::move(net)] { net->stop(); }).detach();
 }
 
 // Stops an AutoJoin link: we left the room, or its host cannot be reached directly.
@@ -494,11 +506,10 @@ void stopAutoJoinLocked(const char* why) {
     a.advertised.clear();
     a.candidates.clear();
     if (!a.net) return;
-    DirectNet* net = a.net;
-    a.net = nullptr;
-    DirectNet* expected = net;  // compare_exchange overwrites its first argument on failure
-    g.net.compare_exchange_strong(expected, g.baseNet);  // a host's own listener takes over again
-    retire(net);
+    std::shared_ptr<DirectNet> net = std::move(a.net);
+    std::shared_ptr<DirectNet> expected = net;  // compare_exchange overwrites its first argument on failure
+    g.net.compare_exchange_strong(expected, g.baseNet.load());  // a host's own listener takes over again
+    retire(std::move(net));
     logf("DIRECT auto-connect stopped (%s)", why);
 }
 
@@ -506,7 +517,7 @@ void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.marker.left();
     if (g.lobbyHold) g.lobbyHold->clear();  // the game left too; other members' statuses are moot
-    if (g.baseNet && g.lobbyTracked) g.baseNet->setActive(false);
+    if (std::shared_ptr<DirectNet> base = g.baseNet.load(); base && g.lobbyTracked) base->setActive(false);
     {
         std::lock_guard<std::mutex> lock(g.markedMutex);
         g.loggedHostAddress.clear();
@@ -520,7 +531,7 @@ void leftLobby(const char* why) {
 void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) {
     if (o && !g_shutdown) {
         std::string target = idString(o->TargetUserId);
-        DirectNet* net = g.net;
+        std::shared_ptr<DirectNet> net = g.net.load();
         logf("GAME kicks %s from the room (direct link %s, game data from it %s, P2P disconnect %s, lobby status %s)",
              shortId(target).c_str(), reachableDirectly(target) ? "up" : "down",
              net && net->heardFromRecently(target, kDirectDataFreshMs) ? "recent" : "none for 10 s",
@@ -558,20 +569,19 @@ void startAutoJoinAttemptLocked(uint64_t now) {
     o.listenPort = 0;
     o.hostAddress = a.candidates[a.next++];
     o.advertisedHost = true;  // the room host chose it, not this player
-    auto* net = new DirectNet();
+    auto net = std::make_shared<DirectNet>();
     if (!net->start(o)) {
         logf("DIRECT auto-connect could not open a UDP socket; game traffic stays on EOS");
-        delete net;
         return;
     }
     EOS_ProductUserId me = g.localUser.load();
     if (!me) me = g.lobbyUser.load();
     std::string local = idString(me);
     if (!local.empty()) net->setLocalUser(local);
-    DirectNet* old = a.net;
+    std::shared_ptr<DirectNet> old = std::move(a.net);
     a.net = net;
-    g.net = net;
-    if (old) retire(old);
+    g.net.store(net);
+    if (old) retire(std::move(old));
     a.attemptMs = now;
     a.connected = false;
     logf("DIRECT auto-connecting to the room host %s at %s", shortId(a.hostPuid).c_str(), o.hostAddress.c_str());
@@ -700,8 +710,9 @@ void noteLocalUser(EOS_HP2P h, EOS_ProductUserId id) {
     if (!s.empty()) {
         // The Mode=host/join transport as well as the current one: AutoJoin may have swapped in its
         // own instance, and the host listener without our id would ignore every hello once it is back.
-        if (g.baseNet) g.baseNet->setLocalUser(s);
-        if (DirectNet* net = g.net; net && net != g.baseNet) net->setLocalUser(s);
+        std::shared_ptr<DirectNet> base = g.baseNet.load();
+        if (base) base->setLocalUser(s);
+        if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) net->setLocalUser(s);
     }
     {
         // Notifications are per local user and stay registered: switching back and forth between
@@ -725,7 +736,7 @@ void maybeLogStats() {
     uint64_t eOut = g.eosOut.exchange(0), eIn = g.eosIn.exchange(0), fail = g.eosSendFail.exchange(0);
     uint64_t upg = g.eosUpgraded.exchange(0);
     TrafficSummary t = g.gameOut.take();
-    DirectNet* net = g.net;
+    std::shared_ptr<DirectNet> net = g.net.load();
     WireTraffic w = net ? net->takeWireTraffic() : WireTraffic{};
     if (!(dOut | dIn | eOut | eIn | fail)) return;
     // kbps = bytes * 8 / 1000 / seconds
@@ -750,8 +761,9 @@ void refreshMemberIdentities(uint64_t now) {
     static uint64_t lastMs = 0;
     if (now - lastMs < kIdentityRefreshMs) return;
     lastMs = now;
-    if (g.baseNet && g.markerReady && g.config.direct.mode == Mode::Host)
-        g.baseNet->setMemberIdentities(g.marker.memberIdentities());
+    std::shared_ptr<DirectNet> base = g.baseNet.load();
+    if (base && g.markerReady && g.config.direct.mode == Mode::Host)
+        base->setMemberIdentities(g.marker.memberIdentities());
 }
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
@@ -792,7 +804,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
     if (o && o->Data)
         g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
-    DirectNet* net = g.net;
+    std::shared_ptr<DirectNet> net = g.net.load();
     if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
         net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
                     static_cast<const uint8_t*>(o->Data), o->DataLengthBytes)) {
@@ -831,7 +843,7 @@ EOS_EResult hookReceivePacket(EOS_HP2P h, const EOS_P2P_ReceivePacketOptions* o,
     if (g_shutdown) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
-    DirectNet* net = g.net;
+    std::shared_ptr<DirectNet> net = g.net.load();
     if (net && o && outPeer && outData && outBytes) {
         const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
         Delivered d;
@@ -877,7 +889,7 @@ void setAdvertisedAddress(const std::string& address) { g.marker.setAddress(addr
 
 bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet* net) {
     g.config = config;
-    g.net = nullptr;  // enabled below only when every transport hook is in place
+    g.net.store(nullptr);  // enabled below only when every transport hook is in place
     resolve(eos, "EOS_P2P_AddNotifyPeerConnectionEstablished", g.api.addEstablished);
     resolve(eos, "EOS_P2P_AddNotifyPeerConnectionInterrupted", g.api.addInterrupted);
     resolve(eos, "EOS_P2P_AddNotifyPeerConnectionClosed", g.api.addClosed);
@@ -941,11 +953,15 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     bool ok = hook(game, "EOS_Platform_GetP2PInterface", hookGetP2PInterface, g.api.getP2P) &&
               hook(game, "EOS_P2P_SendPacket", hookSendPacket, g.api.send) &&
               hook(game, "EOS_P2P_ReceivePacket", hookReceivePacket, g.api.receive);
-    // A half-hooked transport would send direct packets that the game can never receive.
-    g.net = ok ? net : nullptr;
-    g.baseNet = g.net;
+    // A half-hooked transport would send direct packets that the game can never receive. plugin.cpp
+    // owns `net` and never frees it once the hooks are in: the shared pointers do not own it.
+    std::shared_ptr<DirectNet> base = ok && net ? std::shared_ptr<DirectNet>(net, [](DirectNet*) {}) : nullptr;
     g.lobbyTracked = g.markerReady && lobby && leave && destroy;
-    if (g.baseNet && g.lobbyTracked) g.baseNet->setActive(false);  // opened on entering a room
+    if (base && g.lobbyTracked) base->setActive(false);  // opened on entering a room
+    g.baseNet.store(base);
+    g.net.store(base);
+    // The lobby hooks are already in: a room entered meanwhile found no transport to open.
+    if (base && g.lobbyTracked && g.marker.inLobby()) base->setActive(true);
     g.autoJoinOn = ok && g.markerReady && config.autoJoin && config.direct.mode != Mode::Join;
     if (ok && config.autoJoin && config.direct.mode != Mode::Join)
         logf("DIRECT auto-connect %s", g.autoJoinOn ? "on: in other players' rooms we connect directly to a host "

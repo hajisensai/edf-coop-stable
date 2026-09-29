@@ -781,6 +781,43 @@ void testOlderPluginStaysOnEos() {
     CHECK(hellos >= 2 && !a.canRoute(kHost));
 }
 
+void testRetiredInstanceIsFreed() {
+    printf("direct: an instance swapped out while another thread uses it is stopped, then freed by its last user\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    std::string addr = "127.0.0.1:" + std::to_string(host.boundPort());
+    std::atomic<std::shared_ptr<dn::DirectNet>> current;  // what the EOS hooks read (AutoJoin's pattern)
+    std::weak_ptr<dn::DirectNet> first;
+    std::atomic<bool> running{true};
+    std::atomic<uint64_t> calls{0};
+    std::thread game([&] {  // the game thread sending through whatever instance is current
+        auto p = payloadFor(1);
+        while (running) {
+            if (std::shared_ptr<dn::DirectNet> net = current.load()) {
+                net->send(kHost, "EDF6", 1, 0, p.data(), p.size());
+                net->canRoute(kHost);
+                ++calls;
+            }
+            std::this_thread::yield();
+        }
+    });
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        auto net = std::make_shared<dn::DirectNet>();
+        CHECK(net->start(joinOptions(addr, 0)));
+        net->setLocalUser(kA);
+        if (attempt == 0) first = net;
+        std::shared_ptr<dn::DirectNet> old = current.exchange(net);
+        if (old) std::thread([old = std::move(old)] { old->stop(); }).detach();  // retire()
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(waitFor([&] { return first.expired(); }, 3000));  // no leak: the first instance is gone
+    CHECK(waitFor([&] { return current.load()->canRoute(kHost); }, 5000));
+    running = false;
+    game.join();
+    printf("  %llu calls through swapped instances\n", static_cast<unsigned long long>(calls.load()));
+}
+
 void testReplyFromOtherAddress() {
     // A host bound to the wildcard address answers from whatever source address the OS picks for the
     // client. With IPv6 privacy addresses that is usually not the (stable) address the client sent to;
@@ -1580,6 +1617,7 @@ int wmain(int argc, wchar_t** argv) {
     testSpoofedHelloFromVictimAddress();
     testReplayedHelloIgnored();
     testOlderPluginStaysOnEos();
+    testRetiredInstanceIsFreed();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

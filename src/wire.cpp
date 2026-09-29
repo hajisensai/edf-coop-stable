@@ -7,7 +7,6 @@
 namespace dn {
 namespace {
 
-constexpr size_t kMaxString = 64;
 constexpr size_t kMaxRoster = 32;
 constexpr size_t kHeaderBytes = 8;
 
@@ -33,13 +32,17 @@ class Reader {
 public:
     Reader(const uint8_t* p, size_t n) : p_(p), n_(n) {}
     bool ok() const { return ok_; }
+    bool malformed() const { return malformed_; }
+    // A field no valid sender writes (a length over its limit): the datagram is rejected.
+    void reject() { malformed_ = true; }
     uint8_t u8() { uint8_t v = 0; raw(&v, 1); return v; }
     uint16_t u16() { uint16_t v = 0; raw(&v, 2); return v; }
     uint32_t u32() { uint32_t v = 0; raw(&v, 4); return v; }
     uint64_t u64() { uint64_t v = 0; raw(&v, 8); return v; }
     std::string str() {
         size_t n = u8();
-        if (!need(n)) return {};
+        if (n > kMaxString) reject();
+        if (malformed_ || !need(n)) return {};
         std::string s(reinterpret_cast<const char*>(p_ + pos_), n);
         pos_ += n;
         return s;
@@ -66,6 +69,7 @@ private:
     size_t n_;
     size_t pos_ = 0;
     bool ok_ = true;
+    bool malformed_ = false;
 };
 
 void writeRoster(Writer& w, const std::vector<std::string>& roster) {
@@ -75,7 +79,12 @@ void writeRoster(Writer& w, const std::vector<std::string>& roster) {
 }
 
 std::vector<std::string> readRoster(Reader& r) {
-    std::vector<std::string> roster(r.u8());
+    size_t n = r.u8();
+    if (n > kMaxRoster) {
+        r.reject();
+        return {};
+    }
+    std::vector<std::string> roster(n);
     for (auto& s : roster) s = r.str();
     return roster;
 }
@@ -144,7 +153,10 @@ bool readBody(Reader& r, Message& m) {
             m.data.socketName = r.str();
             m.data.channel = r.u8();
             m.data.reliability = r.u8();
-            m.data.payload = r.bytes(r.u16());
+            if (size_t n = r.u16(); n <= kMaxPayload)
+                m.data.payload = r.bytes(n);
+            else
+                r.reject();
             return true;
         case MsgType::Ack:
             m.ack.cumulative = r.u32();
@@ -204,7 +216,9 @@ std::optional<Message> decode(const uint8_t* data, size_t size, const std::strin
         if (diff) return fail(DecodeError::TagMismatch);
     }
     Reader body(data + kHeaderBytes, bodyEnd - kHeaderBytes);
-    if (!readBody(body, m) || !body.ok()) return fail(DecodeError::Truncated);
+    bool known = readBody(body, m);  // false: a message type this version does not know
+    if (!known || body.malformed()) return fail(DecodeError::Malformed);
+    if (!body.ok()) return fail(DecodeError::Truncated);
     return m;
 }
 
@@ -214,6 +228,7 @@ const char* decodeErrorName(DecodeError e) {
         case DecodeError::BadMagic: return "bad-magic";
         case DecodeError::BadProtocol: return "protocol-version-mismatch";
         case DecodeError::Truncated: return "truncated";
+        case DecodeError::Malformed: return "malformed";
         case DecodeError::TagMissing: return "key-missing-on-sender";
         case DecodeError::TagUnexpected: return "key-missing-on-receiver";
         case DecodeError::TagMismatch: return "key-mismatch";

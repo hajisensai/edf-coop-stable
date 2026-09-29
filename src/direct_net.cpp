@@ -29,9 +29,7 @@ constexpr uint64_t kMigrateQuietMs = 5000;
 constexpr uint16_t kDefaultPort = 27015;
 // EDF6 has at most 4 players; the cap only bounds what a hello flood with made-up ids can allocate.
 constexpr size_t kMaxClients = 16;
-// Largest game packet carried: EOS_P2P_MAX_PACKET_SIZE, which keeps a Data datagram (headers, three
-// ids, tag) well inside kMaxDatagram.
-constexpr size_t kMaxPayload = 1170;
+static_assert(kMaxPayload + 3 * kMaxString + 64 < kMaxDatagram, "a full Data datagram must fit the receive buffer");
 
 uint64_t nowMs() { return GetTickCount64(); }
 

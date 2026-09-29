@@ -108,6 +108,142 @@ void testWire() {
     CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9);
 }
 
+// One of every message type, with fields filled in.
+std::vector<dn::Message> sampleMessages() {
+    std::vector<dn::Message> all;
+    dn::Message m;
+    m.type = dn::MsgType::Hello;
+    m.hello.nonce = 77;
+    m.hello.puid = kA;
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Welcome;
+    m.welcome.hostNonce = 5;
+    m.welcome.clientNonce = 9;
+    m.welcome.hostPuid = kHost;
+    m.welcome.roster = {kHost, kA, kB};
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Roster;
+    m.roster.hostNonce = 5;
+    m.roster.roster = {kHost, kB};
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Data;
+    m.epoch = 3;
+    m.data.seq = 9;
+    m.data.src = kA;
+    m.data.dst = kB;
+    m.data.socketName = "EDF6";
+    m.data.reliability = 1;
+    m.data.payload = payloadFor(3);
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Ack;
+    m.ack.cumulative = 4;
+    m.ack.set(7);
+    all.push_back(m);
+    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye}) {
+        m = {};
+        m.type = t;
+        m.ping.timeMs = 1234;
+        all.push_back(m);
+    }
+    return all;
+}
+
+void testWireRejectsMalformed() {
+    printf("wire: over-long fields, unknown types, truncation and random bytes are rejected\n");
+    dn::DecodeError err;
+    auto decodes = [&](const std::vector<uint8_t>& dg) { return dn::decode(dg.data(), dg.size(), "", &err).has_value(); };
+
+    // Data: header(8) epoch(4) seq(4), then src as u8 length + bytes.
+    dn::Message m;
+    m.type = dn::MsgType::Data;
+    m.data.seq = 1;
+    m.data.src = std::string(dn::kMaxString, 'a');
+    m.data.dst = kB;
+    m.data.payload.assign(dn::kMaxPayload, 7);
+    auto dg = dn::encode(m, "");
+    CHECK(decodes(dg));  // the limits themselves are fine
+    auto longId = dg;
+    longId[16] = static_cast<uint8_t>(dn::kMaxString + 1);
+    longId.insert(longId.begin() + 17, 'a');
+    CHECK(!decodes(longId) && err == dn::DecodeError::Malformed);  // an id the encoder would have cut
+    m.data.src = kA;
+    m.data.payload.clear();
+    dg = dn::encode(m, "");
+    auto big = dg;  // payload length is the last field before the payload
+    uint16_t over = static_cast<uint16_t>(dn::kMaxPayload + 1);
+    memcpy(&big[big.size() - 2], &over, 2);
+    big.insert(big.end(), dn::kMaxPayload + 1, 7);
+    CHECK(!decodes(big) && err == dn::DecodeError::Malformed);
+
+    dn::Message r;
+    r.type = dn::MsgType::Roster;
+    r.roster.roster.assign(32, kA);
+    dg = dn::encode(r, "");
+    CHECK(decodes(dg));
+    dg[12] = 33;  // roster count, after the host nonce
+    dg.push_back(static_cast<uint8_t>(kA.size()));
+    dg.insert(dg.end(), kA.begin(), kA.end());
+    CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
+
+    dg = dn::encode(sampleMessages()[0], "");
+    dg[4] = 99;  // a message type this version does not know
+    CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
+
+    // Every strict prefix of every valid message is rejected, tagged or not.
+    bool prefixesRejected = true;
+    for (const auto& msg : sampleMessages()) {
+        for (const std::string key : {"", "k"}) {
+            auto full = dn::encode(msg, key);
+            if (!dn::decode(full.data(), full.size(), key, &err)) prefixesRejected = false;
+            for (size_t n = 0; n < full.size(); ++n)
+                if (dn::decode(full.data(), n, key, &err) || err == dn::DecodeError::None) prefixesRejected = false;
+        }
+    }
+    CHECK(prefixesRejected);
+
+    // Random datagrams and random corruptions of valid ones: never a crash, and anything accepted
+    // is a well-formed message that encodes back within the limits.
+    std::mt19937 rng(20260930);
+    auto valid = sampleMessages();
+    size_t accepted = 0;
+    bool consistent = true;
+    for (int i = 0; i < 200000; ++i) {
+        std::vector<uint8_t> buf;
+        if (i % 2) {
+            buf = dn::encode(valid[rng() % valid.size()], "");
+            for (int flips = 1 + rng() % 4; flips > 0; --flips) buf[rng() % buf.size()] = static_cast<uint8_t>(rng());
+            if (rng() % 4 == 0) buf.resize(rng() % (buf.size() + 1));
+        } else {
+            buf.resize(rng() % 300);
+            for (auto& b : buf) b = static_cast<uint8_t>(rng());
+            if (buf.size() >= 8 && rng() % 2) {  // a valid header, so the body parser gets exercised
+                uint32_t magic = dn::kMagic;
+                uint16_t protocol = dn::kProtocol;
+                memcpy(buf.data(), &magic, 4);
+                buf[4] = static_cast<uint8_t>(rng() % 12);
+                buf[5] = 0;
+                memcpy(buf.data() + 6, &protocol, 2);
+            }
+        }
+        auto got = dn::decode(buf.data(), buf.size(), "", &err);
+        if (!got) {
+            consistent &= err != dn::DecodeError::None;
+            continue;
+        }
+        ++accepted;
+        consistent &= err == dn::DecodeError::None && got->data.payload.size() <= dn::kMaxPayload &&
+                      got->data.src.size() <= dn::kMaxString && got->welcome.roster.size() <= 32;
+        auto again = dn::encode(*got, "");
+        consistent &= dn::decode(again.data(), again.size(), "", &err).has_value();
+    }
+    printf("  fuzz: %zu of 200000 random datagrams decoded as valid messages\n", accepted);
+    CHECK(consistent);
+}
+
 void testReliableUnderLoss() {
     printf("reliable: 40%% loss + reordering, 5000 packets\n");
     dn::ReliableSender tx;
@@ -967,6 +1103,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     const wchar_t* edf = argc > 1 ? argv[1] : L"D:\\steam\\steamapps\\common\\EARTH DEFENSE FORCE 6\\EDF.dll";
     testWire();
+    testWireRejectsMalformed();
     testReliableUnderLoss();
     testConfig();
     testHostCandidates();

@@ -15,6 +15,12 @@ constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
 constexpr uint16_t kProtocol = 2;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
+// Longest id / socket name on the wire. Decoding rejects longer ones instead of reading a string the
+// sender's encoder would have cut, so both sides always agree on an id. EOS ids and socket names are
+// at most 32 characters.
+constexpr size_t kMaxString = 64;
+// Largest game packet carried: EOS_P2P_MAX_PACKET_SIZE. A Data datagram announcing more is rejected.
+constexpr size_t kMaxPayload = 1170;
 
 enum class MsgType : uint8_t {
     Hello = 1,    // client -> host: I am <puid>, session nonce
@@ -95,7 +101,7 @@ inline uint32_t linkEpoch(uint32_t clientNonce, uint32_t hostNonce) {
 // Encodes a message; when `key` is non-empty an HMAC tag is appended.
 std::vector<uint8_t> encode(const Message& msg, const std::string& key);
 
-enum class DecodeError { None, BadMagic, BadProtocol, Truncated, TagMissing, TagUnexpected, TagMismatch };
+enum class DecodeError { None, BadMagic, BadProtocol, Truncated, Malformed, TagMissing, TagUnexpected, TagMismatch };
 
 // Decodes and authenticates a datagram. `key` must match the sender's key (both empty is fine).
 std::optional<Message> decode(const uint8_t* data, size_t size, const std::string& key, DecodeError* err);

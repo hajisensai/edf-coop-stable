@@ -188,9 +188,14 @@ void DirectNet::stop() {
             for (auto& [id, link] : clients_) sendMsg(bye, link.addr, link.addrLen);
             if (hostLink_) sendMsg(bye, hostLink_->addr, hostLink_->addrLen);
         }
+        // Another thread may still hold a pointer to this instance (AutoJoin swaps instances):
+        // with no links left, send() and canRoute() report false and the game falls back to EOS.
+        clients_.clear();
+        hostLink_.reset();
+        roster_.clear();
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
     }
-    closesocket(sock_);
-    sock_ = INVALID_SOCKET;
     WSACleanup();
     logf("DIRECT stopped");
 }
@@ -702,6 +707,21 @@ void DirectNet::run() {
         std::lock_guard<std::mutex> lock(mu_);
         tick(nowMs());
     }
+}
+
+// IPv4 (and host names) first, IPv6 after.
+std::vector<std::string> orderHostCandidates(const std::string& advertised) {
+    std::vector<std::string> first, v6;
+    size_t pos = 0;
+    while (pos < advertised.size()) {
+        size_t end = advertised.find(' ', pos);
+        if (end == std::string::npos) end = advertised.size();
+        std::string a = advertised.substr(pos, end - pos);
+        if (!a.empty()) (a[0] == '[' ? v6 : first).push_back(a);
+        pos = end + 1;
+    }
+    first.insert(first.end(), v6.begin(), v6.end());
+    return first;
 }
 
 }  // namespace dn

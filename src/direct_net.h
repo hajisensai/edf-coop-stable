@@ -145,4 +145,8 @@ private:
 std::string shortId(const std::string& puid);
 std::string addrToString(const sockaddr_storage& addr, int len);
 
+// Splits a host's advertised address list ("v4:port [v6]:port ...") into the order to try:
+// IPv4 and host names first, IPv6 last.
+std::vector<std::string> orderHostCandidates(const std::string& advertised);
+
 }  // namespace dn

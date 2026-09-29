@@ -8,6 +8,11 @@ namespace dn {
 struct Config {
     bool enabled = true;
     DirectOptions direct;
+    // host: what joiners connect to, published in the lobby ("" = public IPv6 + UPnP IPv4, found
+    // automatically). Written as-is, so an external port different from ListenPort works.
+    std::string publicAddress;
+    // Not hosting: connect directly to a room host that advertises its address in the lobby.
+    bool autoJoin = true;
     bool upnp = true;
     bool bindPhysicalInterface = true;
     uint16_t eosFixedPort = 0;  // 0 = leave EOS on random ports

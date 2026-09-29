@@ -35,7 +35,7 @@ bool isPrivateIpv4(const std::string& text) {
     return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) || (a == 100 && b >= 64 && b <= 127);
 }
 
-void mapPort(uint16_t port, const std::string& localIpv4) {
+void mapPort(uint16_t port, const std::string& localIpv4, const std::function<void(const std::string&)>& onPublicIpv4) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
     IUPnPNAT* nat = nullptr;
     IStaticPortMappingCollection* mappings = nullptr;
@@ -62,6 +62,8 @@ void mapPort(uint16_t port, const std::string& localIpv4) {
                  "your IPv4; use your public IPv6 address instead.",
                  ext.c_str());
         }
+        else if (!ext.empty() && onPublicIpv4)
+            onPublicIpv4(ext);
         SysFreeString(external);
     } else if (SUCCEEDED(hr)) {
         // The UPnP API itself worked but found no router offering a port-mapping service.
@@ -83,9 +85,10 @@ void mapPort(uint16_t port, const std::string& localIpv4) {
 
 }  // namespace
 
-void upnpMapUdpAsync(uint16_t port, const std::string& localIpv4) {
+void upnpMapUdpAsync(uint16_t port, const std::string& localIpv4,
+                     std::function<void(const std::string&)> onPublicIpv4) {
     if (localIpv4.empty()) return;
-    std::thread([port, localIpv4] { mapPort(port, localIpv4); }).detach();
+    std::thread([port, localIpv4, onPublicIpv4] { mapPort(port, localIpv4, onPublicIpv4); }).detach();
 }
 
 }  // namespace dn

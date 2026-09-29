@@ -52,6 +52,8 @@ struct Api {
     PFN_EOS_Lobby_AddNotifyMemberUpdate gameAddMemberUpdate = nullptr;
     PFN_EOS_Lobby_CreateLobby gameCreateLobby = nullptr;
     PFN_EOS_Lobby_JoinLobby gameJoinLobby = nullptr;
+    PFN_EOS_Lobby_LeaveOrDestroy gameLeaveLobby = nullptr;
+    PFN_EOS_Lobby_LeaveOrDestroy gameDestroyLobby = nullptr;
 };
 
 // The game's connection-closed handler, which we sit in front of. Never freed: its address is the
@@ -79,17 +81,38 @@ struct LobbyCall {
     void* clientData;
     EOS_HLobby lobby;
     EOS_ProductUserId localUser;
+    bool owner;  // CreateLobby: we own the lobby we enter
+};
+
+// Direct link to a room host found through the lobby (AutoJoin). Touched on the EOS tick and in the
+// lobby hooks, all under `mu`.
+struct AutoJoin {
+    std::mutex mu;
+    std::string advertised;               // the host's advertised address list we are working on
+    std::vector<std::string> candidates;  // that list, best first
+    size_t next = 0;                      // next candidate to try
+    std::string hostPuid;
+    DirectNet* net = nullptr;  // never deleted: other threads may still hold the pointer
+    uint64_t attemptMs = 0;
+    bool connected = false;  // the current attempt reached the host; DirectNet reconnects by itself
+    uint64_t retryAtMs = 0;  // every candidate failed: try the list again from here on
+    uint64_t lastCheckMs = 0;
 };
 
 struct State {
     Api api;
     Config config;
-    DirectNet* net = nullptr;
+    std::atomic<DirectNet*> net{nullptr};  // current direct transport
+    DirectNet* baseNet = nullptr;          // Mode=host/join transport; AutoJoin swaps in and back out
+    bool autoJoinOn = false;               // AutoJoin active (not with Mode=join: its target is fixed)
+    AutoJoin autoJoin;
+    std::atomic<EOS_ProductUserId> lobbyUser{nullptr};
     std::unique_ptr<DisconnectHold> hold;
     LobbyMarker marker;
     bool markerReady = false;
     std::mutex markedMutex;
     std::unordered_set<std::string> markedPeers;  // logged once as plugin users
+    std::string loggedHostAddress;
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
     EOS_HP2P p2p = nullptr;
@@ -144,7 +167,8 @@ EOS_ProductUserId idHandle(const std::string& s) {
 // crashed to menu) must not stay held, or everyone would wait for it at the next sync point.
 constexpr uint64_t kDirectDataFreshMs = 10000;
 bool directAlive(const std::string& remote) {
-    return g.net && !remote.empty() && g.net->canRoute(remote) && g.net->heardFromRecently(remote, kDirectDataFreshMs);
+    DirectNet* net = g.net;
+    return net && !remote.empty() && net->canRoute(remote) && net->heardFromRecently(remote, kDirectDataFreshMs);
 }
 
 std::string peerLabel(EOS_ProductUserId id) {
@@ -268,6 +292,8 @@ EOS_EResult hookCloseConnections(EOS_HP2P h, const EOS_P2P_CloseConnectionsOptio
     return g.api.gameCloseAll(h, o);
 }
 
+void leftLobby(const char* why);
+
 void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* i) {
     if (!g_shutdown) {
         static const char* names[] = {"JOINED", "LEFT", "DISCONNECTED", "KICKED", "PROMOTED", "CLOSED"};
@@ -281,6 +307,10 @@ void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* 
         size_t released = 0;
         if (g.hold && (s == 1 || s == 2 || s == 3)) released = g.hold->release(idString(i->TargetUserId));
         if (g.hold && s == 5) released = g.hold->releaseAll();
+        std::string target = idString(i->TargetUserId);
+        bool self = !target.empty() && target == idString(g.lobbyUser.load());
+        if (s == 5 || (self && (s == 1 || s == 2 || s == 3)))
+            leftLobby(s == 5 ? "the room was closed" : s == 2 ? "we lost the lobby service" : "we left the room");
         if (released)
             logf("RESILIENCE handed %zu held disconnect(s) to the game because of the lobby change", released);
     }
@@ -297,16 +327,29 @@ EOS_NotificationId hookAddNotifyMemberStatus(EOS_HLobby h, const EOS_Lobby_AddNo
     return g.api.gameAddMemberStatus(h, o, handler, memberStatusWrapper);
 }
 
-void memberUpdateWrapper(const EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo* i) {
-    if (!g_shutdown && g.markerReady && g.marker.hasMarker(i->TargetUserId)) {
-        std::string remote = idString(i->TargetUserId);
-        bool first;
-        {
-            std::lock_guard<std::mutex> lock(g.markedMutex);
-            first = g.markedPeers.insert(remote).second;
-        }
-        if (first) logf("LOBBY member %s runs EDF6DirectNet: its disconnects can be held", shortId(remote).c_str());
+// Diagnostics for a lobby member whose attributes changed: plugin users (once each) and the
+// address the room host advertises (once per value).
+void logMemberUpdate(EOS_ProductUserId member) {
+    std::string remote = idString(member);
+    bool self = !remote.empty() && remote == idString(g.lobbyUser.load());
+    bool announce = false;
+    if (!self && g.marker.hasMarker(member)) {
+        std::lock_guard<std::mutex> lock(g.markedMutex);
+        announce = g.markedPeers.insert(remote).second;
     }
+    if (announce) logf("LOBBY member %s runs EDF6DirectNet: its disconnects can be held", shortId(remote).c_str());
+    EOS_ProductUserId owner = nullptr;
+    std::string address = g.marker.ownerAddress(&owner);
+    if (owner != member || address.empty()) return;
+    std::lock_guard<std::mutex> lock(g.markedMutex);
+    if (address == g.loggedHostAddress) return;
+    g.loggedHostAddress = address;
+    logf("LOBBY room host %s%s advertises direct-link address %s", shortId(remote).c_str(), self ? " (us)" : "",
+         address.c_str());
+}
+
+void memberUpdateWrapper(const EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo* i) {
+    if (!g_shutdown && g.markerReady) logMemberUpdate(i->TargetUserId);
     auto* handler = static_cast<MemberUpdateHandler*>(i->ClientData);
     EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo copy = *i;
     copy.ClientData = handler->clientData;
@@ -323,7 +366,10 @@ EOS_NotificationId hookAddNotifyMemberUpdate(EOS_HLobby h, const EOS_Lobby_AddNo
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
 void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     auto* call = static_cast<LobbyCall*>(i->ClientData);
-    if (!g_shutdown && i->ResultCode == EOS_Success) g.marker.entered(call->lobby, i->LobbyId, call->localUser);
+    if (!g_shutdown && i->ResultCode == EOS_Success) {
+        g.lobbyUser = call->localUser;
+        g.marker.entered(call->lobby, i->LobbyId, call->localUser, call->owner);
+    }
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
@@ -334,12 +380,120 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
 void hookCreateLobby(EOS_HLobby h, const EOS_Lobby_CreateLobbyOptionsHead* o, void* clientData,
                      EOS_Lobby_OnLobbyIdCallback cb) {
     if (!cb || !o || g_shutdown) return g.api.gameCreateLobby(h, o, clientData, cb);
-    g.api.gameCreateLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId}, lobbyEnteredWrapper);
+    g.api.gameCreateLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId, true}, lobbyEnteredWrapper);
 }
 
 void hookJoinLobby(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* clientData, EOS_Lobby_OnLobbyIdCallback cb) {
     if (!cb || !o || g_shutdown) return g.api.gameJoinLobby(h, o, clientData, cb);
-    g.api.gameJoinLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId}, lobbyEnteredWrapper);
+    g.api.gameJoinLobby(h, o, new LobbyCall{cb, clientData, h, o->LocalUserId, false}, lobbyEnteredWrapper);
+}
+
+// Stops an AutoJoin link: we left the room, or its host cannot be reached directly.
+void stopAutoJoinLocked(const char* why) {
+    AutoJoin& a = g.autoJoin;
+    a.advertised.clear();
+    a.candidates.clear();
+    if (!a.net) return;
+    DirectNet* net = a.net;
+    a.net = nullptr;
+    g.net.compare_exchange_strong(net, g.baseNet);  // a host's own listener takes over again
+    net->stop();  // later calls through a stale pointer just fail: the game falls back to EOS
+    logf("DIRECT auto-connect stopped (%s)", why);
+}
+
+void leftLobby(const char* why) {
+    if (g.marker.inLobby()) logf("LOBBY %s", why);
+    g.marker.left();
+    {
+        std::lock_guard<std::mutex> lock(g.markedMutex);
+        g.loggedHostAddress.clear();
+    }
+    std::lock_guard<std::mutex> lock(g.autoJoin.mu);
+    stopAutoJoinLocked(why);
+}
+
+void hookLeaveLobby(EOS_HLobby h, const void* o, void* clientData, void* cb) {
+    if (!g_shutdown) leftLobby("left the room");
+    g.api.gameLeaveLobby(h, o, clientData, cb);
+}
+
+void hookDestroyLobby(EOS_HLobby h, const void* o, void* clientData, void* cb) {
+    if (!g_shutdown) leftLobby("closed the room");
+    g.api.gameDestroyLobby(h, o, clientData, cb);
+}
+
+void startAutoJoinAttemptLocked(uint64_t now) {
+    AutoJoin& a = g.autoJoin;
+    DirectOptions o = g.config.direct;
+    o.mode = Mode::Join;
+    o.listenPort = 0;
+    o.hostAddress = a.candidates[a.next++];
+    auto* net = new DirectNet();
+    if (!net->start(o)) {
+        logf("DIRECT auto-connect could not open a UDP socket; game traffic stays on EOS");
+        delete net;
+        return;
+    }
+    EOS_ProductUserId me = g.localUser.load();
+    if (!me) me = g.lobbyUser.load();
+    std::string local = idString(me);
+    if (!local.empty()) net->setLocalUser(local);
+    DirectNet* old = a.net;
+    a.net = net;
+    g.net = net;
+    if (old) old->stop();
+    a.attemptMs = now;
+    a.connected = false;
+    logf("DIRECT auto-connecting to the room host %s at %s", shortId(a.hostPuid).c_str(), o.hostAddress.c_str());
+}
+
+// AutoJoin: once in someone else's room, connect directly to its host if it advertises an address.
+constexpr uint64_t kAutoCheckMs = 2000;
+constexpr uint64_t kAutoAttemptMs = 10000;  // per candidate address before trying the next one
+constexpr uint64_t kAutoRetryMs = 60000;    // all candidates failed: try them again after this
+void autoJoinTick(uint64_t now) {
+    AutoJoin& a = g.autoJoin;
+    std::lock_guard<std::mutex> lock(a.mu);
+    if (now - a.lastCheckMs < kAutoCheckMs) return;
+    a.lastCheckMs = now;
+    if (!g.marker.inLobby() || g.marker.isOwner()) return;
+    EOS_ProductUserId owner = nullptr;
+    std::string advertised = g.marker.ownerAddress(&owner);
+    if (advertised.empty()) return;
+    if (advertised != a.advertised) {  // new room, or the host's address list changed
+        a.advertised = advertised;
+        a.candidates = orderHostCandidates(advertised);
+        a.next = 0;
+        a.retryAtMs = 0;
+        a.hostPuid = idString(owner);
+        logf("DIRECT room host %s advertises %s", shortId(a.hostPuid).c_str(), advertised.c_str());
+        if (!a.candidates.empty()) startAutoJoinAttemptLocked(now);
+        return;
+    }
+    if (a.net) {
+        // Once connected, a drop is DirectNet's to recover (it keeps reconnecting the same address).
+        if (a.connected || a.net->canRoute(a.hostPuid)) {
+            a.connected = true;
+            return;
+        }
+        if (now - a.attemptMs < kAutoAttemptMs) return;
+        if (a.next < a.candidates.size()) {
+            startAutoJoinAttemptLocked(now);
+            return;
+        }
+        std::string keep = a.advertised;
+        std::vector<std::string> candidates = a.candidates;
+        stopAutoJoinLocked("the room host did not answer on any advertised address; retrying in 60 s");
+        a.advertised = keep;
+        a.candidates = candidates;
+        a.retryAtMs = now + kAutoRetryMs;
+        return;
+    }
+    if (a.retryAtMs && now >= a.retryAtMs && !a.candidates.empty()) {
+        a.next = 0;
+        a.retryAtMs = 0;
+        startAutoJoinAttemptLocked(now);
+    }
 }
 
 void onQueueFull(const EOS_P2P_OnIncomingPacketQueueFullInfo* i) {
@@ -400,7 +554,7 @@ void noteLocalUser(EOS_HP2P h, EOS_ProductUserId id) {
     if (!id || g.localUser.exchange(id) == id) return;
     std::string s = idString(id);
     logf("WHOAMI local EOS ProductUserId %s (thread %lu)", s.c_str(), GetCurrentThreadId());
-    if (g.net && !s.empty()) g.net->setLocalUser(s);
+    if (DirectNet* net = g.net; net && !s.empty()) net->setLocalUser(s);
     EOS_P2P_AddNotifyOptions o{1, id, nullptr};
     if (g.api.addEstablished) g.api.addEstablished(h, &o, nullptr, onEstablished);
     if (g.api.addInterrupted) g.api.addInterrupted(h, &o, nullptr, onInterrupted);
@@ -417,10 +571,11 @@ void maybeLogStats() {
     uint64_t eOut = g.eosOut.exchange(0), eIn = g.eosIn.exchange(0), fail = g.eosSendFail.exchange(0);
     uint64_t upg = g.eosUpgraded.exchange(0);
     if (!(dOut | dIn | eOut | eIn | fail)) return;
+    DirectNet* net = g.net;
     logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
          static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
-         static_cast<unsigned long long>(fail), g.net ? " | " : "", g.net ? g.net->statusLine().c_str() : "");
+         static_cast<unsigned long long>(fail), net ? " | " : "", net ? net->statusLine().c_str() : "");
 }
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
@@ -433,6 +588,8 @@ void hookPlatformTick(EOS_HPlatform platform) {
         logf("EOS tick runs on thread %lu", GetCurrentThreadId());
     }
     maybeLogStats();
+    g.marker.tick();
+    if (g.autoJoinOn) autoJoinTick(GetTickCount64());
     if (g.hold && g.hold->heldCount()) {
         for (const auto& remote : g.hold->poll(GetTickCount64(), directAlive))
             logf("RESILIENCE %s did not come back within %u s; disconnect handed to the game",
@@ -451,8 +608,9 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
-    if (g.net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
-        g.net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
+    DirectNet* net = g.net;
+    if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
+        net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
                     static_cast<const uint8_t*>(o->Data), o->DataLengthBytes)) {
         ++g.directOut;
         return EOS_Success;
@@ -489,10 +647,11 @@ EOS_EResult hookReceivePacket(EOS_HP2P h, const EOS_P2P_ReceivePacketOptions* o,
     if (g_shutdown) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
-    if (g.net && o && outPeer && outData && outBytes) {
+    DirectNet* net = g.net;
+    if (net && o && outPeer && outData && outBytes) {
         const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
         Delivered d;
-        if (g.net->pop(channel, o->MaxDataSizeBytes, d)) {
+        if (net->pop(channel, o->MaxDataSizeBytes, d)) {
             EOS_ProductUserId peer = idHandle(d.src);
             if (peer) {
                 *outPeer = peer;
@@ -530,6 +689,8 @@ bool hook(HMODULE game, const char* name, T replacement, T& original) {
 
 void eosHooksShutdown() { g_shutdown = true; }
 
+void setAdvertisedAddress(const std::string& address) { g.marker.setAddress(address); }
+
 bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet* net) {
     g.config = config;
     g.net = nullptr;  // enabled below only when every transport hook is in place
@@ -557,6 +718,8 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     g.markerReady = g.marker.init(eos) && hook(game, "EOS_Lobby_CreateLobby", hookCreateLobby, g.api.gameCreateLobby) &&
                     hook(game, "EOS_Lobby_JoinLobby", hookJoinLobby, g.api.gameJoinLobby);
     hook(game, "EOS_Lobby_AddNotifyLobbyMemberUpdateReceived", hookAddNotifyMemberUpdate, g.api.gameAddMemberUpdate);
+    hook(game, "EOS_Lobby_LeaveLobby", hookLeaveLobby, g.api.gameLeaveLobby);
+    hook(game, "EOS_Lobby_DestroyLobby", hookDestroyLobby, g.api.gameDestroyLobby);
     logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
     if (config.hold != Config::Hold::Off) {
         // Holding needs all of: our closed wrapper, its unregister hook, the tick to expire events,
@@ -577,6 +740,12 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
               hook(game, "EOS_P2P_ReceivePacket", hookReceivePacket, g.api.receive);
     // A half-hooked transport would send direct packets that the game can never receive.
     g.net = ok ? net : nullptr;
+    g.baseNet = g.net;
+    g.autoJoinOn = ok && g.markerReady && config.autoJoin && config.direct.mode != Mode::Join;
+    if (ok && config.autoJoin && config.direct.mode != Mode::Join)
+        logf("DIRECT auto-connect %s", g.autoJoinOn ? "on: in other players' rooms we connect directly to a host "
+                                                    "that advertises its address"
+                                                  : "UNAVAILABLE (lobby functions missing)");
     logf("EOS hooks %s", ok ? "installed" : "FAILED (EDF.dll import table not as expected), direct link disabled");
     return ok;
 }

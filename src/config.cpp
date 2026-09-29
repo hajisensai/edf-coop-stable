@@ -18,13 +18,20 @@ const char kDefaultIni[] =
     "; 1 启用 / 0 关闭插件（关闭后与原版完全一样）\r\n"
     "Enabled=1\r\n"
     "\r\n"
-    "; 公网直连（可选）：off 不用 / host 我开房 / join 我连房主\r\n"
+    "; 公网直连：off 平时 / host 我当房主（别人进我房间会自动直连我）/ join 手动指定房主地址\r\n"
     "Mode=off\r\n"
     "\r\n"
     "; host：监听的 UDP 端口（端口转发、防火墙放行的就是它）；join：本机端口，0 = 自动\r\n"
     "ListenPort=27015\r\n"
     "\r\n"
-    "; join 时填房主地址，例：123.45.67.89:27015 / [2408:8207::5]:27015 / myroom.ddns.net:27015\r\n"
+    "; host：告诉别人连哪里。留空 = 自动（公网 IPv6 + UPnP 映射的 IPv4）\r\n"
+    ";   自己做了端口映射就手动填公网地址:外部端口，例：123.45.67.89:40000 / myroom.ddns.net:40000\r\n"
+    "PublicAddress=\r\n"
+    "\r\n"
+    "; 进房后自动直连房主（房主设了 Mode=host 才会生效）。1 开 / 0 关\r\n"
+    "AutoJoin=1\r\n"
+    "\r\n"
+    "; 手动模式 join 才用：房主地址，例：123.45.67.89:27015 / [2408:8207::5]:27015\r\n"
     "HostAddress=\r\n"
     "\r\n"
     "; 可选暗号，所有人填一样的，只用英文字母和数字\r\n"
@@ -106,6 +113,8 @@ Config loadConfig(const std::wstring& iniPath) {
     c.direct.hostAddress = toUtf8(readString(iniPath, s, L"HostAddress", L""));
     c.direct.key = toUtf8(readString(iniPath, s, L"Key", L""));
     c.direct.linkTimeoutMs = static_cast<uint32_t>(std::clamp(readInt(iniPath, s, L"LinkTimeoutMs", 60000), 3000, 300000));
+    c.publicAddress = toUtf8(readString(iniPath, s, L"PublicAddress", L""));
+    c.autoJoin = readInt(iniPath, s, L"AutoJoin", 1) != 0;
     c.upnp = readInt(iniPath, s, L"UPnP", 1) != 0;
     c.bindPhysicalInterface = readInt(iniPath, s, L"BindPhysicalInterface", 1) != 0;
 

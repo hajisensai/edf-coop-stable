@@ -238,6 +238,10 @@ struct EOS_LobbyDetails_CopyMemberAttributeByKeyOptions {  // ApiVersion 1
     const char* AttrKey;
 };
 
+struct EOS_LobbyDetails_GetLobbyOwnerOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+};
+
 struct EOS_Lobby_AddNotifyLobbyMemberUpdateReceivedOptions {  // ApiVersion 1
     int32_t ApiVersion;
 };
@@ -256,6 +260,8 @@ using PFN_EOS_Lobby_CreateLobby = void (*)(EOS_HLobby, const EOS_Lobby_CreateLob
                                            EOS_Lobby_OnLobbyIdCallback);
 using PFN_EOS_Lobby_JoinLobby = void (*)(EOS_HLobby, const EOS_Lobby_JoinLobbyOptionsHead*, void*,
                                          EOS_Lobby_OnLobbyIdCallback);
+// LeaveLobby / DestroyLobby: only the call itself matters to us, so options and callback stay opaque.
+using PFN_EOS_Lobby_LeaveOrDestroy = void (*)(EOS_HLobby, const void*, void*, void*);
 using PFN_EOS_Lobby_UpdateLobbyModification = EOS_EResult (*)(EOS_HLobby, const EOS_Lobby_UpdateLobbyModificationOptions*,
                                                               EOS_HLobbyModification*);
 using PFN_EOS_Lobby_UpdateLobby = void (*)(EOS_HLobby, const EOS_Lobby_UpdateLobbyOptions*, void*,
@@ -267,6 +273,8 @@ using PFN_EOS_Lobby_CopyLobbyDetailsHandle = EOS_EResult (*)(EOS_HLobby, const E
                                                              EOS_HLobbyDetails*);
 using PFN_EOS_LobbyDetails_CopyMemberAttributeByKey = EOS_EResult (*)(
     EOS_HLobbyDetails, const EOS_LobbyDetails_CopyMemberAttributeByKeyOptions*, EOS_Lobby_Attribute**);
+using PFN_EOS_LobbyDetails_GetLobbyOwner = EOS_ProductUserId (*)(EOS_HLobbyDetails,
+                                                                 const EOS_LobbyDetails_GetLobbyOwnerOptions*);
 using PFN_EOS_LobbyDetails_Release = void (*)(EOS_HLobbyDetails);
 using PFN_EOS_Lobby_Attribute_Release = void (*)(EOS_Lobby_Attribute*);
 using PFN_EOS_Lobby_AddNotifyMemberUpdate = EOS_NotificationId (*)(

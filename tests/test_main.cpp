@@ -8,11 +8,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "../src/auth.h"
 #include "../src/config.h"
 #include "../src/direct_net.h"
 #include "../src/hold.h"
@@ -110,6 +113,151 @@ void testWire() {
     CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9);
 }
 
+// One of every message type, with fields filled in.
+std::vector<dn::Message> sampleMessages() {
+    std::vector<dn::Message> all;
+    dn::Message m;
+    m.type = dn::MsgType::Hello;
+    m.hello.nonce = 77;
+    m.hello.session = 12;
+    m.hello.puid = kA;
+    m.hello.cookie.fill(3);
+    m.hello.publicKey.fill(4);
+    m.hello.signature.fill(5);
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Challenge;
+    m.challenge.clientNonce = 77;
+    m.challenge.cookie.fill(6);
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Welcome;
+    m.welcome.hostNonce = 5;
+    m.welcome.clientNonce = 9;
+    m.welcome.hostPuid = kHost;
+    m.welcome.roster = {kHost, kA, kB};
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Roster;
+    m.roster.hostNonce = 5;
+    m.roster.roster = {kHost, kB};
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Data;
+    m.epoch = 3;
+    m.data.seq = 9;
+    m.data.src = kA;
+    m.data.dst = kB;
+    m.data.socketName = "EDF6";
+    m.data.reliability = 1;
+    m.data.payload = payloadFor(3);
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Ack;
+    m.ack.cumulative = 4;
+    m.ack.set(7);
+    all.push_back(m);
+    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye}) {
+        m = {};
+        m.type = t;
+        m.ping.timeMs = 1234;
+        all.push_back(m);
+    }
+    return all;
+}
+
+void testWireRejectsMalformed() {
+    printf("wire: over-long fields, unknown types, truncation and random bytes are rejected\n");
+    dn::DecodeError err;
+    auto decodes = [&](const std::vector<uint8_t>& dg) { return dn::decode(dg.data(), dg.size(), "", &err).has_value(); };
+
+    // Data: header(8) epoch(4) seq(4), then src as u8 length + bytes.
+    dn::Message m;
+    m.type = dn::MsgType::Data;
+    m.data.seq = 1;
+    m.data.src = std::string(dn::kMaxString, 'a');
+    m.data.dst = kB;
+    m.data.payload.assign(dn::kMaxPayload, 7);
+    auto dg = dn::encode(m, "");
+    CHECK(decodes(dg));  // the limits themselves are fine
+    auto longId = dg;
+    longId[16] = static_cast<uint8_t>(dn::kMaxString + 1);
+    longId.insert(longId.begin() + 17, 'a');
+    CHECK(!decodes(longId) && err == dn::DecodeError::Malformed);  // an id the encoder would have cut
+    m.data.src = kA;
+    m.data.payload.clear();
+    dg = dn::encode(m, "");
+    auto big = dg;  // payload length is the last field before the payload
+    uint16_t over = static_cast<uint16_t>(dn::kMaxPayload + 1);
+    memcpy(&big[big.size() - 2], &over, 2);
+    big.insert(big.end(), dn::kMaxPayload + 1, 7);
+    CHECK(!decodes(big) && err == dn::DecodeError::Malformed);
+
+    dn::Message r;
+    r.type = dn::MsgType::Roster;
+    r.roster.roster.assign(32, kA);
+    dg = dn::encode(r, "");
+    CHECK(decodes(dg));
+    dg[12] = 33;  // roster count, after the host nonce
+    dg.push_back(static_cast<uint8_t>(kA.size()));
+    dg.insert(dg.end(), kA.begin(), kA.end());
+    CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
+
+    dg = dn::encode(sampleMessages()[0], "");
+    dg[4] = 99;  // a message type this version does not know
+    CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
+
+    // Every strict prefix of every valid message is rejected, tagged or not.
+    bool prefixesRejected = true;
+    for (const auto& msg : sampleMessages()) {
+        for (const std::string key : {"", "k"}) {
+            auto full = dn::encode(msg, key);
+            if (!dn::decode(full.data(), full.size(), key, &err)) prefixesRejected = false;
+            for (size_t n = 0; n < full.size(); ++n)
+                if (dn::decode(full.data(), n, key, &err) || err == dn::DecodeError::None) prefixesRejected = false;
+        }
+    }
+    CHECK(prefixesRejected);
+
+    // Random datagrams and random corruptions of valid ones: never a crash, and anything accepted
+    // is a well-formed message that encodes back within the limits.
+    std::mt19937 rng(20260930);
+    auto valid = sampleMessages();
+    size_t accepted = 0;
+    bool consistent = true;
+    for (int i = 0; i < 200000; ++i) {
+        std::vector<uint8_t> buf;
+        if (i % 2) {
+            buf = dn::encode(valid[rng() % valid.size()], "");
+            for (int flips = 1 + rng() % 4; flips > 0; --flips) buf[rng() % buf.size()] = static_cast<uint8_t>(rng());
+            if (rng() % 4 == 0) buf.resize(rng() % (buf.size() + 1));
+        } else {
+            buf.resize(rng() % 300);
+            for (auto& b : buf) b = static_cast<uint8_t>(rng());
+            if (buf.size() >= 8 && rng() % 2) {  // a valid header, so the body parser gets exercised
+                uint32_t magic = dn::kMagic;
+                uint16_t protocol = dn::kProtocol;
+                memcpy(buf.data(), &magic, 4);
+                buf[4] = static_cast<uint8_t>(rng() % 12);
+                buf[5] = 0;
+                memcpy(buf.data() + 6, &protocol, 2);
+            }
+        }
+        auto got = dn::decode(buf.data(), buf.size(), "", &err);
+        if (!got) {
+            consistent &= err != dn::DecodeError::None;
+            continue;
+        }
+        ++accepted;
+        consistent &= err == dn::DecodeError::None && got->data.payload.size() <= dn::kMaxPayload &&
+                      got->data.src.size() <= dn::kMaxString && got->welcome.roster.size() <= 32;
+        auto again = dn::encode(*got, "");
+        consistent &= dn::decode(again.data(), again.size(), "", &err).has_value();
+    }
+    printf("  fuzz: %zu of 200000 random datagrams decoded as valid messages\n", accepted);
+    CHECK(consistent);
+}
+
 void testReliableUnderLoss() {
     printf("reliable: 40%% loss + reordering, 5000 packets\n");
     dn::ReliableSender tx;
@@ -181,6 +329,8 @@ dn::DirectOptions hostOptions(uint16_t port, double drop, const std::string& key
     o.mode = dn::Mode::Host;
     o.listenPort = port;
     o.key = key;
+    // A and B published this process's identity, which every test client proves by default.
+    o.memberIds = {{kA, dn::processIdentity()->commitment()}, {kB, dn::processIdentity()->commitment()}};
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     return o;
@@ -270,6 +420,404 @@ struct RawPeer {
         return n;
     }
 };
+
+// Sends `m` to 127.0.0.1:`port` from `peer`'s socket.
+void sendTo(RawPeer& peer, uint16_t port, const dn::Message& m, const std::string& key = "") {
+    auto dg = dn::encode(m, key);
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(peer.s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+           reinterpret_cast<sockaddr*>(&to), sizeof(to));
+}
+
+// The next datagram of `type` arriving at `peer` within `ms`.
+std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms, const std::string& key = "") {
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        int got = recv(peer.s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+        if (got <= 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        auto m = dn::decode(buf, static_cast<size_t>(got), key, nullptr);
+        if (m && m->type == type) return m;
+    }
+    return std::nullopt;
+}
+
+// A hand-driven client: says hello as `puid`, proves it with `identity` once the host sent a cookie,
+// and keeps the link epoch the host welcomed it with.
+struct RawClient {
+    RawPeer peer;
+    std::shared_ptr<const dn::Identity> identity = dn::processIdentity();
+    std::string key;
+    uint16_t port = 0;
+    std::string puid;
+    uint32_t nonce = 0;
+    uint32_t epoch = 0;
+    dn::Message lastHello;  // the last proven hello sent
+
+    // A hello of session `session`; signed when `cookie` is given.
+    dn::Message hello(uint64_t session, const dn::Cookie* cookie) const {
+        dn::Message h;
+        h.type = dn::MsgType::Hello;
+        h.hello.nonce = nonce;
+        h.hello.session = session;
+        h.hello.puid = puid;
+        if (cookie) {
+            h.hello.cookie = *cookie;
+            h.hello.publicKey = identity->publicKey();
+            h.hello.signature = identity->sign(*dn::helloDigest(h.hello)).value();
+        }
+        return h;
+    }
+    bool welcomed(const dn::Message& h, int ms) {
+        sendTo(peer, port, h, key);
+        auto w = receiveFrom(peer, dn::MsgType::Welcome, ms, key);
+        if (!w || w->welcome.clientNonce != h.hello.nonce) return false;
+        epoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        return true;
+    }
+    bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce, int attempts = 5) {
+        port = hostPort;
+        puid = id;
+        nonce = sessionNonce;
+        uint64_t session = identity->nextSession();
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            sendTo(peer, port, hello(session, nullptr), key);
+            auto c = receiveFrom(peer, dn::MsgType::Challenge, 500, key);
+            if (!c || c->challenge.clientNonce != nonce) continue;
+            lastHello = hello(session, &c->challenge.cookie);
+            if (welcomed(lastHello, 500)) return true;
+        }
+        return false;
+    }
+    void data(uint32_t seq, const std::string& dst, const std::vector<uint8_t>& payload) {
+        dn::Message m;
+        m.type = dn::MsgType::Data;
+        m.epoch = epoch;
+        m.data.seq = seq;
+        m.data.src = puid;
+        m.data.dst = dst;
+        m.data.socketName = "EDF6";
+        m.data.channel = 1;
+        m.data.reliability = seq ? 1 : 0;
+        m.data.payload = payload;
+        sendTo(peer, port, m, key);
+    }
+};
+
+void testNoReflectionToSender() {
+    printf("direct: the host never sends a client's packets back to that client\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawClient c;
+    CHECK(c.connect(host.boundPort(), kA, 0x51));
+    for (uint32_t seq = 1; seq <= 50; ++seq) c.data(seq, kA, payloadFor(seq));  // addressed to itself
+    c.data(0, kA, payloadFor(0));
+    CHECK(c.peer.count(dn::MsgType::Data, 500) == 0);
+    c.data(51, kHost, payloadFor(51));  // the link still works for real traffic
+    dn::Delivered d;
+    CHECK(waitFor([&] { return host.pop(nullptr, 1170, d); }, 2000) && d.src == kA && d.data == payloadFor(51));
+}
+
+void testIdentityCrypto() {
+    printf("identity: commitments, signatures and session numbers\n");
+    auto a = dn::Identity::generate(), b = dn::Identity::generate();
+    CHECK(a && b && dn::processIdentity() && dn::processIdentity() == dn::processIdentity());
+    if (!a || !b) return;
+    CHECK(a->commitment().size() == 32 && a->commitment() != b->commitment());
+    CHECK(a->commitment() == dn::identityCommitment(a->publicKey()));
+    dn::HelloMsg h;
+    h.nonce = 5;
+    h.session = 1;
+    h.puid = kA;
+    h.cookie.fill(9);
+    auto digest = dn::helloDigest(h);
+    CHECK(digest.has_value());
+    auto sig = a->sign(*digest);
+    CHECK(sig && dn::verifySignature(a->publicKey(), *digest, *sig));
+    CHECK(!dn::verifySignature(b->publicKey(), *digest, *sig));  // someone else's key
+    for (auto change : {0, 1, 2, 3}) {  // every signed field matters
+        dn::HelloMsg t = h;
+        if (change == 0) t.nonce ^= 1;
+        if (change == 1) ++t.session;
+        if (change == 2) t.puid = kB;
+        if (change == 3) t.cookie[0] ^= 1;
+        CHECK(!dn::verifySignature(a->publicKey(), *dn::helloDigest(t), *sig));
+    }
+    dn::PublicKey offCurve{};
+    offCurve.fill(1);
+    CHECK(!dn::verifySignature(offCurve, *digest, *sig));
+    uint64_t s1 = a->nextSession(), s2 = a->nextSession();
+    CHECK(s2 > s1);
+}
+
+void testHelloNeedsCookieAndIdentity() {
+    printf("direct: a hello proves its EOS id: a cookie for its address, signed by the id's published identity\n");
+    for (const std::string key : {"", "roomkey"}) {  // a shared Key lets nobody claim someone else
+        auto idA = dn::Identity::generate(), idB = dn::Identity::generate();
+        dn::DirectOptions ho = hostOptions(0, 0, key);
+        ho.memberIds = {{kA, idA->commitment()}, {kB, idB->commitment()}};  // kC: a player without the plugin
+        dn::DirectNet host;
+        CHECK(host.start(ho));
+        host.setLocalUser(kHost);
+        const std::string kC = "0002dddddddddddddddddddddddddddd";
+
+        RawClient plain;  // no cookie: answered with a challenge only
+        plain.key = key;
+        plain.port = host.boundPort();
+        plain.puid = kA;
+        plain.nonce = 0x10;
+        sendTo(plain.peer, plain.port, plain.hello(1, nullptr), key);
+        auto c = receiveFrom(plain.peer, dn::MsgType::Challenge, 500, key);
+        CHECK(c && c->challenge.clientNonce == 0x10);
+        CHECK(receiveFrom(plain.peer, dn::MsgType::Welcome, 200, key) == std::nullopt);
+        dn::Cookie forged{};
+        forged.fill(0x42);
+        CHECK(!plain.welcomed(plain.hello(1, &forged), 300));  // a made-up cookie: another challenge
+
+        RawClient memberB;  // B, a room member, claims to be A: right cookie, wrong identity
+        memberB.identity = idB;
+        memberB.key = key;
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x20, 1));
+        RawClient vanilla;  // someone claims kC, who published nothing
+        vanilla.identity = idB;
+        vanilla.key = key;
+        CHECK(!vanilla.connect(host.boundPort(), kC, 0x30, 1));
+        CHECK(!host.canRoute(kA) && !host.canRoute(kC) && host.directMembers().size() == 1);
+
+        RawClient realA;
+        realA.identity = idA;
+        realA.key = key;
+        CHECK(realA.connect(host.boundPort(), kA, 0x40));
+        CHECK(host.canRoute(kA));
+        auto p = payloadFor(1);
+        CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+        auto d = receiveFrom(realA.peer, dn::MsgType::Data, 1000, key);
+        CHECK(d && d->epoch == realA.epoch && d->data.payload == p);
+        // B still cannot take A's place, now that A is connected.
+        CHECK(!memberB.connect(host.boundPort(), kA, 0x21, 1));
+        CHECK(memberB.peer.count(dn::MsgType::Data, 300) == 0);
+    }
+}
+
+void testIdentityPublishedLate() {
+    printf("direct: a client connects soon after its identity reaches the host's copy of the room\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.memberIds.clear();  // the room info has not arrived yet
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2500));
+    host.setMemberIdentities({{kA, dn::processIdentity()->commitment()}});
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 3000));
+    printf("  connected %lld ms after the identity arrived\n",
+           static_cast<long long>(
+               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()));
+    CHECK(streamInOrder(a, kHost, host, kA, 100));
+}
+
+void testJunkHellosDoNotBlockPlayers() {
+    printf("direct: floods of hellos from many addresses keep nothing and do not keep a player out\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    for (int i = 0; i < 40; ++i) {  // even ids that are room members: without their key nothing sticks
+        char id[40];
+        snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+        ho.memberIds[id] = dn::Identity::generate()->commitment();
+    }
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    std::vector<RawClient> junk(40);
+    std::atomic<bool> flooding{true};
+    std::thread flood([&] {
+        dn::Cookie made{};
+        for (uint32_t round = 0; flooding; ++round) {
+            for (int i = 0; i < 40; ++i) {
+                char id[40];
+                snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+                junk[i].port = host.boundPort();
+                junk[i].puid = id;
+                junk[i].nonce = round * 64 + i + 1;
+                made.fill(static_cast<uint8_t>(round));
+                sendTo(junk[i].peer, junk[i].port, junk[i].hello(round, (round & 1) ? &made : nullptr));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    flooding = false;
+    flood.join();
+    CHECK(host.directMembers() == std::vector<std::string>({kHost, kA}));
+    CHECK(host.statusLine().rfind("HOST clients=1 ", 0) == 0);
+}
+
+void testSpoofedHelloFromVictimAddress() {
+    printf("direct: a hello for a new id sent from a connected player's address does not end its link\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    // Same source address and port as A: what an attacker forging A's address sends.
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    BOOL reuse = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_port = htons(a.boundPort());
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+        printf("  SKIP: cannot share A's port (error %d)\n", WSAGetLastError());
+        closesocket(s);
+        return;
+    }
+    {
+        RawClient spoof;  // while it exists it also takes the datagrams sent to A
+        closesocket(spoof.peer.s);
+        spoof.peer.s = s;
+        spoof.port = host.boundPort();
+        spoof.puid = kB;  // a fresh id: the old host dropped A's link for it
+        spoof.nonce = 0x77;
+        dn::Cookie made{};
+        for (int i = 0; i < 5; ++i) {
+            sendTo(spoof.peer, spoof.port, spoof.hello(1, nullptr));
+            sendTo(spoof.peer, spoof.port, spoof.hello(1, &made));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(host.canRoute(kA) && !host.canRoute(kB));
+    CHECK(streamInOrder(host, kA, a, kHost, 100));
+}
+
+void testReplayedHelloIgnored() {
+    printf("direct: a captured hello of an earlier session does not replace the live one\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawClient c;
+    CHECK(c.connect(host.boundPort(), kA, 0x100));
+    dn::Message first = c.lastHello;
+    CHECK(c.connect(host.boundPort(), kA, 0x200));  // a newer session replaces the first
+    uint32_t live = c.epoch;
+    CHECK(!c.welcomed(first, 500));  // same address, cookie still valid: still refused
+    RawClient elsewhere;             // from another address the old cookie is worthless anyway
+    elsewhere.port = host.boundPort();
+    CHECK(!elsewhere.welcomed(first, 300));
+    CHECK(c.welcomed(c.lastHello, 500) && c.epoch == live);  // the live session's own hello: just welcomed again
+    auto p = payloadFor(2);
+    CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+    auto d = receiveFrom(c.peer, dn::MsgType::Data, 1000);
+    CHECK(d && d->epoch == live);
+}
+
+void testOlderPluginStaysOnEos() {
+    printf("direct: peers speaking the 0.3.6 protocol are ignored both ways, nothing breaks\n");
+    // A 0.3.6 hello: header with protocol 2, nonce, id.
+    std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, 2, 0, 7, 0, 0, 0, static_cast<uint8_t>(kA.size())};
+    old.insert(old.end(), kA.begin(), kA.end());
+    dn::DecodeError err;
+    CHECK(!dn::decode(old.data(), old.size(), "", &err) && err == dn::DecodeError::BadProtocol);
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    RawPeer oldClient;
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(host.boundPort());
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    for (int i = 0; i < 3; ++i)
+        sendto(oldClient.s, reinterpret_cast<const char*>(old.data()), static_cast<int>(old.size()), 0,
+               reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    int replies = 0;
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        if (recv(oldClient.s, reinterpret_cast<char*>(buf), sizeof(buf), 0) > 0) ++replies;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(replies == 0 && !host.canRoute(kA));
+
+    // A 0.3.6 host: it cannot read our hello, whatever it sends back is not a protocol-3 answer.
+    RawPeer oldHost;
+    sockaddr_in bound{};
+    int len = sizeof(bound);
+    getsockname(oldHost.s, reinterpret_cast<sockaddr*>(&bound), &len);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(ntohs(bound.sin_port)), 0)));
+    a.setLocalUser(kA);
+    int hellos = 0;
+    end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+    while (std::chrono::steady_clock::now() < end) {
+        uint8_t buf[2048];
+        sockaddr_storage from{};
+        int fromLen = sizeof(from);
+        int got = recvfrom(oldHost.s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from),
+                           &fromLen);
+        if (got <= 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        ++hellos;
+        // 0.3.6 answers a hello it understood with a protocol-2 Welcome; send one anyway.
+        std::vector<uint8_t> welcome = {0x45, 0x44, 0x4E, 0x31, 2, 0, 2, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
+        sendto(oldHost.s, reinterpret_cast<const char*>(welcome.data()), static_cast<int>(welcome.size()), 0,
+               reinterpret_cast<sockaddr*>(&from), fromLen);
+    }
+    CHECK(hellos >= 2 && !a.canRoute(kHost));
+}
+
+void testRetiredInstanceIsFreed() {
+    printf("direct: an instance swapped out while another thread uses it is stopped, then freed by its last user\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    std::string addr = "127.0.0.1:" + std::to_string(host.boundPort());
+    std::atomic<std::shared_ptr<dn::DirectNet>> current;  // what the EOS hooks read (AutoJoin's pattern)
+    std::weak_ptr<dn::DirectNet> first;
+    std::atomic<bool> running{true};
+    std::atomic<uint64_t> calls{0};
+    std::thread game([&] {  // the game thread sending through whatever instance is current
+        auto p = payloadFor(1);
+        while (running) {
+            if (std::shared_ptr<dn::DirectNet> net = current.load()) {
+                net->send(kHost, "EDF6", 1, 0, p.data(), p.size());
+                net->canRoute(kHost);
+                ++calls;
+            }
+            std::this_thread::yield();
+        }
+    });
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        auto net = std::make_shared<dn::DirectNet>();
+        CHECK(net->start(joinOptions(addr, 0)));
+        net->setLocalUser(kA);
+        if (attempt == 0) first = net;
+        std::shared_ptr<dn::DirectNet> old = current.exchange(net);
+        if (old) std::thread([old = std::move(old)] { old->stop(); }).detach();  // retire()
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(waitFor([&] { return first.expired(); }, 3000));  // no leak: the first instance is gone
+    CHECK(waitFor([&] { return current.load()->canRoute(kHost); }, 5000));
+    running = false;
+    game.join();
+    printf("  %llu calls through swapped instances\n", static_cast<unsigned long long>(calls.load()));
+}
 
 void testReplyFromOtherAddress() {
     // A host bound to the wildcard address answers from whatever source address the OS picks for the
@@ -887,6 +1435,47 @@ void testNetif() {
     }
 }
 
+void testReliableBacklogLimit() {
+    printf("reliable: a peer that never acknowledges makes the link overloaded, by count and by bytes\n");
+    dn::ReliableSender count;
+    for (uint32_t i = 0; i < 8192; ++i) count.track(count.nextSeq(), std::vector<uint8_t>(20), 1);
+    CHECK(!count.overloaded());
+    count.track(count.nextSeq(), std::vector<uint8_t>(20), 1);
+    CHECK(count.overloaded() && count.pendingCount() == 8193);  // nothing dropped: the caller closes the link
+    dn::AckMsg ack;
+    ack.cumulative = 100;
+    count.onAck(ack, 2);
+    CHECK(!count.overloaded() && count.pendingBytes() == 8093 * 20);
+
+    dn::ReliableSender bytes;
+    size_t tracked = 0;
+    while (!bytes.overloaded()) {
+        bytes.track(bytes.nextSeq(), std::vector<uint8_t>(1200), 1);
+        ++tracked;
+    }
+    CHECK(tracked < 8192 && bytes.pendingBytes() > (8u << 20) && bytes.pendingBytes() <= (8u << 20) + 1200);
+}
+
+void testUnacknowledgedLinkIsDropped() {
+    printf("direct: a client that takes data but never acknowledges it is disconnected, not buffered forever\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.linkTimeoutMs = 60000;  // the backlog, not the timeout, must end it
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
+    a.setTestBlackhole(true);  // receives everything, acknowledges nothing
+    std::vector<uint8_t> p(1100, 1);
+    size_t sent = 0;
+    while (sent < 20000 && host.send(kA, "EDF6", 1, 1, p.data(), p.size())) ++sent;
+    printf("  host stopped taking packets for it after %zu\n", sent);
+    CHECK(sent < 8193);
+    CHECK(waitFor([&] { return !host.canRoute(kA) && host.directMembers().size() == 1; }, 2000));
+}
+
 void testHostCandidates() {
     printf("auto-connect: IPv4 addresses of the room host are tried before IPv6\n");
     using V = std::vector<std::string>;
@@ -895,6 +1484,33 @@ void testHostCandidates() {
     CHECK(dn::orderHostCandidates("my.ddns.net:40000") == V({"my.ddns.net:40000"}));
     CHECK(dn::orderHostCandidates("  a:1   b:2 ") == V({"a:1", "b:2"}));
     CHECK(dn::orderHostCandidates("").empty());
+}
+
+void testHostCandidateFilter() {
+    printf("auto-connect: a room host cannot aim joiners at loopback, broadcast, multicast or link-local\n");
+    using V = std::vector<std::string>;
+    CHECK(dn::orderHostCandidates("127.0.0.1:1 0.0.0.0:1 224.0.0.1:1 255.255.255.255:1 169.254.1.1:1 [::1]:1 [::]:1 "
+                                  "[fe80::1]:1 [ff02::1]:1 [::ffff:127.0.0.1]:1 [fe80::1%3]:1 127.1:1 2130706433:1 "
+                                  "bad_name:1 1.2.3.4:0 1.2.3.4:99999 [2408::1")
+              .empty());
+    CHECK(dn::orderHostCandidates("[fd00::1]:5 192.168.1.5:27015 10.0.0.2:1 my.ddns.net:40000") ==
+          V({"192.168.1.5:27015", "10.0.0.2:1", "my.ddns.net:40000", "[fd00::1]:5"}));  // LAN play is fine
+    CHECK(dn::orderHostCandidates("1.1.1.1:1 1.1.1.2:1 127.0.0.1:1 1.1.1.3:1 [2408::5]:1 1.1.1.4:1 1.1.1.5:1") ==
+          V({"1.1.1.1:1", "1.1.1.2:1", "1.1.1.3:1", "[2408::5]:1"}));  // at most 4, refused ones not counted
+    CHECK(dn::orderHostCandidates("2408::5").size() == 1);
+
+    // Names are checked again after DNS: "localhost" is a fine-looking name for a loopback address.
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    for (std::string target : {"127.0.0.1", "localhost"}) {
+        dn::DirectOptions o = joinOptions(target + ":" + std::to_string(host.boundPort()), 0);
+        o.advertisedHost = true;
+        dn::DirectNet a;
+        CHECK(a.start(o));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost) || host.canRoute(kA); }, 1500));
+    }
 }
 
 void testConfig() {
@@ -1296,9 +1912,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     const wchar_t* edf = argc > 1 ? argv[1] : L"D:\\steam\\steamapps\\common\\EARTH DEFENSE FORCE 6\\EDF.dll";
     testWire();
+    testWireRejectsMalformed();
     testReliableUnderLoss();
     testConfig();
     testHostCandidates();
+    testHostCandidateFilter();
     testNetif();
     testIat(edf);
     testKeyMismatch();
@@ -1322,6 +1940,17 @@ int wmain(int argc, wchar_t** argv) {
     testHelloCannotHijackLiveLink();
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
+    testReliableBacklogLimit();
+    testUnacknowledgedLinkIsDropped();
+    testNoReflectionToSender();
+    testIdentityCrypto();
+    testHelloNeedsCookieAndIdentity();
+    testIdentityPublishedLate();
+    testJunkHellosDoNotBlockPlayers();
+    testSpoofedHelloFromVictimAddress();
+    testReplayedHelloIgnored();
+    testOlderPluginStaysOnEos();
+    testRetiredInstanceIsFreed();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -33,6 +33,13 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
+    // The probe is no room member, so a host never lets it in; its challenge still shows it is reachable.
+    if (net.statusLine().find("host answered") != std::string::npos) {
+        printf("PROBE host %s is reachable and answers (it admits only room members it can identify): %s\n",
+               o.hostAddress.c_str(), net.statusLine().c_str());
+        net.stop();
+        return 0;
+    }
     printf("PROBE no welcome from %s within 10 s: %s\n", o.hostAddress.c_str(), net.statusLine().c_str());
     net.stop();
     return 1;

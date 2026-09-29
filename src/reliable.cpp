@@ -14,11 +14,17 @@ constexpr size_t kMaxReorderBuffer = 4096;
 // while still letting every lost packet be retried, so recovery is not serialised behind the oldest.
 constexpr double kRetransmitPerSecond = 2000.0;
 constexpr double kRetransmitBurst = 64.0;
+// Unacknowledged data one link may hold. EDF6 sends well under 1 Mbit/s per player, so a link
+// stalled for the whole link timeout (60 s) stays far below this; only a peer that receives but
+// never acknowledges (or bounces data back to itself through the host) gets here.
+constexpr size_t kMaxPendingPackets = 8192;
+constexpr size_t kMaxPendingBytes = 8u << 20;
 
 }  // namespace
 
 void ReliableSender::track(uint32_t seq, std::vector<uint8_t> datagram, uint64_t nowMs) {
     Pending& p = pending_[seq];
+    pendingBytes_ += datagram.size() - p.datagram.size();
     p.datagram = std::move(datagram);
     p.firstSentMs = nowMs;
     p.lastSentMs = nowMs;
@@ -43,6 +49,7 @@ size_t ReliableSender::onAck(const AckMsg& ack, uint64_t nowMs) {
         // Karn's rule: only packets sent once give an unambiguous RTT sample.
         if (it->second.sends == 1) sampleRtt(nowMs - it->second.firstSentMs);
         ++acked;
+        pendingBytes_ -= it->second.datagram.size();
         return pending_.erase(it);
     };
     for (auto it = pending_.begin(); it != pending_.end() && it->first <= ack.cumulative;) it = take(it);
@@ -75,6 +82,10 @@ void ReliableSender::poll(uint64_t nowMs, const std::function<void(const std::ve
         ++retransmits_;
         budget_ -= 1.0;
     }
+}
+
+bool ReliableSender::overloaded() const {
+    return pending_.size() > kMaxPendingPackets || pendingBytes_ > kMaxPendingBytes;
 }
 
 uint64_t ReliableSender::oldestPendingAgeMs(uint64_t nowMs) const {

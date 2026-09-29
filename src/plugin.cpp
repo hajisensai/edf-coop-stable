@@ -95,8 +95,9 @@ bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
         return false;
     }
     if (c.direct.mode == dn::Mode::Host && c.direct.key.empty())
-        dn::logf("DIRECT WARNING: hosting without Key= ; anyone who knows your address and a player's EOS id "
-                 "can disturb that player's direct link. Set the same Key= for everyone in the room.");
+        dn::logf("DIRECT hosting without Key= : players still prove who they are through the room, but direct-link "
+                 "packets carry no tag, so someone on the network path could alter them. Set the same Key= for "
+                 "everyone in the room to prevent that.");
     g_net = new dn::DirectNet();
     if (!g_net->start(c.direct)) {
         dn::logf("DIRECT failed to start (is UDP port %u already in use?); direct link disabled",

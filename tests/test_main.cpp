@@ -679,6 +679,39 @@ void testConfig() {
     CHECK(def.reliableGameTraffic && def.direct.upgradeUnreliable);
     CHECK(def.autoJoin && def.publicAddress.empty());
 
+    // Every language writes the same settings; only the comments differ.
+    const unsigned short langs[] = {MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED),
+                                    MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL),
+                                    MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT),
+                                    MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                                    MAKELANGID(LANG_GERMAN, SUBLANG_DEFAULT)};
+    auto settingsOnly = [](const std::string& text) {
+        std::string out;
+        size_t pos = 3;  // BOM
+        while (pos < text.size()) {
+            size_t end = text.find("\r\n", pos);
+            std::string line = text.substr(pos, end - pos);
+            if (!line.empty() && line[0] != ';') out += line + "\n";
+            pos = end == std::string::npos ? text.size() : end + 2;
+        }
+        return out;
+    };
+    std::string zh = dn::defaultIni(langs[0]), ja = dn::defaultIni(langs[2]), en = dn::defaultIni(langs[3]);
+    CHECK(zh.compare(0, 3, "\xEF\xBB\xBF") == 0 && zh != ja && ja != en && zh != en);
+    CHECK(dn::defaultIni(langs[1]) == zh && dn::defaultIni(langs[4]) == en);
+    CHECK(en.find("settings") != std::string::npos);
+    CHECK(settingsOnly(zh) == settingsOnly(ja) && settingsOnly(ja) == settingsOnly(en));
+    CHECK(settingsOnly(en).find("GraceSeconds=30\n") != std::string::npos);
+    for (unsigned short lang : langs) {
+        FILE* w = _wfopen(path.c_str(), L"wb");
+        std::string text = dn::defaultIni(lang);
+        fwrite(text.data(), 1, text.size(), w);
+        fclose(w);
+        dn::Config d = dn::loadConfig(path);
+        CHECK(d.enabled && d.direct.mode == dn::Mode::Off && d.direct.listenPort == 27015 && d.eosRelay == -1);
+        CHECK(d.hold == dn::Config::Hold::Auto && d.graceMs == 30000 && d.autoJoin && d.publicAddress.empty());
+    }
+
     FILE* f = _wfopen(path.c_str(), L"wb");
     fputs("[DirectNet]\r\nMode= Join \r\nHostAddress=[2408:8207::5]:30000\r\nKey=abc\r\n"
           "PublicAddress= 1.2.3.4:40000 \r\nAutoJoin=0\r\n"

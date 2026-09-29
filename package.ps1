@@ -10,6 +10,8 @@ $entries = [ordered]@{
     'UNINSTALL.bat'                     = 'dist\UNINSTALL.bat'
     'install.ps1'                       = 'dist\install.ps1'
     'README_EDF6DirectNet.txt'          = 'dist\README_EDF6DirectNet.txt'
+    'README_EDF6DirectNet_en.txt'       = 'dist\README_EDF6DirectNet_en.txt'
+    'README_EDF6DirectNet_ja.txt'       = 'dist\README_EDF6DirectNet_ja.txt'
     'EDF6DirectNet_AllowFirewall.bat'   = 'dist\EDF6DirectNet_AllowFirewall.bat'
     'Mods/Plugins/EDF6DirectNet.dll'    = 'build\EDF6DirectNet.dll'
     'EDFModLoader/winmm.dll'            = (Join-Path $ModLoaderDir 'winmm.dll')
@@ -31,9 +33,10 @@ $pluginVersion = [regex]::Match($pluginSource, 'kVersionText = "([^"]+)"').Group
 $numbers = [regex]::Match($pluginSource, 'kVersionMajor = (\d+), kVersionMinor = (\d+), kVersionPatch = (\d+)')
 $numericVersion = '{0}.{1}.{2}' -f $numbers.Groups[1].Value, $numbers.Groups[2].Value, $numbers.Groups[3].Value
 if ($numericVersion -ne $pluginVersion) { throw "src\plugin.cpp: kVersionText $pluginVersion but kVersionMajor/Minor/Patch $numericVersion" }
-$readmeVersion = [regex]::Match((Get-Content (Join-Path $root 'dist\README_EDF6DirectNet.txt') -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value
-if ($pluginVersion -ne $Version -or $readmeVersion -ne $Version) {
-    throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion, dist\README_EDF6DirectNet.txt $readmeVersion"
+if ($pluginVersion -ne $Version) { throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion" }
+foreach ($readme in 'README_EDF6DirectNet.txt', 'README_EDF6DirectNet_en.txt', 'README_EDF6DirectNet_ja.txt') {
+    $readmeVersion = [regex]::Match((Get-Content (Join-Path $root "dist\$readme") -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value
+    if ($readmeVersion -ne $Version) { throw "version mismatch: -Version $Version, dist\$readme $readmeVersion" }
 }
 $newestSource = Get-ChildItem (Join-Path $root 'src') -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ((Get-Item $sources['Mods/Plugins/EDF6DirectNet.dll']).LastWriteTime -lt $newestSource.LastWriteTime) {

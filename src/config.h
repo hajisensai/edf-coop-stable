@@ -25,8 +25,11 @@ struct Config {
     bool reliableGameTraffic = true;
 };
 
-// Reads the INI; writes a commented default file first when it does not exist.
+// Reads the INI; writes a commented default file first when it does not exist, commented in the
+// Windows display language (Chinese, Japanese, otherwise English).
 Config loadConfig(const std::wstring& iniPath);
+// The default settings file for a Windows language id (LANGID).
+std::string defaultIni(unsigned short langId);
 
 const char* modeName(Mode m);
 const char* relayName(int relay);

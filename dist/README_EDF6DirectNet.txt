@@ -1,6 +1,7 @@
-EDF6DirectNet 0.3.2 —— EDF6 联机稳定插件
+EDF6DirectNet 0.3.3 —— EDF6 联机稳定插件
 项目主页：https://github.com/hajisensai/edf6-coop-stable
-（实验性：还没有经过两台电脑的真实联机验证，遇到问题请带日志提 Issue）
+English: README_EDF6DirectNet_en.txt / 日本語: README_EDF6DirectNet_ja.txt
+（实验性：自动直连已在两台电脑实测通过；掉线不重来还没实测。遇到问题请带日志提 Issue）
 
 【安装 / 卸载】
 先把 zip 完整解压，再双击 INSTALL.bat，然后从 Steam 正常启动游戏。
@@ -15,7 +16,8 @@ EDF6DirectNet 0.3.2 —— EDF6 联机稳定插件
 ・掉线日志：Mods\Plugins\EDF6DirectNet.log。掉线了把它发出来就能查原因。
 
 【当房主开公网直连（可选，只有房主要设）】
-不走 Epic 中继，大家直接连你。设置文件是 Mods\Plugins\EDF6DirectNet.ini（第一次启动游戏后生成）。
+不走 Epic 中继，大家直接连你。设置文件是 Mods\Plugins\EDF6DirectNet.ini（第一次启动游戏后生成，
+注释按 Windows 显示语言写成中文 / 日文 / 英文）。
 1. ini 里改成 Mode=host
 2. 右键游戏目录里的 EDF6DirectNet_AllowFirewall.bat → 以管理员身份运行（只需一次）
 3. 让外面能连到你，二选一：

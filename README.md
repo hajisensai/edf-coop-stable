@@ -1,10 +1,12 @@
 # edf6-coop-stable
 
+**中文** | [English](README.en.md) | [日本語](README.ja.md)
+
 EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) 插件形式运行。
 
 > 非官方 Mod，与 D3 PUBLISHER / SANDLOT / Epic Games 无关。只在本机进程内接管网络调用，不改动任何游戏文件；`Enabled=0` 或删掉 DLL 即恢复原版。
 >
-> **状态：实验性。** 单机实测与 900+ 项自动化测试通过；加入方自动直连、跨两台电脑的断线宽限尚未经过真实多人联机验证。出问题请附日志提 [Issue](https://github.com/hajisensai/edf6-coop-stable/issues)。
+> **状态：实验性。** 900+ 项自动化测试通过；自动直连已在两台电脑的真实联机中验证（0.3.2）；跨两台电脑的断线宽限尚未实测。出问题请附日志提 [Issue](https://github.com/hajisensai/edf6-coop-stable/issues)。
 
 ## 它解决什么
 
@@ -24,6 +26,8 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
    - 没有 EDFModLoader 时会装上附带的官方版（[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10，MIT）；已有的 `winmm.dll` 不会覆盖。
    - 找不到游戏时会让你粘贴游戏目录（Steam 库里右键 EDF6 → 管理 → 浏览本地文件）。
 3. 从 Steam 正常启动游戏。第一次启动后生成 `Mods\Plugins\EDF6DirectNet.ini`（设置）和 `EDF6DirectNet.log`（日志）。
+
+zip 内附 README_EDF6DirectNet.txt（中文）、README_EDF6DirectNet_en.txt（English）、README_EDF6DirectNet_ja.txt（日本語）；默认设置文件的注释按 Windows 显示语言写成中文 / 日文 / 其他语言一律英文。
 
 升级：重新运行新版的 `INSTALL.bat`，设置文件保留。
 卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动）。若当初添加过防火墙规则，卸载程序会提示删除命令。
@@ -118,7 +122,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1 -Test
 # 手动打发布包：需要官方 EDFModLoader.zip 解压后的目录（含 winmm.dll、ModLoader.ini，外加它的 LICENSE.txt）
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDir <目录>
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDir <目录>
 ```
 
 产物：`build\EDF6DirectNet.dll`（静态 CRT，只依赖系统 DLL）、`build\edf6_directnet_tests.exe`（单元测试 + 本机回环多节点测试，含 20%～40% 丢包、断网、重启场景；`EDF.dll` 导入表测试需要本机装有游戏，否则跳过）、`build\probe_join.exe`（手动联调用的直连探针）。
@@ -127,9 +131,9 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDi
 
 发布由 GitHub Actions（`.github/workflows/release.yml`）自动完成：
 
-1. 改版本号：`src/plugin.cpp` 的 `kVersionMajor/Minor/Patch` 与 `kVersionText`、`dist/README_EDF6DirectNet.txt` 第一行。
+1. 改版本号：`src/plugin.cpp` 的 `kVersionMajor/Minor/Patch` 与 `kVersionText`，以及三份随包说明书 `dist/README_EDF6DirectNet*.txt` 的第一行。
 2. 写发布说明 `release-notes/<版本>.md`（就是 Release 页面的正文，没有它流水线会失败）。
-3. 提交到 `main`，推送 tag：`git tag v0.3.2 && git push origin v0.3.2`。
+3. 提交到 `main`，推送 tag：`git tag v0.3.3 && git push origin v0.3.3`。
 
 流水线会构建、跑测试、下载官方 EDFModLoader v1.0.10（按 SHA-256 校验）、打包 `EDF6DirectNet-v<版本>.zip` 并创建 Release。tag、源码版本号、说明书版本号三者不一致时 `package.ps1` 会拒绝打包。在 Actions 页面手动运行只构建打包（产物在运行记录的 Artifacts 里），不发布。
 
@@ -138,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDi
 | 路径 | 内容 |
 |---|---|
 | `src/plugin.cpp` | EDFModLoader 入口，读配置、启动直连 |
-| `src/config.*` | INI 读取与默认设置文件 |
+| `src/config.*` | INI 读取与默认设置文件（注释按 Windows 显示语言写中文 / 日文 / 英文） |
 | `src/eos_min.h` | 所用 EOS SDK 结构体（按官方 1.15.5 头文件，游戏为 1.16.1） |
 | `src/eos_hooks.cpp`, `src/iat.*` | 修改 `EDF.dll` 导入表，接管 EOS P2P / 大厅调用 |
 | `src/hold.*` | 断线宽限 |
@@ -146,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDi
 | `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | 直连传输 |
 | `src/netif.*`, `src/upnp.*` | 物理网卡识别、UPnP |
 | `src/log.*` | 日志 |
-| `dist/` | 安装脚本与随包说明书 |
+| `dist/` | 安装脚本与随包说明书（中 / 英 / 日） |
 | `tests/` | 测试 |
 
 ## 已知限制
@@ -157,7 +161,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.1 -ModLoaderDi
 - 直连由房主转发：某个加入者的直连在重连的那一瞬间，房主正替他转发、尚未被确认的少量数据会丢失（游戏随后回落到 EOS）。
 - 不设 `Key=` 时直连没有身份认证：知道房主地址和某玩家 EOS ID 的人可以伪造该玩家的数据。设了 Key 能防伪造，但仍不能防截获后的 `Bye`/成员表重放（需要升级协议版本，留待下个大版本）。
 - UPnP 映射是永久的，游戏退出后不会自动删除（端口上没有程序监听时无害）；需要时在路由器管理页删除名为 `EDF6DirectNet` 的映射。
-- 尚未在真实多人联机中验证，欢迎提交带日志的 Issue。
+- 断线宽限尚未在真实多人联机中验证，欢迎提交带日志的 Issue。
 
 ## 许可证
 

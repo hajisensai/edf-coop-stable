@@ -1,4 +1,4 @@
-EDF6DirectNet 0.3.0 —— EDF6 联机稳定插件
+EDF6DirectNet 0.3.1 —— EDF6 联机稳定插件
 项目主页：https://github.com/hajisensai/edf6-coop-stable
 （实验性：还没有经过两台电脑的真实联机验证，遇到问题请带日志提 Issue）
 

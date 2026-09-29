@@ -25,7 +25,12 @@ foreach ($name in $entries.Keys) {
     $sources[$name] = $src
 }
 # The version is written in three places; a mismatch ships a zip whose log and readme lie about it.
-$pluginVersion = [regex]::Match((Get-Content (Join-Path $root 'src\plugin.cpp') -Raw), 'kVersionText = "([^"]+)"').Groups[1].Value
+$pluginSource = Get-Content (Join-Path $root 'src\plugin.cpp') -Raw
+$pluginVersion = [regex]::Match($pluginSource, 'kVersionText = "([^"]+)"').Groups[1].Value
+# The numeric version EDFModLoader shows must say the same.
+$numbers = [regex]::Match($pluginSource, 'kVersionMajor = (\d+), kVersionMinor = (\d+), kVersionPatch = (\d+)')
+$numericVersion = '{0}.{1}.{2}' -f $numbers.Groups[1].Value, $numbers.Groups[2].Value, $numbers.Groups[3].Value
+if ($numericVersion -ne $pluginVersion) { throw "src\plugin.cpp: kVersionText $pluginVersion but kVersionMajor/Minor/Patch $numericVersion" }
 $readmeVersion = [regex]::Match((Get-Content (Join-Path $root 'dist\README_EDF6DirectNet.txt') -TotalCount 1 -Encoding UTF8), 'EDF6DirectNet (\S+)').Groups[1].Value
 if ($pluginVersion -ne $Version -or $readmeVersion -ne $Version) {
     throw "version mismatch: -Version $Version, src\plugin.cpp $pluginVersion, dist\README_EDF6DirectNet.txt $readmeVersion"

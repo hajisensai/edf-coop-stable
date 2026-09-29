@@ -1,0 +1,68 @@
+name: Release
+
+# Push a tag vX.Y.Z to build, test, package and publish EDF6DirectNet-vX.Y.Z.zip as a GitHub Release.
+# The release text is release-notes/X.Y.Z.md (required). Run manually to build and package only.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Official EDFModLoader bundled for players who do not have it yet (MIT). Pinned by hash.
+  MODLOADER_ZIP_URL: https://github.com/BlueAmulet/EDFModLoader/releases/download/v1.0.10/EDFModLoader.zip
+  MODLOADER_ZIP_SHA256: 850be7567954ee319dc2b65e9174d1eec70791ba9a43d2508a40b22b98bb4b08
+  MODLOADER_LICENSE_URL: https://raw.githubusercontent.com/BlueAmulet/EDFModLoader/v1.0.10/LICENSE
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        shell: pwsh
+        run: ./build.ps1 -Test
+
+      - name: Fetch official EDFModLoader
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'EDFModLoader'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'EDFModLoader.zip'
+          Invoke-WebRequest $env:MODLOADER_ZIP_URL -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:MODLOADER_ZIP_SHA256) { throw "EDFModLoader.zip hash $hash does not match the pinned one" }
+          Expand-Archive $zip -DestinationPath $dir -Force
+          Invoke-WebRequest $env:MODLOADER_LICENSE_URL -OutFile (Join-Path $dir 'LICENSE.txt')
+          "MODLOADER_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            # Manual run: package whatever version the sources declare.
+            $version = [regex]::Match((Get-Content src/plugin.cpp -Raw), 'kVersionText = "([^"]+)"').Groups[1].Value
+          }
+          ./package.ps1 -Version $version -ModLoaderDir $env:MODLOADER_DIR
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EDF6DirectNet-v${{ env.VERSION }}
+          path: build/EDF6DirectNet-v${{ env.VERSION }}.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "release-notes/$env:VERSION.md"
+          if (-not (Test-Path $notes)) { throw "missing ${notes}: write the release text before tagging" }
+          gh release create $env:GITHUB_REF_NAME "build/EDF6DirectNet-v$env:VERSION.zip" `
+            --title "EDF6DirectNet v$env:VERSION" --notes-file $notes --verify-tag

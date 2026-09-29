@@ -9,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -40,6 +41,11 @@ constexpr uint8_t kReleaseKey[72] = {
 
 // installOver, beginRun and confirmHealthy all move the same files; one at a time within a game.
 std::mutex g_files;
+
+// Set by the first EOS tick (noteGameRunning): a trial's health clock starts there, not at load, so a
+// game quit at its title screen is not taken for a version that failed.
+HANDLE g_gameRunning = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+std::atomic<bool> g_gameRunningNoted{false};
 
 std::wstring widen(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -537,7 +543,8 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
     bool rolledBackBefore = badVersion(installed) == me;  // an older updater installed it again
     if (!rolledBackBefore && !(trial.version == me)) {
         writeText(trialPath, versionText(me) + " " + std::to_string(GetCurrentProcessId()) + "\n");
-        logf("UPDATE first run of %s: keeping %s as EDF6DirectNet.dll.old until this version has run for %u seconds",
+        logf("UPDATE first run of %s: keeping %s as EDF6DirectNet.dll.old until this version has run for %u seconds "
+             "past the game's first EOS tick",
              versionString.c_str(), fileVersion(old).c_str(), kHealthySeconds);
         return RunState::Trial;
     }
@@ -570,9 +577,14 @@ void confirmHealthy(const std::wstring& installed, const std::string& versionStr
 
 void startHealthWatch(const std::wstring& installed, const char* version) {
     std::thread([installed, v = std::string(version)] {
+        WaitForSingleObject(g_gameRunning, INFINITE);
         std::this_thread::sleep_for(std::chrono::seconds(kHealthySeconds));
         confirmHealthy(installed, v);
     }).detach();
+}
+
+void noteGameRunning() {
+    if (!g_gameRunningNoted.exchange(true)) SetEvent(g_gameRunning);
 }
 
 std::string updateOnce(const std::wstring& installed, const std::string& current) {

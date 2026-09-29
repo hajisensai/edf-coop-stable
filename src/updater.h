@@ -14,7 +14,7 @@
 // repository's release download URLs.
 //
 // A bad release must not strand anyone: the version that is replaced stays as EDF6DirectNet.dll.old
-// until the new one has run for a while (kHealthySeconds). When a new version's previous run ended
+// until the new one has run for a while (kHealthySeconds past the game's first EOS tick). When a new version's previous run ended
 // before that, the next start puts the old version back, remembers the new one as bad (not installed
 // again) and runs this session without the plugin. There is never a moment without a loadable
 // EDF6DirectNet.dll: files are swapped by renaming a complete file over the name (see swapIn).
@@ -89,8 +89,9 @@ bool installOver(const std::wstring& installed, const std::vector<uint8_t>& data
 // quit mid-install, and installed.rolledback once no game has it loaded. Part of beginRun.
 void removeUpdateLeftovers(const std::wstring& installed);
 
-// How long a new version has to run before it counts as working.
-constexpr unsigned kHealthySeconds = 120;
+// How long a new version has to run once the game is up (its first EOS tick, the title screen) before it
+// counts as working. Counted from there, not from load, so quitting at the title screen is not a failure.
+constexpr unsigned kHealthySeconds = 20;
 
 enum class RunState {
     Normal,      // nothing to prove
@@ -107,8 +108,11 @@ RunState beginRun(const std::wstring& installed, const std::string& version);
 // This version has run healthily: clears its trial, then deletes installed.old. Does nothing when the
 // trial is not this version's (another update has been installed meanwhile).
 void confirmHealthy(const std::wstring& installed, const std::string& version);
-// Calls confirmHealthy after kHealthySeconds on a background thread.
+// Calls confirmHealthy on a background thread kHealthySeconds after noteGameRunning.
 void startHealthWatch(const std::wstring& installed, const char* version);
+// The game is up: called on every EOS tick (cheap after the first), and at load when there is no game
+// for the plugin to run in (then nothing can fail and the trial ends kHealthySeconds later).
+void noteGameRunning();
 // The version recorded in installed.bad, invalid when none.
 Version badVersion(const std::wstring& installed);
 

@@ -177,6 +177,7 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
     HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
     if (!game || !eos) {
         dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
+        dn::noteGameRunning();  // nothing of the plugin runs, so nothing can prove an update bad
         return true;
     }
     // A router mapping lives until a start that does not map it: at game exit there is no safe point

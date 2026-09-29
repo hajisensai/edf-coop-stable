@@ -16,6 +16,7 @@
 #include "lobby_marker.h"
 #include "log.h"
 #include "traffic.h"
+#include "updater.h"
 
 namespace dn {
 namespace {
@@ -749,6 +750,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     if (!loggedThread) {
         loggedThread = true;
         logf("EOS tick runs on thread %lu", GetCurrentThreadId());
+        noteGameRunning();  // an update on trial starts its health clock here
     }
     maybeLogStats();
     g.marker.tick();

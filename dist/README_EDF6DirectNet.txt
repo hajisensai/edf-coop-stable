@@ -17,7 +17,7 @@ replaced by the fixed build and the original is kept as winmm.dll.bak-official.
 At game start the plugin fetches a newer release from GitHub; it runs from the next start.
 - Releases are signed (ECDSA P-256) with a key held only by the release pipeline; the public key is inside the
   plugin. A file without a valid signature (or with the wrong version / SHA-256) is never installed.
-- Rollback: the replaced DLL stays as EDF6DirectNet.dll.old until the new version has run for 2 minutes. If the
+- Rollback: the replaced DLL stays as EDF6DirectNet.dll.old until the new version has run for 20 seconds after the game reaches its title screen. If the
   game ends before that, the next start restores the old version by itself, remembers the failed one
   (EDF6DirectNet.dll.bad, not installed again) and runs that session without the plugin.
 - An ini without an AutoUpdate line (older versions did not write it) counts as OFF. To turn it on, add at the

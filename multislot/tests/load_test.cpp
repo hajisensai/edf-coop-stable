@@ -124,25 +124,37 @@ bool HookedInto(const unsigned char* base, const MidSite& site, HMODULE plugin) 
     const unsigned char* thunk = at + 5 + relative;
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(thunk, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || mbi.Protect != PAGE_EXECUTE_READ) return false;
-    const std::uint64_t marker = 0x1122334455667788ull;
-    const auto reference = MidThunkCode(reinterpret_cast<MidHandler>(static_cast<std::uintptr_t>(marker)),
-                                        site.original.data() + site.displacedOffset, site.displacedSize, marker);
-    std::size_t handlerAt = 0;
+    // Every byte as in a reference thunk, except the handler address and the resume address (pushed as the
+    // return address at the start, and jumped to at the end).
+    const std::uint64_t handlerMarker = 0x1122334455667788ull, resumeMarker = 0x8877665544332211ull;
+    const auto reference = MidThunkCode(reinterpret_cast<MidHandler>(static_cast<std::uintptr_t>(handlerMarker)),
+                                        site.original.data() + site.displacedOffset, site.displacedSize, resumeMarker);
+    const auto expectedResume = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at + site.original.size()));
+    std::vector<bool> operand(reference.size(), false);
+    std::uint64_t handler = 0;
+    int handlers = 0, resumes = 0;
     for (std::size_t i = 0; i + 8 <= reference.size(); ++i) {
-        std::uint64_t value = 0;
+        std::uint64_t value = 0, actual = 0;
         std::memcpy(&value, reference.data() + i, 8);
-        if (value == marker) {
-            handlerAt = i;
-            break;
+        std::memcpy(&actual, thunk + i, 8);
+        if (value != handlerMarker && value != resumeMarker) continue;
+        for (std::size_t j = i; j < i + 8; ++j) operand[j] = true;
+        if (value == handlerMarker) {
+            handler = actual;
+            ++handlers;
+        } else if (actual == expectedResume) {
+            ++resumes;
+        } else {
+            return false;
         }
     }
     for (std::size_t i = 0; i < reference.size(); ++i)
-        if ((i < handlerAt || i >= handlerAt + 8) && i < reference.size() - 8 && thunk[i] != reference[i]) return false;
-    std::uint64_t handler = 0, resume = 0;
-    std::memcpy(&handler, thunk + handlerAt, 8);
-    std::memcpy(&resume, thunk + reference.size() - 8, 8);
-    return handlerAt && InModule(static_cast<std::uintptr_t>(handler), plugin) &&
-           resume == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at + site.original.size()));
+        if (!operand[i] && thunk[i] != reference[i]) return false;
+    // And the unwinder knows the thunk, so a fault in its handler unwinds back into the game.
+    DWORD64 imageBase = 0;
+    const bool described = RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(thunk)), &imageBase,
+                                                  nullptr) != nullptr;
+    return handlers == 1 && resumes == 2 && described && InModule(static_cast<std::uintptr_t>(handler), plugin);
 }
 
 bool SiteUntouched(const unsigned char* base, const MidSite& site) {

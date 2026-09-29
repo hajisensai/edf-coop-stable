@@ -57,6 +57,52 @@ void ClobberFlagsAndXmm(CpuContext* context) {
     context->rdx = static_cast<std::uint64_t>(zero - 1 < 0);
 }
 
+// Where each frame of the call stack is, walked from inside a handler the way crashlog.cpp's Stack() walks a
+// crash: the unwind data where there is some, the return address on top of the stack where there is none.
+DWORD64 walked[4]{};
+__declspec(noinline) void WalkFromHandler(CpuContext*) {
+    CONTEXT context{};
+    RtlCaptureContext(&context);
+    for (int frame = 0; frame < 4 && context.Rip; ++frame) {
+        walked[frame] = context.Rip;
+        DWORD64 imageBase = 0;
+        const auto function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+        if (function) {
+            PVOID handlerData = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function, &context, &handlerData, &establisher,
+                             nullptr);
+        } else {
+            context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+        }
+    }
+}
+
+void FaultingHandler(CpuContext*) {
+    volatile int* nowhere = nullptr;
+    *nowhere = 1;
+}
+
+// The system has to unwind from the handler, through the thunk and the hooked function, to reach this __except.
+bool FaultReachesCaller(int (*hooked)()) {
+    __try {
+        hooked();
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+bool InThisModule(DWORD64 address) {
+    HMODULE module = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(static_cast<std::uintptr_t>(address)), &module) &&
+           module == GetModuleHandleW(nullptr);
+}
+
+int Seven() { return 7; }
+
 // Installs a hook over `length` bytes at `site` whose displaced instructions are the last
 // `displacedSize` bytes of the site.
 bool Hook(ThunkPage& page, unsigned char* site, std::size_t length, std::size_t displacedSize, MidHandler handler) {
@@ -110,7 +156,52 @@ int main() {
     std::memcpy(m, mCode, sizeof(mCode));
     Check(Hook(page, m, 5, 5, &ClobberFlagsAndXmm), "hook m");
 
+    // p(): 5 nops (the site, displaced); ret. Its handler walks the call stack from inside.
+    unsigned char* p = buffer.code + 0xA0;
+    const unsigned char pCode[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
+    std::memcpy(p, pCode, sizeof(pCode));
+    Check(Hook(page, p, 5, 5, &WalkFromHandler), "hook p");
+    unsigned char* const pThunk = p + 5 + *reinterpret_cast<const std::int32_t*>(p + 1);
+
+    // q(): 5 nops (the site); mov eax, 7; ret. Its handler faults.
+    unsigned char* q = buffer.code + 0xC0;
+    const unsigned char qCode[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x07, 0x00, 0x00, 0x00, 0xC3};
+    std::memcpy(q, qCode, sizeof(qCode));
+    Check(Hook(page, q, 5, 5, &FaultingHandler), "hook q");
+
+    // A call stub, as the redirected calls use.
+    unsigned char* stub = page.Add(reinterpret_cast<void*>(&Seven));
+    Check(stub != nullptr, "stub emitted");
+
     Check(page.Seal(), "seal thunk page");
+    Check(page.Unwindable(), "the page's function table is registered");
+
+    // The thunks and stubs are described to the unwinder.
+    DWORD64 imageBase = 0;
+    const auto thunkEntry = RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(pThunk) + 60),
+                                                   &imageBase, nullptr);
+    Check(thunkEntry && imageBase == static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(page.Base())) &&
+              page.Base() + thunkEntry->BeginAddress == pThunk && thunkEntry->EndAddress - thunkEntry->BeginAddress == MidThunkFrameBytes(),
+          "a thunk's frame is in the page's function table");
+    Check(RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(stub)), &imageBase, nullptr) != nullptr,
+          "so is a stub");
+    Check(reinterpret_cast<int (*)()>(stub)() == 7, "the stub still reaches its target");
+    const auto layout = MidThunkCode(&TenfoldRcx, nullptr, 0, 0);
+    const unsigned char drop[] = {0x48, 0x8D, 0x64, 0x24, 0x08};  // lea rsp, [rsp+8]
+    Check(layout.size() > MidThunkFrameBytes() + sizeof(drop) &&
+              std::memcmp(layout.data() + MidThunkFrameBytes(), drop, sizeof(drop)) == 0,
+          "the described frame ends where the thunk drops the pushed resume address");
+
+    // Walked from the handler: the handler, the thunk, the hooked function at the site's resume address, and the
+    // caller of that function in this executable. Without unwind data the walk lost its way at the thunk.
+    reinterpret_cast<void (*)()>(p)();
+    Check(InThisModule(walked[0]), "frame 0 is the handler");
+    Check(page.Contains(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(walked[1]))), "frame 1 is the thunk");
+    Check(walked[2] == static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(p + 5)), "frame 2 is the hooked function, at the site");
+    Check(InThisModule(walked[3]), "frame 3 is the function that called it");
+
+    // A fault in a handler is dispatched through the thunk to an __except above the hooked function.
+    Check(FaultReachesCaller(reinterpret_cast<int (*)()>(q)), "a handler's fault unwinds through the thunk to the caller's handler");
 
     const auto fn = reinterpret_cast<std::uint64_t(*)(std::uint64_t)>(f);
     Check(fn(4) == 45, "handler sees rcx and its change reaches the displaced instructions");
@@ -132,6 +223,8 @@ int main() {
     Check(resume == 0x1122334455667788ull, "thunk resume address");
 
     page.Release();
+    Check(RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(pThunk)), &imageBase, nullptr) == nullptr,
+          "releasing the page removes its function table");
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

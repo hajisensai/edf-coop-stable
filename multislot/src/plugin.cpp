@@ -274,6 +274,9 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
         thunks.Release();
         return false;
     }
+    if (!thunks.Unwindable())
+        Log("Call stubs: their unwind data could not be registered, so a crash inside a hook handler shows a call "
+            "stack that ends at the stub");
     writes.insert(writes.end(), patches.begin(), patches.end());
     for (const auto& write : slots) {
         const auto& slot = write.slot;

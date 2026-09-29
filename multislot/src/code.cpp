@@ -39,7 +39,40 @@ unsigned char* ThunkPage::Add(void* target) {
     unsigned char code[kStub] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
     const auto address = reinterpret_cast<std::uintptr_t>(target);
     std::memcpy(code + 2, &address, sizeof(address));
-    return Emit(code, kStub);
+    unsigned char* stub = Emit(code, kStub);
+    if (!stub) return nullptr;
+    // One UNWIND_INFO with no codes serves every stub: version 1, no handler, no prolog, no frame register.
+    constexpr std::uint8_t kLeaf[4] = {1, 0, 0, 0};
+    if (!leafUnwind_) {
+        std::uint32_t at = 0;
+        if (!Describe(stub, kStub, kLeaf, sizeof(kLeaf), at)) return nullptr;
+        leafUnwind_ = at;
+        return stub;
+    }
+    functions_.push_back({static_cast<DWORD>(stub - page_), static_cast<DWORD>(stub - page_ + kStub), leafUnwind_});
+    return stub;
+}
+
+unsigned char* ThunkPage::EmitFunction(const unsigned char* code, std::size_t size, std::size_t covered,
+                                       const std::uint8_t* unwind, std::size_t unwindSize) {
+    if (covered > size) return nullptr;
+    unsigned char* at = Emit(code, size);
+    std::uint32_t unwindAt = 0;
+    return at && Describe(at, covered, unwind, unwindSize, unwindAt) ? at : nullptr;
+}
+
+// Copies `unwind` into the page, 4-byte aligned as the unwinder reads it, and records `code`'s first `covered`
+// bytes as a function that unwinds by it.
+bool ThunkPage::Describe(const unsigned char* code, std::size_t covered, const std::uint8_t* unwind,
+                         std::size_t unwindSize, std::uint32_t& unwindAt) {
+    const std::size_t padding = (4 - used_ % 4) % 4;
+    if (padding + unwindSize > kPage - used_) return false;
+    std::memset(page_ + used_, 0xCC, padding);
+    used_ += padding;
+    unwindAt = static_cast<std::uint32_t>(used_);
+    Emit(unwind, unwindSize);
+    functions_.push_back({static_cast<DWORD>(code - page_), static_cast<DWORD>(code - page_ + covered), unwindAt});
+    return true;
 }
 
 unsigned char* ThunkPage::Emit(const unsigned char* code, std::size_t size) {
@@ -54,10 +87,18 @@ bool ThunkPage::Seal() {
     DWORD previous = 0;
     if (!page_ || !VirtualProtect(page_, kPage, PAGE_EXECUTE_READ, &previous)) return false;
     FlushInstructionCache(GetCurrentProcess(), page_, kPage);
+    registered_ = !functions_.empty() &&
+                  RtlAddFunctionTable(functions_.data(), static_cast<DWORD>(functions_.size()),
+                                      static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(page_)));
     return true;
 }
 
 void ThunkPage::Release() {
+    // The table goes before the memory it describes.
+    if (registered_) RtlDeleteFunctionTable(functions_.data());
+    registered_ = false;
+    functions_.clear();
+    leafUnwind_ = 0;
     if (page_) VirtualFree(page_, 0, MEM_RELEASE);
     page_ = nullptr;
     used_ = 0;

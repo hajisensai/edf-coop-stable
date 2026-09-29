@@ -164,6 +164,14 @@ add_executable(CrashDumpTests tests/crashdump_test.cpp src/crashlog.cpp src/log.
 target_compile_options(CrashDumpTests PRIVATE ${WARNINGS})
 add_test(NAME CrashDump COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/crashdumptest")
 
+# A plugin that refuses (Enabled=0, or no supported EDF.dll) is unloaded by EDFModLoader at once: nothing of it
+# may keep running. Needs no game: without EDF.dll in the process the plugin refuses as it does in an unsupported one.
+add_executable(RefusalTests tests/refusal_test.cpp)
+target_include_directories(RefusalTests PRIVATE ${MODLOADER_INCLUDE})
+target_compile_options(RefusalTests PRIVATE ${WARNINGS})
+add_dependencies(RefusalTests EDF6MultiSlot)
+add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6MultiSlot>" "${CMAKE_BINARY_DIR}/refusaltest")
+
 add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})

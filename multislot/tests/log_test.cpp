@@ -5,8 +5,11 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -88,9 +91,137 @@ bool FillerIntact(const std::string& text, std::size_t last) {
     return expected == last + 1;
 }
 
+std::string ReadRaw(const std::wstring& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Run as `LogTests --killed <log>`: logs 200 lines with the writer thread running and is killed at once, the
+// way Task Manager or a __fastfail ends a process - no handler, no DLL_PROCESS_DETACH. Exit code 3 when lines
+// were still queued at the kill (the normal case: the writer drains every 200 ms), 4 when none were.
+int KilledChild(const wchar_t* path) {
+    LogOpen(path);
+    LogStartWriter();
+    for (int i = 0; i < 200; ++i) Log("before the kill %03d", i);
+    TerminateProcess(GetCurrentProcess(), LogQueued() ? 3 : 4);
+    return 1;
+}
+
+// Writes `path`.queue as a run that was killed would have left it: `lines` queued from byte `start` of the
+// ring's stream, the first `appending` of them in an append that had begun when the log held `appendingAt`.
+void WriteQueueFile(const std::wstring& path, const std::string& lines, std::uint64_t start, std::uint64_t appending,
+                    long long appendingAt) {
+    std::vector<char> file(sizeof(LogQueueHeader) + kLogQueueBytes, 0);
+    LogQueueHeader header{};
+    std::memcpy(header.magic, kLogQueueMagic, sizeof(kLogQueueMagic));
+    header.consumed = start;
+    header.produced = start + lines.size();
+    header.appending = appending;
+    header.appendingFrom = start;
+    header.appendingAt = appendingAt;
+    std::memcpy(file.data(), &header, sizeof(header));
+    for (std::size_t i = 0; i < lines.size(); ++i) file[sizeof(header) + (start + i) % kLogQueueBytes] = lines[i];
+    std::ofstream(path + kLogQueueSuffix, std::ios::binary | std::ios::trunc).write(file.data(), static_cast<std::streamsize>(file.size()));
+}
+
+std::size_t Count(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++count;
+    return count;
+}
+
+// Lines the writer thread had not written when the process was killed are in <log>.queue (log.h), and the next
+// LogOpen puts them in the log, before anything of its own and exactly once.
+void QueueRecoveryTests(const std::wstring& folder) {
+    const std::wstring killed = folder + L"\\killed.log";
+    DeleteFileW(killed.c_str());
+    DeleteFileW((killed + kLogQueueSuffix).c_str());
+    WriteText(killed, "[2026-09-20 00:00:00.000] ==== EDF6MultiSlot 1.5.13 ====\r\n");
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring command = L"\"" + std::wstring(self) + L"\" --killed \"" + killed + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    DWORD code = 0;
+    if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child)) {
+        WaitForSingleObject(child.hProcess, 60000);
+        GetExitCodeProcess(child.hProcess, &code);
+        CloseHandle(child.hThread);
+        CloseHandle(child.hProcess);
+    }
+    Check(code == 3 || code == 4, "the child logged and was killed");
+    const std::string atKill = ReadRaw(killed);
+    if (code == 3)
+        Check(Count(atKill, "before the kill 199") == 0, "the lines still queued at the kill are not in the log yet");
+    else
+        std::printf("note: the writer thread had written every line before the kill; recovery is covered below\n");
+    LogOpen(killed.c_str());  // this process is the next start
+    const std::string recovered = ReadText(killed);
+    bool everyLineOnce = true;
+    std::size_t last = 0;
+    for (int i = 0; i < 200; ++i) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "before the kill %03d\r\n", i);
+        const std::size_t at = recovered.find(text);
+        everyLineOnce = everyLineOnce && at != std::string::npos && at >= last && Count(recovered, text) == 1;
+        last = at == std::string::npos ? last : at;
+    }
+    Check(everyLineOnce, "a killed run's last lines reach the log at the next start, in order and once each");
+    Check((code == 3) == (recovered.find("recovered from the .queue file") != std::string::npos),
+          "and the log says they were recovered");
+    LogOpen(killed.c_str());
+    Check(ReadText(killed) == recovered, "a clean queue recovers nothing a second time");
+
+    // The same, set up byte by byte. The queued stream starts just before the end of the ring, so it wraps.
+    const std::wstring partial = folder + L"\\partial.log";
+    const std::wstring other = folder + L"\\other.log";
+    const std::string earlier = "[2026-09-20 00:00:00.000] earlier\r\n";
+    const std::string lineA = "[2026-09-20 00:00:01.000] line A\r\n", lineB = "[2026-09-20 00:00:02.000] line B\r\n",
+                      lineC = "[2026-09-20 00:00:03.000] line C\r\n";
+    const std::string queued = lineA + lineB + lineC;
+    const std::uint64_t start = kLogQueueBytes * 3 - 20;
+    const auto recover = [&](const std::string& inLog, std::uint64_t appending, long long appendingAt) {
+        LogOpen(other.c_str());  // lets go of partial.log.queue
+        WriteText(partial, inLog);
+        WriteQueueFile(partial, queued, start, appending, appendingAt);
+        LogOpen(partial.c_str());
+        const std::string text = ReadText(partial);
+        const std::size_t note = text.find("[... the ");
+        return note == std::string::npos ? text : text.substr(0, note);
+    };
+    const auto size = static_cast<long long>(earlier.size());
+    Check(recover(earlier, 0, 0) == earlier + queued, "lines queued behind no append are all recovered");
+    Check(recover(earlier + lineA.substr(0, 10), lineA.size() + lineB.size(), size) == earlier + queued,
+          "an append cut part of the way through: the rest of it and what followed, nothing twice");
+    Check(recover(earlier + lineA + lineB, lineA.size() + lineB.size(), size) == earlier + queued,
+          "an append that finished just before the kill is not repeated");
+    Check(recover(earlier, lineA.size() + lineB.size(), size) == earlier + queued, "an append that wrote nothing yet");
+    Check(recover(earlier + lineA, lineA.size() + lineB.size(), size + 1000) == earlier + lineA + queued,
+          "a log smaller than when the append started is taken as holding none of it");
+    // A header this code did not write recovers nothing and is started over.
+    LogOpen(other.c_str());
+    WriteText(partial, earlier);
+    WriteQueueFile(partial, queued, start, 0, 0);
+    {
+        std::fstream broken(partial + kLogQueueSuffix, std::ios::binary | std::ios::in | std::ios::out);
+        const std::uint64_t behind = 1;  // produced below consumed
+        broken.seekp(offsetof(LogQueueHeader, produced));
+        broken.write(reinterpret_cast<const char*>(&behind), sizeof(behind));
+    }
+    LogOpen(partial.c_str());
+    Check(ReadText(partial) == earlier, "a queue file that makes no sense is not written into the log");
+    LogClose();
+    for (const auto& path : {killed, partial, other}) {
+        DeleteFileW(path.c_str());
+        DeleteFileW((path + kLogQueueSuffix).c_str());
+    }
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wcscmp(argv[1], L"--killed") == 0) return KilledChild(argv[2]);
     if (argc < 2) {
         std::printf("usage: LogTests work-folder\n");
         return 2;
@@ -190,6 +321,9 @@ int wmain(int argc, wchar_t** argv) {
     Check(duplicates == 0 && seen.size() == static_cast<std::size_t>(kThreads * kPerThread), "every thread line arrives exactly once");
 
     // Logging does not touch the file on the thread that logs: lines go out in batches, not one open each.
+    // Until now every line was written by the thread that logged it: the writer thread starts only when asked
+    // (plugin.cpp, once the plugin stays loaded).
+    LogStartWriter();
     WriteText(big, std::string());
     LogOpen(big.c_str());
     const std::size_t opensBefore = LogFileOpens();
@@ -287,7 +421,15 @@ int wmain(int argc, wchar_t** argv) {
     Check(write(line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====") + ended) == LastRun::Ended &&
               write(ended + line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====")) == LastRun::Ended,
           "and a banner inside a line is no banner either");
+    // A plugin that refused and was unloaded writes UNLOADED: its run's end cannot be seen, so nothing is claimed.
+    const std::string unloaded = line("[2026-09-20 00:00:02.000] UNLOADED the plugin was unloaded");
+    Check(write(banner + ended + banner + unloaded) == LastRun::Unknown, "a run whose plugin was unloaded is not called cut");
+    Check(write(banner + unloaded + banner + ended) == LastRun::Ended && write(banner + unloaded + banner + ended + banner) == LastRun::Cut,
+          "and it does not hide what the runs after it say");
     DeleteFileW(mark.c_str());
+
+    QueueRecoveryTests(folder);
+
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

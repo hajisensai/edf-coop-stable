@@ -627,19 +627,34 @@ bool LoadPlugin(PluginInfo* info) {
 }  // namespace
 
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
+    // Every line so far was written by this thread, so the startup report is on disk already.
     const bool loaded = LoadPlugin(info);
-    // The startup report is on disk as soon as the game goes on; from here on the writer thread keeps up.
-    multislot::LogFlush();
+    if (loaded) {
+        // Staying for the life of the process: from here on the writer thread keeps up, and the game's threads
+        // never wait on the disk.
+        multislot::LogStartWriter();
+    } else {
+        // EDFModLoader unloads a plugin that refuses (FreeLibrary as soon as this returns). 1.5.13 had started
+        // the writer thread with the first line, and it woke up inside the unmapped DLL about 200 ms later and
+        // took the game down with it. No thread was started, and the queue file is let go here.
+        multislot::LogClose();
+    }
     return loaded;
 }
 
-BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         multislot::self = instance;
         DisableThreadLibraryCalls(instance);
     }
-    // The last thing the log gets from a game that was closed properly. LogShutdown is raw Win32 with no
-    // heap and no CRT, which is what makes it safe this late in a process that is already tearing down.
-    if (reason == DLL_PROCESS_DETACH) multislot::LogShutdown("the game exited");
+    // The last thing the log gets from this run. Both are raw Win32 with no heap and no CRT, which is what
+    // makes them safe this late. `reserved` is null when the DLL is unloaded (FreeLibrary after a refusal) and
+    // set when the process ends: only the second is the game exiting.
+    if (reason == DLL_PROCESS_DETACH) {
+        if (reserved)
+            multislot::LogShutdown("the game exited");
+        else
+            multislot::LogUnloaded("the plugin was unloaded (see above why); the game goes on without it");
+    }
     return TRUE;
 }

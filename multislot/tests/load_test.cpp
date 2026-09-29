@@ -294,6 +294,14 @@ int wmain(int argc, wchar_t** argv) {
         Check(GetFileAttributesW(layoutPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
               "Enabled=0 removes our menu layout (and the UI folder it was alone in)");
         Check(Contains(log, "Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO"), "the removal is logged");
+        // What EDFModLoader does next with a plugin that says no (its dllmain.cpp): FreeLibrary. 1.5.13's log
+        // writer thread was running by then and faulted in the unmapped DLL within one 200 ms interval.
+        FreeLibrary(plugin);
+        Check(GetModuleHandleW(dll.c_str()) == nullptr, "the refused plugin is unloaded completely");
+        Sleep(600);
+        const std::string unloaded = ReadText(logPath);
+        Check(Contains(unloaded, "] UNLOADED the plugin was unloaded") && !Contains(unloaded, "SHUTDOWN"),
+              "the process goes on, and the log calls it an unload, not the game exiting");
     } else {
         const bool eightPlayers = mode == L"host8";
         // NetLog defaults to on: only host4's INI turns it off.

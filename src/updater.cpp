@@ -207,7 +207,8 @@ bool lowerHexLine(const std::string& line, size_t digits) {
 
 std::wstring sibling(const std::wstring& installed, const wchar_t* suffix) { return installed + suffix; }
 
-// "0.3.7 1234" in installed.trial.
+// "0.3.7 1234" in installed.trial: the game (pid) running the version on trial. pid 0: the last game running
+// it ended the normal way (noteCleanExit) before the version had proven itself - not a failure.
 struct Trial {
     Version version;
     DWORD pid = 0;
@@ -502,12 +503,15 @@ bool installOver(const std::wstring& installed, const std::vector<uint8_t>& data
         return false;
     }
     std::lock_guard<std::mutex> lock(g_files);
-    if (!swapIn(installed, fresh, sibling(installed, L".old"), why)) {
+    // The rollback target must be a version that has proven itself: the running one, unless it is still on
+    // trial - then the one kept before it stays, and the running one is only moved aside.
+    std::wstring old = sibling(installed, L".old"), trial = sibling(installed, L".trial");
+    bool onTrial = exists(trial) && exists(old);
+    if (!swapIn(installed, fresh, onTrial ? sibling(installed, L".rolledback") : old, why)) {
         DeleteFileW(fresh.c_str());
         return false;
     }
-    // The running version is the rollback target now; its own trial (if any) is over.
-    DeleteFileW(sibling(installed, L".trial").c_str());
+    DeleteFileW(trial.c_str());  // the running version's trial is over either way: it is not installed anymore
     return true;
 }
 
@@ -549,6 +553,12 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
         return RunState::Trial;
     }
     if (!rolledBackBefore && sameGameRunning(trial.pid)) return RunState::Trial;  // that game's trial, not over
+    if (!rolledBackBefore && trial.pid == 0) {  // the last game quit normally before it was proven: go on trying
+        writeText(trialPath, versionText(me) + " " + std::to_string(GetCurrentProcessId()) + "\n");
+        logf("UPDATE %s is still on trial (the last game ended normally before it had run long enough)",
+             versionString.c_str());
+        return RunState::Trial;
+    }
     std::string previous = fileVersion(old), why;
     if (!swapIn(installed, old, sibling(installed, L".rolledback"), &why)) {
         logf("UPDATE %s did not run properly last time, but the previous version could not be restored: %s. "
@@ -562,7 +572,7 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
          "installed again (a newer release will). EDF6DirectNet is off for this session. Please report this at %s",
          versionString.c_str(),
          rolledBackBefore ? "was rolled back before and has been installed again"
-                          : "stopped before it had run for a while last time (crash or forced quit)",
+                          : "crashed or was killed before it had run for a while last time",
          previous.c_str(), versionString.c_str(), kReleasePage);
     return RunState::RolledBack;
 }
@@ -585,6 +595,15 @@ void startHealthWatch(const std::wstring& installed, const char* version) {
 
 void noteGameRunning() {
     if (!g_gameRunningNoted.exchange(true)) SetEvent(g_gameRunning);
+}
+
+bool noteCleanExit(const std::wstring& installed, const std::string& versionString, bool mayWait) {
+    std::unique_lock<std::mutex> lock(g_files, std::defer_lock);
+    // At process exit the other threads are gone, and one of them may have died holding the lock.
+    if (mayWait) lock.lock(); else if (!lock.try_lock()) return false;
+    Trial trial = readTrial(installed);
+    if (!(trial.version == parseVersion(versionString)) || trial.pid != GetCurrentProcessId()) return false;
+    return writeText(sibling(installed, L".trial"), versionText(trial.version) + " 0\n");
 }
 
 std::string updateOnce(const std::wstring& installed, const std::string& current) {

@@ -1,7 +1,8 @@
-# What multislot/tools/fix_winmm_proxy.py needs in the release workflow, pinned by hash (pip --require-hashes).
+# What multislot/tools/fix_winmm_proxy.py needs (release and MultiSlot workflows), pinned by hash
+# (pip --require-hashes). The same versions as multislot/README.md's build requirements.
 pefile==2024.8.26 \
     --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f \
     --hash=sha256:3ff6c5d8b43e8c37bb6e6dd5085658d658a7a0bdcd20b6a07b1fcfc1c4e9d632
-capstone==5.0.7 \
-    --hash=sha256:4ab8bcb7da8f221ff45926ca168ca33e76f7237d06fbf3c10780002faa2670e1 \
-    --hash=sha256:796bdd69b05fa124fc2aa2e74b9a0b3d4c4e7f3e02add5e583cf2f3bca282ede
+capstone==5.0.9 \
+    --hash=sha256:732cedbbb56d42e723f14d7af6387f1454194a820b4b96b56d1e53f865ef85d0 \
+    --hash=sha256:0429af292ddc604d3c9344696807e281d5e728db029f00e6a4ea9e3bff1aac9e

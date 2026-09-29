@@ -294,12 +294,13 @@ Config loadConfig(const std::wstring& iniPath) {
     c.hold = hold == L"all" ? Config::Hold::All : (hold == L"off" || hold == L"0") ? Config::Hold::Off : Config::Hold::Auto;
     c.reliableGameTraffic = readBool(ini, L"Sync", L"ReliableGameTraffic", true, w);
     c.direct.upgradeUnreliable = c.reliableGameTraffic;
-    // Every settings file written since auto-update exists has this line; an older one means off (see Config).
+    // A settings file from before auto-update has no such line; 0.3.6 already updated those players, so it
+    // stays on (see Config), and the log says how to turn it off.
     bool autoUpdateWritten = ini.find(L"Update", L"AutoUpdate") != nullptr;
-    c.autoUpdate = autoUpdateWritten && readBool(ini, L"Update", L"AutoUpdate", false, w);
+    c.autoUpdate = readBool(ini, L"Update", L"AutoUpdate", true, w);
     if (!autoUpdateWritten)
-        w.push_back("UPDATE automatic updates are off: EDF6DirectNet.ini was written by an older version and has no "
-                    "AutoUpdate line. To turn them on, add the two lines [Update] and AutoUpdate=1 at its end");
+        w.push_back("UPDATE automatic updates are on (EDF6DirectNet.ini has no AutoUpdate line, written by an older "
+                    "version). To turn them off, add the two lines [Update] and AutoUpdate=0 at its end");
     c.graceMs =
         static_cast<uint32_t>(std::clamp(readInt(ini, L"Resilience", L"GraceSeconds", 30, 0, 999999999, w), 1, 600)) * 1000u;
     return c;

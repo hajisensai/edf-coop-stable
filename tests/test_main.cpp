@@ -1734,12 +1734,18 @@ void testUpdateRollback() {
     CHECK(!fileExists(trial) && !fileExists(old));
     CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Normal);
 
-    // 0.3.8 updates to 0.3.9, whose first run dies before it is healthy (the trial stays).
+    // 0.3.8 updates to 0.3.9. A game that ends normally before 0.3.9 is proven is no failure: the trial
+    // goes on at the next start.
     std::vector<uint8_t> v039 = testDll("0.3.9");
     CHECK(dn::installOver(dll, v039, &why));
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);  // the same game asking again: still its trial
-    putFile(trial, "0.3.9 0\n");                              // that game is gone
+    CHECK(!dn::noteCleanExit(dll, "0.3.8", true));              // not the version on trial
+    CHECK(dn::noteCleanExit(dll, "0.3.9", true) && fileText(trial) == "0.3.9 0\n");
+    CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial && fileExists(old));
+    CHECK(fileText(trial) == "0.3.9 " + std::to_string(GetCurrentProcessId()) + "\n");
+    // Then a game running it dies before it is healthy (no clean exit): pid 4 is System, never a game.
+    putFile(trial, "0.3.9 4\n");
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
     CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
     CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.3.9") != std::string::npos);
@@ -1759,9 +1765,10 @@ void testUpdateRollback() {
     CHECK(dn::beginRun(dll, "0.4.0") == dn::RunState::Trial && fileExists(old));
 
     // A version on trial that installs the next one gives up its own trial: its health check must not
-    // delete the new version's rollback target.
+    // delete the new version's rollback target, and that target stays the proven 0.3.8, not unproven 0.4.0.
     CHECK(dn::installOver(dll, testDll("0.4.1"), &why));
-    CHECK(!fileExists(trial) && fileText(old).find("EDF6DN_VERSION=0.4.0") != std::string::npos);
+    CHECK(!fileExists(trial) && fileText(old).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
+    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.4.0") != std::string::npos);
     dn::confirmHealthy(dll, "0.4.0");
     CHECK(fileExists(old));
 
@@ -1805,7 +1812,7 @@ void testSwapKeepsDllLoadable() {
     loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
     putFile(dll + L".old", "MZ EDF6DN_VERSION=0.3.9");
-    putFile(dll + L".trial", "0.9.9 0\n");
+    putFile(dll + L".trial", "0.9.9 4\n");  // its game (pid 4 is System, never a game) died on trial
     bool rolledBack = dn::beginRun(dll, "0.9.9") == dn::RunState::RolledBack;
     done = true;
     watcher.join();
@@ -1876,10 +1883,11 @@ void testConfigParsing() {
     for (const std::string& w : c.warnings) mentionsPort = mentionsPort || w.find("ListenPort=abc") != std::string::npos;
     CHECK(mentionsPort);
 
-    // A settings file from before auto-update (no AutoUpdate line) keeps it off and says how to turn it on.
+    // A settings file from before auto-update (no AutoUpdate line) keeps it on, as 0.3.6 did, and says how
+    // to turn it off.
     putFile(path, "; old\r\n[DirectNet]\r\nMode=off\r\n");
     c = dn::loadConfig(path);
-    CHECK(!c.autoUpdate && c.warnings.size() == 1 && c.warnings[0].find("AutoUpdate=1") != std::string::npos);
+    CHECK(c.autoUpdate && c.warnings.size() == 1 && c.warnings[0].find("AutoUpdate=0") != std::string::npos);
     // A new default file has it on, with nothing to warn about.
     DeleteFileW(path.c_str());
     c = dn::loadConfig(path);

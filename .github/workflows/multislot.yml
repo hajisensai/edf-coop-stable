@@ -9,10 +9,12 @@ on:
     paths:
       - 'multislot/**'
       - '.github/workflows/multislot.yml'
+      - '.github/loader-fix-requirements.txt'
   pull_request:
     paths:
       - 'multislot/**'
       - '.github/workflows/multislot.yml'
+      - '.github/loader-fix-requirements.txt'
 
 permissions:
   contents: read
@@ -33,6 +35,13 @@ jobs:
       - name: Fetch EDFModLoader (pinned by hash)
         shell: pwsh
         run: ./multislot/tools/fetch_modloader.ps1
+
+      # The build runs tools/fix_winmm_proxy.py on the loader, which needs pefile and capstone.
+      - name: Install the loader-fix tools (pinned by hash)
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r .github/loader-fix-requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 
       - name: Build and test
         shell: cmd

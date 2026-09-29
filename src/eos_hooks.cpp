@@ -928,6 +928,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     bool lobby = hook(game, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived", hookAddNotifyMemberStatus,
                       g.api.gameAddMemberStatus);
     bool tick = hook(game, "EOS_Platform_Tick", hookPlatformTick, g.api.tick);
+    if (!tick) noteGameRunning();  // an update on trial cannot wait for a tick it will never see
     // Plugin detection: publish our marker on entering a lobby, read the other members' markers.
     g.markerReady = g.marker.init(eos) && hook(game, "EOS_Lobby_CreateLobby", hookCreateLobby, g.api.gameCreateLobby) &&
                     hook(game, "EOS_Lobby_JoinLobby", hookJoinLobby, g.api.gameJoinLobby);

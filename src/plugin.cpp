@@ -8,6 +8,7 @@
 #include "config.h"
 #include "direct_net.h"
 #include "eos_hooks.h"
+#include "iat.h"
 #include "log.h"
 #include "netif.h"
 #include "updater.h"
@@ -132,12 +133,37 @@ bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
     return false;
 }
 
+// This DLL's path while its version is on trial after an update (never destroyed, like g_net): a game that
+// ends the normal way says so, so that quitting early is not taken for a crash (dn::noteCleanExit).
+std::wstring* g_onTrial = nullptr;
+
+using TerminateProcessFn = BOOL(WINAPI*)(HANDLE, UINT);
+TerminateProcessFn g_terminateProcess = nullptr;
+
+// EDF.dll ends the game with TerminateProcess of itself (DLL_PROCESS_DETACH does not run then).
+BOOL WINAPI hookTerminateProcess(HANDLE process, UINT code) {
+    if (g_onTrial && GetProcessId(process) == GetCurrentProcessId()) dn::noteCleanExit(*g_onTrial, kVersionText, true);
+    return g_terminateProcess(process, code);
+}
+
+void watchCleanExit(HMODULE game) {
+    if (!dn::patchImport(game, "KERNEL32.dll", "TerminateProcess", reinterpret_cast<void*>(&hookTerminateProcess),
+                         reinterpret_cast<void**>(&g_terminateProcess)))
+        dn::logf("UPDATE cannot see the game exit (TerminateProcess is not imported by EDF.dll): quitting within "
+                 "%u seconds of the title screen counts as a failed run while this version is on trial",
+                 dn::kHealthySeconds);
+}
+
 }  // namespace
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) {
     // At exit the worker thread is already killed (possibly holding a lock) and static objects are
     // about to be destroyed, while EDF.dll may still call EOS through our hooks.
-    if (reason == DLL_PROCESS_DETACH) dn::eosHooksShutdown();
+    if (reason == DLL_PROCESS_DETACH) {
+        dn::eosHooksShutdown();
+        // reserved set: ExitProcess, the other normal way out. Never wait here (loader lock, dead threads).
+        if (reserved && g_onTrial) dn::noteCleanExit(*g_onTrial, kVersionText, false);
+    }
     return TRUE;
 }
 
@@ -160,27 +186,31 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
     }
 
     for (const std::string& warning : config.warnings) dn::logf("%s", warning.c_str());
-    // Before anything that could fail in a new version: a version whose previous run did not last is
-    // replaced by the one before it, and this session runs without the plugin.
+    HMODULE game = GetModuleHandleW(L"EDF.dll");
+    HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
+    if (!game || !eos) {
+        // Not the game (or not one we know): the update state belongs to the game's runs, so leave it be.
+        dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
+        return true;
+    }
+    // Before anything that could fail in a new version: a version whose previous run crashed is replaced
+    // by the one before it, and this session runs without the plugin.
     std::wstring self = pluginPath();
     dn::RunState run = dn::beginRun(self, kVersionText);
     if (run == dn::RunState::RolledBack) {
         dn::logClose();
         return false;  // the loader unloads us
     }
-    if (run == dn::RunState::Trial) dn::startHealthWatch(self, kVersionText);
+    if (run == dn::RunState::Trial) {
+        g_onTrial = new std::wstring(self);
+        watchCleanExit(game);
+        dn::startHealthWatch(self, kVersionText);
+    }
     if (config.autoUpdate)
         dn::startAutoUpdate(self, kVersionText);
     else
         dn::logf("UPDATE automatic updates are off");
 
-    HMODULE game = GetModuleHandleW(L"EDF.dll");
-    HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
-    if (!game || !eos) {
-        dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
-        dn::noteGameRunning();  // nothing of the plugin runs, so nothing can prove an update bad
-        return true;
-    }
     // A router mapping lives until a start that does not map it: at game exit there is no safe point
     // for the network calls removing it (DllMain runs under the loader lock with the other threads gone).
     std::wstring upnpRecord = dir + L"EDF6DirectNet.upnp";

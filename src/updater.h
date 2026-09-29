@@ -14,9 +14,10 @@
 // repository's release download URLs.
 //
 // A bad release must not strand anyone: the version that is replaced stays as EDF6DirectNet.dll.old
-// until the new one has run for a while (kHealthySeconds past the game's first EOS tick). When a new version's previous run ended
-// before that, the next start puts the old version back, remembers the new one as bad (not installed
-// again) and runs this session without the plugin. There is never a moment without a loadable
+// until the new one has run for a while (kHealthySeconds past the game's first EOS tick). When a game
+// running the new version crashed or was killed before that, the next start puts the old version back,
+// remembers the new one as bad (not installed again) and runs this session without the plugin. A game
+// that ended normally before that (noteCleanExit) is no failure: the trial goes on at the next start. There is never a moment without a loadable
 // EDF6DirectNet.dll: files are swapped by renaming a complete file over the name (see swapIn).
 //
 // Every failure is one log line; the game never waits for the network. [Update] AutoUpdate=0 turns
@@ -113,6 +114,10 @@ void startHealthWatch(const std::wstring& installed, const char* version);
 // The game is up: called on every EOS tick (cheap after the first), and at load when there is no game
 // for the plugin to run in (then nothing can fail and the trial ends kHealthySeconds later).
 void noteGameRunning();
+// The game is ending the normal way (EDF.dll's TerminateProcess of itself, or ExitProcess): when this
+// process runs `version` on trial, the trial is marked as ended cleanly so the next start does not roll
+// it back. mayWait false (DllMain at process exit) gives up instead of waiting for the file lock.
+bool noteCleanExit(const std::wstring& installed, const std::string& version, bool mayWait);
 // The version recorded in installed.bad, invalid when none.
 Version badVersion(const std::wstring& installed);
 

@@ -73,7 +73,13 @@ int wmain(int argc, wchar_t** argv) {
     Check(embedded.size() > 16 && std::memcmp(embedded.data(), "SGO\0", 4) == 0, "embedded layout is an SGO file");
     Check(std::search(embedded.begin(), embedded.end(), labelBytes, labelBytes + 7 * sizeof(wchar_t)) != embedded.end(),
           "embedded layout names the MSLabel field");
+#ifdef MULTISLOT_PLACEHOLDER_LAYOUT
+    // A CI build (MULTISLOT_CI) embeds a placeholder: the file handling below still runs on it, but only the real
+    // asset can be in the known list.
+    std::printf("SKIPPED: the known-list check needs the real assets/LYT_MAINFRAME.SGO (this build has a placeholder)\n");
+#else
     Check(OurMenuLayout(embedded.data(), embedded.size()), "the current layout is in the known list (add it when the asset changes)");
+#endif
     auto changed = embedded;
     changed[changed.size() / 2] ^= 0x5A;
     Check(!OurMenuLayout(changed.data(), changed.size()), "a changed layout is not ours");

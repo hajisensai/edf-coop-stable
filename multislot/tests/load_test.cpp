@@ -203,6 +203,11 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     const std::wstring mode = argv[4];
+    // CMake registers this test with or without the game; without it the test says so and counts as skipped.
+    if (GetFileAttributesW(argv[1]) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("SKIPPED: %ls is not there (set EDF6_GAME_DIR to the game folder to run this test)\n", argv[1]);
+        return 77;
+    }
     const HMODULE game = LoadLibraryExW(argv[1], nullptr, DONT_RESOLVE_DLL_REFERENCES);
     if (!game) {
         std::printf("FAIL: cannot map %ls (error %lu)\n", argv[1], GetLastError());

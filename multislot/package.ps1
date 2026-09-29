@@ -49,6 +49,12 @@ $sources = @{
 foreach ($source in $sources.Values) {
     if (-not (Test-Path -LiteralPath $source)) { throw "Missing $source (run build.cmd first?)" }
 }
+# A CI build (CMake MULTISLOT_CI) embeds a placeholder in place of the game's menu layout; it is for tests only.
+$pluginBytes = [IO.File]::ReadAllBytes($sources['Mods\Plugins\EDF6MultiSlot.dll'])
+$pluginText = [Text.Encoding]::ASCII.GetString($pluginBytes)
+if ($pluginText.Contains('MULTISLOT CI PLACEHOLDER')) {
+    throw 'EDF6MultiSlot.dll is a CI build with a placeholder menu layout; build with assets\LYT_MAINFRAME.SGO (build.cmd) to package'
+}
 
 # Verify every deletion target stays below this release directory; use native PowerShell only.
 $releaseFull = [IO.Path]::GetFullPath($release).TrimEnd('\') + '\'

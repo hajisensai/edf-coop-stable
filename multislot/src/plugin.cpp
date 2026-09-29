@@ -311,6 +311,11 @@ void KeepMenuLayout(bool active) {
             Log("Menu: could not remove Mods\\UI\\LYT_MAINFRAME.SGO (error %lu)", GetLastError());
         return;
     }
+#ifdef MULTISLOT_PLACEHOLDER_LAYOUT
+    // A CI build (CMake MULTISLOT_CI) has no layout of the game's to embed, only a placeholder that would break the
+    // menu; it is never written to a game folder.
+    Log("Menu: this is a CI test build with a placeholder layout; Mods\\UI\\LYT_MAINFRAME.SGO is not written");
+#else
     switch (InstallMenuLayout(path)) {
         case LayoutInstall::Written:
             Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the 8Player MOD label)");
@@ -326,6 +331,7 @@ void KeepMenuLayout(bool active) {
                 "still works)", GetLastError());
             break;
     }
+#endif
 }
 
 ThunkPage thunks;

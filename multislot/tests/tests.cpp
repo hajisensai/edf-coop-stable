@@ -141,6 +141,11 @@ int main(int argc, char** argv) {
         std::printf("usage: MultiSlotTests EDF.dll\n");
         return 2;
     }
+    // CMake registers this test with or without the game; without it the test says so and counts as skipped.
+    if (GetFileAttributesA(argv[1]) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("SKIPPED: %s is not there (set EDF6_GAME_DIR to the game folder to run this test)\n", argv[1]);
+        return 77;
+    }
     Image image;
     std::ifstream in(argv[1], std::ios::binary);
     image.file.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());

@@ -135,6 +135,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `RESILIENCE ... RECOVERED` 表示一次断线被成功隐藏；`did not come back within` 表示超时后交给了游戏。
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic 房间服务把某人踢掉又放了回来，游戏没察觉。`direct link silent for ...` 表示他真的掉了，已交给游戏。
 - `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
+- `GAME sends a N-byte packet ...: over the 1170-byte packet limit`：游戏生成了一个 EOS 发不出去的超长包（装 EDF6MultiSlot、8 人及以上开任务时出现），它会重试约 26 秒然后解散房间。紧跟着的 `GAME kicked X N more times` 是游戏在踢人生效前反复调用踢人。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
 - `TRAFFIC last 60s: ...`：游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据、有多少包在 5 秒内把同一份数据又发给了同一个人（即游戏自己的重发，如果有的话），以及直连实际占用的上传 / 下载，含房主替别人转发的部分。
 - `DIRECT refused hello for ...`：有人想以某个玩家的身份直连，但证明不了。玩家刚进房的一两秒内出现 `published no direct-link identity` 是正常的（他的房间信息还没到房主这里，对方每秒重试）；对没装插件或 0.3.6 及更早版本的玩家，意思是他继续走 EOS。`not signed by the identity that player published` 说明有人冒充该玩家，已被拒绝，影响不到那个玩家。

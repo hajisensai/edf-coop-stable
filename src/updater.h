@@ -114,10 +114,13 @@ void startHealthWatch(const std::wstring& installed, const char* version);
 // The game is up: called on every EOS tick (cheap after the first), and at load when there is no game
 // for the plugin to run in (then nothing can fail and the trial ends kHealthySeconds later).
 void noteGameRunning();
-// The game is ending the normal way (EDF.dll's TerminateProcess of itself, or ExitProcess): when this
+// The game is ending the normal way (ExitProcess: DLL_PROCESS_DETACH with a process exit): when this
 // process runs `version` on trial, the trial is marked as ended cleanly so the next start does not roll
-// it back. mayWait false (DllMain at process exit) gives up instead of waiting for the file lock.
-bool noteCleanExit(const std::wstring& installed, const std::string& version, bool mayWait);
+// it back. Never waits for the file lock (a thread that died at exit may hold it); false when not marked.
+// A process killed outright (Task Manager, __fastfail - EDF6VR aborts the game at quit) cannot say so.
+bool noteCleanExit(const std::wstring& installed, const std::string& version);
+// The version a DLL file says it is (its "EDF6DN_VERSION=x.y.z" marker), "?" when it does not say.
+std::string fileVersion(const std::wstring& path);
 // The version recorded in installed.bad, invalid when none.
 Version badVersion(const std::wstring& installed);
 

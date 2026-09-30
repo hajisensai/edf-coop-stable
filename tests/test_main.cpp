@@ -1716,6 +1716,14 @@ void testUpdateRollback() {
     auto install = [&](const char* version) { putFile(dll, "MZ EDF6DN_VERSION=" + std::string(version)); };
     std::string why;
 
+    // The version a DLL says it is, past the marker prefix its own updater code also contains.
+    const char marked[] = "MZ EDF6DN_VERSION=\0%s\0 EDF6DN_VERSION=1.2\0 EDF6DN_VERSION=0.3.6\0";
+    putFile(dll, std::string(marked, sizeof(marked) - 1));
+    CHECK(dn::fileVersion(dll) == "0.3.6");
+    const char unmarked[] = "MZ EDF6DN_VERSION=\0 no marker\0";
+    putFile(dll, std::string(unmarked, sizeof(unmarked) - 1));
+    CHECK(dn::fileVersion(dll) == "?");
+
     // Installed by hand: nothing to prove, a stray trial is dropped.
     install("0.3.7");
     putFile(trial, "0.3.7 0\n");
@@ -1740,8 +1748,8 @@ void testUpdateRollback() {
     CHECK(dn::installOver(dll, v039, &why));
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial);  // the same game asking again: still its trial
-    CHECK(!dn::noteCleanExit(dll, "0.3.8", true));              // not the version on trial
-    CHECK(dn::noteCleanExit(dll, "0.3.9", true) && fileText(trial) == "0.3.9 0\n");
+    CHECK(!dn::noteCleanExit(dll, "0.3.8"));                    // not the version on trial
+    CHECK(dn::noteCleanExit(dll, "0.3.9") && fileText(trial) == "0.3.9 0\n");
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::Trial && fileExists(old));
     CHECK(fileText(trial) == "0.3.9 " + std::to_string(GetCurrentProcessId()) + "\n");
     // Then a game running it dies before it is healthy (no clean exit): pid 4 is System, never a game.

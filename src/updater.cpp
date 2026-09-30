@@ -237,11 +237,18 @@ bool sameGameRunning(DWORD pid) {
 }
 
 // The version a DLL file says it is ("?" when it does not say).
-std::string fileVersion(const std::wstring& path) {
+std::string fileVersionImpl(const std::wstring& path) {
     std::string data = readFile(path, kMaxDll);
-    size_t at = data.find("EDF6DN_VERSION=");
-    Version v = at == std::string::npos ? Version{} : parseVersion(data.substr(at, 40));
-    return v.valid() ? versionText(v) : "?";
+    // The marker is "EDF6DN_VERSION=x.y.z" and a NUL; the prefix alone also appears in the updater's own code.
+    const std::string prefix = "EDF6DN_VERSION=";
+    for (size_t at = data.find(prefix); at != std::string::npos; at = data.find(prefix, at + 1)) {
+        size_t from = at + prefix.size(), end = data.find('\0', from);
+        if (end == std::string::npos || end - from > 20) continue;
+        std::string text = data.substr(from, end - from);
+        Version v = parseVersion(text);
+        if (v.valid() && versionText(v) == text) return text;
+    }
+    return "?";
 }
 
 std::string updateOnceImpl(const std::wstring& installed, const std::string& currentText) {
@@ -549,7 +556,7 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
         writeText(trialPath, versionText(me) + " " + std::to_string(GetCurrentProcessId()) + "\n");
         logf("UPDATE first run of %s: keeping %s as EDF6DirectNet.dll.old until this version has run for %u seconds "
              "past the game's first EOS tick",
-             versionString.c_str(), fileVersion(old).c_str(), kHealthySeconds);
+             versionString.c_str(), fileVersionImpl(old).c_str(), kHealthySeconds);
         return RunState::Trial;
     }
     if (!rolledBackBefore && sameGameRunning(trial.pid)) return RunState::Trial;  // that game's trial, not over
@@ -559,7 +566,7 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
              versionString.c_str());
         return RunState::Trial;
     }
-    std::string previous = fileVersion(old), why;
+    std::string previous = fileVersionImpl(old), why;
     if (!swapIn(installed, old, sibling(installed, L".rolledback"), &why)) {
         logf("UPDATE %s did not run properly last time, but the previous version could not be restored: %s. "
              "Reinstall from %s",
@@ -597,10 +604,10 @@ void noteGameRunning() {
     if (!g_gameRunningNoted.exchange(true)) SetEvent(g_gameRunning);
 }
 
-bool noteCleanExit(const std::wstring& installed, const std::string& versionString, bool mayWait) {
-    std::unique_lock<std::mutex> lock(g_files, std::defer_lock);
+bool noteCleanExit(const std::wstring& installed, const std::string& versionString) {
     // At process exit the other threads are gone, and one of them may have died holding the lock.
-    if (mayWait) lock.lock(); else if (!lock.try_lock()) return false;
+    std::unique_lock<std::mutex> lock(g_files, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
     Trial trial = readTrial(installed);
     if (!(trial.version == parseVersion(versionString)) || trial.pid != GetCurrentProcessId()) return false;
     return writeText(sibling(installed, L".trial"), versionText(trial.version) + " 0\n");
@@ -609,6 +616,8 @@ bool noteCleanExit(const std::wstring& installed, const std::string& versionStri
 std::string updateOnce(const std::wstring& installed, const std::string& current) {
     return updateOnceImpl(installed, current);
 }
+
+std::string fileVersion(const std::wstring& path) { return fileVersionImpl(path); }
 
 void startAutoUpdate(const std::wstring& installed, const char* current) {
     std::thread([installed, version = std::string(current)] { logf("%s", updateOnce(installed, version).c_str()); })

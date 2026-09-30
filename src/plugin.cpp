@@ -8,7 +8,6 @@
 #include "config.h"
 #include "direct_net.h"
 #include "eos_hooks.h"
-#include "iat.h"
 #include "log.h"
 #include "netif.h"
 #include "updater.h"
@@ -137,23 +136,6 @@ bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
 // ends the normal way says so, so that quitting early is not taken for a crash (dn::noteCleanExit).
 std::wstring* g_onTrial = nullptr;
 
-using TerminateProcessFn = BOOL(WINAPI*)(HANDLE, UINT);
-TerminateProcessFn g_terminateProcess = nullptr;
-
-// EDF.dll ends the game with TerminateProcess of itself (DLL_PROCESS_DETACH does not run then).
-BOOL WINAPI hookTerminateProcess(HANDLE process, UINT code) {
-    if (g_onTrial && GetProcessId(process) == GetCurrentProcessId()) dn::noteCleanExit(*g_onTrial, kVersionText, true);
-    return g_terminateProcess(process, code);
-}
-
-void watchCleanExit(HMODULE game) {
-    if (!dn::patchImport(game, "KERNEL32.dll", "TerminateProcess", reinterpret_cast<void*>(&hookTerminateProcess),
-                         reinterpret_cast<void**>(&g_terminateProcess)))
-        dn::logf("UPDATE cannot see the game exit (TerminateProcess is not imported by EDF.dll): quitting within "
-                 "%u seconds of the title screen counts as a failed run while this version is on trial",
-                 dn::kHealthySeconds);
-}
-
 }  // namespace
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) {
@@ -161,8 +143,9 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) {
     // about to be destroyed, while EDF.dll may still call EOS through our hooks.
     if (reason == DLL_PROCESS_DETACH) {
         dn::eosHooksShutdown();
-        // reserved set: ExitProcess, the other normal way out. Never wait here (loader lock, dead threads).
-        if (reserved && g_onTrial) dn::noteCleanExit(*g_onTrial, kVersionText, false);
+        // reserved set: the process is ending through ExitProcess, which is how EDF6 quits from its menu
+        // (measured; EDF.dll's TerminateProcess import is not the quit path). Never wait here (loader lock).
+        if (reserved && g_onTrial) dn::noteCleanExit(*g_onTrial, kVersionText);
     }
     return TRUE;
 }
@@ -203,7 +186,6 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
     }
     if (run == dn::RunState::Trial) {
         g_onTrial = new std::wstring(self);
-        watchCleanExit(game);
         dn::startHealthWatch(self, kVersionText);
     }
     if (config.autoUpdate)

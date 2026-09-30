@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 #include "direct_net.h"
 
@@ -23,12 +24,18 @@ struct Config {
     uint32_t graceMs = 30000;  // bounded: a hidden disconnect may make everyone wait at a sync point
     // Send EDF6's UnreliableUnordered game packets as ReliableUnordered (EOS and direct link).
     bool reliableGameTraffic = true;
-    // Install newer releases from GitHub by itself (they run from the next game start).
+    // Install newer releases from GitHub by itself (they run from the next game start). Also on for a
+    // settings file without [Update] AutoUpdate= (written before auto-update): 0.3.6 already updated those
+    // players, and turning it off now would leave them without later fixes. The log says how to opt out.
     bool autoUpdate = true;
+    // Log lines about the settings file: values that were not understood, settings that are off.
+    std::vector<std::string> warnings;
 };
 
 // Reads the INI; writes a commented default file first when it does not exist, commented in the
-// Windows display language (Chinese, Japanese, otherwise English).
+// Windows display language (Chinese, Japanese, otherwise English). The file is read as UTF-8 (with or
+// without BOM; UTF-16 with BOM and the ANSI code page also work), `;` and `#` start comments, also
+// after a value (`Mode=host ; me`), and a value that is not understood keeps its default (warned).
 Config loadConfig(const std::wstring& iniPath);
 // The default settings file for a Windows language id (LANGID).
 std::string defaultIni(unsigned short langId);

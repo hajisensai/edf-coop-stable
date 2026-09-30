@@ -22,9 +22,13 @@ constexpr std::size_t kTextSize = 8192;
 
 std::uintptr_t gameBase = 0;
 std::uintptr_t gameEnd = 0;
+// The plugin's own image: a fault in its code is as much a crash of the game as one in EDF.dll.
+std::uintptr_t pluginBase = 0;
+std::uintptr_t pluginEnd = 0;
 // First-chance exceptions can be normal elsewhere, so each source gets its own small budget
-// and a noisy module cannot use up the entries a real crash in EDF.dll needs.
+// and a noisy module cannot use up the entries a real crash in EDF.dll or the plugin needs.
 std::atomic<int> gameBudget{16};
+std::atomic<int> pluginBudget{16};
 std::atomic<int> cppBudget{6};
 std::atomic<int> otherBudget{4};
 
@@ -39,6 +43,16 @@ constexpr MINIDUMP_TYPE kDumpType = static_cast<MINIDUMP_TYPE>(
 WriteDumpFn writeDump = nullptr;
 wchar_t dumpPathW[MAX_PATH]{};
 std::atomic<int> dumpBudget{1};
+// MiniDumpWriteDump is not called on the faulting thread (its documentation asks for another thread, and a
+// stack overflow leaves the faulting thread no stack to write it with): a thread made when the dump is armed
+// writes it while the faulting thread waits. It still runs in the failing process, so if the fault came while
+// the game held a lock the dump needs (the process heap's, say), it cannot finish; the faulting thread stops
+// waiting after kDumpWaitMs and lets the crash go on (EDF6MultiSlot.ini says so next to CrashDump).
+constexpr DWORD kDumpWaitMs = 30000;
+HANDLE dumpRequest = nullptr;
+HANDLE dumpDone = nullptr;
+EXCEPTION_POINTERS* dumpException = nullptr;
+DWORD dumpFaultingThread = 0;
 
 struct Text {
     char data[kTextSize];
@@ -149,14 +163,14 @@ bool ThrownForGame(CONTEXT context) {
 
 std::atomic<DWORD> writerThread{0};
 
-// Called with the report lock held, from the handler, at most once per launch.
-void WriteMiniDump(EXCEPTION_POINTERS* info) {
+// On the dump thread, while the faulting thread (`thread`) waits with the report lock held; at most once per launch.
+void WriteMiniDump(EXCEPTION_POINTERS* info, DWORD thread) {
     HANDLE file = CreateFileW(dumpPathW, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         Log("CRASH DUMP could not be created (error %lu)", GetLastError());
         return;
     }
-    MINIDUMP_EXCEPTION_INFORMATION param{GetCurrentThreadId(), info, FALSE};
+    MINIDUMP_EXCEPTION_INFORMATION param{thread, info, FALSE};
     SetLastError(0);
     BOOL written = writeDump(GetCurrentProcess(), GetCurrentProcessId(), file, kDumpType, &param, nullptr, nullptr);
     if (!written) {
@@ -178,10 +192,31 @@ void WriteMiniDump(EXCEPTION_POINTERS* info) {
         Log("CRASH DUMP failed (error %lu); the log above is all there is", GetLastError());
 }
 
+DWORD WINAPI DumpThreadMain(void*) {
+    for (;;) {
+        WaitForSingleObject(dumpRequest, INFINITE);
+        // DbgHelp reads memory that may be gone and catches its own faults: not a crash to report.
+        Probing([] { WriteMiniDump(dumpException, dumpFaultingThread); });
+        SetEvent(dumpDone);
+    }
+}
+
+// Called with the report lock held, from the handler, at most once per launch.
+void RequestMiniDump(EXCEPTION_POINTERS* info) {
+    dumpException = info;
+    dumpFaultingThread = GetCurrentThreadId();
+    SetEvent(dumpRequest);
+    if (WaitForSingleObject(dumpDone, kDumpWaitMs) != WAIT_OBJECT_0)
+        Log("CRASH DUMP did not finish within %lu s (the game may have held a lock it needs); going on without it",
+            kDumpWaitMs / 1000);
+}
+
 LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     const EXCEPTION_RECORD* record = info->ExceptionRecord;
     const DWORD code = record->ExceptionCode;
     if (!CrashClass(code)) return EXCEPTION_CONTINUE_SEARCH;
+    // One of the plugin's own probes, which its __except is about to catch (crashlog.h).
+    if (InProbe()) return EXCEPTION_CONTINUE_SEARCH;
     if (code == kCppException && !ThrownForGame(*info->ContextRecord)) return EXCEPTION_CONTINUE_SEARCH;
     // A fault while this thread is already writing a report (caught by the __try blocks below)
     // re-enters here first; the SRW lock is not recursive, so leave it to those blocks.
@@ -189,7 +224,8 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     if (writerThread.load() == thread) return EXCEPTION_CONTINUE_SEARCH;
     const std::uintptr_t rip = info->ContextRecord->Rip;
     const bool inGame = rip >= gameBase && rip < gameEnd;
-    auto& budget = code == kCppException ? cppBudget : (inGame ? gameBudget : otherBudget);
+    const bool inPlugin = !inGame && rip >= pluginBase && rip < pluginEnd;
+    auto& budget = code == kCppException ? cppBudget : (inGame ? gameBudget : inPlugin ? pluginBudget : otherBudget);
     if (budget.fetch_sub(1) <= 0) return EXCEPTION_CONTINUE_SEARCH;
 
     static Text text;  // exception paths may run deep in a thread's stack; keep 8 KB off it
@@ -217,11 +253,11 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* info) {
     LogWrite(text.data, text.length);
     // The report is on disk before the dump starts: a dump can take long, or never finish.
     LogFlush();
-    // Only an access violation in the game's own code, and only once per launch: everything else the
-    // handler sees is either another module's business or a fault the game goes on to handle.
-    if (inGame && code == EXCEPTION_ACCESS_VIOLATION && writeDump && dumpPathW[0] &&
+    // Only an access violation in the game's own code or the plugin's, and only once per launch: everything
+    // else the handler sees is either another module's business or a fault the game goes on to handle.
+    if ((inGame || inPlugin) && code == EXCEPTION_ACCESS_VIOLATION && writeDump && dumpPathW[0] &&
         dumpBudget.fetch_sub(1) > 0)
-        WriteMiniDump(info);
+        RequestMiniDump(info);
     // And the dump's own result line ("CRASH DUMP written ..."): the process may end as soon as this returns.
     LogFlush();
     writerThread.store(0);
@@ -237,13 +273,30 @@ void InstallCrashLog(HMODULE game, const wchar_t* dumpPath) {
     const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     gameBase = base;
     gameEnd = base + nt->OptionalHeader.SizeOfImage;
+    HMODULE plugin = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&OnException), &plugin)) {
+        const auto own = reinterpret_cast<std::uintptr_t>(plugin);
+        const auto ownNt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+            own + reinterpret_cast<const IMAGE_DOS_HEADER*>(plugin)->e_lfanew);
+        pluginBase = own;
+        pluginEnd = own + ownNt->OptionalHeader.SizeOfImage;
+    }
     if (dumpPath) {
         const std::size_t length = wcslen(dumpPath);
-        if (length < MAX_PATH) {
+        dumpRequest = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        dumpDone = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (length < MAX_PATH && dumpRequest && dumpDone) {
             if (const HMODULE dbghelp = LoadLibraryW(L"DbgHelp.dll")) {
-                writeDump = reinterpret_cast<WriteDumpFn>(
+                const auto write = reinterpret_cast<WriteDumpFn>(
                     reinterpret_cast<void*>(GetProcAddress(dbghelp, "MiniDumpWriteDump")));
-                if (writeDump) wmemcpy(dumpPathW, dumpPath, length + 1);
+                // Runs for the rest of the process: the plugin is loaded for good by the time this is installed.
+                const HANDLE thread = write ? CreateThread(nullptr, 0, &DumpThreadMain, nullptr, 0, nullptr) : nullptr;
+                if (thread) {
+                    CloseHandle(thread);
+                    writeDump = write;
+                    wmemcpy(dumpPathW, dumpPath, length + 1);
+                }
             }
         }
     }

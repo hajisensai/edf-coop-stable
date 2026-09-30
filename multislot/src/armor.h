@@ -71,13 +71,20 @@ struct ArmorRules {
     float base;   // armor with no pickups
     float step;   // armor per pickup
 };
+// The most armor a room member can be taken to report. The number arrives from the other machines, and no
+// player comes near it (the largest seen in a room was about 6500); anything above is not an armor to copy.
+constexpr int kMaxRoomArmor = 1000000;
+// The largest pickup count this ever hands the game: every count up to it is exact in the float the game
+// computes armor with, and it is far past what kMaxRoomArmor needs with any class's step.
+constexpr int kMaxPickups = 1 << 24;
 int ArmorFor(const ArmorRules& rules, int count);
-// The pickup count that first reaches `armor`, never below `count`.
+// The pickup count that first reaches `armor`, never below `count` and never above kMaxPickups (which it
+// returns when even that falls short).
 int CountFor(const ArmorRules& rules, int count, int armor);
 // The armor to copy: the lowest among the other members of `soldier`, else the lowest among all the others.
 // Members within `ignoreWithin` of `mine` are passed over, so a room full of beginners reaches up to the
-// first player who is really ahead. Returns 0 when there is nobody to copy from. `self` is the index to
-// leave out, or `count` for none.
+// first player who is really ahead, and members reporting more than kMaxRoomArmor are passed over too.
+// Returns 0 when there is nobody to copy from. `self` is the index to leave out, or `count` for none.
 int TargetArmor(const RoomMemberArmor* members, std::size_t count, std::size_t self, int soldier, int mine,
                 int ignoreWithin);
 // Which member this machine is, by the class and armor it publishes; `count` when none matches.

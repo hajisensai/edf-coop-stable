@@ -5,9 +5,12 @@
 #include "armor.h"
 
 #include <atomic>
+#include <climits>
+#include <cmath>
 #include <cstring>
 #include <cwchar>
 
+#include "crashlog.h"
 #include "log.h"
 #include "mission.h"
 #include "patches.h"
@@ -57,14 +60,16 @@ using ClassRuleFn = float(__fastcall*)(const void*, int);
 
 bool RulesFor(const std::uint8_t* status, int soldier, ArmorRules& rules) {
     if (!status || soldier < 0 || soldier >= kSoldierTypes) return false;
-    __try {
-        const void* data = status + kGameData;
-        rules.base = reinterpret_cast<ClassRuleFn>(game + kArmorBase)(data, soldier);
-        rules.step = reinterpret_cast<ClassRuleFn>(game + kArmorStep)(data, soldier);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-    return rules.step > 0.0f;
+    return Probing([&]() -> bool {
+        __try {
+            const void* data = status + kGameData;
+            rules.base = reinterpret_cast<ClassRuleFn>(game + kArmorBase)(data, soldier);
+            rules.step = reinterpret_cast<ClassRuleFn>(game + kArmorStep)(data, soldier);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        return std::isfinite(rules.base) && std::isfinite(rules.step) && rules.step > 0.0f;
+    });
 }
 
 void Clear(const char* why) {
@@ -80,20 +85,27 @@ void Clear(const char* why) {
 
 int ArmorFor(const ArmorRules& rules, int count) {
     if (count < 0) count = 0;
-    // The game truncates the float when it publishes the number (cvttss2si at 7480B1).
+    // The game truncates the float when it publishes the number (cvttss2si at 7480B1). NaN and anything at or
+    // below zero is no armor; a float past INT_MAX has no int to truncate to, so it stops there.
     const float armor = rules.base + rules.step * static_cast<float>(count);
-    return armor <= 0.0f ? 0 : static_cast<int>(armor);
+    if (!(armor > 0.0f)) return 0;
+    return armor < 2147483648.0f ? static_cast<int>(armor) : INT_MAX;
 }
 
 int CountFor(const ArmorRules& rules, int count, int armor) {
     if (count < 0) count = 0;
-    if (rules.step <= 0.0f) return count;
-    while (ArmorFor(rules, count) < armor) {
-        const int next = count + 1;
-        if (next <= count) break;  // a count that cannot grow any further
-        count = next;
+    if (!std::isfinite(rules.base) || !std::isfinite(rules.step) || !(rules.step > 0.0f)) return count;
+    if (count >= kMaxPickups || ArmorFor(rules, count) >= armor) return count;
+    // ArmorFor never falls as the count grows, so the first count that reaches `armor` is found by halving
+    // [count, kMaxPickups]: 24 steps whatever a room member reports (1.5.13 counted up one pickup at a time,
+    // two billion steps a frame for a member claiming two billion armor).
+    int low = count, high = kMaxPickups;  // ArmorFor(low) < armor; high is the answer if nothing below is
+    while (high - low > 1) {
+        const int middle = low + (high - low) / 2;
+        if (ArmorFor(rules, middle) >= armor) high = middle;
+        else low = middle;
     }
-    return count;
+    return high;
 }
 
 int TargetArmor(const RoomMemberArmor* members, std::size_t count, std::size_t self, int soldier, int mine,
@@ -101,7 +113,7 @@ int TargetArmor(const RoomMemberArmor* members, std::size_t count, std::size_t s
     if (!members) return 0;
     int sameClass = 0, anyClass = 0;
     for (std::size_t i = 0; i < count; ++i) {
-        if (i == self || !members[i].valid || members[i].armor <= 0) continue;
+        if (i == self || !members[i].valid || members[i].armor <= 0 || members[i].armor > kMaxRoomArmor) continue;
         const int apart = members[i].armor - mine;
         if ((apart < 0 ? -apart : apart) <= ignoreWithin) continue;  // too close to be worth copying
         if (!anyClass || members[i].armor < anyClass) anyClass = members[i].armor;
@@ -154,15 +166,17 @@ bool LocalArmor(int& soldier, int& count, int& armor) {
     const std::uint8_t* status = Status();
     if (!status) return false;
     ArmorRules rules{};
-    __try {
-        soldier = Field32(status, kLocalPlayers);
-        if (!RulesFor(status, soldier, rules)) return false;
-        count = Field32(status, kArmorCounts + static_cast<std::size_t>(soldier) * 4);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-    armor = ArmorFor(rules, count);
-    return true;
+    return Probing([&]() -> bool {
+        __try {
+            soldier = Field32(status, kLocalPlayers);
+            if (!RulesFor(status, soldier, rules)) return false;
+            count = Field32(status, kArmorCounts + static_cast<std::size_t>(soldier) * 4);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        armor = ArmorFor(rules, count);
+        return true;
+    });
 }
 
 void ForgetRoom() {
@@ -175,15 +189,18 @@ void NoteRoomMembers(const RoomMemberArmor* members, std::size_t count) {
     if (!status || !members || !count) return;
     int soldier = 0, mine = 0;
     ArmorRules rules{};
-    __try {
-        soldier = Field32(status, kLocalPlayers);
-        if (soldier < 0 || soldier >= kSoldierTypes) return;
-        if (!RulesFor(status, soldier, rules)) return;
-        mine = Field32(status, kArmorCounts + static_cast<std::size_t>(soldier) * 4);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-    if (mine < 0) return;
+    const bool read = Probing([&] {
+        __try {
+            soldier = Field32(status, kLocalPlayers);
+            if (soldier < 0 || soldier >= kSoldierTypes) return false;
+            if (!RulesFor(status, soldier, rules)) return false;
+            mine = Field32(status, kArmorCounts + static_cast<std::size_t>(soldier) * 4);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        return true;
+    });
+    if (!read || mine < 0) return;
     const int own = ArmorFor(rules, mine);
     // Leave out the member this machine is. The room always has this machine's real armor, raised or not,
     // which is what makes everyone's decision here stable: nobody ever copies a copied number.
@@ -233,9 +250,15 @@ void ArmorCountHandler(CpuContext* context) {
     const auto* status = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(context->*Base));
     const auto index = static_cast<std::uint32_t>(context->*Index);
     std::int32_t count = 0;
-    __try {
-        std::memcpy(&count, status + kArmorCounts + static_cast<std::size_t>(index) * 4, sizeof(count));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    const bool read = Probing([&] {
+        __try {
+            std::memcpy(&count, status + kArmorCounts + static_cast<std::size_t>(index) * 4, sizeof(count));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        return true;
+    });
+    if (!read) {
         if (!(reported & 1u)) {
             reported |= 1u;
             Log("ARMOR pickup count %u is out of range; using 0", index);
@@ -261,9 +284,15 @@ void ArmorCountHandler(CpuContext* context) {
 void RecordArmorHandler(CpuContext* context) {
     std::int32_t count = 0;
     const auto at = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(context->rbx + context->rdx + 0x118));
-    __try {
-        std::memcpy(&count, at, sizeof(count));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    const bool read = Probing([&] {
+        __try {
+            std::memcpy(&count, at, sizeof(count));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+        return true;
+    });
+    if (!read) {
         context->rsi = 0;
         return;
     }

@@ -124,25 +124,37 @@ bool HookedInto(const unsigned char* base, const MidSite& site, HMODULE plugin) 
     const unsigned char* thunk = at + 5 + relative;
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(thunk, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || mbi.Protect != PAGE_EXECUTE_READ) return false;
-    const std::uint64_t marker = 0x1122334455667788ull;
-    const auto reference = MidThunkCode(reinterpret_cast<MidHandler>(static_cast<std::uintptr_t>(marker)),
-                                        site.original.data() + site.displacedOffset, site.displacedSize, marker);
-    std::size_t handlerAt = 0;
+    // Every byte as in a reference thunk, except the handler address and the resume address (pushed as the
+    // return address at the start, and jumped to at the end).
+    const std::uint64_t handlerMarker = 0x1122334455667788ull, resumeMarker = 0x8877665544332211ull;
+    const auto reference = MidThunkCode(reinterpret_cast<MidHandler>(static_cast<std::uintptr_t>(handlerMarker)),
+                                        site.original.data() + site.displacedOffset, site.displacedSize, resumeMarker);
+    const auto expectedResume = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at + site.original.size()));
+    std::vector<bool> operand(reference.size(), false);
+    std::uint64_t handler = 0;
+    int handlers = 0, resumes = 0;
     for (std::size_t i = 0; i + 8 <= reference.size(); ++i) {
-        std::uint64_t value = 0;
+        std::uint64_t value = 0, actual = 0;
         std::memcpy(&value, reference.data() + i, 8);
-        if (value == marker) {
-            handlerAt = i;
-            break;
+        std::memcpy(&actual, thunk + i, 8);
+        if (value != handlerMarker && value != resumeMarker) continue;
+        for (std::size_t j = i; j < i + 8; ++j) operand[j] = true;
+        if (value == handlerMarker) {
+            handler = actual;
+            ++handlers;
+        } else if (actual == expectedResume) {
+            ++resumes;
+        } else {
+            return false;
         }
     }
     for (std::size_t i = 0; i < reference.size(); ++i)
-        if ((i < handlerAt || i >= handlerAt + 8) && i < reference.size() - 8 && thunk[i] != reference[i]) return false;
-    std::uint64_t handler = 0, resume = 0;
-    std::memcpy(&handler, thunk + handlerAt, 8);
-    std::memcpy(&resume, thunk + reference.size() - 8, 8);
-    return handlerAt && InModule(static_cast<std::uintptr_t>(handler), plugin) &&
-           resume == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at + site.original.size()));
+        if (!operand[i] && thunk[i] != reference[i]) return false;
+    // And the unwinder knows the thunk, so a fault in its handler unwinds back into the game.
+    DWORD64 imageBase = 0;
+    const bool described = RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(thunk)), &imageBase,
+                                                  nullptr) != nullptr;
+    return handlers == 1 && resumes == 2 && described && InModule(static_cast<std::uintptr_t>(handler), plugin);
 }
 
 bool SiteUntouched(const unsigned char* base, const MidSite& site) {
@@ -203,6 +215,11 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     const std::wstring mode = argv[4];
+    // CMake registers this test with or without the game; without it the test says so and counts as skipped.
+    if (GetFileAttributesW(argv[1]) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("SKIPPED: %ls is not there (set EDF6_GAME_DIR to the game folder to run this test)\n", argv[1]);
+        return 77;
+    }
     const HMODULE game = LoadLibraryExW(argv[1], nullptr, DONT_RESOLVE_DLL_REFERENCES);
     if (!game) {
         std::printf("FAIL: cannot map %ls (error %lu)\n", argv[1], GetLastError());
@@ -289,6 +306,14 @@ int wmain(int argc, wchar_t** argv) {
         Check(GetFileAttributesW(layoutPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
               "Enabled=0 removes our menu layout (and the UI folder it was alone in)");
         Check(Contains(log, "Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO"), "the removal is logged");
+        // What EDFModLoader does next with a plugin that says no (its dllmain.cpp): FreeLibrary. 1.5.13's log
+        // writer thread was running by then and faulted in the unmapped DLL within one 200 ms interval.
+        FreeLibrary(plugin);
+        Check(GetModuleHandleW(dll.c_str()) == nullptr, "the refused plugin is unloaded completely");
+        Sleep(600);
+        const std::string unloaded = ReadText(logPath);
+        Check(Contains(unloaded, "] UNLOADED the plugin was unloaded") && !Contains(unloaded, "SHUTDOWN"),
+              "the process goes on, and the log calls it an unload, not the game exiting");
     } else {
         const bool eightPlayers = mode == L"host8";
         // NetLog defaults to on: only host4's INI turns it off.
@@ -304,6 +329,9 @@ int wmain(int argc, wchar_t** argv) {
         Check(loaded, "EML6_Load succeeds against the supported EDF.dll");
         Check(info.infoVersion == PluginInfo::MaxInfoVer && info.name && std::strcmp(info.name, "EDF6 MultiSlot") == 0,
               "PluginInfo is filled in");
+        Check(info.version.major == MULTISLOT_VERSION_MAJOR && info.version.minor == MULTISLOT_VERSION_MINOR &&
+                  info.version.patch == MULTISLOT_VERSION_PATCH && info.version.build == 0,
+              "PluginInfo carries CMakeLists.txt's project version");
         Check(Applied(base, guest) == static_cast<int>(guest.size()), "every guest patch is written");
         Check(Applied(base, sessions) == static_cast<int>(sessions.size()), "room user slots and packet sessions are sized for eight");
         Check(Contains(log, ("Rooms: " + std::to_string(kMaxPlayers) + " user slots, packet sessions and voice chat HUD records").c_str()),
@@ -311,12 +339,10 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : calls) Check(RedirectedInto(base + call.rva, plugin), "member count call reaches the plugin through a stub");
         for (const auto& call : RoomViewCalls()) Check(RedirectedInto(base + call.rva, plugin), "room screen call reaches the plugin through a stub");
         Check(SlotInto(base, RoomViewSlot(), plugin), "HUiRoom OnUpdate vtable slot points into the plugin");
-        // DummyMembers=1 redirects every call to the room member list builder, so fake members reach the
-        // room screen, the voice chat HUD and anything else that asks for the members.
-        for (const auto& call : FakeMemberCalls()) {
-            if (mode == L"host8") Check(RedirectedInto(base + call.rva, plugin), call.name);
-            else Check(CallTargets(base + call.rva, call.rva, call.target), "without dummy members the member list calls are the game's");
-        }
+        // Every call to the room member list builder is redirected, with or without DummyMembers: the list is cut
+        // to this build's room size before the voice chat HUD writes a record per member, and fake members reach
+        // the room screen, the HUD and anything else that asks for the members.
+        for (const auto& call : MemberListCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);
 
         // 8Player MOD: the room sites and the menu frame are hooked whatever the setting; the setting is
         // read when a room is created (hostmode_test covers the handlers).

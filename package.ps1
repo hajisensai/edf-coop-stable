@@ -19,6 +19,15 @@ $entries = [ordered]@{
     'EDFModLoader/LICENSE.txt'          = (Join-Path $ModLoaderDir 'LICENSE.txt')
     'LICENSE.txt'                       = 'LICENSE'
 }
+# The official v1.0.10 winmm.dll (SHA256 B80E4DA6...) has a multithread race in its export thunks
+# (multislot/packaging/LOADER_FIX_JA.md); only the one patched by multislot/tools/fix_winmm_proxy.py ships.
+$fixedLoaderSha256 = 'BE94E1FAC0CA12C41B6924E2EB168851641C999CE951D2A5A9FAEA5161B0F9A3'
+$loaderPath = Join-Path $ModLoaderDir 'winmm.dll'
+if (-not (Test-Path -LiteralPath $loaderPath)) { throw "missing input file $loaderPath" }
+$loaderHash = (Get-FileHash -LiteralPath $loaderPath -Algorithm SHA256).Hash
+if ($loaderHash -ne $fixedLoaderSha256) {
+    throw "$loaderPath is not the race-fixed EDFModLoader winmm.dll ($loaderHash, expected $fixedLoaderSha256); run multislot/tools/fix_winmm_proxy.py on the official one"
+}
 $sources = [ordered]@{}
 foreach ($name in $entries.Keys) {
     $src = $entries[$name]

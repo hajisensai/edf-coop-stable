@@ -15,14 +15,14 @@
 
 namespace {
 
-constexpr uint32_t kVersionMajor = 0, kVersionMinor = 3, kVersionPatch = 6;
-constexpr const char* kVersionText = "0.3.6";
+constexpr uint32_t kVersionMajor = 0, kVersionMinor = 4, kVersionPatch = 0;
+constexpr const char* kVersionText = "0.4.0";
 
 }  // namespace
 
 // The version as the auto-updater of an older build checks it inside a downloaded file (exported,
 // so the linker keeps it). package.ps1 checks that it matches kVersionText.
-extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.3.6";
+extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.4.0";
 
 namespace {
 
@@ -77,7 +77,8 @@ private:
 };
 Advertised* g_advertised = new Advertised();  // never destroyed, like g_net
 
-void startDirect(dn::Config& c) {
+// Returns whether it asked the router for a UPnP port mapping (recorded in `upnpRecord`).
+bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
     auto pi = dn::findPhysicalInterface();
     if (pi) {
         logInterface(*pi);
@@ -88,51 +89,64 @@ void startDirect(dn::Config& c) {
     } else {
         dn::logf("NET could not identify the physical adapter; using normal OS routing");
     }
-    if (c.direct.mode == dn::Mode::Off) return;
+    if (c.direct.mode == dn::Mode::Off) return false;
     if (c.direct.mode == dn::Mode::Join && c.direct.hostAddress.empty()) {
         dn::logf("DIRECT Mode=join but HostAddress is empty; direct link disabled");
-        return;
+        return false;
     }
     if (c.direct.mode == dn::Mode::Host && c.direct.key.empty())
-        dn::logf("DIRECT WARNING: hosting without Key= ; anyone who knows your address and a player's EOS id "
-                 "can disturb that player's direct link. Set the same Key= for everyone in the room.");
+        dn::logf("DIRECT hosting without Key= : players still prove who they are through the room, but direct-link "
+                 "packets carry no tag, so someone on the network path could alter them. Set the same Key= for "
+                 "everyone in the room to prevent that.");
     g_net = new dn::DirectNet();
     if (!g_net->start(c.direct)) {
         dn::logf("DIRECT failed to start (is UDP port %u already in use?); direct link disabled",
                  c.direct.listenPort);
         delete g_net;
         g_net = nullptr;
-        return;
+        return false;
     }
-    if (c.direct.mode != dn::Mode::Host) return;
+    if (c.direct.mode != dn::Mode::Host) return false;
     uint16_t port = g_net->boundPort();
     if (!c.publicAddress.empty()) {
         g_advertised->set(c.publicAddress, {});
         dn::logf("DIRECT players who join your room connect to %s (PublicAddress; UPnP skipped)",
                  c.publicAddress.c_str());
-        return;
+        return false;
     }
     std::string v6 = pi && !pi->globalIpv6.empty() ? "[" + pi->globalIpv6.front() + "]:" + std::to_string(port) : "";
     if (!v6.empty()) {
         g_advertised->set(v6, {});
         dn::logf("DIRECT players who join your room connect to %s (public IPv6)", v6.c_str());
     }
-    if (c.upnp && pi)
-        dn::upnpMapUdpAsync(port, pi->ipv4, [port](const std::string& wan) {
+    if (c.upnp && pi) {
+        dn::upnpMapUdpAsync(port, pi->ipv4, upnpRecord, [port](const std::string& wan) {
             std::string v4 = wan + ":" + std::to_string(port);
             g_advertised->set({}, v4);
             dn::logf("DIRECT players who join your room can also connect to %s (UPnP)", v4.c_str());
         });
-    else if (v6.empty())
+        return true;
+    }
+    if (v6.empty())
         dn::logf("DIRECT WARNING: no public IPv6 and UPnP is off; set PublicAddress= to your public IP:port");
+    return false;
 }
+
+// This DLL's path while its version is on trial after an update (never destroyed, like g_net): a game that
+// ends the normal way says so, so that quitting early is not taken for a crash (dn::noteCleanExit).
+std::wstring* g_onTrial = nullptr;
 
 }  // namespace
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) {
     // At exit the worker thread is already killed (possibly holding a lock) and static objects are
     // about to be destroyed, while EDF.dll may still call EOS through our hooks.
-    if (reason == DLL_PROCESS_DETACH) dn::eosHooksShutdown();
+    if (reason == DLL_PROCESS_DETACH) {
+        dn::eosHooksShutdown();
+        // reserved set: the process is ending through ExitProcess, which is how EDF6 quits from its menu
+        // (measured; EDF.dll's TerminateProcess import is not the quit path). Never wait here (loader lock).
+        if (reserved && g_onTrial) dn::noteCleanExit(*g_onTrial, kVersionText);
+    }
     return TRUE;
 }
 
@@ -154,19 +168,35 @@ extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
         return false;  // the loader unloads us
     }
 
-    dn::removeOldUpdate(pluginPath());
-    if (config.autoUpdate)
-        dn::startAutoUpdate(pluginPath(), kVersionText);
-    else
-        dn::logf("UPDATE automatic updates are off (AutoUpdate=0)");
-
+    for (const std::string& warning : config.warnings) dn::logf("%s", warning.c_str());
     HMODULE game = GetModuleHandleW(L"EDF.dll");
     HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
     if (!game || !eos) {
+        // Not the game (or not one we know): the update state belongs to the game's runs, so leave it be.
         dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
         return true;
     }
-    startDirect(config);
+    // Before anything that could fail in a new version: a version whose previous run crashed is replaced
+    // by the one before it, and this session runs without the plugin.
+    std::wstring self = pluginPath();
+    dn::RunState run = dn::beginRun(self, kVersionText);
+    if (run == dn::RunState::RolledBack) {
+        dn::logClose();
+        return false;  // the loader unloads us
+    }
+    if (run == dn::RunState::Trial) {
+        g_onTrial = new std::wstring(self);
+        dn::startHealthWatch(self, kVersionText);
+    }
+    if (config.autoUpdate)
+        dn::startAutoUpdate(self, kVersionText);
+    else
+        dn::logf("UPDATE automatic updates are off");
+
+    // A router mapping lives until a start that does not map it: at game exit there is no safe point
+    // for the network calls removing it (DllMain runs under the loader lock with the other threads gone).
+    std::wstring upnpRecord = dir + L"EDF6DirectNet.upnp";
+    if (!startDirect(config, upnpRecord)) dn::upnpRemoveRecordedAsync(upnpRecord);
     if (!dn::installEosHooks(game, eos, config, g_net) && g_net) {
         g_net->stop();
         delete g_net;

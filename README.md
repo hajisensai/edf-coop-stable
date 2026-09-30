@@ -29,14 +29,25 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 1. Download `EDF6DirectNet-v*.zip` from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
 2. Double-click **`INSTALL.bat`**: it finds EDF6 in your Steam library automatically and installs.
-   - If EDFModLoader is not present, the bundled official build is installed ([BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10, MIT); an existing `winmm.dll` is never overwritten.
+   - If EDFModLoader is not present, the bundled loader is installed: [BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10 (MIT) **with a fix for a multithread bug in the official build** (its call forwarders shared one target variable, so a call from several threads at once could jump to the wrong function; details in [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)). An existing `winmm.dll` is never overwritten, with one exception: if it is byte-for-byte the official v1.0.10 file, it is replaced by the fixed build and the original is kept as `winmm.dll.bak-official`. Any other (newer or patched) loader is left alone.
    - If the game cannot be found, you will be asked to paste the game folder (in your Steam library, right-click EDF6 → Manage → Browse local files).
 3. Start the game from Steam as usual. The first launch creates `Mods\Plugins\EDF6DirectNet.ini` (settings) and `EDF6DirectNet.log` (log).
 
 The zip contains README_EDF6DirectNet.txt (English), README_EDF6DirectNet_zh.txt (中文) and README_EDF6DirectNet_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
 
-Upgrade: from 0.3.6 on the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll`, checks it (published SHA-256, a real DLL, the release's version inside) and puts it in place, and it runs from the next game start. The log says `UPDATE installed ...`. Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). `[Update] AutoUpdate=0` turns it off; running a newer `INSTALL.bat` still works as before and keeps your settings.
-Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone). If you added the firewall rule earlier, the uninstaller shows you the command to remove it.
+Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll` and the signed manifest `EDF6DirectNet.dll.sig` and puts the DLL in place, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
+
+- **Signed releases.** The manifest (version and SHA-256 of the DLL) is signed with ECDSA P-256 by a key that only the release pipeline holds; the matching public key is built into the plugin. A download is rejected unless the signature verifies, the signed version is the release being installed and newer than the running one, and the DLL has the signed SHA-256 and says it is that version. Files without a valid signature are never installed, and downloads only come from this repository's release URLs. Someone who can alter the release assets or your connection but cannot sign gets nothing installed.
+- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6DirectNet.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game crashes or is killed before that, the next start puts the old version back by itself, remembers the failed version (`EDF6DirectNet.dll.bad`, it is not installed again) and runs that session without the plugin. Quitting the game normally before then is no failure: the new version simply stays on trial at the next start.
+- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) keeps automatic updates **on**, as 0.3.6 did; the log says so at every start. To turn them off, add these two lines at the end of `Mods\Plugins\EDF6DirectNet.ini`:
+
+  ```
+  [Update]
+  AutoUpdate=0
+  ```
+
+  A settings file created by a current version has `AutoUpdate=1`. `AutoUpdate=0` turns downloading off (rollback still works).
+Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone, including a loader the installer upgraded; its backup `winmm.dll.bak-official` stays). It removes the plugin, settings, log and update leftovers (`EDF6DirectNet.dll.old` and friends), and the UPnP mapping the plugin made on your router (only one that points to this PC and is named `EDF6DirectNet`; a router without UPnP is simply skipped). If you added the firewall rule, run `UNINSTALL.bat` as administrator to remove it too; without administrator rights it shows the command to remove it.
 
 You can also extract the zip contents into the game folder (the folder containing `EDF6.exe`) by hand.
 
@@ -45,7 +56,7 @@ You can also extract the zip contents into the game folder (the folder containin
 Only the host needs to set this up; joiners who have the plugin installed with `AutoJoin=1` (the default) connect directly on their own after joining the room.
 
 1. Open `Mods\Plugins\EDF6DirectNet.ini` and set `Mode=host`.
-2. Right-click `EDF6DirectNet_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once).
+2. Right-click `EDF6DirectNet_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once). The rule allows inbound UDP for `EDF6.exe` on the `ListenPort` from your ini only (27015 if unset), not every UDP port; run it again after changing `ListenPort`.
 3. Make yourself reachable from the internet, pick one:
    - **Automatic**: leave `PublicAddress` empty. The plugin maps UDP 27015 via your router's UPnP and also advertises this PC's public IPv6 automatically.
    - **Manual**: forward the UDP port to this PC on your router, then set `PublicAddress=public IP:external port` (a DDNS hostname also works, e.g. `myroom.ddns.net:40000`).
@@ -62,13 +73,13 @@ How to confirm it worked (check the log `Mods\Plugins\EDF6DirectNet.log`):
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | You are behind carrier-grade NAT (common with many ISPs) and have no public IPv4, so IPv4 direct connect is impossible; you can only rely on IPv6 or ask your ISP for a public IP |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | This port on the router is already forwarded to another device on your LAN; the plugin will not delete it. Pick a different `ListenPort`, or forward manually |
 | `DIRECT client ... connected from ...` (host) / `DIRECT connected to host ...` (joiner) | Direct connection established |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch); the game keeps using Epic as usual and retries after 60 seconds |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch / a different EDF6DirectNet version); the game keeps using Epic as usual and retries after 60 seconds |
 
 Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works they stay on EOS, and normal play is not affected.
 
-**About `Key=`**: an optional passphrase that stops someone who knows your address and a player's EOS ID from forging direct-connect data. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset (the host log will show a `hosting without Key=` reminder).
+**About `Key=`**: an optional passphrase. You no longer need it to be safe from impersonation: every plugin player publishes, in its own lobby member info, the fingerprint of a key made for this game session, and the host lets someone connect as player X only after they prove they hold X's key (and receive replies at the address they send from). So nobody, not even another player in the room, can connect as someone else or take over their direct link, and players without the plugin can never be claimed. What the Key adds is a tag on every direct-link packet, so someone on the network path between you cannot alter or inject packets. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset.
 
-**Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it.
+**Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it. A player who joins directly (`AutoJoin=1`) connects to the host from their own public address, so the host sees it (vanilla EOS peer-to-peer usually exposes both addresses to each other too). Set `AutoJoin=0` if you do not want hosts of rooms you join to see your address; you then stay on EOS.
 
 ## Settings reference (`EDF6DirectNet.ini`, restart the game after editing)
 
@@ -78,10 +89,10 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `Mode` | `off` | `off` regular player / `host` act as direct-connect host / `join` specify the host address manually (rarely needed, auto direct connect covers it) |
 | `ListenPort` | `27015` | host: the UDP port to listen on (this is the one to forward and allow through the firewall); join: local port, empty = automatic |
 | `PublicAddress` | empty | host: tells others where to connect. Empty = public IPv6 + UPnP-mapped IPv4 |
-| `AutoJoin` | `1` | When you join someone else's room and the host has direct connect enabled, connect to it automatically |
+| `AutoJoin` | `1` | When you join someone else's room and the host has direct connect enabled, connect to it automatically (the host then sees your public address; `0` stays on EOS) |
 | `HostAddress` | empty | `Mode=join` only: host address, e.g. `123.45.67.89:27015` / `[2408:8207::5]:27015` |
 | `Key` | empty | Direct-connect passphrase, must be identical for everyone; letters and digits only |
-| `UPnP` | `1` | Let the router set up port forwarding automatically when hosting |
+| `UPnP` | `1` | Let the router set up port forwarding automatically when hosting. Only used with `Mode=host`; with the default `Mode=off` nothing is opened |
 | `BindPhysicalInterface` | `1` | Pin direct-connect traffic to the physical network adapter so it is not hijacked by the TUN adapter of Clash / VPN / game accelerator |
 | `LinkTimeoutMs` | `60000` | How long without data from the other side before a direct link counts as disconnected (3000–300000) |
 | `[EOS] FixedPort` | `0` | EOS uses fixed UDP ports `FixedPort`–`FixedPort+7`; 0 = random |
@@ -89,7 +100,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `[Sync] ReliableGameTraffic` | `1` | Desync prevention (reliable sending). `0` = vanilla |
 | `[Resilience] HoldDisconnects` | `auto` | Disconnect grace: `auto` only for players with the plugin / `off` vanilla / `all` no detection, grace for everyone (only if you are sure everyone has the plugin) |
 | `GraceSeconds` | `30` | Maximum number of seconds a disconnect is hidden (1–600) |
-| `[Update] AutoUpdate` | `1` | Install newer releases from GitHub automatically (they run from the next game start) |
+| `[Update] AutoUpdate` | `1` | Install newer signed releases from GitHub automatically (they run from the next game start). A settings file without this line counts as `1` too |
 
 ## How it works
 
@@ -113,6 +124,8 @@ EDF6 parses every EOS packet it receives as game data (`ReceivePacket` is called
 
 The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separated address list). Other members read it every 2 seconds and try each address for 10 seconds in IPv4, IPv6 order; if all fail they retry after 60 seconds. The transport is a custom UDP protocol: selective acknowledgement, token-bucket rate-limited retransmission, session epochs (packets from an old session never leak into the new session after a reconnect), and an optional `Key=` passphrase (truncated HMAC-SHA256 tag, prevents forgery, no encryption); `IP_UNICAST_IF` binds to the physical adapter to prevent TUN hijacking.
 
+Every plugin player also writes `EDF6DN_ID`: the fingerprint (SHA-256) of an ECDSA P-256 key made for this game session. Connecting starts with a cookie round trip: the host answers a hello with a cookie bound to the sender's address and keeps nothing until the cookie comes back (so forged sender addresses and hello floods achieve nothing), then the joiner repeats the hello with the cookie, signed with that key. The host accepts it for EOS ID X only if X is in the room and published that key's fingerprint; a signed hello of an earlier session is rejected as a replay. Only the host checks this; a joiner trusts the host whose address the room owner advertises. EDF6DirectNet versions with different protocols (0.3.6 and older speak protocol 2) ignore each other's packets and keep using EOS with each other.
+
 ## Troubleshooting
 
 - **Check the log first**: `Mods\Plugins\EDF6DirectNet.log` (rotated to `.log.1` once it exceeds 2MB). A first line `==== EDF6DirectNet x.y.z starting` means the plugin loaded; if that line is missing, EDFModLoader is not installed correctly.
@@ -123,8 +136,9 @@ The host additionally writes the member attribute `EDF6DN_ADDR` (a space-separat
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`: Epic's lobby service dropped a player and let them back in; the game never saw it. `direct link silent for ...` means the player really was gone and the game was told.
 - `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
 - `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
-- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, and what the direct link really uses, including what the host relays for others.
-- `DIRECT ignored hello for ... its link is live`: someone tried to connect from a different address using the identity of a player who is online, and was rejected. An occasional line may just mean that player switched networks (it is accepted automatically after 5 seconds); if it shows up often, someone is messing with you and setting `Key=` is recommended.
+- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, how many packets repeat one sent to the same player within 5 s (the game's own resends, if it has any), and what the direct link really uses, including what the host relays for others.
+- `DIRECT refused hello for ...`: someone tried to connect directly as a player and could not prove it. `published no direct-link identity` for a second or two after a player joins is normal (their room info has not reached the host yet; they retry every second); for a player without the plugin, or with 0.3.6 and older, it means they stay on EOS. `not signed by the identity that player published` means someone else claimed to be that player; they were rejected and cannot disturb that player.
+- `DIRECT ... speaks direct-link protocol 2, we speak 3`: that player runs a different EDF6DirectNet version (0.3.6 or older). There is no direct link between you, the game keeps working over EOS; update both to the same version.
 
 ## Build
 
@@ -171,8 +185,8 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 - Only desync caused by packet loss is fixed; desync in the game logic itself needs concrete symptoms before it can be reverse-engineered.
 - During the disconnect grace period other players may wait at a sync point, for at most `GraceSeconds` seconds.
 - Direct connect is relayed by the host: at the moment a joiner's direct link reconnects, the small amount of data the host is relaying for them that has not been acknowledged yet is lost (the game then falls back to EOS).
-- Without `Key=`, direct connect has no authentication: someone who knows the host address and a player's EOS ID can forge that player's data. Setting a Key prevents forgery, but still does not prevent replay of captured `Bye` / member-list packets (this needs a protocol version bump, left for the next major version).
-- UPnP mappings are permanent and are not removed automatically when the game exits (harmless while nothing is listening on the port); if needed, delete the mapping named `EDF6DirectNet` in your router's admin page.
+- Without `Key=`, direct-link packets carry no authentication tag: nobody can connect as another player or take over their link (see the identity check above), but someone on the network path who sees a link's traffic can alter or inject packets on it. Setting a Key prevents that, but still does not prevent replay of captured `Bye` / member-list packets within the same session (not fixed yet).
+- UPnP mappings are not removed when the game exits (there is no safe point for the network calls then): the plugin removes the one it made at the next game start that does not host (`Mode` not `host`, or `UPnP=0`), and `UNINSTALL.bat` removes it too. It never touches mappings that belong to other devices. Until then it is harmless while nothing listens on the port; you can also delete the mapping named `EDF6DirectNet` in your router's admin page.
 - Nothing can be hidden when the direct link itself is down: if a player's own internet drops for longer than `GraceSeconds`, the game handles it as usual.
 
 ## License

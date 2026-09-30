@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "armor.h"
+#include "crashlog.h"
 #include "identity.h"
 #include "joinlog.h"
 #include "log.h"
@@ -112,24 +113,28 @@ void RequestRebuild(void* room) { static_cast<std::uint8_t*>(room)[kRebuild] = 1
 // A child screen or dialog of the room is alive; rebuilding now would drop it. An unreadable
 // field counts as open, so nothing is rebuilt.
 bool ChildOpen(void* room) {
-    __try {
-        const auto* bytes = static_cast<const char*>(room);
-        return Alive(*reinterpret_cast<void* const*>(bytes + kChildA)) || Alive(*reinterpret_cast<void* const*>(bytes + kChildB));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return true;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            const auto* bytes = static_cast<const char*>(room);
+            return Alive(*reinterpret_cast<void* const*>(bytes + kChildA)) || Alive(*reinterpret_cast<void* const*>(bytes + kChildB));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return true;
+        }
+    });
 }
 
 bool PadDown(std::uint32_t channel) {
     if (!channel) return false;
-    __try {
-        for (std::size_t slot = 0; slot < 2; ++slot) {
-            const auto* button = *reinterpret_cast<const std::uint8_t* const*>(game + kPadSlots + slot * kPadSlotSize + channel);
-            if (button && button[kChannelPressed]) return true;
+    return Probing([&]() -> bool {
+        __try {
+            for (std::size_t slot = 0; slot < 2; ++slot) {
+                const auto* button = *reinterpret_cast<const std::uint8_t* const*>(game + kPadSlots + slot * kPadSlotSize + channel);
+                if (button && button[kChannelPressed]) return true;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return false;
+        return false;
+    });
 }
 
 bool KeyDown(int key) {
@@ -164,21 +169,23 @@ int Field32(const std::uint8_t* at, std::size_t offset) {
 // Diagnostic: what the game holds for this machine's own player. Logged once and again whenever it
 // changes, so picking a different armor or class on the equipment screen shows up here.
 void ProbeLocalArmor() {
-    __try {
-        const std::uint8_t* status = GameStatus();
-        if (!status) return;
-        const int soldier = Field32(status, kLocalPlayers);
-        const int armor = Field32(status, kLocalPlayers + 4);
-        if (soldier == lastLocalClass && armor == lastLocalArmor) return;
-        lastLocalClass = soldier;
-        lastLocalArmor = armor;
-        const auto effective = reinterpret_cast<int(__fastcall*)(const void*, int)>(game + kEffectiveArmor);
-        int ownClass = 0, pickups = 0, own = 0;
-        const bool read = LocalArmor(ownClass, pickups, own);
-        Log("ARMOR you: class %d, armor %d from %d pickups%s (armor limit setting %d, effective %d)", soldier,
-            read ? own : -1, read ? pickups : -1, read ? "" : " - could not be read", armor, effective(status, 0));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+    Probing([&] {
+        __try {
+            const std::uint8_t* status = GameStatus();
+            if (!status) return;
+            const int soldier = Field32(status, kLocalPlayers);
+            const int armor = Field32(status, kLocalPlayers + 4);
+            if (soldier == lastLocalClass && armor == lastLocalArmor) return;
+            lastLocalClass = soldier;
+            lastLocalArmor = armor;
+            const auto effective = reinterpret_cast<int(__fastcall*)(const void*, int)>(game + kEffectiveArmor);
+            int ownClass = 0, pickups = 0, own = 0;
+            const bool read = LocalArmor(ownClass, pickups, own);
+            Log("ARMOR you: class %d, armor %d from %d pickups%s (armor limit setting %d, effective %d)", soldier,
+                read ? own : -1, read ? pickups : -1, read ? "" : " - could not be read", armor, effective(status, 0));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    });
 }
 
 const char* SoldierName(int soldier) {
@@ -201,7 +208,7 @@ void NoteRoster(const MemberVector* members, std::size_t count, const RoomMember
     int used = 0;
     for (std::size_t i = 0; i < count && used >= 0; ++i) {
         const auto* member = static_cast<const std::uint8_t*>(members->data[i].object);
-        char name[128]{};
+        char name[kNameTextBytes]{};
         if (member && member[kMemberNameOk] != 0) NameText(member + kMemberName, name, sizeof(name));
         const int written =
             _snprintf_s(roster + used, sizeof(roster) - used, _TRUNCATE, "%s%zu %s %s %d", used ? ", " : "", i,
@@ -216,26 +223,28 @@ void NoteRoster(const MemberVector* members, std::size_t count, const RoomMember
 
 // What "copy armor" needs from the room screen: the class and armor of every member, in panel order.
 void NoteMembers(void* room) {
-    __try {
-        const MemberVector* members = Members(room);
-        const std::size_t count = members->size;
-        if (!members->data || count > static_cast<std::size_t>(kMaxPlayers)) {
+    Probing([&] {
+        __try {
+            const MemberVector* members = Members(room);
+            const std::size_t count = members->size;
+            if (!members->data || count > static_cast<std::size_t>(kMaxPlayers)) {
+                ForgetRoom();
+                return;
+            }
+            RoomMemberArmor seen[kMaxPlayers]{};
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto* member = static_cast<const std::uint8_t*>(members->data[i].object);
+                if (!member) continue;
+                seen[i].valid = member[kMemberClassOk] != 0 && member[kMemberArmorOk] != 0;
+                seen[i].soldier = Field32(member, kMemberClass);
+                seen[i].armor = Field32(member, kMemberArmor);
+            }
+            NoteRoster(members, count, seen);
+            NoteRoomMembers(seen, count);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
             ForgetRoom();
-            return;
         }
-        RoomMemberArmor seen[kMaxPlayers]{};
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto* member = static_cast<const std::uint8_t*>(members->data[i].object);
-            if (!member) continue;
-            seen[i].valid = member[kMemberClassOk] != 0 && member[kMemberArmorOk] != 0;
-            seen[i].soldier = Field32(member, kMemberClass);
-            seen[i].armor = Field32(member, kMemberArmor);
-        }
-        NoteRoster(members, count, seen);
-        NoteRoomMembers(seen, count);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ForgetRoom();
-    }
+    });
 }
 
 void Poll(void* room) {

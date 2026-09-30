@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EDF6MultiSlot VERSION 1.5.13 LANGUAGES CXX)
+project(EDF6MultiSlot VERSION 1.5.14 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -8,6 +8,9 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(MULTISLOT_MAX_PLAYERS 8 CACHE STRING "Largest room this build supports (8, 10 or 12)")
 set_property(CACHE MULTISLOT_MAX_PLAYERS PROPERTY STRINGS 8 10 12)
 add_compile_definitions(MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
+# The version EDFModLoader is told (PluginInfo) and the one kVersion must start with (plugin.cpp) come from here.
+add_compile_definitions(MULTISLOT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MULTISLOT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+                        MULTISLOT_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 if(MULTISLOT_MAX_PLAYERS EQUAL 8)
     set(MULTISLOT_DIST "${CMAKE_SOURCE_DIR}/dist")
 else()
@@ -37,18 +40,36 @@ configure_file(src/default_ini.h.in "${CMAKE_BINARY_DIR}/generated/default_ini.h
 # The menu frame layout with the 8Player MOD label field (tools/make_menu_label.py); the plugin writes it
 # to Mods/UI while it is active.
 set(MENU_LAYOUT "${CMAKE_SOURCE_DIR}/assets/LYT_MAINFRAME.SGO")
+# CI has no game: MULTISLOT_CI=ON builds the plugin and every test that does not need the game with a
+# placeholder in place of the layout. The placeholder names itself (MULTISLOT CI PLACEHOLDER), the plugin never
+# writes it into a game folder, and package.ps1 refuses a DLL that carries it, so such a build cannot ship.
+option(MULTISLOT_CI "Build without assets/LYT_MAINFRAME.SGO (placeholder layout; the result cannot be packaged)" OFF)
+set(MULTISLOT_PLACEHOLDER_LAYOUT OFF)
 if(NOT EXISTS "${MENU_LAYOUT}")
-    # Made from the game's own UI/LYT_MAINFRAME.SGO, so it is not in the repository.
-    message(FATAL_ERROR "assets/LYT_MAINFRAME.SGO is missing: run `python -B tools/make_menu_label.py` with "
-                        "EDF6_GAME_DIR set to the game folder first (it reads Root.cpk there)")
+    if(NOT MULTISLOT_CI)
+        # Made from the game's own UI/LYT_MAINFRAME.SGO, so it is not in the repository.
+        message(FATAL_ERROR "assets/LYT_MAINFRAME.SGO is missing: run `python -B tools/make_menu_label.py` with "
+                            "EDF6_GAME_DIR set to the game folder first (it reads Root.cpk there)")
+    endif()
+    message(WARNING "MULTISLOT_CI: no assets/LYT_MAINFRAME.SGO, so the plugin embeds a placeholder layout. "
+                    "This build is for tests only; package.ps1 refuses it")
+    set(MULTISLOT_PLACEHOLDER_LAYOUT ON)
+    # An SGO header, the marker package.ps1 looks for, and the label name in UTF-16, so the file handling tests
+    # have something shaped like the real layout.
+    string(HEX "SGO" SGO_HEX)
+    string(HEX "MULTISLOT CI PLACEHOLDER - not the game's layout, never packaged" MARKER_HEX)
+    set(MENU_LAYOUT_HEX "${SGO_HEX}00${MARKER_HEX}004d0053004c006100620065006c000000")
+    add_compile_definitions(MULTISLOT_PLACEHOLDER_LAYOUT=1)
+else()
+    file(READ "${MENU_LAYOUT}" MENU_LAYOUT_HEX HEX)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MENU_LAYOUT}")
 endif()
-file(READ "${MENU_LAYOUT}" MENU_LAYOUT_HEX HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," MENU_LAYOUT_BYTES "${MENU_LAYOUT_HEX}")
 set(BYTE "0x[0-9a-f][0-9a-f],")
 string(REGEX REPLACE "(${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE})"
        "\\1\n" MENU_LAYOUT_BYTES "${MENU_LAYOUT_BYTES}")
 configure_file(src/menu_layout.h.in "${CMAKE_BINARY_DIR}/generated/menu_layout.h" @ONLY)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini" "${MENU_LAYOUT}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini")
 
 add_library(EDF6MultiSlot SHARED
     src/plugin.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
@@ -84,23 +105,25 @@ add_executable(NetLogForwardTests tests/netlog_forward_test.cpp src/joinlog.cpp 
 target_compile_options(NetLogForwardTests PRIVATE ${WARNINGS})
 add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests)
 set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
+# The tests against the game's code are registered either way. Without EDF.dll they report themselves skipped
+# (exit code 77), so ctest names them in its summary instead of a configure warning nobody reads in CI.
+set(GAME_TEST_SKIPPED 77)
 if(NOT EXISTS "${EDF_DLL}")
     message(WARNING "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): the tests against the game's code "
-                    "(PatchTablesMatchEDF, PluginLoad_*) are not registered")
+                    "(PatchTablesMatchEDF, PluginLoad_*) will be reported as skipped")
 endif()
 
 add_executable(MultiSlotTests tests/tests.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
-if(EXISTS "${EDF_DLL}")
-    add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
-endif()
+add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
+set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 
 add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
 target_compile_options(RoomViewTests PRIVATE ${WARNINGS})
 add_test(NAME RoomViewPaging COMMAND RoomViewTests)
 
-add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp)
+add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
 
@@ -118,6 +141,11 @@ add_executable(MenuLayoutTests tests/menulayout_test.cpp src/menulayout.cpp)
 target_include_directories(MenuLayoutTests PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MenuLayoutTests PRIVATE ${WARNINGS})
 add_test(NAME MenuLayoutFile COMMAND MenuLayoutTests "${CMAKE_BINARY_DIR}/layouttest")
+
+add_executable(DefaultIniTests tests/default_ini_test.cpp)
+target_include_directories(DefaultIniTests PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_compile_options(DefaultIniTests PRIVATE ${WARNINGS})
+add_test(NAME DefaultIniKeys COMMAND DefaultIniTests "${CMAKE_SOURCE_DIR}/src" "${CMAKE_BINARY_DIR}/initest")
 
 add_executable(SpawnTests tests/spawn_test.cpp src/spawn.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(SpawnTests PRIVATE ${WARNINGS})
@@ -140,16 +168,24 @@ add_test(NAME LogFileCap COMMAND LogTests "${CMAKE_BINARY_DIR}/logtest")
 add_executable(CrashDumpTests tests/crashdump_test.cpp src/crashlog.cpp src/log.cpp)
 target_compile_options(CrashDumpTests PRIVATE ${WARNINGS})
 add_test(NAME CrashDump COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/crashdumptest")
+add_test(NAME CrashDumpInPlugin COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/crashdumptest" plugin)
+
+# A plugin that refuses (Enabled=0, or no supported EDF.dll) is unloaded by EDFModLoader at once: nothing of it
+# may keep running. Needs no game: without EDF.dll in the process the plugin refuses as it does in an unsupported one.
+add_executable(RefusalTests tests/refusal_test.cpp)
+target_include_directories(RefusalTests PRIVATE ${MODLOADER_INCLUDE})
+target_compile_options(RefusalTests PRIVATE ${WARNINGS})
+add_dependencies(RefusalTests EDF6MultiSlot)
+add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6MultiSlot>" "${CMAKE_BINARY_DIR}/refusaltest")
 
 add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6MultiSlot)
-if(EXISTS "${EDF_DLL}")
-    foreach(mode off host4 host8 fresh nomission recoveryoff quiet smooth)
-        add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
-                 "${CMAKE_BINARY_DIR}/loadtest" ${mode})
-    endforeach()
-endif()
+foreach(mode off host4 host8 fresh nomission recoveryoff quiet smooth)
+    add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
+             "${CMAKE_BINARY_DIR}/loadtest" ${mode})
+    set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+endforeach()
 
 configure_file(EDF6MultiSlot.ini "${MULTISLOT_DIST}/EDF6MultiSlot.ini" @ONLY)

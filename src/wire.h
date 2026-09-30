@@ -3,21 +3,37 @@
 //   u32 magic 'EDN1' | u8 type | u8 flags | u16 protocol | body ... | [8-byte HMAC tag if flags&kFlagTagged]
 //
 // Strings are u8 length + bytes (max 64).
+//
+// Protocol 2 was spoken up to 0.3.6. Protocol 3 adds the Challenge and a proven Hello: a host keeps
+// nothing for a sender until it echoes a cookie sent to its address, and accepts an EOS id only with
+// a signature matching the identity that id published in the room. Peers of different protocols
+// reject each other's datagrams (BadProtocol) and so keep using EOS with each other.
 #pragma once
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "auth.h"
+
 namespace dn {
 
 constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
-constexpr uint16_t kProtocol = 2;
+constexpr uint16_t kProtocol = 3;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
+// Longest id / socket name on the wire. Decoding rejects longer ones instead of reading a string the
+// sender's encoder would have cut, so both sides always agree on an id. EOS ids and socket names are
+// at most 32 characters.
+constexpr size_t kMaxString = 64;
+// Largest game packet carried: EOS_P2P_MAX_PACKET_SIZE. A Data datagram announcing more is rejected.
+constexpr size_t kMaxPayload = 1170;
+constexpr size_t kCookieBytes = 8;
+using Cookie = std::array<uint8_t, kCookieBytes>;
 
 enum class MsgType : uint8_t {
-    Hello = 1,    // client -> host: I am <puid>, session nonce
+    Hello = 1,    // client -> host: I am <puid>, session nonce; proven once it carries a cookie
     Welcome = 2,  // host -> client: host puid + roster, echoes client nonce
     Roster = 3,   // host -> clients: current direct members
     Data = 4,     // game packet
@@ -25,11 +41,21 @@ enum class MsgType : uint8_t {
     Ping = 6,
     Pong = 7,
     Bye = 8,
+    Challenge = 9,  // host -> client: cookie for the client's address; hello again with it, signed
 };
 
 struct HelloMsg {
     uint32_t nonce = 0;
+    uint64_t session = 0;  // Identity::nextSession(): newer sessions have higher numbers
     std::string puid;
+    Cookie cookie{};  // all zero until the host sent one
+    PublicKey publicKey{};
+    Signature signature{};  // over helloDigest()
+};
+
+struct ChallengeMsg {
+    uint32_t clientNonce = 0;
+    Cookie cookie{};
 };
 
 struct WelcomeMsg {
@@ -77,6 +103,7 @@ struct Message {
     // dropped instead of acknowledging or duplicating packets of the new session.
     uint32_t epoch = 0;
     HelloMsg hello;
+    ChallengeMsg challenge;
     WelcomeMsg welcome;
     RosterMsg roster;
     DataMsg data;
@@ -95,11 +122,14 @@ inline uint32_t linkEpoch(uint32_t clientNonce, uint32_t hostNonce) {
 // Encodes a message; when `key` is non-empty an HMAC tag is appended.
 std::vector<uint8_t> encode(const Message& msg, const std::string& key);
 
-enum class DecodeError { None, BadMagic, BadProtocol, Truncated, TagMissing, TagUnexpected, TagMismatch };
+enum class DecodeError { None, BadMagic, BadProtocol, Truncated, Malformed, TagMissing, TagUnexpected, TagMismatch };
 
 // Decodes and authenticates a datagram. `key` must match the sender's key (both empty is fine).
 std::optional<Message> decode(const uint8_t* data, size_t size, const std::string& key, DecodeError* err);
 
 const char* decodeErrorName(DecodeError e);
+
+// What a proven hello signs: its cookie, nonce, session and id. nullopt when crypto fails.
+std::optional<Digest> helloDigest(const HelloMsg& hello);
 
 }  // namespace dn

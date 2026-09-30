@@ -36,10 +36,19 @@
 namespace multislot {
 namespace {
 
-constexpr const char* kVersion = "1.5.13";
-// Which room-size build this is (patches.h); empty for the distributed eight.
+constexpr const char* kVersion = "1.5.14";
+// CMake's project VERSION is the one EDFModLoader is told (PluginInfo); kVersion adds only a pre-release tag to it.
 #define MULTISLOT_TEXT2(x) #x
 #define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)
+constexpr const char* kProjectVersion =
+    MULTISLOT_TEXT(MULTISLOT_VERSION_MAJOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_MINOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_PATCH);
+constexpr bool SameRelease(const char* version, const char* project) {
+    for (; *project; ++version, ++project)
+        if (*version != *project) return false;
+    return *version == 0 || *version == '-';
+}
+static_assert(SameRelease(kVersion, kProjectVersion), "kVersion must be CMakeLists.txt's project VERSION (plus a -tag)");
+// Which room-size build this is (patches.h); empty for the distributed eight.
 #if MULTISLOT_MAX_PLAYERS == 8
 constexpr const char* kRoomTag = "";
 #else
@@ -115,15 +124,17 @@ RoomViewSettings ReadRoomView(const wchar_t* ini) {
 }
 
 bool SupportedImage(const unsigned char* base) {
-    __try {
-        const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return false;
-        const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-               nt->FileHeader.TimeDateStamp == kImageTimeDateStamp && nt->OptionalHeader.SizeOfImage == kImageSize;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Probing([&]() -> bool {
+        __try {
+            const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return false;
+            const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+                   nt->FileHeader.TimeDateStamp == kImageTimeDateStamp && nt->OptionalHeader.SizeOfImage == kImageSize;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    });
 }
 
 struct Redirect {
@@ -143,7 +154,7 @@ struct SlotWrite {
 
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
-bool Apply(unsigned char* base, bool dummies, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
+bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
            float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
@@ -171,8 +182,8 @@ bool Apply(unsigned char* base, bool dummies, bool mission, bool spawns, int gho
     redirects.push_back({room[0], reinterpret_cast<void*>(&BuildPanelsHook)});
     redirects.push_back({room[1], reinterpret_cast<void*>(&BuildPanelsHook)});
     redirects.push_back({room[2], reinterpret_cast<void*>(&UpdateVoiceIconsHook)});
-    if (dummies)
-        for (const auto& call : FakeMemberCalls()) redirects.push_back({call, FakeMemberCallHandler(call.rva)});
+    // Always, not only with dummy members: the member list is cut to this build's room size (fakemembers.h).
+    for (const auto& call : MemberListCalls()) redirects.push_back({call, MemberListCallHandler(call.rva)});
     if (diagnostics)
         for (const auto& call : DiagnosticCalls()) redirects.push_back({call, JoinLogCallHandler(call.rva)});
     if (recovery)
@@ -265,6 +276,9 @@ bool Apply(unsigned char* base, bool dummies, bool mission, bool spawns, int gho
         thunks.Release();
         return false;
     }
+    if (!thunks.Unwindable())
+        Log("Call stubs: their unwind data could not be registered, so a crash inside a hook handler shows a call "
+            "stack that ends at the stub");
     writes.insert(writes.end(), patches.begin(), patches.end());
     for (const auto& write : slots) {
         const auto& slot = write.slot;
@@ -311,6 +325,11 @@ void KeepMenuLayout(bool active) {
             Log("Menu: could not remove Mods\\UI\\LYT_MAINFRAME.SGO (error %lu)", GetLastError());
         return;
     }
+#ifdef MULTISLOT_PLACEHOLDER_LAYOUT
+    // A CI build (CMake MULTISLOT_CI) has no layout of the game's to embed, only a placeholder that would break the
+    // menu; it is never written to a game folder.
+    Log("Menu: this is a CI test build with a placeholder layout; Mods\\UI\\LYT_MAINFRAME.SGO is not written");
+#else
     switch (InstallMenuLayout(path)) {
         case LayoutInstall::Written:
             Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the 8Player MOD label)");
@@ -326,6 +345,7 @@ void KeepMenuLayout(bool active) {
                 "still works)", GetLastError());
             break;
     }
+#endif
 }
 
 ThunkPage thunks;
@@ -343,7 +363,7 @@ bool LoadPlugin(PluginInfo* info) {
     LogOpen(logPath);
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDF6 MultiSlot";
-    info->version = PLUG_VER(1, 5, 5, 0);
+    info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
 
     Log("==== EDF6MultiSlot %s%s ====", kVersion, kRoomTag);
     const auto loader = GetModuleHandleW(L"winmm.dll");
@@ -368,7 +388,7 @@ bool LoadPlugin(PluginInfo* info) {
     const float smoothing = smoothingPercent > 0 && smoothingPercent <= 100
                                 ? static_cast<float>(smoothingPercent) / 100.0f
                                 : 0.0f;
-    // A minidump of the first access violation inside EDF.dll, one file overwritten each launch. The
+    // A minidump of the first access violation inside EDF.dll or the plugin, one file overwritten each launch. The
     // 2026-09-27 host crash is a null whose source is a stack local, which no log line can show.
     // Off unless the INI asks for it: a dump carries process memory, which can include the room name and
     // chat text, and that is not something to switch on for everyone who installs the package.
@@ -511,9 +531,10 @@ bool LoadPlugin(PluginInfo* info) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitJoinLog(base);
+    InitFinalHello(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
     InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
-    if (!Apply(base, roomView.dummies, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,
+    if (!Apply(base, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,
                smoothing, thunks)) {
         KeepMenuLayout(false);
         return false;
@@ -596,7 +617,7 @@ bool LoadPlugin(PluginInfo* info) {
         const bool wantDump = crashDump && SiblingPath(dumpPath, L"-crash.dmp");
         InstallCrashLog(game, wantDump ? dumpPath : nullptr);
         if (CrashDumpArmed())
-            Log("Crash log armed; CrashDump=1, so the first access violation in EDF.dll also writes %ls "
+            Log("Crash log armed; CrashDump=1, so the first access violation in EDF.dll or the plugin also writes %ls "
                 "(one per launch, overwritten each time). It holds process memory, so only send it on "
                 "purpose", dumpPath);
         else if (crashDump)
@@ -611,19 +632,34 @@ bool LoadPlugin(PluginInfo* info) {
 }  // namespace
 
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
+    // Every line so far was written by this thread, so the startup report is on disk already.
     const bool loaded = LoadPlugin(info);
-    // The startup report is on disk as soon as the game goes on; from here on the writer thread keeps up.
-    multislot::LogFlush();
+    if (loaded) {
+        // Staying for the life of the process: from here on the writer thread keeps up, and the game's threads
+        // never wait on the disk.
+        multislot::LogStartWriter();
+    } else {
+        // EDFModLoader unloads a plugin that refuses (FreeLibrary as soon as this returns). 1.5.13 had started
+        // the writer thread with the first line, and it woke up inside the unmapped DLL about 200 ms later and
+        // took the game down with it. No thread was started, and the queue file is let go here.
+        multislot::LogClose();
+    }
     return loaded;
 }
 
-BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         multislot::self = instance;
         DisableThreadLibraryCalls(instance);
     }
-    // The last thing the log gets from a game that was closed properly. LogShutdown is raw Win32 with no
-    // heap and no CRT, which is what makes it safe this late in a process that is already tearing down.
-    if (reason == DLL_PROCESS_DETACH) multislot::LogShutdown("the game exited");
+    // The last thing the log gets from this run. Both are raw Win32 with no heap and no CRT, which is what
+    // makes them safe this late. `reserved` is null when the DLL is unloaded (FreeLibrary after a refusal) and
+    // set when the process ends: only the second is the game exiting.
+    if (reason == DLL_PROCESS_DETACH) {
+        if (reserved)
+            multislot::LogShutdown("the game exited");
+        else
+            multislot::LogUnloaded("the plugin was unloaded (see above why); the game goes on without it");
+    }
     return TRUE;
 }

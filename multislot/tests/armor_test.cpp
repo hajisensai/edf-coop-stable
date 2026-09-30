@@ -5,6 +5,8 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cwchar>
 #include <vector>
@@ -48,6 +50,35 @@ int main() {
     Check(CountFor(kFencer, 0, 500) == 100, "an armor that lands exactly on a step needs no extra");
     Check(CountFor(kRanger, 80, 200) == 80, "an armor below your own leaves the count alone");
     Check(CountFor({150.0f, 0.0f}, 7, 900) == 7, "a class that gains nothing per pickup is left alone");
+    // The halving search gives exactly what counting up one pickup at a time gives.
+    bool sameAsCounting = true;
+    for (const ArmorRules rules : {kRanger, kFencer, ArmorRules{250.0f, 0.5f}, ArmorRules{183.3f, 1.7f}}) {
+        for (int armor = 0; armor < 1200; armor += 7) {
+            int counted = 0;
+            while (ArmorFor(rules, counted) < armor) ++counted;
+            sameAsCounting = sameAsCounting && CountFor(rules, 0, armor) == counted &&
+                             CountFor(rules, 13, armor) == (counted > 13 ? counted : 13);
+        }
+    }
+    Check(sameAsCounting, "the count found is the first that reaches the armor, as counting up finds it");
+
+    // Numbers another machine reports are not trusted to be sane: a member claiming two billion armor, with no
+    // ceiling set (Max*=0), must not take two billion steps a frame or overflow anything.
+    const ULONGLONG started = GetTickCount64();
+    const int huge = CountFor(kRanger, 0, INT_MAX);
+    Check(huge == kMaxPickups && GetTickCount64() - started < 1000, "an absurd armor is reached within the pickup bound at once");
+    Check(CountFor({1.0f, 1e-7f}, 0, 1000) == kMaxPickups, "a step too small to get there stops at the bound");
+    Check(ArmorFor({0.0f, 1e30f}, 1000) == INT_MAX && ArmorFor({1e38f, 1e38f}, 10) == INT_MAX,
+          "armor past what an int holds stops at INT_MAX instead of an undefined conversion");
+    const float nan = std::nanf("");
+    Check(ArmorFor({nan, 1.0f}, 5) == 0 && CountFor({nan, 1.0f}, 5, 900) == 5 && CountFor({150.0f, nan}, 5, 900) == 5 &&
+              CountFor({150.0f, INFINITY}, 5, 900) == 5,
+          "rules that are not numbers leave the count alone");
+    const std::vector<RoomMemberArmor> liar{Member(0, 2000000000), Member(0, 900), Member(0, kMaxRoomArmor + 1)};
+    Check(TargetArmor(liar.data(), liar.size(), liar.size(), 0, 300, 0) == 900,
+          "a member reporting more armor than any player has is passed over");
+    const std::vector<RoomMemberArmor> onlyLiar{Member(1, INT_MAX)};
+    Check(TargetArmor(onlyLiar.data(), onlyLiar.size(), onlyLiar.size(), 1, 0, 0) == 0, "and alone is nobody to copy");
 
     // Who to copy: the lowest of your own class, otherwise the lowest of the room, never yourself.
     const std::vector<RoomMemberArmor> room{Member(0, 1146), Member(3, 2014), Member(3, 4312), Member(0, 6486)};

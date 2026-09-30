@@ -29,6 +29,10 @@ public:
     // Age of the oldest unacknowledged packet (0 when nothing is pending).
     uint64_t oldestPendingAgeMs(uint64_t nowMs) const;
     size_t pendingCount() const { return pending_.size(); }
+    size_t pendingBytes() const { return pendingBytes_; }
+    // More unacknowledged data than any live link builds up (see kMaxPendingBytes): the peer is not
+    // acknowledging on purpose. The link must be closed; nothing is dropped from it silently.
+    bool overloaded() const;
     uint32_t rtoMs() const;
     uint32_t srttMs() const { return static_cast<uint32_t>(srtt_); }
     uint64_t retransmits() const { return retransmits_; }
@@ -38,6 +42,7 @@ private:
 
     uint32_t next_ = 1;
     std::map<uint32_t, Pending> pending_;
+    size_t pendingBytes_ = 0;
     double srtt_ = 100.0;
     double rttvar_ = 50.0;
     bool haveRtt_ = false;

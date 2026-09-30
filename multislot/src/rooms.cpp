@@ -6,6 +6,7 @@
 
 #include <atomic>
 
+#include "crashlog.h"
 #include "log.h"
 #include "patches.h"
 
@@ -38,11 +39,13 @@ ReleaseInfoFn releaseInfo = nullptr;
 std::atomic<int> reports{0};
 
 void* HandleOf(void* holder) {
-    __try {
-        return holder ? **static_cast<void***>(holder) : nullptr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
+    return Probing([&]() -> void* {
+        __try {
+            return holder ? **static_cast<void***>(holder) : nullptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+    });
 }
 
 // The lobby's capacity from EOS, or the vanilla 4 when EOS cannot tell.

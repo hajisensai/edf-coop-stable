@@ -45,6 +45,12 @@ void __fastcall FakeResize(RoomMemberList* list, std::uint64_t size, const RoomM
     list->size = size;
 }
 
+std::vector<void*> released;
+void FakeRelease(RoomMember& member) {
+    released.push_back(member.control);
+    member = {};
+}
+
 struct Room {
     std::vector<RoomMember> entries;
     std::vector<std::int32_t> uses;
@@ -102,6 +108,28 @@ int main() {
     Check(AppendFakeMembers(&one.list, 4, limit, &FakeReserve, &FakeResize) == 0, "a failed reserve adds nothing");
     reserveFails = false;
     Check(one.list.data == before.data && one.list.size == before.size && one.uses[0] == 1, "the list is as it was");
+
+    // A room larger than this build's (another mod's, up to EOS's 64): the list is cut to kMaxPlayers before the
+    // voice chat HUD writes a record per member into its kMaxPlayers records, and every dropped reference is let go.
+    Room crowd(kMaxPlayers + 5);
+    released.clear();
+    Check(ClampMembers(&crowd.list, limit, &FakeRelease) == 5 && crowd.list.size == kMaxPlayers,
+          "a list of more than kMaxPlayers members is cut to kMaxPlayers");
+    bool droppedReleased = released.size() == 5;
+    for (std::size_t i = 0; i < released.size(); ++i) droppedReleased = droppedReleased && released[i] == &crowd.uses[kMaxPlayers + i];
+    Check(droppedReleased, "each dropped member's reference is released, once");
+    bool keptWhole = true;
+    for (std::size_t i = 0; i < limit; ++i) keptWhole = keptWhole && crowd.list.data[i].object == &crowd.uses[i];
+    Check(keptWhole && crowd.list.data[kMaxPlayers].object == nullptr && crowd.list.reserved == reinterpret_cast<void*>(0x1234),
+          "the first kMaxPlayers stay as they were and the dropped entries are emptied");
+    released.clear();
+    Check(ClampMembers(&fullRoom.list, limit, &FakeRelease) == 0 && fullRoom.list.size == kMaxPlayers && released.empty(),
+          "a full room of this build is left alone");
+    RoomMemberList broken = crowd.list;
+    broken.size = kMaxPlayers + 3;
+    broken.capacity = kMaxPlayers + 1;
+    Check(ClampMembers(&broken, limit, &FakeRelease) == 0 && released.empty() && ClampMembers(nullptr, limit, &FakeRelease) == 0,
+          "a list whose size is past its capacity is not a member list: nothing is touched");
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

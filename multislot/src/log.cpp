@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <iterator>
 
 namespace multislot {
 namespace {
@@ -275,11 +276,12 @@ void RecoverQueue(LogQueueHeader* queue, const char* bytes) {
 // Caller holds drainLock, with logPath already set. Maps <log>.queue, writes out what a killed run left in it and
 // makes it this run's queue; false (and the queue stays in memory) when it cannot be had.
 bool OpenQueueFile() {
-    const std::size_t length = wcslen(logPath), suffix = wcslen(kLogQueueSuffix);
-    if (length + suffix >= MAX_PATH) return false;
+    // The suffix is an array: its size, terminator included, is known here rather than measured.
+    const std::size_t length = wcslen(logPath), suffixWithNul = std::size(kLogQueueSuffix);
+    if (length + suffixWithNul > MAX_PATH) return false;
     wchar_t path[MAX_PATH]{};
     wmemcpy(path, logPath, length);
-    wmemcpy(path + length, kLogQueueSuffix, suffix + 1);
+    wmemcpy(path + length, kLogQueueSuffix, suffixWithNul);
     // Not shared for writing: a second game started from the same folder keeps its queue in memory.
     const HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);

@@ -48,7 +48,7 @@ struct LogQueueHeader {
 };
 constexpr std::size_t kLogQueueBytes = 256 * 1024;
 constexpr char kLogQueueMagic[8] = {'M', 'S', 'L', 'O', 'G', 'Q', '1', 0};
-constexpr const wchar_t* kLogQueueSuffix = L".queue";
+inline constexpr wchar_t kLogQueueSuffix[] = L".queue";
 
 // The log is one file that never grows much past kLogCapBytes: when it is opened or a write takes it over the
 // cap, the oldest lines are dropped so that about the newest kLogKeepBytes remain, starting at a line boundary

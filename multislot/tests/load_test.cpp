@@ -244,6 +244,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!fresh) {
         const char* ini = mode == L"off"         ? "[MultiSlot]\r\nEnabled=0\r\nEightPlayerRooms=1\r\n"
                           : mode == L"recoveryoff" ? "[MultiSlot]\r\nEnabled=1\r\nHandshakeRecovery=0\r\n"
+                          : mode == L"keeproomoff" ? "[MultiSlot]\r\nEnabled=1\r\nKeepRoomOnPeerTimeout=0\r\n"
                           : mode == L"quiet"     ? "[MultiSlot]\r\nEnabled=1\r\nHandshakeRecovery=0\r\nNetLog=0\r\n"
                           : mode == L"host4"     ? "[MultiSlot]\r\nEnabled=1\r\nNetLog=0\r\n[Mission]\r\nExtraEnemies=0\r\n"
                           : mode == L"nomission" ? "[MultiSlot]\r\nEnabled=1\r\nMaxPlayers=4\r\n[Mission]\r\nExtend=0\r\n"
@@ -303,6 +304,9 @@ int wmain(int argc, wchar_t** argv) {
               "Enabled=0 leaves SEARCH_TYPE behaviour identical");
         Check(Contains(log, "Enabled=0"), "Enabled=0 is logged");
         Check(missionUntouched(), "Enabled=0 leaves mission code untouched");
+        for (const auto& call : PeerTimeoutCalls())
+            Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves the room-leave check untouched");
+        for (const auto& hook : PeerTimeoutHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves Users::Add untouched");
         Check(GetFileAttributesW(layoutPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
               "Enabled=0 removes our menu layout (and the UI folder it was alone in)");
         Check(Contains(log, "Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO"), "the removal is logged");
@@ -324,6 +328,15 @@ int wmain(int argc, wchar_t** argv) {
                   "recovery call is installed only when enabled");
         }
         Check(Contains(log, recovery ? "HandshakeRecovery=1:" : "HandshakeRecovery=0:"), "recovery mode is logged");
+        // KeepRoomOnPeerTimeout defaults to on, NetLog or not; only its own key turns it off.
+        const bool keepRoom = mode != L"keeproomoff";
+        for (const auto& call : PeerTimeoutCalls())
+            Check(keepRoom ? RedirectedInto(base + call.rva, plugin) : CallTargets(base + call.rva, call.rva, call.target),
+                  "the room-leave check reaches the plugin only when KeepRoomOnPeerTimeout is on");
+        for (const auto& hook : PeerTimeoutHooks())
+            Check(keepRoom ? HookedInto(base, hook, plugin) : SiteUntouched(base, hook),
+                  "Users::Add records join times only when KeepRoomOnPeerTimeout is on");
+        Check(Contains(log, keepRoom ? "KeepRoomOnPeerTimeout=1:" : "KeepRoomOnPeerTimeout=0:"), "KeepRoomOnPeerTimeout is logged");
         if (!netLog && recovery)
             Check(Contains(log, "Recovery transport: 1 EOS import redirected"), "recovery works independently of NetLog");
         Check(loaded, "EML6_Load succeeds against the supported EDF.dll");

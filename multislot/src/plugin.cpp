@@ -27,6 +27,7 @@
 #include "mission.h"
 #include "netlog.h"
 #include "patches.h"
+#include "peertimeout.h"
 #include "roomview.h"
 #include "rooms.h"
 #include "smoothing.h"
@@ -155,7 +156,7 @@ struct SlotWrite {
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
 bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
-           float smoothing, ThunkPage& thunks) {
+           bool keepRoom, float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
     patches.insert(patches.end(), sessionPatches.begin(), sessionPatches.end());
@@ -165,6 +166,8 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
         for (const auto& site : ArmorHooks()) hooks.push_back({site, ArmorHookHandler(site.rva)});
     if (diagnostics)
         for (const auto& site : DiagnosticHooks()) hooks.push_back({site, JoinLogHookHandler(site.rva)});
+    if (keepRoom)
+        for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
     if (mission) {
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
@@ -188,6 +191,9 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
         for (const auto& call : DiagnosticCalls()) redirects.push_back({call, JoinLogCallHandler(call.rva)});
     if (recovery)
         for (const auto& call : RecoveryCalls()) redirects.push_back({call, reinterpret_cast<void*>(&FinalHelloHook)});
+    if (keepRoom)
+        for (const auto& call : PeerTimeoutCalls())
+            redirects.push_back({call, reinterpret_cast<void*>(&PeerTimeoutLeaveCheck)});
     if (mission) {
         for (const auto& call : MissionCalls()) redirects.push_back({call, MissionCallHandler(call.rva)});
         if (ghosts > 0)
@@ -396,6 +402,8 @@ bool LoadPlugin(PluginInfo* info) {
     // On by default since 1.2.2, so reports from real rooms come with the lobby and P2P lines (the log caps itself).
     const bool netLog = GetPrivateProfileIntW(L"MultiSlot", L"NetLog", 1, iniPath) != 0;
     const bool recovery = GetPrivateProfileIntW(L"MultiSlot", L"HandshakeRecovery", 1, iniPath) != 0;
+    // An established member stays in the room when a newcomer's P2P handshake with it times out (peertimeout.h).
+    const bool keepRoom = GetPrivateProfileIntW(L"MultiSlot", L"KeepRoomOnPeerTimeout", 1, iniPath) != 0;
     SetDetailLog(netLog);
     if (!enabled) {
         Log("Enabled=0: game left untouched, plugin unloaded");
@@ -532,9 +540,10 @@ bool LoadPlugin(PluginInfo* info) {
     InitMission(base, ghosts);
     InitJoinLog(base);
     InitFinalHello(base);
+    InitPeerTimeout(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
     InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
-    if (!Apply(base, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery,
+    if (!Apply(base, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery, keepRoom,
                smoothing, thunks)) {
         KeepMenuLayout(false);
         return false;
@@ -587,6 +596,12 @@ bool LoadPlugin(PluginInfo* info) {
     } else {
         Log("HandshakeRecovery=0: off");
     }
+    if (keepRoom)
+        Log("KeepRoomOnPeerTimeout=1: when the P2P handshake with someone who joined after you times out, you stay in "
+            "the room and they stay unconnected (the game makes every member but the host leave); someone whose own "
+            "join fails still leaves");
+    else
+        Log("KeepRoomOnPeerTimeout=0: a timed-out P2P handshake makes this machine leave the room, as the game does");
     if (smoothing > 0.0f && smoothing != kVanillaSmoothing)
         Log("Remote players: their drawn position closes %d%% of the gap per update instead of %d%%, so a "
             "correction shrinks to a tenth in about %d ms instead of %d ms. Display only - nothing sent "

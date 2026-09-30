@@ -139,6 +139,10 @@ std::vector<MidSite> DiagnosticHooks();
 std::vector<CallSite> DiagnosticCalls();
 // Experimental final-hello recovery, independently switchable with HandshakeRecovery=0.
 std::vector<CallSite> RecoveryCalls();
+// KeepRoomOnPeerTimeout=1 (peertimeout.h): Users::Add records when each user joined, and the room update's
+// "a P2P handshake timed out, so leave the room" check is redirected to PeerTimeoutLeaveCheck.
+std::vector<MidSite> PeerTimeoutHooks();
+std::vector<CallSite> PeerTimeoutCalls();
 
 // Solo test harness ([Test] GhostPlayers=N, needs Extend=1): when the online player count written by
 // the mission sync is 1 (host alone), it becomes 1+N; players 2..N+1 are created as remote copies of

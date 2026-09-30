@@ -355,6 +355,19 @@ std::vector<CallSite> RecoveryCalls() {
     return {{"handshake final hello recovery", 0x12D5B9B, 0x12C8F50}};
 }
 
+std::vector<MidSite> PeerTimeoutHooks() {
+    return {
+        // Users::Add (12B7F50) right after make_shared<eos::User> (12B7610): `mov r12, [rax]; mov rsi, [rax+8]`
+        // takes the new user out of the returned shared_ptr; rbx is still the {ProductUserId, bool remote} argument.
+        {"room user joined (join time)", 0x12B80E0, {0x4C, 0x8B, 0x20, 0x48, 0x8B, 0x70, 0x08}, 0, 7},
+    };
+}
+
+std::vector<CallSite> PeerTimeoutCalls() {
+    // Online room update (788460): `if (!IsLocalHost(room) && AnyLinkTimedOut(room))` leaves the room (787090).
+    return {{"leave the room when a P2P handshake timed out", 0x788ABF, 0x12BE750}};
+}
+
 std::vector<PointerSlot> MissionSlots() {
     return {
         // (callback, int* position, NetGameStatus::Item*) -> GameStatus+0x14FD4 + position*8, no bound.

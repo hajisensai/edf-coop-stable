@@ -8,8 +8,10 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -18,6 +20,7 @@
 #include "../src/smoothing.h"
 #include "../src/rooms.h"
 #include "../src/joinlog.h"
+#include "../src/peertimeout.h"
 
 using namespace multislot;
 
@@ -445,6 +448,82 @@ int main(int argc, char** argv) {
     }
     for (const auto& call : DiagnosticCalls()) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
     for (const auto& call : RecoveryCalls()) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
+
+    // KeepRoomOnPeerTimeout (peertimeout.h): the sites, and every step of the chain from a timed-out handshake to
+    // EOS_Lobby_LeaveLobby that the redirected call cuts, as the game has them.
+    const auto peerTimeoutHooks = PeerTimeoutHooks();
+    const auto peerTimeoutCalls = PeerTimeoutCalls();
+    Check(peerTimeoutHooks.size() == 1 && peerTimeoutCalls.size() == 1, "peer timeout table sizes");
+    for (const auto& hook : peerTimeoutHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the join-time hook keeps both moves", hook.rva);
+    }
+    for (const auto& call : peerTimeoutCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
+    const auto Bytes = [&](std::uint32_t rva, std::initializer_list<std::uint8_t> bytes) {
+        const auto at = image.At(rva, bytes.size());
+        return at && std::memcmp(at, bytes.begin(), bytes.size()) == 0;
+    };
+    // Users::Add: the join-time hook sits right after make_shared<eos::User>, with rbx still the {id, remote} argument
+    // (12B7F7A `mov rbx, r8`; the only other writes of rbx before 12B80E0 are on the paths that return empty).
+    Check(CallTargets(image.At(0x12B80DB, 5), 0x12B80DB, 0x12B7610) && Bytes(0x12B7F7A, {0x49, 0x8B, 0xD8}) &&
+              Bytes(0x12B80CB, {0x4C, 0x8D, 0x4B, 0x08, 0x4C, 0x8B, 0xC3}),
+          "Users::Add makes the user at 12B7610, rbx = its argument", 0x12B80DB);
+    // The room update: `mov rcx, rdi; call IsLocalHost; test al, al; jne skip; mov rcx, rdi; call AnyLinkTimedOut;
+    // test al, al; je skip`, then the leave.
+    Check(Bytes(0x788AB0, {0x48, 0x8B, 0xCF}) && CallTargets(image.At(0x788AB3, 5), 0x788AB3, 0x12BE580) &&
+              Bytes(0x788AB8, {0x84, 0xC0, 0x75, 0x47, 0x48, 0x8B, 0xCF}) && Bytes(0x788AC4, {0x84, 0xC0, 0x74, 0x3B}),
+          "the room update asks IsLocalHost first, then whether a link timed out", 0x788AB0);
+    Check(CallTargets(image.At(0x788AE7, 5), 0x788AE7, 0x787090) && CallTargets(image.At(0x787262, 5), 0x787262, 0x728740) &&
+              Bytes(0x78724A, {0x48, 0x8D, 0xA8, 0x68, 0xFF, 0xFF, 0xFF}),
+          "a timed-out link leaves the room: 787090 hands 728740 an empty room", 0x788AE7);
+    Check(Bytes(0x728A1C, {0x48, 0x89, 0x87, 0xC0, 0x00, 0x00, 0x00}) && CallTargets(image.At(0x74214E, 5), 0x74214E, 0x741AB0) &&
+              CallTargets(image.At(0x741AD7, 5), 0x741AD7, 0x12BFB30) && CallTargets(image.At(0x12BFBF5, 5), 0x12BFBF5, 0x12BE860),
+          "releasing the room runs RoomImpl's destructor down to 12BE860", 0x728A1C);
+    // 12BE96C: call [IAT slot] of EOS_Lobby_LeaveLobby.
+    const auto ImportAt = [&](std::uint32_t slot) -> std::string {
+        const auto& directory = image.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        for (std::uint32_t d = directory.VirtualAddress;; d += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+            const auto descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(image.At(d, sizeof(IMAGE_IMPORT_DESCRIPTOR)));
+            if (!descriptor || !descriptor->Name) return {};
+            for (std::uint32_t i = 0;; ++i) {
+                const auto entry = image.At(descriptor->OriginalFirstThunk + 8 * i, 8);
+                std::uint64_t value = 0;
+                if (entry) std::memcpy(&value, entry, 8);
+                if (!value) break;
+                if (descriptor->FirstThunk + 8 * i != slot || (value >> 63)) continue;
+                // IMAGE_IMPORT_BY_NAME: a 2-byte hint, then the name.
+                const auto name = reinterpret_cast<const char*>(image.At(static_cast<std::uint32_t>(value) + 2, 1));
+                return name ? std::string(name) : std::string{};
+            }
+        }
+    };
+    Check(Bytes(0x12BE96C, {0xFF, 0x15}) && ImportAt(RipTarget(0x12BE96C, 6)) == "EOS_Lobby_LeaveLobby",
+          "12BE860 leaves the EOS lobby", 0x12BE96C);
+    // IsLocalHost: Users (room+0x160) -> local user (+0x18) -> flags bit 2.
+    Check(Bytes(0x12BE597, {0x48, 0x8B, 0x89, 0x60, 0x01, 0x00, 0x00}) && Bytes(0x12BE5AF, {0x48, 0x8B, 0x49, 0x18}) &&
+              CallTargets(image.At(0x12BE5BD, 5), 0x12BE5BD, 0x12AC6F0) &&
+              Bytes(0x12AC6F0, {0x8B, 0x41, 0x10, 0xC1, 0xE8, 0x02, 0x24, 0x01, 0xC3}) &&
+              kRoomUsersOffset == 0x160 && kUsersLocalOffset == 0x18,
+          "12BE580 asks the local user (room+0x160, +0x18) for its host flag", 0x12BE580);
+    // AnyLinkTimedOut: manager = room+0xB0, then 12C86B0 walks the link list (manager+0xD0, node+0x30 = Link).
+    Check(Bytes(0x12BE750, {0x48, 0x8B, 0x89, 0xB0, 0x00, 0x00, 0x00, 0x48, 0x85, 0xC9, 0x0F, 0x85}) &&
+              RipTarget(0x12BE75A, 6) == 0x12C86B0 && Bytes(0x12BE760, {0x32, 0xC0, 0xC3}) && kRoomLinksOwnerOffset == 0xB0,
+          "12BE750 = [room+0xB0] ? 12C86B0 : false", 0x12BE750);
+    Check(Bytes(0x12C8757, {0x4C, 0x8B, 0x83, 0xD0, 0x00, 0x00, 0x00, 0x49, 0x8B, 0x10}) &&
+              Bytes(0x12C8771, {0x48, 0x8B, 0x1F, 0x48, 0x3B, 0xDF}) && Bytes(0x12C8780, {0x48, 0x8B, 0x4B, 0x30}) &&
+              CallTargets(image.At(0x12C8784, 5), 0x12C8784, 0x12D5A40) && Bytes(0x12C878D, {0x48, 0x8B, 0x1B}) &&
+              kLinkListOffset == 0xD0 && kLinkNodeValueOffset == 0x30,
+          "12C86B0 walks the list at manager+0xD0, Link at node+0x30, next at node+0", 0x12C86B0);
+    Check(Bytes(0x12D5A40, {0x0F, 0xB6, 0x81, 0xA8, 0x00, 0x00, 0x00, 0xC3}) && kLinkTimedOutOffset == 0xA8,
+          "12D5A40 returns Link+0xA8", 0x12D5A40);
+    // Link::OnInitial: the weak_ptr<User> at +0x60/+0x68, the deadline at +0xA0 (20000 unless the peer hosts).
+    Check(Bytes(0x12D5BEB, {0x48, 0x8B, 0x51, 0x68}) && Bytes(0x12D5C43, {0x48, 0x8B, 0x5F, 0x60}) &&
+              Bytes(0x12D5C82, {0x0F, 0x2F, 0x87, 0xA0, 0x00, 0x00, 0x00}) &&
+              Bytes(0x12D5E0B, {0xC7, 0x87, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x40, 0x9C, 0x46}) &&
+              Bytes(0x12D5C90, {0xC6, 0x87, 0xA8, 0x00, 0x00, 0x00, 0x01}) &&
+              kLinkUserOffset == 0x60 && kLinkDeadlineOffset == 0xA0,
+          "Link::OnInitial: user weak_ptr +0x60, deadline +0xA0 (20000 ms), timed out +0xA8", 0x12D5AA0);
     // These constructors overwrite eos::lobby::Room's base vtable with eos::RoomImpl.
     // Tie the runtime guard to the actual image, so a fake fixture cannot repeat a wrong assumption.
     for (const auto site : {0x741088u, 0x741557u}) {
@@ -469,6 +548,7 @@ int main(int argc, char** argv) {
     allCalls.insert(allCalls.end(), diagnosticCalls.begin(), diagnosticCalls.end());
     const auto recoveryCalls = RecoveryCalls();
     allCalls.insert(allCalls.end(), recoveryCalls.begin(), recoveryCalls.end());
+    allCalls.insert(allCalls.end(), peerTimeoutCalls.begin(), peerTimeoutCalls.end());
     auto allHooks = missionHooks;
     allHooks.insert(allHooks.end(), spawnHooks.begin(), spawnHooks.end());
     const auto diagnosticHooks = DiagnosticHooks();
@@ -476,6 +556,7 @@ int main(int argc, char** argv) {
     allHooks.insert(allHooks.end(), armorHooks.begin(), armorHooks.end());
     const auto ghostHooks = GhostHooks();
     allHooks.insert(allHooks.end(), ghostHooks.begin(), ghostHooks.end());
+    allHooks.insert(allHooks.end(), peerTimeoutHooks.begin(), peerTimeoutHooks.end());
     // 8Player MOD (hostmode.cpp): the sites it replaces, and the game functions it calls from the menu frame.
     const auto hostHooks = HostModeHooks();
     Check(hostHooks.size() == 11, "host mode hook table size");

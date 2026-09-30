@@ -390,6 +390,39 @@ int main(int argc, char** argv) {
     Check(std::memcmp(image.At(0x1D628E, 7), vanillaArray, 7) == 0, "constructor builds the player array at +0x100", 0x1D628E);
     Check(RipTarget(0x1D6295, 7) == 0x1D6C50 && RipTarget(0x1D6ED5, 7) == 0x1D6C50, "constructor and destructor use the weak_ptr destructor", 0x1D6ED5);
 
+    // The mission start message (packetfit.h): the record write/read calls, the hook after the host's record loop,
+    // and what the fix is built on - where the stream is, how a record and a stream are laid out, and the sizes the
+    // game's transport allows.
+    const auto packetFitCalls = PacketFitCalls();
+    const auto packetFitHooks = PacketFitHooks();
+    Check(packetFitCalls.size() == 2 && packetFitHooks.size() == 1, "packet fit table sizes");
+    for (const auto& call : packetFitCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
+    for (const auto& hook : packetFitHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(hook.original.size() >= 5 && hook.displacedOffset + hook.displacedSize <= hook.original.size(), "hook covers a jump", hook.rva);
+    }
+    const auto bytesAt = [&](std::uint32_t rva, std::initializer_list<std::uint8_t> bytes) {
+        const std::vector<std::uint8_t> expected(bytes);
+        const std::uint8_t* at = image.At(rva, expected.size());
+        return at && std::memcmp(at, expected.data(), expected.size()) == 0;
+    };
+    Check(bytesAt(0x78D11B, {0x4C, 0x89, 0x44, 0x24, 0x60}) && bytesAt(0x78D5AB, {0x48, 0x8B, 0x7C, 0x24, 0x60}),
+          "MissionSync_Res keeps its output stream at rsp+0x60 and writes the count from it", 0x78D11B);
+    Check(CallTargets(image.At(0x78D6E3, 5), 0x78D6E3, 0x773740) && CallTargets(image.At(0x78D5B6, 5), 0x78D5B6, 0x12B5580),
+          "MissionSync_Res reads each reply's record back and writes the count before the records", 0x78D6E3);
+    Check(bytesAt(0x77377C, {0x41, 0x89, 0x0E}) && bytesAt(0x790878, {0x48, 0x63, 0x4D, 0x20, 0x85, 0xC9, 0x0F, 0x88}),
+          "a record's index is its first dword, and a negative one is skipped", 0x790878);
+    Check(bytesAt(0x12B4665, {0x4C, 0x8B, 0x51, 0x08}) && bytesAt(0x12B5200, {0x48, 0x8B, 0x81, 0xF0, 0x05, 0x00, 0x00}) &&
+              bytesAt(0x12B5217, {0x41, 0x80, 0xE1, 0x1F, 0x41, 0x80, 0xC9, 0xA0}) &&
+              bytesAt(0x12B45C8, {0xBA, 0xF8, 0x05, 0x00, 0x00}),
+          "streams read at +8, write at +0x5F0, are 0x5F8 bytes, and byte arrays are tagged 0xA0", 0x12B5200);
+    Check(bytesAt(0x12D0B96, {0xC7, 0x01, 0x00, 0x12, 0x40, 0x00}) && bytesAt(0x12D0BE6, {0x48, 0x3D, 0x78, 0x05, 0x00, 0x00}) &&
+              bytesAt(0x12D0017, {0x48, 0x81, 0xFA, 0x4C, 0x04, 0x00, 0x00}) && bytesAt(0x74ED6D, {0x41, 0xB9, 0xFA, 0x00, 0x00, 0x00}),
+          "the controller frames packets with 0x401200 and allows 1400 bytes, datagrams 1100, the builder 250", 0x12D0BE6);
+    Check(bytesAt(0x12C8D1D, {0xC7, 0x44, 0x24, 0x60, 0x00, 0x10, 0x00, 0x00}) && bytesAt(0x12C8D25, {0x48, 0x89, 0x74, 0x24, 0x68}),
+          "the game receives up to 4096 bytes from any channel", 0x12C8D1D);
+
     const auto spawnHooks = SpawnHooks();
     Check(spawnHooks.size() == 8, "spawn hook table size");
     for (const auto& hook : spawnHooks) {
@@ -463,6 +496,7 @@ int main(int argc, char** argv) {
 
     std::vector<CallSite> allCalls = calls;
     allCalls.insert(allCalls.end(), missionCalls.begin(), missionCalls.end());
+    allCalls.insert(allCalls.end(), packetFitCalls.begin(), packetFitCalls.end());
     const auto ghostCalls = GhostCalls();
     allCalls.insert(allCalls.end(), ghostCalls.begin(), ghostCalls.end());
     const auto diagnosticCalls = DiagnosticCalls();
@@ -470,6 +504,7 @@ int main(int argc, char** argv) {
     const auto recoveryCalls = RecoveryCalls();
     allCalls.insert(allCalls.end(), recoveryCalls.begin(), recoveryCalls.end());
     auto allHooks = missionHooks;
+    allHooks.insert(allHooks.end(), packetFitHooks.begin(), packetFitHooks.end());
     allHooks.insert(allHooks.end(), spawnHooks.begin(), spawnHooks.end());
     const auto diagnosticHooks = DiagnosticHooks();
     allHooks.insert(allHooks.end(), diagnosticHooks.begin(), diagnosticHooks.end());

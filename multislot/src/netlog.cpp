@@ -526,6 +526,10 @@ bool RedirectImport(HMODULE module, const char* dll, const char* function, void*
 
 }  // namespace
 
+bool RedirectGameImport(HMODULE game, const char* dll, const char* function, void* replacement, void** original) {
+    return RedirectImport(game, dll, function, replacement, original);
+}
+
 bool InstallExitMarker(HMODULE game) {
     if (originalTerminate) return true;  // already wrapped
     void* previous = nullptr;

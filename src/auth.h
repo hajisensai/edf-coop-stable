@@ -19,6 +19,8 @@ using Signature = std::array<uint8_t, 64>;  // r then s
 
 // SHA-256; nullopt when the OS crypto provider fails.
 std::optional<Digest> sha256(const uint8_t* data, size_t size);
+// HMAC-SHA256, all 32 bytes; nullopt when the OS crypto provider fails.
+std::optional<Digest> hmacSha256(const std::string& key, const uint8_t* data, size_t size);
 // Cryptographically random bytes; false when the OS provider fails.
 bool randomBytes(uint8_t* out, size_t size);
 
@@ -49,6 +51,52 @@ private:
     std::string commitment_;
     mutable std::mutex mu_;  // one signature at a time per key handle
     mutable std::atomic<uint64_t> session_{0};
+};
+
+using LinkKey = Digest;
+constexpr size_t kLinkTagBytes = 16;
+
+// HMAC-SHA256 with one link direction's key, truncated to kLinkTagBytes. Keeps one reusable hash
+// object (BCRYPT_HASH_REUSABLE_FLAG) instead of setting up the key for every packet. Not thread-safe.
+class LinkMac {
+public:
+    LinkMac() = default;
+    explicit LinkMac(const LinkKey& key);
+    ~LinkMac();
+    LinkMac(LinkMac&& other) noexcept : hash_(other.hash_) { other.hash_ = nullptr; }
+    LinkMac& operator=(LinkMac&& other) noexcept;
+    LinkMac(const LinkMac&) = delete;
+    LinkMac& operator=(const LinkMac&) = delete;
+
+    // False when the OS crypto provider failed (or default-constructed): nothing can be tagged.
+    bool valid() const { return hash_ != nullptr; }
+    // Writes kLinkTagBytes to `out`; false when crypto fails.
+    bool tag(const uint8_t* data, size_t size, uint8_t* out);
+    // Constant-time check of the kLinkTagBytes at `expected`.
+    bool check(const uint8_t* data, size_t size, const uint8_t* expected);
+
+private:
+    void* hash_ = nullptr;  // BCRYPT_HASH_HANDLE
+};
+
+// An ephemeral ECDH P-256 key pair: one per direct-link session, never reused, never stored.
+class EcdhKey {
+public:
+    // nullptr when the OS crypto provider fails.
+    static std::unique_ptr<EcdhKey> generate();
+    ~EcdhKey();
+    EcdhKey(const EcdhKey&) = delete;
+    EcdhKey& operator=(const EcdhKey&) = delete;
+
+    const PublicKey& publicKey() const { return public_; }
+    // SHA-256 of the secret shared with `peer`; nullopt for a point not on the curve or a crypto failure.
+    std::optional<Digest> agree(const PublicKey& peer) const;
+
+private:
+    EcdhKey() = default;
+
+    void* key_ = nullptr;  // BCRYPT_KEY_HANDLE
+    PublicKey public_{};
 };
 
 // 32 lowercase hex digits of SHA-256(public key); "" when the crypto provider fails.

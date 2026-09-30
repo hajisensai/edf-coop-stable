@@ -31,6 +31,11 @@ BCRYPT_ALG_HANDLE ecdsaAlgorithm() {
     return alg;
 }
 
+BCRYPT_ALG_HANDLE ecdhAlgorithm() {
+    static BCRYPT_ALG_HANDLE alg = openAlgorithm(BCRYPT_ECDH_P256_ALGORITHM, 0);
+    return alg;
+}
+
 // SHA-256, keyed (HMAC) when `key` is given.
 bool digestOf(BCRYPT_ALG_HANDLE alg, const std::string* key, const uint8_t* data, size_t size, Digest& out) {
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -49,14 +54,118 @@ struct PublicBlob {
     uint8_t xy[64];
 };
 
+// Generates a P-256 key pair of `alg` and exports its public point; nullptr when crypto fails.
+BCRYPT_KEY_HANDLE generateKeyPair(BCRYPT_ALG_HANDLE alg, PublicKey& out) {
+    BCRYPT_KEY_HANDLE key = nullptr;
+    if (!alg || BCryptGenerateKeyPair(alg, &key, 256, 0) != 0) return nullptr;
+    PublicBlob blob{};
+    ULONG size = 0;
+    if (BCryptFinalizeKeyPair(key, 0) != 0 ||
+        BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB, reinterpret_cast<PUCHAR>(&blob), sizeof(blob), &size, 0) != 0 ||
+        size != sizeof(blob) || blob.header.cbKey != 32) {
+        BCryptDestroyKey(key);
+        return nullptr;
+    }
+    memcpy(out.data(), blob.xy, out.size());
+    return key;
+}
+
+// Imports a P-256 public point for `alg`; nullptr for a point that is not on the curve.
+BCRYPT_KEY_HANDLE importPublic(BCRYPT_ALG_HANDLE alg, ULONG magic, const PublicKey& key) {
+    PublicBlob blob{};
+    blob.header.dwMagic = magic;
+    blob.header.cbKey = 32;
+    memcpy(blob.xy, key.data(), key.size());
+    BCRYPT_KEY_HANDLE pub = nullptr;
+    if (!alg || BCryptImportKeyPair(alg, nullptr, BCRYPT_ECCPUBLIC_BLOB, &pub, reinterpret_cast<PUCHAR>(&blob),
+                                    sizeof(blob), 0) != 0)
+        return nullptr;
+    return pub;
+}
+
 }  // namespace
 
-std::optional<std::array<uint8_t, 8>> hmacTag(const std::string& key, const uint8_t* data, size_t size) {
+std::optional<Digest> hmacSha256(const std::string& key, const uint8_t* data, size_t size) {
     Digest digest{};
     if (!digestOf(hmacAlgorithm(), &key, data, size, digest)) return std::nullopt;
+    return digest;
+}
+
+std::optional<std::array<uint8_t, 8>> hmacTag(const std::string& key, const uint8_t* data, size_t size) {
+    auto digest = hmacSha256(key, data, size);
+    if (!digest) return std::nullopt;
     std::array<uint8_t, 8> tag{};
-    memcpy(tag.data(), digest.data(), tag.size());
+    memcpy(tag.data(), digest->data(), tag.size());
     return tag;
+}
+
+LinkMac::LinkMac(const LinkKey& key) {
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    BCRYPT_ALG_HANDLE alg = hmacAlgorithm();
+    if (alg && BCryptCreateHash(alg, &hash, nullptr, 0, (PUCHAR)key.data(), (ULONG)key.size(),
+                                BCRYPT_HASH_REUSABLE_FLAG) == 0)
+        hash_ = hash;
+}
+
+LinkMac::~LinkMac() {
+    if (hash_) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_));
+}
+
+LinkMac& LinkMac::operator=(LinkMac&& other) noexcept {
+    if (this != &other) {
+        if (hash_) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_));
+        hash_ = other.hash_;
+        other.hash_ = nullptr;
+    }
+    return *this;
+}
+
+bool LinkMac::tag(const uint8_t* data, size_t size, uint8_t* out) {
+    Digest digest{};
+    auto hash = static_cast<BCRYPT_HASH_HANDLE>(hash_);
+    // A reusable hash object starts over, keyed, after every BCryptFinishHash.
+    if (!hash || BCryptHashData(hash, (PUCHAR)data, (ULONG)size, 0) != 0 ||
+        BCryptFinishHash(hash, digest.data(), (ULONG)digest.size(), 0) != 0)
+        return false;
+    memcpy(out, digest.data(), kLinkTagBytes);
+    return true;
+}
+
+bool LinkMac::check(const uint8_t* data, size_t size, const uint8_t* expected) {
+    uint8_t mine[kLinkTagBytes];
+    if (!tag(data, size, mine)) return false;  // no tag computed: reject
+    uint8_t diff = 0;
+    for (size_t i = 0; i < kLinkTagBytes; ++i) diff |= mine[i] ^ expected[i];  // constant time
+    return diff == 0;
+}
+
+std::unique_ptr<EcdhKey> EcdhKey::generate() {
+    std::unique_ptr<EcdhKey> k(new EcdhKey());
+    k->key_ = generateKeyPair(ecdhAlgorithm(), k->public_);
+    return k->key_ ? std::move(k) : nullptr;
+}
+
+EcdhKey::~EcdhKey() {
+    if (key_) BCryptDestroyKey(static_cast<BCRYPT_KEY_HANDLE>(key_));
+}
+
+std::optional<Digest> EcdhKey::agree(const PublicKey& peer) const {
+    BCRYPT_KEY_HANDLE pub = importPublic(ecdhAlgorithm(), BCRYPT_ECDH_PUBLIC_P256_MAGIC, peer);
+    if (!pub) return std::nullopt;
+    BCRYPT_SECRET_HANDLE secret = nullptr;
+    NTSTATUS agreed = BCryptSecretAgreement(static_cast<BCRYPT_KEY_HANDLE>(key_), pub, &secret, 0);
+    BCryptDestroyKey(pub);
+    if (agreed != 0) return std::nullopt;
+    BCryptBuffer param{static_cast<ULONG>(sizeof(BCRYPT_SHA256_ALGORITHM)), KDF_HASH_ALGORITHM,
+                       const_cast<wchar_t*>(BCRYPT_SHA256_ALGORITHM)};
+    BCryptBufferDesc params{BCRYPTBUFFER_VERSION, 1, &param};
+    Digest out{};
+    ULONG size = 0;
+    bool ok = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &params, out.data(), (ULONG)out.size(), &size, 0) == 0 &&
+              size == out.size();
+    BCryptDestroySecret(secret);
+    if (!ok) return std::nullopt;
+    return out;
 }
 
 std::optional<Digest> sha256(const uint8_t* data, size_t size) {
@@ -70,18 +179,9 @@ bool randomBytes(uint8_t* out, size_t size) {
 }
 
 std::shared_ptr<const Identity> Identity::generate() {
-    BCRYPT_ALG_HANDLE alg = ecdsaAlgorithm();
-    BCRYPT_KEY_HANDLE key = nullptr;
-    if (!alg || BCryptGenerateKeyPair(alg, &key, 256, 0) != 0) return nullptr;
     std::shared_ptr<Identity> id(new Identity());
-    id->key_ = key;  // destroyed with `id` from here on
-    PublicBlob blob{};
-    ULONG size = 0;
-    if (BCryptFinalizeKeyPair(key, 0) != 0 ||
-        BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB, reinterpret_cast<PUCHAR>(&blob), sizeof(blob), &size, 0) != 0 ||
-        size != sizeof(blob) || blob.header.cbKey != 32)
-        return nullptr;
-    memcpy(id->public_.data(), blob.xy, id->public_.size());
+    id->key_ = generateKeyPair(ecdsaAlgorithm(), id->public_);  // destroyed with `id`
+    if (!id->key_) return nullptr;
     id->commitment_ = identityCommitment(id->public_);
     if (id->commitment_.empty()) return nullptr;
     return id;
@@ -115,16 +215,8 @@ std::string identityCommitment(const PublicKey& key) {
 }
 
 bool verifySignature(const PublicKey& key, const Digest& digest, const Signature& signature) {
-    BCRYPT_ALG_HANDLE alg = ecdsaAlgorithm();
-    PublicBlob blob{};
-    blob.header.dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
-    blob.header.cbKey = 32;
-    memcpy(blob.xy, key.data(), key.size());
-    BCRYPT_KEY_HANDLE pub = nullptr;
-    // Import fails for a point that is not on the curve.
-    if (!alg || BCryptImportKeyPair(alg, nullptr, BCRYPT_ECCPUBLIC_BLOB, &pub, reinterpret_cast<PUCHAR>(&blob),
-                                    sizeof(blob), 0) != 0)
-        return false;
+    BCRYPT_KEY_HANDLE pub = importPublic(ecdsaAlgorithm(), BCRYPT_ECDSA_PUBLIC_P256_MAGIC, key);
+    if (!pub) return false;
     bool ok = BCryptVerifySignature(pub, nullptr, (PUCHAR)digest.data(), (ULONG)digest.size(), (PUCHAR)signature.data(),
                                     (ULONG)signature.size(), 0) == 0;
     BCryptDestroyKey(pub);

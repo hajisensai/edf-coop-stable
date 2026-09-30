@@ -11,6 +11,7 @@
 #include "log.h"
 #include "identity.h"
 #include "joinlog.h"
+#include "packetfit.h"
 
 namespace multislot {
 namespace {
@@ -219,6 +220,10 @@ EOS_EResult DispatchSendPacket(void* handle, const SendPacketOptions* options, s
                     local, remote, effective->DataLengthBytes, effective->Channel, effective->AllowDelayedDelivery,
                     effective->Reliability, result, GetCurrentThreadId());
             }
+            // EOS refuses these (the mission start message did at eight players); name the sender once per kind.
+            if (packetDiagnostics && effective && effective->DataLengthBytes > kEosMaxPacket)
+                LogOversizePacket(caller, effective->Channel, effective->Reliability, effective->Data,
+                                  effective->DataLengthBytes, result);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         return result;

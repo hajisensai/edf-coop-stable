@@ -189,14 +189,41 @@ void NoteHandshakeUser(const char* event, const void* user) {
 }
 
 // Link::OnInitial reached its deadline. Observe only; displaced instruction sets Link+0xA8.
+// The game takes this branch on every update of the link from then on (it neither retries nor resets the flag),
+// which logged two lines per frame, about 500 a second, and used up the session's line budget in ten seconds.
+// One line per link when it times out, and a reminder with the count while it stays timed out.
+constexpr std::size_t kTimeoutLinks = 16;
+constexpr ULONGLONG kTimeoutRepeatMs = 30000;
+struct TimeoutEpisode {
+    std::uintptr_t link = 0;
+    ULONGLONG logged = 0;
+    unsigned long long repeats = 0;
+};
+TimeoutEpisode timeouts[kTimeoutLinks]{};
+std::size_t nextTimeout = 0;
+
 void HandshakeTimeoutHandler(CpuContext* context) {
+    const auto link = static_cast<std::uintptr_t>(context->rdi);
+    const auto now = GetTickCount64();
+    TimeoutEpisode* episode = nullptr;
+    for (auto& entry : timeouts)
+        if (entry.link == link) episode = &entry;
+    if (episode && now - episode->logged < kTimeoutRepeatMs) {
+        ++episode->repeats;
+        return;
+    }
+    const unsigned long long repeats = episode ? episode->repeats : 0;
+    if (!episode) episode = &timeouts[nextTimeout++ % kTimeoutLinks];
+    *episode = {link, now, 0};
     // OnInitial already owns a strong reference in rbx on this branch.
     const void* user = reinterpret_cast<const void*>(context->rbx);
     float deadline = 0;
     Read(context->rdi + 0xA0, deadline);
     if (Budget()) {
-        NoteHandshakeUser("TIMEOUT", user);
-        Log("HANDSHAKE deadline=%.0f ms link=%p", deadline, reinterpret_cast<void*>(context->rdi));
+        NoteHandshakeUser(repeats ? "STILL TIMED OUT" : "TIMEOUT", user);
+        Log("HANDSHAKE deadline=%.0f ms link=%p (checked every frame from now on; %llu repeats since the last "
+            "line, next line in %llu s if it stays timed out)", deadline, reinterpret_cast<void*>(link), repeats,
+            kTimeoutRepeatMs / 1000);
     }
 }
 

@@ -79,7 +79,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 
 **关于 `Key=`**：可选暗号。防冒充已经不靠它了：每个装了插件的玩家都会在自己的大厅成员信息里公布一把本局游戏专用密钥的指纹，房主只有在对方证明自己持有玩家 X 的密钥（并且能在发包的地址上收到回包）后，才允许他以 X 的身份直连。所以谁都——包括同房间的其他玩家——无法冒充别人直连、抢走别人的直连，没装插件的玩家也永远不会被冒名。Key 额外提供的是给每个直连包加认证标签，防止你们之间网络路径上的人篡改或注入数据包。它**不会**写进房间信息——房主设了 Key，每个加入者都必须在自己的 ini 里填同样的 Key，否则自动直连失败、回落到 EOS。只和熟人玩可以不设。
 
-**隐私**：房主的公网地址写在大厅成员属性里，能看到这个房间的人都读得到。
+**隐私**：房主的公网地址写在大厅成员属性里，能看到这个房间的人都读得到。加入者直连（`AutoJoin=1`）时是从自己的公网地址连向房主，所以房主能看到加入者的地址（原版 EOS 点对点通常也会让双方互相看到地址）。不想让你加入的房间的房主看到你的地址，就设 `AutoJoin=0`，继续走 EOS。
 
 ## 设置参考（`EDF6DirectNet.ini`，改完重启游戏生效）
 
@@ -89,10 +89,10 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `Mode` | `off` | `off` 普通玩家 / `host` 当直连房主 / `join` 手动指定房主地址（一般用不到，自动直连已覆盖） |
 | `ListenPort` | `27015` | host：监听的 UDP 端口（端口映射、防火墙放行的就是它）；join：本机端口，留空 = 自动 |
 | `PublicAddress` | 空 | host：告诉别人连哪里。空 = 公网 IPv6 + UPnP 映射的 IPv4 |
-| `AutoJoin` | `1` | 进入别人房间时，若房主开了直连就自动连过去 |
+| `AutoJoin` | `1` | 进入别人房间时，若房主开了直连就自动连过去（房主会看到你的公网地址；`0` 则继续走 EOS） |
 | `HostAddress` | 空 | 仅 `Mode=join`：房主地址，如 `123.45.67.89:27015` / `[2408:8207::5]:27015` |
 | `Key` | 空 | 直连暗号，所有人必须一致；只用英文字母和数字 |
-| `UPnP` | `1` | host 时自动让路由器做端口映射 |
+| `UPnP` | `1` | host 时自动让路由器做端口映射。只在 `Mode=host` 时生效；默认的 `Mode=off` 什么端口都不开 |
 | `BindPhysicalInterface` | `1` | 直连流量固定走物理网卡，不被 Clash / 加速器的 TUN 网卡劫持 |
 | `LinkTimeoutMs` | `60000` | 直连多久收不到对方数据才算断开（3000–300000） |
 | `[EOS] FixedPort` | `0` | EOS 使用固定 UDP 端口 `FixedPort`～`FixedPort+7`；0 = 随机 |
@@ -136,7 +136,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic 房间服务把某人踢掉又放了回来，游戏没察觉。`direct link silent for ...` 表示他真的掉了，已交给游戏。
 - `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
 - `STATS last 60s: ...` 每分钟一行收发统计，`send-failures` 不为 0 时请附日志。
-- `TRAFFIC last 60s: ...`：游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据，以及直连实际占用的上传 / 下载，含房主替别人转发的部分。
+- `TRAFFIC last 60s: ...`：游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据、有多少包在 5 秒内把同一份数据又发给了同一个人（即游戏自己的重发，如果有的话），以及直连实际占用的上传 / 下载，含房主替别人转发的部分。
 - `DIRECT refused hello for ...`：有人想以某个玩家的身份直连，但证明不了。玩家刚进房的一两秒内出现 `published no direct-link identity` 是正常的（他的房间信息还没到房主这里，对方每秒重试）；对没装插件或 0.3.6 及更早版本的玩家，意思是他继续走 EOS。`not signed by the identity that player published` 说明有人冒充该玩家，已被拒绝，影响不到那个玩家。
 - `DIRECT ... speaks direct-link protocol 2, we speak 3`：对方的 EDF6DirectNet 版本不同（0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
 

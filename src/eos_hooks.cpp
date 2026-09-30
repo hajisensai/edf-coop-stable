@@ -743,11 +743,12 @@ void maybeLogStats() {
     // kbps = bytes * 8 / 1000 / seconds
     auto kbps = [](uint64_t bytes, double seconds) { return static_cast<double>(bytes) * 8.0 / 1000.0 / seconds; };
     logf("TRAFFIC last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
-         "(largest %u), %.0f%% copies of the same data to another player | direct link up %.0f kbps down %.0f kbps, "
-         "relayed for others %.0f kbps",
+         "(largest %u), %.0f%% copies of the same data to another player, %.1f%% of packets repeat one sent to the "
+         "same player within 5 s | direct link up %.0f kbps down %.0f kbps, relayed for others %.0f kbps",
          kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
          t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
-         t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0, kbps(w.out, 60.0),
+         t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
+         t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
          kbps(w.in, 60.0), kbps(w.relayed, 60.0));
     logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),

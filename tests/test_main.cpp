@@ -1145,14 +1145,21 @@ void testTrafficMeter() {
     CHECK(hx != hy && dn::TrafficMeter::hash(x, sizeof(x)) == hx);
     m.record(kA, 100, hx, 1000);
     m.record(kB, 100, hx, 1001);  // the same data to another player: a copy
-    m.record(kB, 100, hx, 1002);  // the same data to the same player again: not a copy
+    m.record(kB, 100, hx, 1002);  // the same data to the same player again: not a copy, a repeat
     m.record(kA, 100, hy, 1500);
-    m.record(kA, 400, hy, 2100);  // next second
+    m.record(kA, 400, hy, 2100);  // next second; another size is other data
     dn::TrafficSummary s = m.take();
     CHECK(s.bytes == 800 && s.packets == 5 && s.peers == 2 && s.copyBytes == 100);
-    CHECK(s.busiestSecondBytes == 400 && s.largestPacket == 400);
+    CHECK(s.busiestSecondBytes == 400 && s.largestPacket == 400 && s.repeatPackets == 1);
     s = m.take();
-    CHECK(s.bytes == 0 && s.packets == 0 && s.peers == 0 && s.busiestSecondBytes == 0);
+    CHECK(s.bytes == 0 && s.packets == 0 && s.peers == 0 && s.busiestSecondBytes == 0 && s.repeatPackets == 0);
+
+    // Repeats count within the window only.
+    m.record(kA, 100, hx, 10000);
+    m.record(kA, 100, hx, 10000 + dn::TrafficMeter::kRepeatWindowMs);      // just inside: a repeat
+    m.record(kA, 100, hy, 20000);
+    m.record(kA, 100, hy, 20001 + dn::TrafficMeter::kRepeatWindowMs);      // just outside: not
+    CHECK(m.take().repeatPackets == 1);
 }
 
 void testUpdater() {

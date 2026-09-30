@@ -79,7 +79,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 
 **About `Key=`**: an optional passphrase. You no longer need it to be safe from impersonation: every plugin player publishes, in its own lobby member info, the fingerprint of a key made for this game session, and the host lets someone connect as player X only after they prove they hold X's key (and receive replies at the address they send from). So nobody, not even another player in the room, can connect as someone else or take over their direct link, and players without the plugin can never be claimed. What the Key adds is a tag on every direct-link packet, so someone on the network path between you cannot alter or inject packets. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset.
 
-**Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it.
+**Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it. A player who joins directly (`AutoJoin=1`) connects to the host from their own public address, so the host sees it (vanilla EOS peer-to-peer usually exposes both addresses to each other too). Set `AutoJoin=0` if you do not want hosts of rooms you join to see your address; you then stay on EOS.
 
 ## Settings reference (`EDF6DirectNet.ini`, restart the game after editing)
 
@@ -89,10 +89,10 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 | `Mode` | `off` | `off` regular player / `host` act as direct-connect host / `join` specify the host address manually (rarely needed, auto direct connect covers it) |
 | `ListenPort` | `27015` | host: the UDP port to listen on (this is the one to forward and allow through the firewall); join: local port, empty = automatic |
 | `PublicAddress` | empty | host: tells others where to connect. Empty = public IPv6 + UPnP-mapped IPv4 |
-| `AutoJoin` | `1` | When you join someone else's room and the host has direct connect enabled, connect to it automatically |
+| `AutoJoin` | `1` | When you join someone else's room and the host has direct connect enabled, connect to it automatically (the host then sees your public address; `0` stays on EOS) |
 | `HostAddress` | empty | `Mode=join` only: host address, e.g. `123.45.67.89:27015` / `[2408:8207::5]:27015` |
 | `Key` | empty | Direct-connect passphrase, must be identical for everyone; letters and digits only |
-| `UPnP` | `1` | Let the router set up port forwarding automatically when hosting |
+| `UPnP` | `1` | Let the router set up port forwarding automatically when hosting. Only used with `Mode=host`; with the default `Mode=off` nothing is opened |
 | `BindPhysicalInterface` | `1` | Pin direct-connect traffic to the physical network adapter so it is not hijacked by the TUN adapter of Clash / VPN / game accelerator |
 | `LinkTimeoutMs` | `60000` | How long without data from the other side before a direct link counts as disconnected (3000–300000) |
 | `[EOS] FixedPort` | `0` | EOS uses fixed UDP ports `FixedPort`–`FixedPort+7`; 0 = random |
@@ -136,7 +136,7 @@ Every plugin player also writes `EDF6DN_ID`: the fingerprint (SHA-256) of an ECD
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`: Epic's lobby service dropped a player and let them back in; the game never saw it. `direct link silent for ...` means the player really was gone and the game was told.
 - `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
 - `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
-- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, and what the direct link really uses, including what the host relays for others.
+- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, how many packets repeat one sent to the same player within 5 s (the game's own resends, if it has any), and what the direct link really uses, including what the host relays for others.
 - `DIRECT refused hello for ...`: someone tried to connect directly as a player and could not prove it. `published no direct-link identity` for a second or two after a player joins is normal (their room info has not reached the host yet; they retry every second); for a player without the plugin, or with 0.3.6 and older, it means they stay on EOS. `not signed by the identity that player published` means someone else claimed to be that player; they were rejected and cannot disturb that player.
 - `DIRECT ... speaks direct-link protocol 2, we speak 3`: that player runs a different EDF6DirectNet version (0.3.6 or older). There is no direct link between you, the game keeps working over EOS; update both to the same version.
 

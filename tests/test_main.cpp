@@ -872,6 +872,27 @@ void testWelcomeProvesTheRoomOwner() {
         CHECK(streamInOrder(host, kA, a, kHost, 50));
     }
     {
+        // The owner's identity key is public: a welcome carrying it but not signed with it is refused.
+        dn::DirectOptions ho = hostOptions(0, 0);
+        ho.identity = impostor;
+        dn::DirectNet host;
+        CHECK(host.start(ho));
+        host.setLocalUser(kHost);
+        Tap tap(host.boundPort());
+        tap.setAlter([](std::vector<uint8_t>& dg, bool toHost) {
+            auto m = dn::decode(dg.data(), dg.size(), "", nullptr);
+            if (toHost || !m || m->type != dn::MsgType::Welcome) return true;
+            m->welcome.publicKey = dn::processIdentity()->publicKey();
+            dg = dn::encode(*m, "");
+            return true;
+        });
+        dn::DirectNet a;
+        CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(tap.port()), 0)));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost) || host.canRoute(kA); }, 2500));
+        CHECK(!tap.captured(dn::MsgType::Welcome, false).empty());
+    }
+    {
         // A real plugin player (its own published identity) that is not the room owner.
         dn::DirectNet host;
         CHECK(host.start(hostOptions(0, 0)));

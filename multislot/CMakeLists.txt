@@ -142,6 +142,11 @@ target_include_directories(MenuLayoutTests PRIVATE "${CMAKE_BINARY_DIR}/generate
 target_compile_options(MenuLayoutTests PRIVATE ${WARNINGS})
 add_test(NAME MenuLayoutFile COMMAND MenuLayoutTests "${CMAKE_BINARY_DIR}/layouttest")
 
+add_executable(DefaultIniTests tests/default_ini_test.cpp)
+target_include_directories(DefaultIniTests PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_compile_options(DefaultIniTests PRIVATE ${WARNINGS})
+add_test(NAME DefaultIniKeys COMMAND DefaultIniTests "${CMAKE_SOURCE_DIR}/src" "${CMAKE_BINARY_DIR}/initest")
+
 add_executable(SpawnTests tests/spawn_test.cpp src/spawn.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(SpawnTests PRIVATE ${WARNINGS})
 add_test(NAME EnemySpawnCounts COMMAND SpawnTests)

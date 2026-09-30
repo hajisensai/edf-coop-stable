@@ -59,6 +59,9 @@ public:
     AckMsg onData(DataMsg msg, std::vector<DataMsg>& deliver);
     uint32_t expected() const { return expected_; }
     size_t buffered() const { return buffer_.size(); }
+    // Reliable packets received again after they had arrived: set against the sender's retransmits,
+    // the share of its resends that were not needed.
+    uint64_t duplicates() const { return duplicates_; }
 
 private:
     AckMsg currentAck() const;
@@ -70,6 +73,7 @@ private:
 
     uint32_t expected_ = 1;
     std::map<uint32_t, Slot> buffer_;
+    uint64_t duplicates_ = 0;
 };
 
 }  // namespace dn

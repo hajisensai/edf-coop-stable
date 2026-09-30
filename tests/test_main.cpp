@@ -1463,6 +1463,47 @@ void testReliableBacklogLimit() {
     CHECK(tracked < 8192 && bytes.pendingBytes() > (8u << 20) && bytes.pendingBytes() <= (8u << 20) + 1200);
 }
 
+void testRetransmitTimeout() {
+    printf("reliable: the retransmission timeout stays above a steady RTT; duplicates are counted\n");
+    // A steady 62 ms link (what real games showed): every sample the same, so RTTVAR goes to zero. The
+    // timeout must not then equal the RTT, which resent nearly every packet.
+    dn::ReliableSender tx;
+    uint64_t now = 1000;
+    for (int i = 0; i < 64; ++i) {
+        uint32_t seq = tx.nextSeq();
+        tx.track(seq, std::vector<uint8_t>(20), now);
+        dn::AckMsg ack;
+        ack.cumulative = seq;
+        now += 62;
+        tx.onAck(ack, now);
+    }
+    CHECK(tx.srttMs() == 62 && tx.rtoMs() >= 150);
+    // A slow link keeps SRTT plus a margin above the floor.
+    dn::ReliableSender slow;
+    now = 1000;
+    for (int i = 0; i < 64; ++i) {
+        uint32_t seq = slow.nextSeq();
+        slow.track(seq, std::vector<uint8_t>(20), now);
+        dn::AckMsg ack;
+        ack.cumulative = seq;
+        now += 300;
+        slow.onAck(ack, now);
+    }
+    CHECK(slow.rtoMs() >= 305);
+
+    dn::ReliableReceiver rx;
+    std::vector<dn::DataMsg> ready;
+    dn::DataMsg m;
+    m.reliability = 1;
+    m.seq = 1;
+    rx.onData(m, ready);
+    rx.onData(m, ready);  // resent after it had arrived
+    m.seq = 3;
+    rx.onData(m, ready);
+    rx.onData(m, ready);  // resent while buffered out of order
+    CHECK(ready.size() == 2 && rx.duplicates() == 2);
+}
+
 void testUnacknowledgedLinkIsDropped() {
     printf("direct: a client that takes data but never acknowledges it is disconnected, not buffered forever\n");
     dn::DirectOptions ho = hostOptions(0, 0);
@@ -1964,6 +2005,7 @@ int wmain(int argc, wchar_t** argv) {
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
     testReliableBacklogLimit();
+    testRetransmitTimeout();
     testUnacknowledgedLinkIsDropped();
     testNoReflectionToSender();
     testIdentityCrypto();

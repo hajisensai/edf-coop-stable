@@ -529,15 +529,51 @@ void leftLobby(const char* why) {
 
 // Diagnostics: the game removes a player from the room by itself (the local player kicking someone
 // goes through here too). Tells whether the direct link still showed that player playing.
+// The game calls KickMember for the same member over and over (thousands of times in half a second)
+// until the KICKED status comes back: the first call per member in kKickLogWindowMs is logged in
+// full, the rest are counted and summed up with the next STATS line.
+constexpr uint64_t kKickLogWindowMs = 10000;
+struct KickLog {
+    uint64_t firstMs = 0;
+    uint64_t repeats = 0;
+};
+std::mutex g_kickMu;
+std::unordered_map<std::string, KickLog> g_kicks;
+
+// True when this kick is the first for `target` in the window (log it); counts it otherwise.
+bool firstKickInWindow(const std::string& target, uint64_t now) {
+    std::lock_guard<std::mutex> lock(g_kickMu);
+    KickLog& k = g_kicks[target];
+    if (k.firstMs != 0 && now - k.firstMs <= kKickLogWindowMs) {
+        ++k.repeats;
+        return false;
+    }
+    if (k.repeats) logf("GAME kicked %s %llu more times", shortId(target).c_str(), static_cast<unsigned long long>(k.repeats));
+    k = {now, 0};
+    return true;
+}
+
+void logKickRepeats() {
+    std::lock_guard<std::mutex> lock(g_kickMu);
+    for (auto it = g_kicks.begin(); it != g_kicks.end();) {
+        if (it->second.repeats)
+            logf("GAME kicked %s %llu more times", shortId(it->first).c_str(),
+                 static_cast<unsigned long long>(it->second.repeats));
+        it = g_kicks.erase(it);
+    }
+}
+
 void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) {
     if (o && !g_shutdown) {
         std::string target = idString(o->TargetUserId);
         std::shared_ptr<DirectNet> net = g.net.load();
-        logf("GAME kicks %s from the room (direct link %s, game data from it %s, P2P disconnect %s, lobby status %s)",
-             shortId(target).c_str(), reachableDirectly(target) ? "up" : "down",
-             net && net->heardFromRecently(target, kDirectDataFreshMs) ? "recent" : "none for 10 s",
-             g.hold && g.hold->isHeld(target) ? "held by us" : "not held",
-             g.lobbyHold && g.lobbyHold->isHeld(target) ? "hidden by us" : "normal");
+        if (firstKickInWindow(target, GetTickCount64()))
+            logf("GAME kicks %s from the room (direct link %s, direct game packets to us from it %s, P2P disconnect %s, "
+                 "lobby status %s)",
+                 shortId(target).c_str(), reachableDirectly(target) ? "up" : "down",
+                 net && net->heardFromRecently(target, kDirectDataFreshMs) ? "recent" : "none for 10 s",
+                 g.hold && g.hold->isHeld(target) ? "held by us" : "not held",
+                 g.lobbyHold && g.lobbyHold->isHeld(target) ? "hidden by us" : "normal");
         // The game gave up on this member: a disconnect we are hiding must reach it now, or the member
         // would stay in the game (EOS already dropped it, so the kick itself may produce no status).
         if (g.lobbyHold && g.lobbyHold->abandon(target))
@@ -750,6 +786,7 @@ void maybeLogStats() {
          t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
          t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
          kbps(w.in, 60.0), kbps(w.relayed, 60.0));
+    logKickRepeats();
     logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
          static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
@@ -807,6 +844,14 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
     if (o && o->Data)
         g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
+    // EOS refuses anything above its packet limit, and so does the direct link (its receivers' games read
+    // with that limit too). The game then retries for about 26 s and disbands the room.
+    if (o && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE)
+        logRateLimited("oversize", 10000,
+                       "GAME sends a %u-byte packet (channel %u) to %s: over the %u-byte packet limit, so it cannot be "
+                       "delivered; the game retries for about 26 s and then disbands the room",
+                       o->DataLengthBytes, static_cast<unsigned>(o->Channel), peerLabel(o->RemoteUserId).c_str(),
+                       static_cast<unsigned>(EOS_P2P_MAX_PACKET_SIZE));
     std::shared_ptr<DirectNet> net = g.net.load();
     if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
         net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
@@ -834,7 +879,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     ++g.eosOut;
     if (r != EOS_Success) {
         ++g.eosSendFail;
-        std::string key = "send-fail-" + std::to_string(r);
+        std::string key = "send-fail-" + std::to_string(r) + "-" + remote;  // per target: one hides no others
         logRateLimited(key.c_str(), 10000, "EOS SendPacket to %s failed: %s", peerLabel(o ? o->RemoteUserId : nullptr).c_str(),
                        resultName(r));
     }

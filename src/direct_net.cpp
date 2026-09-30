@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <random>
 
@@ -34,7 +35,12 @@ constexpr uint16_t kDefaultPort = 27015;
 constexpr size_t kMaxClients = 16;
 static_assert(kMaxPayload + 3 * kMaxString + 64 < kMaxDatagram, "a full Data datagram must fit the receive buffer");
 
-uint64_t nowMs() { return GetTickCount64(); }
+// Millisecond resolution: GetTickCount64 moves in ~15.6 ms steps, which made every RTT sample on a
+// steady link the same number, the RTT variance zero and the retransmission timeout equal to the RTT.
+uint64_t nowMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 uint32_t randomNonce() {
     static std::random_device rd;
@@ -425,9 +431,9 @@ std::string DirectNet::statusLine() {
     char buf[256];
     std::string s;
     auto describe = [&](const Link& l) {
-        snprintf(buf, sizeof(buf), " [%s %s rtt=%ums pending=%zu retx=%llu]", shortId(l.puid).c_str(),
-                 addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.pendingCount(),
-                 static_cast<unsigned long long>(l.tx.retransmits()));
+        snprintf(buf, sizeof(buf), " [%s %s rtt=%ums rto=%ums pending=%zu retx=%llu dup=%llu]", shortId(l.puid).c_str(),
+                 addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.rtoMs(), l.tx.pendingCount(),
+                 static_cast<unsigned long long>(l.tx.retransmits()), static_cast<unsigned long long>(l.rx.duplicates()));
         s += buf;
     };
     if (opt_.mode == Mode::Host) {

@@ -411,6 +411,16 @@ int wmain(int argc, wchar_t** argv) {
           "line breaks inside a logged text are written as '?'");
     LogOpen(mark.c_str());
     Check(PreviousRun() == LastRun::Cut, "a name or message that says SHUTDOWN does not make a cut run look ended");
+
+    // Wide text past ASCII (the menu label's arrow, a path under a Japanese user name) is written as UTF-8;
+    // one that cannot be converted at all only cuts its line short, never fills it with old stack bytes.
+    Log("MENU label shown: \"%ls\"", L"NEW EDF6VR 2.0.0 \x2192 2.1.8 \x65E5\x672C");
+    Log("UNCONVERTIBLE <%ls> tail", L"ok\xD800" L"bad");  // a lone surrogate: no UTF-8 for it
+    const std::string wide = ReadText(mark);
+    Check(wide.find("MENU label shown: \"NEW EDF6VR 2.0.0 \xE2\x86\x92 2.1.8 \xE6\x97\xA5\xE6\x9C\xAC\"\r\n") != std::string::npos,
+          "a %ls argument past ASCII is written as UTF-8, whole");
+    Check(wide.find("] (text not convertible) UNCONVERTIBLE <%ls> tail\r\n") != std::string::npos,
+          "a %ls argument that cannot be converted leaves the line's own format, not a buffer of stack bytes");
     // A mark counts only right after a line's own timestamp.
     Check(write(banner + ended + banner + line("[2026-09-20 00:09:00.000] ROOM x SHUTDOWN y")) == LastRun::Cut,
           "SHUTDOWN later in a line is not the mark");

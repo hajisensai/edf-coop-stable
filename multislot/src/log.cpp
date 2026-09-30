@@ -5,6 +5,7 @@
 #include "log.h"
 
 #include <atomic>
+#include <clocale>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -474,6 +475,10 @@ void LogClose() {
 }
 
 void LogOpen(const wchar_t* path) {
+    // %ls arguments (the menu label with its arrow, paths under a Chinese or Japanese user name) are written
+    // as UTF-8 like the rest of the file; in the default "C" locale anything past ASCII fails the whole line.
+    // The CRT is linked statically, so this locale is the plugin's own and the game's is untouched.
+    setlocale(LC_CTYPE, ".UTF8");
     // Lengths are checked by hand: *_s string functions end the process when something does not fit.
     const std::size_t length = wcslen(path);
     if (length >= MAX_PATH) return;
@@ -531,7 +536,7 @@ void LogWrite(const char* text, std::size_t length) {
 }
 
 void Log(const char* format, ...) {
-    char line[1024];
+    char line[1024]{};  // zeroed: a failed conversion below leaves what it wrote, then zeros, never old stack
     SYSTEMTIME now{};
     GetLocalTime(&now);
     int used = _snprintf_s(line, sizeof(line), _TRUNCATE, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ", now.wYear, now.wMonth,
@@ -541,7 +546,14 @@ void Log(const char* format, ...) {
     va_start(args, format);
     int body = _vsnprintf_s(line + used, sizeof(line) - used, _TRUNCATE, format, args);
     va_end(args);
-    std::size_t length = body < 0 ? sizeof(line) - 1 : static_cast<std::size_t>(used + body);
+    // -1 is both "truncated" (the buffer is full) and "an argument could not be converted" (it is not):
+    // the text that is really there is up to the first NUL either way.
+    std::size_t length = body < 0 ? strnlen(line, sizeof(line) - 1) : static_cast<std::size_t>(used + body);
+    if (body < 0 && length == static_cast<std::size_t>(used)) {
+        // The conversion emptied the line: say which one it was (the format is the plugin's own text).
+        const int note = _snprintf_s(line + used, sizeof(line) - used, _TRUNCATE, "(text not convertible) %s", format);
+        length = note < 0 ? strnlen(line, sizeof(line) - 1) : static_cast<std::size_t>(used + note);
+    }
     if (length > sizeof(line) - 3) length = sizeof(line) - 3;
     // One call, one line: text that comes from elsewhere (member names, EOS messages) may hold CR, LF or other
     // controls, which would end this line early and start one that reads as the plugin's own.

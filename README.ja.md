@@ -135,7 +135,6 @@ EDF6 は受信した EOS パケットをすべてゲームデータとして解�
 - `RESILIENCE ... RECOVERED` は切断の隠蔽に成功したことを、`did not come back within` はタイムアウト後にゲームへ渡したことを示します。
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic のロビーサービスがプレイヤーを落として戻しましたが、ゲームは気付いていません。`direct link silent for ...` は本当にいなくなったのでゲームに伝えたことを示します。
 - `GAME kicks ... from the room (direct link up/down, ...)`：ゲームが自分でプレイヤーを部屋から外しました（またはあなたがキックしました）。その時点で直結がまだそのプレイヤーの接続を示していたかを記録します。
-- `GAME sends a N-byte packet ...: over the 1170-byte packet limit`：ゲームが EOS で送れない大きすぎるパケットを作りました（EDF6MultiSlot で 8 人以上がミッションを始めるときに出ます）。約 26 秒再送したあと部屋を解散します。直後の `GAME kicked X N more times` は、キックが反映されるまでゲームが繰り返し呼んだ回数です。
 - `STATS last 60s: ...` は 1 分ごとの送受信統計です。`send-failures` が 0 でない場合はログを添えてください。
 - `TRAFFIC last 60s: ...`：ゲーム自身の送信量（平均と最も多かった 1 秒、kbps。ゲームは通常の同期を約 320 kbps 以内に抑え、上限に近づくと重要度の低い更新を省きます）、そのうち複数のプレイヤーへ送った同じデータの割合、5 秒以内に同じプレイヤーへ同じデータを送り直したパケットの割合（ゲーム自身の再送があればそれ）、直結が実際に使っている上り / 下り（ホストが他の人のために中継した分を含む）。
 - `DIRECT refused hello for ...`：誰かがあるプレイヤーとして直結しようとしましたが、証明できませんでした。プレイヤーの入室直後 1～2 秒に `published no direct-link identity` が出るのは正常です（その人の部屋情報がまだホストに届いていないだけで、相手は毎秒再試行します）。プラグインなし、または 0.3.6 以前のプレイヤーについては、その人は EOS のまま続行するという意味です。`not signed by the identity that player published` は誰かがそのプレイヤーになりすまそうとしたことを示します。拒否されたので、そのプレイヤーには影響しません。

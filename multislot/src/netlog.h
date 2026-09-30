@@ -23,4 +23,8 @@ void InitFinalHello(const unsigned char* gameBase);
 // kill (which never reach it) correctly unmarked. True when the import was found and redirected.
 bool InstallExitMarker(HMODULE game);
 
+// Points EDF.dll's import `function` of `dll` at `replacement`. `*original` gets the previous target before the
+// slot changes; a second redirect of the same slot wraps the first.
+bool RedirectGameImport(HMODULE game, const char* dll, const char* function, void* replacement, void** original);
+
 }  // namespace multislot

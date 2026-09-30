@@ -126,6 +126,12 @@ std::vector<CallSite> MissionCalls();
 // Callback vtable slots replaced by mission handlers (mission.h, MissionSlotHandler).
 std::vector<PointerSlot> MissionSlots();
 
+// The mission start message (packetfit.h), applied with [Mission] Extend=1: the host's MissionSync_Res record writes
+// and everyone's MissionSync_Update record reads are redirected, and a hook after the host's record loop writes
+// the records it held back. A message that fits one EOS packet is written exactly as before.
+std::vector<CallSite> PacketFitCalls();
+std::vector<MidSite> PacketFitHooks();
+
 // Enemy spawn counts for 5-8 players (spawn.h), applied with [Mission] Extend=1 and ExtraEnemies=1.
 // Only online missions with more than four players get different counts.
 std::vector<MidSite> SpawnHooks();

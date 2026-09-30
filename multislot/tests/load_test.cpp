@@ -287,6 +287,8 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : missionCalls) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
         for (const auto& hook : SpawnHooks()) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& slot : MissionSlots()) untouched = untouched && SlotTargets(base + slot.rva, reinterpret_cast<std::uint64_t>(base), slot.target);
+        for (const auto& call : PacketFitCalls()) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
+        for (const auto& hook : PacketFitHooks()) untouched = untouched && SiteUntouched(base, hook);
         return untouched;
     };
 
@@ -474,11 +476,17 @@ int wmain(int argc, wchar_t** argv) {
         if (mode == L"nomission") {
             Check(missionUntouched(), "Extend=0 leaves every mission site untouched");
             Check(Contains(log, "Mission: Extend=0"), "Extend=0 is logged");
+            Check(!Contains(log, "Mission sync:"), "Extend=0 leaves the mission start message alone");
         } else {
             Check(Applied(base, missionPatches) == static_cast<int>(missionPatches.size()), "every mission patch is written");
             for (const auto& hook : missionHooks) Check(HookedInto(base, hook, plugin), hook.name);
             for (const auto& call : missionCalls) Check(RedirectedInto(base + call.rva, plugin), call.name);
             for (const auto& slot : MissionSlots()) Check(SlotInto(base, slot, plugin), slot.name);
+            for (const auto& call : PacketFitCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);
+            for (const auto& hook : PacketFitHooks()) Check(HookedInto(base, hook, plugin), hook.name);
+            // Whatever NetLog and HandshakeRecovery say: without it no mission of eight starts.
+            Check(Contains(log, "Mission sync: a start message too large for one EOS packet"),
+                  "the mission start message transport is installed with Extend=1");
             Check(Contains(log, ("Mission: players 5-" + std::to_string(kMaxPlayers)).c_str()) && !Contains(log, "Mission: Extend=0"),
                   "mission support is logged (and only that)");
             const bool spawns = mode != L"host4";

@@ -26,6 +26,7 @@
 #include "midhook.h"
 #include "mission.h"
 #include "netlog.h"
+#include "packetfit.h"
 #include "patches.h"
 #include "peertimeout.h"
 #include "roomview.h"
@@ -176,6 +177,7 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
             for (const auto& site : SpawnHooks()) hooks.push_back({site, SpawnHookHandler(site.rva)});
         if (ghosts > 0)
             for (const auto& site : GhostHooks()) hooks.push_back({site, GhostHookHandler(site.rva)});
+        for (const auto& site : PacketFitHooks()) hooks.push_back({site, PacketFitHookHandler(site.rva)});
     }
     std::vector<Redirect> redirects;
     const auto guest = GuestCalls();
@@ -196,6 +198,7 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
             redirects.push_back({call, reinterpret_cast<void*>(&PeerTimeoutLeaveCheck)});
     if (mission) {
         for (const auto& call : MissionCalls()) redirects.push_back({call, MissionCallHandler(call.rva)});
+        for (const auto& call : PacketFitCalls()) redirects.push_back({call, PacketFitCallHandler(call.rva)});
         if (ghosts > 0)
             for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
     }
@@ -538,6 +541,7 @@ bool LoadPlugin(PluginInfo* info) {
     InitRoomView(base, roomView);
     InitFakeMembers(base);
     InitMission(base, ghosts);
+    InitPacketFit(base);
     InitJoinLog(base);
     InitFinalHello(base);
     InitPeerTimeout(base);
@@ -587,6 +591,18 @@ bool LoadPlugin(PluginInfo* info) {
         Log("Mission: Extend=0, mission code untouched (only rooms of up to four players can start safely)");
     if (ghosts > 0)
         Log("Test: GhostPlayers=%d - a mission started alone online gets %d idle copies of you as extra players", ghosts, ghosts);
+    // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
+    if (mission) {
+        const int imports = InstallPacketFit(game, &RedirectGameImport);
+        if (imports == 2)
+            Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "
+                "what fits and sends the other loadout records beside it; smaller ones are unchanged. Everyone in a "
+                "room of more than 4 needs this version",
+                kEosMaxPacket);
+        else
+            Log("Mission sync: only %d of the 2 EOS P2P imports could be redirected; missions of eight or more players "
+                "cannot start", imports);
+    }
     if (netLog || recovery) {
         const int imports = InstallNetLog(game, netLog, recovery);
         if (netLog)

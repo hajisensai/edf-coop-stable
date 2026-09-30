@@ -2,7 +2,8 @@
 //
 // On joining or creating a lobby the plugin publishes member attributes on its own member: a marker
 // saying it runs the plugin, the commitment of its direct-link identity (a direct-link host lets a
-// player in only as the member whose identity it proves) and, for a direct-link host, the address
+// player in only as the member whose identity it proves, and a joiner accepts as host only the room
+// owner proving its identity) and, for a direct-link host, the address
 // to connect to. EDF.dll never
 // reads member attributes (it imports none of those functions), while every other plugin reads them
 // from the lobby details EOS already keeps locally. That answers "does this peer run the plugin" and

@@ -72,23 +72,51 @@ void testWire() {
     m.data.channel = 3;
     m.data.reliability = 2;
     m.data.payload = payloadFor(7);
-    for (const std::string key : {"", "secret"}) {
+    m.counter = 77;
+    for (const std::string key : {"", "secret"}) {  // link messages carry the link tag, not the Key's
         auto dg = dn::encode(m, key);
         dn::DecodeError err;
         auto back = dn::decode(dg.data(), dg.size(), key, &err);
-        CHECK(back && err == dn::DecodeError::None);
+        CHECK(back && err == dn::DecodeError::None && back->counter == 77);
         CHECK(back && back->data.payload == m.data.payload && back->data.src == kA && back->data.dst == kB &&
               back->data.socketName == "EDF6" && back->data.channel == 3 && back->data.seq == 42);
     }
-    auto tagged = dn::encode(m, "secret");
+    // Handshake messages carry the shared Key's tag.
+    dn::Message challenge;
+    challenge.type = dn::MsgType::Challenge;
+    challenge.challenge.clientNonce = 5;
+    auto tagged = dn::encode(challenge, "secret");
     dn::DecodeError err;
+    CHECK(dn::decode(tagged.data(), tagged.size(), "secret", &err).has_value());
     CHECK(!dn::decode(tagged.data(), tagged.size(), "other", &err) && err == dn::DecodeError::TagMismatch);
     CHECK(!dn::decode(tagged.data(), tagged.size(), "", &err) && err == dn::DecodeError::TagUnexpected);
-    auto plain = dn::encode(m, "");
+    auto plain = dn::encode(challenge, "");
     CHECK(!dn::decode(plain.data(), plain.size(), "secret", &err) && err == dn::DecodeError::TagMissing);
-    tagged[20] ^= 1;
+    tagged[10] ^= 1;
     CHECK(!dn::decode(tagged.data(), tagged.size(), "secret", &err) && err == dn::DecodeError::TagMismatch);
     CHECK(!dn::decode(plain.data(), 10, "", &err) && err == dn::DecodeError::Truncated);
+
+    // Link tags: made with one direction's key, checked with it; any changed byte or other key fails.
+    dn::LinkKey k1{}, k2{};
+    k1.fill(1);
+    k2.fill(2);
+    dn::LinkMac mac1(k1), mac1b(k1), mac2(k2);
+    CHECK(mac1.valid() && mac2.valid());
+    auto dg = dn::encode(m, "");
+    CHECK(dn::sealLink(dg, 9, mac1));
+    CHECK(dn::linkTagValid(dg.data(), dg.size(), mac1b) && !dn::linkTagValid(dg.data(), dg.size(), mac2));
+    auto back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->counter == 9);
+    bool everyByte = true;
+    for (size_t i = 0; i < dg.size(); ++i) {
+        auto bent = dg;
+        bent[i] ^= 0x40;
+        everyByte &= !dn::linkTagValid(bent.data(), bent.size(), mac1b);
+    }
+    CHECK(everyByte);
+    auto resent = dg;  // a retransmission: same datagram, new counter, new tag
+    CHECK(dn::sealLink(resent, 10, mac1) && resent != dg && dn::linkTagValid(resent.data(), resent.size(), mac1b));
+    CHECK(!dn::linkTagValid(dg.data(), 20, mac1b));
 
     dn::Message ack;
     ack.type = dn::MsgType::Ack;
@@ -108,9 +136,14 @@ void testWire() {
     w.welcome.clientNonce = 9;
     w.welcome.hostPuid = kHost;
     w.welcome.roster = {kHost, kA, kB};
-    auto dg = dn::encode(w, "");
-    auto back = dn::decode(dg.data(), dg.size(), "", &err);
-    CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9);
+    w.welcome.ecdh.fill(3);
+    w.welcome.publicKey.fill(4);
+    w.welcome.signature.fill(5);
+    dg = dn::encode(w, "");
+    back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9 &&
+          back->welcome.ecdh == w.welcome.ecdh && back->welcome.publicKey == w.welcome.publicKey &&
+          back->welcome.signature == w.welcome.signature);
 }
 
 // One of every message type, with fields filled in.
@@ -123,6 +156,7 @@ std::vector<dn::Message> sampleMessages() {
     m.hello.puid = kA;
     m.hello.cookie.fill(3);
     m.hello.publicKey.fill(4);
+    m.hello.ecdh.fill(8);
     m.hello.signature.fill(5);
     all.push_back(m);
     m = {};
@@ -136,9 +170,13 @@ std::vector<dn::Message> sampleMessages() {
     m.welcome.clientNonce = 9;
     m.welcome.hostPuid = kHost;
     m.welcome.roster = {kHost, kA, kB};
+    m.welcome.ecdh.fill(9);
+    m.welcome.publicKey.fill(10);
+    m.welcome.signature.fill(11);
     all.push_back(m);
     m = {};
     m.type = dn::MsgType::Roster;
+    m.counter = 3;
     m.roster.hostNonce = 5;
     m.roster.roster = {kHost, kB};
     all.push_back(m);
@@ -157,7 +195,7 @@ std::vector<dn::Message> sampleMessages() {
     m.ack.cumulative = 4;
     m.ack.set(7);
     all.push_back(m);
-    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye}) {
+    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye, dn::MsgType::Reset}) {
         m = {};
         m.type = t;
         m.ping.timeMs = 1234;
@@ -171,7 +209,8 @@ void testWireRejectsMalformed() {
     dn::DecodeError err;
     auto decodes = [&](const std::vector<uint8_t>& dg) { return dn::decode(dg.data(), dg.size(), "", &err).has_value(); };
 
-    // Data: header(8) epoch(4) seq(4), then src as u8 length + bytes.
+    // Data: header(8) epoch(4) counter(8) seq(4), then src as u8 length + bytes; the link tag last.
+    const size_t tag = dn::kLinkTagBytes;
     dn::Message m;
     m.type = dn::MsgType::Data;
     m.data.seq = 1;
@@ -181,16 +220,16 @@ void testWireRejectsMalformed() {
     auto dg = dn::encode(m, "");
     CHECK(decodes(dg));  // the limits themselves are fine
     auto longId = dg;
-    longId[16] = static_cast<uint8_t>(dn::kMaxString + 1);
-    longId.insert(longId.begin() + 17, 'a');
+    longId[24] = static_cast<uint8_t>(dn::kMaxString + 1);
+    longId.insert(longId.begin() + 25, 'a');
     CHECK(!decodes(longId) && err == dn::DecodeError::Malformed);  // an id the encoder would have cut
     m.data.src = kA;
     m.data.payload.clear();
     dg = dn::encode(m, "");
     auto big = dg;  // payload length is the last field before the payload
     uint16_t over = static_cast<uint16_t>(dn::kMaxPayload + 1);
-    memcpy(&big[big.size() - 2], &over, 2);
-    big.insert(big.end(), dn::kMaxPayload + 1, 7);
+    memcpy(&big[big.size() - tag - 2], &over, 2);
+    big.insert(big.end() - tag, dn::kMaxPayload + 1, 7);
     CHECK(!decodes(big) && err == dn::DecodeError::Malformed);
 
     dn::Message r;
@@ -198,7 +237,7 @@ void testWireRejectsMalformed() {
     r.roster.roster.assign(32, kA);
     dg = dn::encode(r, "");
     CHECK(decodes(dg));
-    dg[12] = 33;  // roster count, after the host nonce
+    dg[24] = 33;  // roster count, after epoch, counter and host nonce
     dg.push_back(static_cast<uint8_t>(kA.size()));
     dg.insert(dg.end(), kA.begin(), kA.end());
     CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
@@ -342,6 +381,9 @@ dn::DirectOptions joinOptions(const std::string& address, double drop, const std
     o.listenPort = 0;
     o.hostAddress = address;
     o.key = key;
+    // The room is kHost's, which published this process's identity like every test host proves.
+    o.roomOwner = kHost;
+    o.roomOwnerIdentity = dn::processIdentity()->commitment();
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     return o;
@@ -448,16 +490,29 @@ std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms, 
     return std::nullopt;
 }
 
+// Sends an already encoded datagram to 127.0.0.1:`port` from `peer`'s socket.
+void sendRawTo(RawPeer& peer, uint16_t port, const std::vector<uint8_t>& dg) {
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(peer.s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+           reinterpret_cast<sockaddr*>(&to), sizeof(to));
+}
+
 // A hand-driven client: says hello as `puid`, proves it with `identity` once the host sent a cookie,
-// and keeps the link epoch the host welcomed it with.
+// and keeps the link epoch and keys the host welcomed it with.
 struct RawClient {
     RawPeer peer;
     std::shared_ptr<const dn::Identity> identity = dn::processIdentity();
+    std::unique_ptr<dn::EcdhKey> ecdh = dn::EcdhKey::generate();  // new for every connect()
     std::string key;
     uint16_t port = 0;
     std::string puid;
     uint32_t nonce = 0;
     uint32_t epoch = 0;
+    dn::LinkMac tx;  // client -> host link key
+    uint64_t counter = 0;
     dn::Message lastHello;  // the last proven hello sent
 
     // A hello of session `session`; signed when `cookie` is given.
@@ -470,6 +525,7 @@ struct RawClient {
         if (cookie) {
             h.hello.cookie = *cookie;
             h.hello.publicKey = identity->publicKey();
+            h.hello.ecdh = ecdh->publicKey();
             h.hello.signature = identity->sign(*dn::helloDigest(h.hello)).value();
         }
         return h;
@@ -478,27 +534,53 @@ struct RawClient {
         sendTo(peer, port, h, key);
         auto w = receiveFrom(peer, dn::MsgType::Welcome, ms, key);
         if (!w || w->welcome.clientNonce != h.hello.nonce) return false;
-        epoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        auto shared = ecdh->agree(w->welcome.ecdh);
+        auto keys = shared ? dn::deriveLinkKeys(*shared, key, h.hello, w->welcome) : std::nullopt;
+        if (!keys) return false;
+        uint32_t welcomedEpoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        if (welcomedEpoch != epoch) counter = 0;  // a new link; a repeated welcome keeps the old one going
+        epoch = welcomedEpoch;
+        tx = dn::LinkMac(keys->clientToHost);
         return true;
     }
+    // Connects and confirms the link keys the way a real client does (any datagram with them), then
+    // waits for the member list the host sends once the link is up.
     bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce, int attempts = 5) {
         port = hostPort;
         puid = id;
         nonce = sessionNonce;
+        ecdh = dn::EcdhKey::generate();
         uint64_t session = identity->nextSession();
         for (int attempt = 0; attempt < attempts; ++attempt) {
             sendTo(peer, port, hello(session, nullptr), key);
             auto c = receiveFrom(peer, dn::MsgType::Challenge, 500, key);
             if (!c || c->challenge.clientNonce != nonce) continue;
             lastHello = hello(session, &c->challenge.cookie);
-            if (welcomed(lastHello, 500)) return true;
+            if (!welcomed(lastHello, 500)) continue;
+            dn::Message ping;
+            ping.type = dn::MsgType::Ping;
+            link(ping);
+            auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+            while (std::chrono::steady_clock::now() < end) {
+                auto r = receiveFrom(peer, dn::MsgType::Roster, 100, key);
+                if (r && std::find(r->roster.roster.begin(), r->roster.roster.end(), puid) != r->roster.roster.end())
+                    return true;
+            }
+            return false;
         }
         return false;
     }
+    // Encodes and seals a link message with this client's link.
+    std::vector<uint8_t> sealed(dn::Message m) {
+        m.epoch = epoch;
+        auto dg = dn::encode(m, key);
+        dn::sealLink(dg, ++counter, tx);
+        return dg;
+    }
+    void link(const dn::Message& m) { sendRawTo(peer, port, sealed(m)); }
     void data(uint32_t seq, const std::string& dst, const std::vector<uint8_t>& payload) {
         dn::Message m;
         m.type = dn::MsgType::Data;
-        m.epoch = epoch;
         m.data.seq = seq;
         m.data.src = puid;
         m.data.dst = dst;
@@ -506,7 +588,7 @@ struct RawClient {
         m.data.channel = 1;
         m.data.reliability = seq ? 1 : 0;
         m.data.payload = payload;
-        sendTo(peer, port, m, key);
+        link(m);
     }
 };
 
@@ -542,12 +624,13 @@ void testIdentityCrypto() {
     auto sig = a->sign(*digest);
     CHECK(sig && dn::verifySignature(a->publicKey(), *digest, *sig));
     CHECK(!dn::verifySignature(b->publicKey(), *digest, *sig));  // someone else's key
-    for (auto change : {0, 1, 2, 3}) {  // every signed field matters
+    for (auto change : {0, 1, 2, 3, 4}) {  // every signed field matters
         dn::HelloMsg t = h;
         if (change == 0) t.nonce ^= 1;
         if (change == 1) ++t.session;
         if (change == 2) t.puid = kB;
         if (change == 3) t.cookie[0] ^= 1;
+        if (change == 4) t.ecdh[0] ^= 1;
         CHECK(!dn::verifySignature(a->publicKey(), *dn::helloDigest(t), *sig));
     }
     dn::PublicKey offCurve{};

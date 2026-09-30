@@ -72,7 +72,7 @@ uint32_t ReliableSender::rtoMs() const {
     return std::clamp(static_cast<uint32_t>(rto), kMinRtoMs, kMaxRtoMs);
 }
 
-void ReliableSender::poll(uint64_t nowMs, const std::function<void(const std::vector<uint8_t>&)>& resend) {
+void ReliableSender::poll(uint64_t nowMs, const std::function<void(std::vector<uint8_t>&)>& resend) {
     if (lastBudgetMs_ == 0) lastBudgetMs_ = nowMs;
     budget_ = std::min(kRetransmitBurst, budget_ + (nowMs - lastBudgetMs_) * kRetransmitPerSecond / 1000.0);
     lastBudgetMs_ = nowMs;

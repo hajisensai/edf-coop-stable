@@ -2,12 +2,15 @@
 
 #include <atomic>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "auth.h"
@@ -599,6 +602,17 @@ void hookDestroyLobby(EOS_HLobby h, const void* o, void* clientData, void* cb) {
     g.api.gameDestroyLobby(h, o, clientData, cb);
 }
 
+// The room owner's EOS id and the direct-link identity commitment it published ("" when not known).
+// EOS calls: run on the EOS tick only.
+std::pair<std::string, std::string> roomOwnerIdentity() {
+    EOS_ProductUserId owner = nullptr;
+    g.marker.ownerAddress(&owner);
+    std::string id = idString(owner);
+    std::map<std::string, std::string> ids = g.marker.memberIdentities();
+    auto it = ids.find(id);
+    return {id, it == ids.end() ? std::string() : it->second};
+}
+
 void startAutoJoinAttemptLocked(uint64_t now) {
     AutoJoin& a = g.autoJoin;
     DirectOptions o = g.config.direct;
@@ -606,6 +620,7 @@ void startAutoJoinAttemptLocked(uint64_t now) {
     o.listenPort = 0;
     o.hostAddress = a.candidates[a.next++];
     o.advertisedHost = true;  // the room host chose it, not this player
+    std::tie(o.roomOwner, o.roomOwnerIdentity) = roomOwnerIdentity();  // who may answer on it
     auto net = std::make_shared<DirectNet>();
     if (!net->start(o)) {
         logf("DIRECT auto-connect could not open a UDP socket; game traffic stays on EOS");
@@ -794,15 +809,18 @@ void maybeLogStats() {
 }
 
 // A direct-link host lets a player in only as the room member whose published identity it proves
-// (DirectNet::setMemberIdentities). The member list lives in EOS, which we only call from the tick.
+// (DirectNet::setMemberIdentities), and a joiner accepts a host only as the room owner, proven the
+// same way (DirectNet::setRoomOwner). The member list lives in EOS, which we only call from the tick.
 constexpr uint64_t kIdentityRefreshMs = 500;
 void refreshMemberIdentities(uint64_t now) {
     static uint64_t lastMs = 0;
-    if (now - lastMs < kIdentityRefreshMs) return;
+    if (now - lastMs < kIdentityRefreshMs || !g.markerReady) return;
     lastMs = now;
     std::shared_ptr<DirectNet> base = g.baseNet.load();
-    if (base && g.markerReady && g.config.direct.mode == Mode::Host)
-        base->setMemberIdentities(g.marker.memberIdentities());
+    if (base && g.config.direct.mode == Mode::Host) base->setMemberIdentities(g.marker.memberIdentities());
+    auto [owner, commitment] = roomOwnerIdentity();
+    if (base && g.config.direct.mode == Mode::Join) base->setRoomOwner(owner, commitment);
+    if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) net->setRoomOwner(owner, commitment);
 }
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.

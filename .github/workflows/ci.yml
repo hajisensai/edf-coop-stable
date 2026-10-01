@@ -1,0 +1,71 @@
+name: CI
+
+# Builds EDF6Coop.dll for every room size and runs every test that needs no game. CI has neither the game's
+# menu layout (multislot/assets/LYT_MAINFRAME.SGO, made from Root.cpk) nor EDF.dll: build.ps1 -CI
+# (MULTISLOT_CI=ON) embeds a placeholder layout that package.ps1 and the release workflow refuse, and the
+# tests against the game's code (PatchTablesMatchEDF, PluginLoad_*) report themselves skipped, which ctest
+# lists at the end of its output. Release packages are built with the game by release.ps1.
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'multislot/**'
+      - 'build.ps1'
+      - 'sign-update.ps1'
+      - '.github/workflows/ci.yml'
+      - '.github/loader-fix-requirements.txt'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'multislot/**'
+      - 'build.ps1'
+      - 'sign-update.ps1'
+      - '.github/workflows/ci.yml'
+      - '.github/loader-fix-requirements.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        players: [8, 10, 12, 16, 24, 32]
+    name: ${{ matrix.players }} players
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch EDFModLoader (pinned by hash)
+        shell: pwsh
+        run: ./multislot/tools/fetch_modloader.ps1
+
+      # The build runs multislot/tools/fix_winmm_proxy.py on the loader, which needs pefile and capstone. The
+      # runner has several Pythons and CMake would pick its own, so the build is told which one has them.
+      - name: Install the loader-fix tools (pinned by hash)
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r .github/loader-fix-requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
+          "LOADER_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $env:GITHUB_ENV
+
+      - name: Build and test
+        shell: pwsh
+        run: ./build.ps1 -Players ${{ matrix.players }} -Test -CI
+
+      - name: Say which tests were skipped
+        shell: pwsh
+        env:
+          PLAYERS: ${{ matrix.players }}
+        run: |
+          $dir = if ($env:PLAYERS -eq '8') { 'multislot/build' } else { "multislot/build-$($env:PLAYERS)p" }
+          $listed = & ctest --test-dir $dir --show-only=json-v1 | ConvertFrom-Json
+          $game = $listed.tests | Where-Object { $_.name -like 'PatchTablesMatchEDF' -or $_.name -like 'PluginLoad_*' }
+          $names = ($game | ForEach-Object { $_.name }) -join ', '
+          Write-Output "::warning title=Game tests skipped::No EDF.dll in CI, so these ran as skipped: $names. Run build.ps1 -Test on a machine with the game to cover them."

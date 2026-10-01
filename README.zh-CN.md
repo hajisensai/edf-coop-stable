@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文** | [日本語](README.ja.md)
 
-EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) 插件形式运行。
+**EDF6Coop** 让 EARTH DEFENSE FORCE 6（PC / Steam）的联机人数更多、更稳：最多 8、10、12、16、24 或 32 人的房间（8Player MOD），Epic 抽风也不散的玩家直连，以及丢包重发。它是一个 [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) 插件 `EDF6Coop.dll`，取代原来的两个插件 EDF6DirectNet 和 EDF6MultiSlot。
 
 地球防卫军系列的联机稳定 Mod。目前支持：**EDF6**。EDF6 稳定后计划支持 EDF5 等其他作品。
 
@@ -10,9 +10,11 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 >
 > **状态：实验性。** 900+ 项自动化测试通过；自动直连和断线宽限已在真实的四人联机中验证（0.3.2：所有人都走直连，7 次连接中断都没让游戏察觉）。出问题请附日志提 [Issue](https://github.com/hajisensai/edf-coop-stable/issues)。
 
-## EDF6MultiSlot：8 人联机（可选 10 / 12 人）
+## 房间人数与旧插件
 
-8 人联机插件 EDF6MultiSlot（原作者 momotori01，公有领域）在 [multislot/](multislot/README.zh-CN.md) 目录，有自己的构建、打包和说明，可以和 EDF6DirectNet 一起用。
+每种房间人数一个安装包：**8p、10p、12p、16p、24p、32p**（`EDF6Coop-<版本>-<N>p.zip`）。某个人数的房间只有同人数版本才能加入，所以同一个房间的人都用同一个包；拿不准就用 8p。8p 玩得最多，10p、12p 少一些。**16p、24p、32p 是 2.0.0 新增的，目前只用离线幽灵队员验证过**，还没有真的这么多人联机测试过。房间越大，房主需要的上传带宽越大：开了直连时所有玩家的数据都经过房主。
+
+房间部分（8Player MOD：超过 4 人、房间画面、任务、护甲复制）原作者是 **momotori01**，原名 EDF6MultiSlot（公有领域，[multislot/LICENSE](multislot/LICENSE)），历史和测试在 [multislot/](multislot/README.zh-CN.md)。从 2.0.0 起它和 EDF6DirectNet 合成一个 DLL、一份日志（`EDF6Coop.log`）、一个设置文件（`EDF6Coop.ini`）。安装时旧的 `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` 会改名为 `.disabled`；旧设置文件保留，第一次启动时把值搬进 `EDF6Coop.ini`。
 
 ## 它解决什么
 
@@ -27,19 +29,19 @@ EARTH DEFENSE FORCE 6（PC / Steam）联机稳定插件 **EDF6DirectNet**，以 
 
 ## 安装
 
-1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载 `EDF6DirectNet-v*.zip`，**完整解压**到任意文件夹。
+1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载对应房间人数的 `EDF6Coop-<版本>-<N>p.zip`（见上文），**完整解压**到任意文件夹。
 2. 双击 **`INSTALL.bat`**：从 Steam 库自动找到 EDF6 并安装。
    - 没有 EDFModLoader 时会装上附带的加载器：[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10（MIT），且**修复了官方版的一个多线程问题**（它的函数转发口共用同一个跳转目标变量，多个线程同时调用时可能跳到错误的函数；详见 [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)）。已有的 `winmm.dll` 不会覆盖，只有一个例外：如果它与官方 v1.0.10 的文件逐字节相同，就换成修复版，原文件备份为 `winmm.dll.bak-official`。其他加载器（更新的或打过补丁的）一律不动。
    - 找不到游戏时会让你粘贴游戏目录（Steam 库里右键 EDF6 → 管理 → 浏览本地文件）。
-3. 从 Steam 正常启动游戏。第一次启动后生成 `Mods\Plugins\EDF6DirectNet.ini`（设置）和 `EDF6DirectNet.log`（日志）。
+3. 从 Steam 正常启动游戏。第一次启动后生成 `Mods\Plugins\EDF6Coop.ini`（设置）和 `EDF6Coop.log`（日志）。
 
-zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）；默认设置文件的注释按 Windows 显示语言写成中文 / 日文 / 其他语言一律英文。
+zip 内附 README_EDF6Coop.txt（English）、README_EDF6Coop_zh.txt（中文）、README_EDF6Coop_ja.txt（日本語）；默认设置文件的注释按 Windows 显示语言写成中文 / 日文 / 其他语言一律英文。
 
-升级：插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载 `EDF6DirectNet.dll` 和带签名的清单 `EDF6DirectNet.dll.sig`，把 DLL 放到原位，下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。可以依赖的保证：
+升级：插件会自动更新。每次启动游戏，它在后台向 GitHub 查询最新版本；有新版就下载同房间人数的 `EDF6Coop-<N>p.dll` 和带签名的清单 `EDF6Coop-<N>p.dll.sig`，把 DLL 放到原位（`EDF6Coop.dll`），下次启动游戏生效，日志里会出现 `UPDATE installed ...`。连不上 GitHub 不影响游戏（请求走系统代理）。手动运行新版的 `INSTALL.bat` 也照样可以，设置文件保留。可以依赖的保证：
 
 - **发布带签名。** 清单（版本号和 DLL 的 SHA-256）用 ECDSA P-256 签名，私钥只在发布流水线里；对应的公钥编译在插件里。只有签名校验通过、签名里的版本就是正在安装的那个发布且比当前运行的更新、DLL 的 SHA-256 与签名一致且里面写的版本号相符，才会安装；没有有效签名的文件一律不安装，下载也只来自本仓库的发布地址。能改发布文件或你的网络连接、但无法签名的人，装不上任何东西。
-- **自动回滚。** 被替换的 DLL 会以 `EDF6DirectNet.dll.old` 留在旁边，直到游戏进入标题画面后新版本又运行满 20 秒。如果游戏在这之前崩溃或被强制结束，下次启动会自动把旧版本放回去，记下失败的版本（`EDF6DirectNet.dll.bad`，不会再装它），这一次游戏不加载插件。在这之前正常退出游戏不算失败：下次启动新版本继续试用。
-- **旧版本的设置文件。** 没有 `AutoUpdate` 这一行的设置文件（旧版本不写这一行）和 0.3.6 一样视为**开启**，每次启动日志都会写明。要关闭，在 `Mods\Plugins\EDF6DirectNet.ini` 末尾加上这两行：
+- **自动回滚。** 被替换的 DLL 会以 `EDF6Coop.dll.old` 留在旁边，直到游戏进入标题画面后新版本又运行满 20 秒。如果游戏在这之前崩溃或被强制结束，下次启动会自动把旧版本放回去，记下失败的版本（`EDF6Coop.dll.bad`，不会再装它），这一次游戏不加载插件。在这之前正常退出游戏不算失败：下次启动新版本继续试用。
+- **旧版本的设置文件。** 没有 `AutoUpdate` 这一行的设置文件（旧版本不写这一行）和 0.3.6 一样视为**开启**，每次启动日志都会写明。要关闭，在 `Mods\Plugins\EDF6Coop.ini` 末尾加上这两行：
 
   ```
   [Update]
@@ -47,7 +49,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
   ```
 
   当前版本新生成的设置文件里已经是 `AutoUpdate=1`。`AutoUpdate=0` 关闭下载（回滚仍然有效）。
-卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动，安装程序升级过的加载器也保留，备份 `winmm.dll.bak-official` 留在原处）。它会删除插件、设置、日志和更新留下的文件（`EDF6DirectNet.dll.old` 等），以及插件在路由器上建立的 UPnP 映射（只删指向本机、名为 `EDF6DirectNet` 的那一条；路由器不支持 UPnP 就直接跳过）。若当初添加过防火墙规则，请以管理员身份运行 `UNINSTALL.bat` 一并删除；没有管理员权限时它会显示删除命令。
+卸载：双击 `UNINSTALL.bat`（EDFModLoader 与其他 Mod 不动，安装程序升级过的加载器也保留，备份 `winmm.dll.bak-official` 留在原处）。它会删除插件、设置、日志和更新留下的文件（`EDF6Coop.dll.old` 等），以及插件在路由器上建立的 UPnP 映射（只删指向本机、名为 `EDF6DirectNet` 的那一条；路由器不支持 UPnP 就直接跳过）。若当初添加过防火墙规则，请以管理员身份运行 `UNINSTALL.bat` 一并删除；没有管理员权限时它会显示删除命令。
 
 也可以手动把 zip 内容解压到游戏目录（`EDF6.exe` 所在文件夹）。
 
@@ -55,15 +57,15 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 
 只有房主需要设置；加入者只要装了插件、`AutoJoin=1`（默认），进房后就会自动直连。
 
-1. 打开 `Mods\Plugins\EDF6DirectNet.ini`，改 `Mode=host`。
-2. 右键游戏目录里的 `EDF6DirectNet_AllowFirewall.bat` → **以管理员身份运行**（只需一次）。这条规则只放行 `EDF6.exe` 在 ini 里 `ListenPort` 指定的 UDP 端口（没设置则为 27015），而不是所有 UDP 端口；改了 `ListenPort` 之后请再运行一次。
+1. 打开 `Mods\Plugins\EDF6Coop.ini`，改 `Mode=host`。
+2. 右键游戏目录里的 `EDF6Coop_AllowFirewall.bat` → **以管理员身份运行**（只需一次）。这条规则只放行 `EDF6.exe` 在 ini 里 `ListenPort` 指定的 UDP 端口（没设置则为 27015），而不是所有 UDP 端口；改了 `ListenPort` 之后请再运行一次。
 3. 让外网能连到你，二选一：
    - **自动**：`PublicAddress` 留空。插件用路由器 UPnP 映射 UDP 27015，并自动带上本机公网 IPv6。
    - **手动**：在路由器把 UDP 端口映射到本机，然后填 `PublicAddress=公网IP:外部端口`（也可以填 DDNS 域名，如 `myroom.ddns.net:40000`）。
    - **电脑直接拨号上网（PPPoE，没有路由器）**：插件识别不到这类网卡，不会自动公布地址，请手动填 `PublicAddress=公网IP:27015`。
 4. 重启游戏，正常建房。
 
-怎么确认成功（看日志 `Mods\Plugins\EDF6DirectNet.log`）：
+怎么确认成功（看日志 `Mods\Plugins\EDF6Coop.log`）：
 
 | 日志 | 含义 |
 |---|---|
@@ -73,7 +75,7 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | 你在运营商大内网里，没有公网 IPv4，IPv4 直连不可能；只能靠 IPv6 或找运营商要公网 IP |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | 路由器上这个端口已经映射给了局域网里别的设备，插件不会删它；换一个 `ListenPort`，或手动映射 |
 | `DIRECT client ... connected from ...`（房主） / `DIRECT connected to host ...`（加入者） | 直连已建立 |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 加入者连不上房主（防火墙/端口映射/Key 不一致/EDF6DirectNet 版本不同），游戏照常走 Epic，60 秒后重试 |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 加入者连不上房主（防火墙/端口映射/Key 不一致/EDF6Coop 版本不同），游戏照常走 Epic，60 秒后重试 |
 
 加入者按 IPv4 → IPv6 顺序每个地址试 10 秒，都不通就留在 EOS，不影响正常游戏。
 
@@ -81,7 +83,9 @@ zip 内附 README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
 
 **隐私**：房主的公网地址写在大厅成员属性里，能看到这个房间的人都读得到。加入者直连（`AutoJoin=1`）时是从自己的公网地址连向房主，所以房主能看到加入者的地址（原版 EOS 点对点通常也会让双方互相看到地址）。不想让你加入的房间的房主看到你的地址，就设 `AutoJoin=0`，继续走 EOS。
 
-## 设置参考（`EDF6DirectNet.ini`，改完重启游戏生效）
+## 设置参考（`EDF6Coop.ini`，改完重启游戏生效）
+
+下面是直连的设置项。同一个文件里还有大房间用的 `[MultiSlot]`、`[Smoothing]`、`[RoomScreen]`、`[Mission]`、`[CopyArmor]`，文件里的注释解释了每一项。`[MultiSlot] Enabled=0` 和 `[DirectNet] Enabled=0` 同时设置时插件自己卸载。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -128,7 +132,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 ## 排障
 
-- **先看日志**：`Mods\Plugins\EDF6DirectNet.log`（超过 2MB 轮转为 `.log.1`）。开头一行 `==== EDF6DirectNet x.y.z starting` 说明插件已加载；没有这一行说明 EDFModLoader 没装好。
+- **先看日志**：`Mods\Plugins\EDF6Coop.log`（自动保持在 2MB 左右以内；直连相关的行以 `[DN]` 开头）。出现 `==== EDF6Coop x.y.z-<N>p ====` 这一行说明插件已加载；没有这一行说明 EDFModLoader 没装好。
 - `EOS hooks FAILED`：游戏版本更新导致导入表不符，插件自动停用直连，请提 Issue。
 - `LOBBY plugin detection UNAVAILABLE`：无法识别对方是否装了插件，断线宽限只对直连成员生效。
 - `EOS incoming packet queue FULL`：EOS 队列满开始丢包，请附日志提 Issue。
@@ -142,42 +146,50 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 ## 构建
 
-需要 Visual Studio 2022（MSVC x64）。
+需要 Windows x64、装了「使用 C++ 的桌面开发」的 Visual Studio 2022（用它带的 CMake 和 Ninja）、Python 3.10+ 并 `pip install numpy pillow pefile==2024.8.26 capstone==5.0.9`，以及已安装的地球防卫军6（EDF.dll 版本 `678CCB46`）。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1 -Test
-# 手动打发布包：需要官方 EDFModLoader.zip 解压后的目录（含 winmm.dll、ModLoader.ini，外加它的 LICENSE.txt）
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDir <目录>
+$env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 8 -Test    # -> multislot\dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 12 -Test   # -> multislot\dist-12p\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> release\EDF6Coop-<version>-8p.zip (+ .sha256)
 ```
 
-产物：`build\EDF6DirectNet.dll`（静态 CRT，只依赖系统 DLL）、`build\edf6_directnet_tests.exe`（单元测试 + 本机回环多节点测试，含 20%～40% 丢包、断网、重启场景；`EDF.dll` 导入表测试需要本机装有游戏，否则跳过）、`build\probe_join.exe`（手动联调用的直连探针）。
+- `-Players` 选房间人数（8、10、12、16、24、32），每种人数单独构建。`-Test` 跑测试（单元测试、本机回环多节点直连测试，以及逐个核对补丁位置与游戏 `EDF.dll` 代码的测试，没装游戏时跳过）。
+- 游戏目录只读不写：`Root.cpk` 用来生成带「8Player MOD」标签的菜单框（`multislot/tools/make_menu_label.py` 写出 `multislot/assets/LYT_MAINFRAME.SGO`，它来自游戏文件，所以从不提交），`EDF.dll` 给测试用。
+- `build.ps1` 会获取官方 EDFModLoader v1.0.10 的 `winmm.dll`（校验 SHA-256），并生成随包的修复版加载器（`multislot/tools/fix_winmm_proxy.py`）。
+- `package.ps1` 拒绝打包人数或版本不符的构建、比源码旧的 DLL，以及 CI 构建（`build.ps1 -CI` 不带游戏菜单资源，内嵌占位数据）。
 
 ## 发布
 
-发布由 GitHub Actions（`.github/workflows/release.yml`）自动完成：
+发布包需要游戏的菜单资源，而它不能放到构建服务器上，所以发布包在装了游戏的机器上构建；GitHub Actions 跑 CI 构建和测试（`.github/workflows/ci.yml`，覆盖每种人数）。
 
-1. 改版本号：`src/plugin.cpp` 的 `kVersionMajor/Minor/Patch` 与 `kVersionText`，以及三份随包说明书 `dist/README_EDF6DirectNet*.txt` 的第一行。
-2. 写发布说明 `release-notes/<版本>.md`（就是 Release 页面的正文，没有它流水线会失败）。
-3. 提交到 `main`，推送 tag：`git tag v0.3.3 && git push origin v0.3.3`。
+1. 改版本号：`multislot/CMakeLists.txt` 里的 `project(EDF6Coop VERSION x.y.z)`，以及三份随包说明 `dist/README_EDF6Coop*.txt` 的第一行。
+2. 写发布说明 `release-notes/<版本>.md`（即 Release 页面正文，也是包里的 `RELEASE_NOTES_EDF6Coop.md`）。
+3. 提交到 `main`，打 tag 并推送：`git tag v2.0.0 && git push origin v2.0.0`。
+4. 在装了游戏的机器上、在该提交处运行 `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`。它对每种人数执行 `build.ps1 -Players <N> -Test` 和 `package.ps1 -Players <N>`，然后创建一个**草稿** Release，带上 `EDF6Coop-<N>p.dll`、`EDF6Coop-<版本>-<N>p.zip` 及其 `.sha256`（不加 `-Upload` 时只放到 `release\upload-<版本>\`）。它从不签名。
+5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：检查 tag 在 `main` 上且与版本一致、草稿里每种人数都齐、每个 zip 与其 `.sha256` 相符且装的正是那个 DLL、没有 CI 构建；用 `sign-update.ps1 -Players <N>` 给每个 DLL 签名（密钥是仓库 secret `EDF6DN_UPDATE_SIGNING_KEY`，只在只读 token 的 job 里）；上传 `EDF6Coop-<N>p.dll.sig` 和 `.dll.sha256`；把 Release 发布为最新。
 
-流水线会构建、跑测试、下载官方 EDFModLoader v1.0.10（按 SHA-256 校验）、打包 `EDF6DirectNet-v<版本>.zip` 并创建 Release。tag、源码版本号、说明书版本号三者不一致时 `package.ps1` 会拒绝打包。在 Actions 页面手动运行只构建打包（产物在运行记录的 Artifacts 里），不发布。
+所有已安装插件的自动更新都从最新 Release 下载自己人数的 `EDF6Coop-<N>p.dll` / `.dll.sig`，所以一个 Release 必须带齐六种人数之后才能标为最新。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `src/plugin.cpp` | EDFModLoader 入口，读配置、启动直连 |
-| `src/config.*` | INI 读取与默认设置文件（注释按 Windows 显示语言写中文 / 日文 / 英文） |
-| `src/eos_min.h` | 所用 EOS SDK 结构体（按官方 1.15.5 头文件，游戏为 1.16.1） |
-| `src/eos_hooks.cpp`, `src/iat.*` | 修改 `EDF.dll` 导入表，接管 EOS P2P / 大厅调用 |
+| `multislot/src/plugin.cpp` | EDFModLoader 入口：读 `EDF6Coop.ini`（搬入旧设置文件的值），启动房间部分和直连 |
+| `multislot/src/` | 房间部分（8Player MOD）：补丁、房间画面、任务、护甲复制、菜单布局、日志 |
+| `src/config.*` | 直连的设置项和注释（按 Windows 显示语言写中文 / 日文 / 英文） |
+| `src/eos_min.h` | 用到的 EOS SDK 结构体（取自官方 1.15.5 头文件；游戏用的是 1.16.1） |
+| `src/eos_hooks.cpp`、`src/iat.*` | 改 `EDF.dll` 导入表，接管 EOS P2P / 大厅调用 |
 | `src/hold.*` | 断线宽限 |
 | `src/lobby_marker.*` | 大厅成员属性：识别谁装了插件、分发房主地址 |
-| `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | 直连传输 |
-| `src/netif.*`, `src/upnp.*` | 物理网卡识别、UPnP |
-| `src/log.*` | 日志 |
-| `dist/` | 安装脚本与随包说明书（中 / 英 / 日） |
-| `tests/` | 测试 |
-| `multislot/` | EDF6MultiSlot：8 / 10 / 12 人联机插件（独立构建和说明） |
+| `src/direct_net.*`、`src/reliable.*`、`src/wire.*`、`src/auth.*` | 直连传输 |
+| `src/netif.*`、`src/upnp.*` | 物理网卡识别、UPnP |
+| `src/updater.*`、`src/product.h` | 带签名的自动更新；每个发布带的房间人数和版本 |
+| `multislot/CMakeLists.txt` | 构建和唯一的版本号（`project(EDF6Coop VERSION x.y.z)`） |
+| `multislot/packaging/` | 随包附带的加载器修复和握手恢复说明 |
+| `dist/` | 安装脚本和随包说明（英文 / 中文 / 日文） |
+| `tests/`、`multislot/tests/` | 测试 |
 
 ## 已知限制
 
@@ -191,4 +203,4 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。附带的 EDFModLoader 为 MIT，许可证随包在 `EDFModLoader\LICENSE.txt`。
+MIT，见 [LICENSE](LICENSE)。附带的 EDFModLoader 为 MIT，许可证随包在 `EDFModLoader_LICENSE.txt`。房间部分（`multislot/`，momotori01 作）为公有领域（[Unlicense](multislot/LICENSE)）。

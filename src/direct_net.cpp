@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <random>
 
@@ -25,7 +26,10 @@ constexpr uint64_t kRosterIntervalMs = 5000;
 constexpr uint64_t kRosterBurstMs = 1000;
 constexpr uint64_t kRosterBurstIntervalMs = 200;
 constexpr uint64_t kResolveIntervalMs = 30000;
-constexpr uint64_t kMigrateQuietMs = 5000;
+// A Reset (unauthenticated) ends a joiner's link only when the host has not been heard for this long:
+// a live host pings every second, so a forged Reset cannot end a working link, while a restarted host
+// is reconnected within seconds instead of after the link timeout.
+constexpr uint64_t kResetQuietMs = 3000;
 // A cookie is valid in the time bucket it was made in and the next one (20-40 s): long enough for a
 // client to answer, short enough that a captured proven hello soon stops being accepted at all.
 constexpr uint64_t kCookieBucketMs = 20000;
@@ -34,7 +38,12 @@ constexpr uint16_t kDefaultPort = 27015;
 constexpr size_t kMaxClients = 16;
 static_assert(kMaxPayload + 3 * kMaxString + 64 < kMaxDatagram, "a full Data datagram must fit the receive buffer");
 
-uint64_t nowMs() { return GetTickCount64(); }
+// Millisecond resolution: GetTickCount64 moves in ~15.6 ms steps, which made every RTT sample on a
+// steady link the same number, the RTT variance zero and the retransmission timeout equal to the RTT.
+uint64_t nowMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 uint32_t randomNonce() {
     static std::random_device rd;
@@ -232,10 +241,13 @@ bool DirectNet::start(const DirectOptions& options) {
     }
     cookieSecret_ = std::move(secret);
     memberIds_ = opt_.memberIds;
+    roomOwner_ = opt_.roomOwner;
+    roomOwnerId_ = opt_.roomOwnerIdentity;
     identity_ = opt_.identity ? opt_.identity : processIdentity();
-    if (!identity_ && opt_.mode == Mode::Join)
-        logf("DIRECT cannot create our direct-link identity (Windows crypto failed): hosts cannot check who we "
-             "are and will not accept us, the game stays on EOS");
+    if (!identity_)
+        logf("DIRECT cannot create our direct-link identity (Windows crypto failed): %s, the game stays on EOS",
+             opt_.mode == Mode::Join ? "hosts cannot check who we are and will not accept us"
+                                     : "joiners cannot check who we are and will not accept us");
     newLocalSession();
     running_ = true;
     thread_ = std::thread([this] { run(); });
@@ -252,12 +264,7 @@ void DirectNet::stop() {
     if (thread_.joinable()) thread_.join();
     {
         std::lock_guard<std::mutex> lock(mu_);
-        Message bye;
-        bye.type = MsgType::Bye;
-        for (int copy = 0; copy < 3; ++copy) {  // one lost datagram must not leave a stale link behind
-            for (auto& [id, link] : clients_) sendMsg(bye, link.addr, link.addrLen);
-            if (hostLink_) sendMsg(bye, hostLink_->addr, hostLink_->addrLen);
-        }
+        sendBye();
         // Another thread may still hold a pointer to this instance (AutoJoin swaps instances):
         // with no links left, send() and canRoute() report false and the game falls back to EOS.
         clients_.clear();
@@ -293,10 +300,27 @@ void DirectNet::setMemberIdentities(std::map<std::string, std::string> commitmen
         it = memberIds_.count(it->first) ? std::next(it) : seen_.erase(it);
 }
 
+void DirectNet::setRoomOwner(const std::string& puid, const std::string& commitment) {
+    std::lock_guard<std::mutex> lock(mu_);
+    roomOwner_ = puid;
+    roomOwnerId_ = commitment;
+}
+
 void DirectNet::newLocalSession() {
     localNonce_ = randomNonce();
     localSession_ = identity_ ? identity_->nextSession() : 0;
     cookie_.reset();
+    if (opt_.mode == Mode::Join) localEcdh_ = EcdhKey::generate();  // null (crypto failed): nobody welcomes us
+}
+
+// Every link is told three times: one lost datagram must not leave a stale link behind.
+void DirectNet::sendBye() {
+    Message bye;
+    bye.type = MsgType::Bye;
+    for (int copy = 0; copy < 3; ++copy) {
+        for (auto& [id, link] : clients_) sendLink(link, bye);
+        if (hostLink_) sendLink(*hostLink_, bye);
+    }
 }
 
 bool DirectNet::canRoute(const std::string& remote) {
@@ -386,12 +410,7 @@ void DirectNet::setActive(bool active) {
         logf("DIRECT links open again (in a room)");
         return;
     }
-    Message bye;
-    bye.type = MsgType::Bye;
-    for (int copy = 0; copy < 3; ++copy) {  // one lost datagram must not leave a stale link behind
-        for (auto& [id, link] : clients_) sendMsg(bye, link.addr, link.addrLen);
-        if (hostLink_) sendMsg(bye, hostLink_->addr, hostLink_->addrLen);
-    }
+    sendBye();
     size_t closed = clients_.size() + (hostLink_ ? 1 : 0);
     clients_.clear();
     hostLink_.reset();
@@ -425,9 +444,9 @@ std::string DirectNet::statusLine() {
     char buf[256];
     std::string s;
     auto describe = [&](const Link& l) {
-        snprintf(buf, sizeof(buf), " [%s %s rtt=%ums pending=%zu retx=%llu]", shortId(l.puid).c_str(),
-                 addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.pendingCount(),
-                 static_cast<unsigned long long>(l.tx.retransmits()));
+        snprintf(buf, sizeof(buf), " [%s %s rtt=%ums rto=%ums pending=%zu retx=%llu dup=%llu]", shortId(l.puid).c_str(),
+                 addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.rtoMs(), l.tx.pendingCount(),
+                 static_cast<unsigned long long>(l.tx.retransmits()), static_cast<unsigned long long>(l.rx.duplicates()));
         s += buf;
     };
     if (opt_.mode == Mode::Host) {
@@ -435,11 +454,12 @@ std::string DirectNet::statusLine() {
         for (const auto& [id, link] : clients_) describe(link);
     } else {
         s = hostLink_ && hostLink_->up ? "JOIN connected"
-            : cookie_                  ? "JOIN host answered, waiting for it to accept our identity"
+            : cookie_                  ? "JOIN host answered, waiting for both identities to check out"
                                        : "JOIN waiting for host";
         if (hostLink_) describe(*hostLink_);
         s += " roster=" + std::to_string(roster_.size());
     }
+    if (uint64_t n = rejected_) s += " rejected=" + std::to_string(n);
     return s;
 }
 
@@ -458,6 +478,17 @@ void DirectNet::sendMsg(const Message& m, const sockaddr_storage& to, int toLen)
     sendRaw(encode(m, opt_.key), to, toLen);
 }
 
+// Stamps a link datagram with the link's next counter and tag, and sends it. Nothing goes out when
+// crypto fails: an unsealed datagram would only be dropped by the peer.
+void DirectNet::sendSealed(Link& link, std::vector<uint8_t>& dg) {
+    if (!sealLink(dg, ++link.txCounter, link.txMac)) {
+        logRateLimited("seal", 10000, "DIRECT cannot authenticate a packet to %s (Windows crypto failed)",
+                       shortId(link.puid).c_str());
+        return;
+    }
+    sendRaw(dg, link.addr, link.addrLen);
+}
+
 void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
     Message m;
     m.type = MsgType::Data;
@@ -467,7 +498,7 @@ void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
     uint32_t seq = msg.seq;
     m.data = std::move(msg);
     std::vector<uint8_t> dg = encode(m, opt_.key);
-    sendRaw(dg, link.addr, link.addrLen);
+    sendSealed(link, dg);
     if (reliable) link.tx.track(seq, std::move(dg), now);
 }
 
@@ -511,15 +542,35 @@ void DirectNet::routeData(DataMsg msg) {
 
 void DirectNet::sendLink(Link& link, Message m) {
     m.epoch = link.epoch;
-    sendMsg(m, link.addr, link.addrLen);
+    std::vector<uint8_t> dg = encode(m, opt_.key);
+    sendSealed(link, dg);
+}
+
+// Why a datagram for `link` is not authentic, or nullptr when it is: it must carry the link's epoch,
+// a tag made with the peer's link key, and a counter not seen before. Only a peer holding the key made
+// in this session's handshake can send one, and each datagram counts once.
+const char* DirectNet::linkRefusal(Link& link, const Received& r) {
+    if (r.msg.epoch != link.epoch) return "it belongs to an earlier session of the link";
+    if (!linkTagValid(r.data, r.size, link.rxMac)) return "its authentication tag does not match (forged or altered)";
+    if (!link.replay.fresh(r.msg.counter)) return "it was received before (replayed)";
+    return nullptr;
+}
+
+// Checks a link datagram (see linkRefusal) and takes its counter. Refused ones are dropped, counted and
+// logged at a limited rate.
+bool DirectNet::authentic(Link& link, const Received& r, const sockaddr_storage& from, int fromLen) {
+    if (const char* why = linkRefusal(link, r)) {
+        uint64_t n = ++rejected_;
+        logRateLimited("link-auth", 10000, "DIRECT dropped a packet on the link of %s from %s: %s (%llu dropped so far)",
+                       shortId(link.puid).c_str(), addrToString(from, fromLen).c_str(), why,
+                       static_cast<unsigned long long>(n));
+        return false;
+    }
+    link.replay.mark(r.msg.counter);
+    return true;
 }
 
 void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
-    if (isLinkScoped(m.type) && m.epoch != link.epoch) {
-        logRateLimited("stale-epoch", 10000, "DIRECT ignored a packet from an earlier session of link %s",
-                       shortId(link.puid).c_str());
-        return;
-    }
     link.lastRecvMs = now;
     switch (m.type) {
         case MsgType::Ping: {
@@ -616,7 +667,8 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
     }
     const std::string commitment = memberIds_[id];
     auto it = clients_.find(id);
-    bool sameSession = it != clients_.end() && it->second.session == h.session && it->second.peerNonce == h.nonce;
+    bool sameSession = it != clients_.end() && it->second.session == h.session && it->second.peerNonce == h.nonce &&
+                       it->second.peerEcdh == h.ecdh;
     auto seen = seen_.find(id);
     if (!sameSession && seen != seen_.end() && seen->second.commitment == commitment &&
         h.session <= seen->second.session) {
@@ -639,11 +691,7 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
                            addrToString(from, fromLen).c_str(), clients_.size());
             return;
         }
-        // New client or a new session of a known one: start its reliable streams from scratch.
-        if (other && other->puid != id) {
-            std::string stale = other->puid;  // copy: erase must not take a key owned by the node
-            clients_.erase(stale);
-        }
+        // New client or a new session of a known one: new link keys, reliable streams from scratch.
         Link link;
         link.addr = from;
         link.addrLen = fromLen;
@@ -651,42 +699,82 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
         link.peerNonce = h.nonce;
         link.session = h.session;
         link.epoch = linkEpoch(h.nonce, localNonce_);
-        link.up = true;
         link.lastRecvMs = now;
+        if (!openHostLink(link, h)) return;
+        bool wasUp = it != clients_.end() && it->second.up;
+        if (other && other->puid != id) {
+            std::string stale = other->puid;  // copy: erase must not take a key owned by the node
+            wasUp |= other->up;
+            clients_.erase(stale);
+        }
         clients_[id] = std::move(link);
         seen_[id] = Seen{commitment, h.session};
-        logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(id).c_str(),
-             addrToString(from, fromLen).c_str(), clients_.size());
+        if (wasUp) rosterChanged();  // the old session's link is gone
     }
-    clients_[id].lastRecvMs = now;
-    Message w;
-    w.type = MsgType::Welcome;
-    w.welcome.hostNonce = localNonce_;
-    w.welcome.clientNonce = h.nonce;
-    w.welcome.hostPuid = localPuid_;
-    w.welcome.roster = rosterLocked();
-    sendMsg(w, from, fromLen);
-    if (!sameSession) rosterChanged();
+    Link& link = clients_[id];
+    link.lastRecvMs = now;
+    sendWelcome(link, from, fromLen);
 }
 
-void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
+// Makes the keys of a new link for hello `h`: our ECDH key for it (kept only for this), the welcome
+// that carries it, and the key of each direction. False (logged) when crypto fails or the client's
+// ECDH key is not a valid point.
+bool DirectNet::openHostLink(Link& link, const HelloMsg& h) {
+    link.welcome.hostNonce = localNonce_;
+    link.welcome.clientNonce = h.nonce;
+    link.welcome.hostPuid = localPuid_;
+    link.peerEcdh = h.ecdh;
+    auto ecdh = EcdhKey::generate();
+    auto shared = ecdh ? ecdh->agree(h.ecdh) : std::nullopt;
+    if (ecdh) link.welcome.ecdh = ecdh->publicKey();
+    auto keys = shared && identity_ ? deriveLinkKeys(*shared, opt_.key, h, link.welcome) : std::nullopt;
+    if (keys) {
+        link.txMac = LinkMac(keys->hostToClient);
+        link.rxMac = LinkMac(keys->clientToHost);
+        link.welcome.publicKey = identity_->publicKey();
+    }
+    if (keys && link.txMac.valid() && link.rxMac.valid()) return true;
+    logRateLimited("link-keys", 10000, "DIRECT cannot make link keys for %s: %s", shortId(h.puid).c_str(),
+                   ecdh && !shared ? "its key exchange value is invalid" : "Windows crypto failed");
+    return false;
+}
+
+// Welcomes the client of `link`, signed with our identity. The signature covers the member list, so
+// it is made again only when that changed since the last welcome of this link.
+void DirectNet::sendWelcome(Link& link, const sockaddr_storage& to, int toLen) {
+    std::vector<std::string> roster = rosterLocked();
+    if (link.welcomeDatagram.empty() || roster != link.welcome.roster) {
+        link.welcome.roster = std::move(roster);
+        auto digest = welcomeDigest(link.welcome, link.peerEcdh);
+        auto signature = digest && identity_ ? identity_->sign(*digest) : std::nullopt;
+        if (!signature) {
+            logRateLimited("welcome-sign", 10000, "DIRECT cannot sign a welcome (Windows crypto failed)");
+            return;
+        }
+        link.welcome.signature = *signature;
+        Message w;
+        w.type = MsgType::Welcome;
+        w.welcome = link.welcome;
+        link.welcomeDatagram = encode(w, opt_.key);
+    }
+    sendRaw(link.welcomeDatagram, to, toLen);
+}
+
+void DirectNet::onHostDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now) {
+    const Message& m = r.msg;
     if (m.type == MsgType::Hello) {
         onHostHello(m.hello, from, fromLen, now);
         return;
     }
+    if (!isLinkScoped(m.type)) return;  // handshake answers are for joiners
     Link* link = hostClientByAddr(from, fromLen);
-    bool knownSession = false;
-    if (!link && isLinkScoped(m.type)) {
-        // A live session showing up from a new address (NAT rebinding): migrate instead of resetting.
-        // Packets can be replayed by anyone who saw them (a key only stops forgery), so the link moves
-        // only on proof of freshness: a reliable packet the host has not received yet, or the old
-        // address having gone quiet (a live client pings every second).
+    if (!link) {
+        // A live session showing up from a new address (NAT rebinding): the link moves there on the
+        // first authentic datagram from it. Only the client holds the link key, and a datagram seen
+        // before (captured and replayed from elsewhere) is not fresh, so nobody else can move it.
         for (auto& [id, candidate] : clients_) {
             if (candidate.epoch != m.epoch) continue;
-            knownSession = true;
-            bool freshData = m.type == MsgType::Data && m.data.seq != 0 && m.data.src == id &&
-                             m.data.seq >= candidate.rx.expected();
-            if (!freshData && now - candidate.lastRecvMs < kMigrateQuietMs) break;
+            if (!authentic(candidate, r, from, fromLen)) return;
             logf("DIRECT client %s moved %s -> %s", shortId(id).c_str(),
                  addrToString(candidate.addr, candidate.addrLen).c_str(), addrToString(from, fromLen).c_str());
             candidate.addr = from;
@@ -694,17 +782,24 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
             link = &candidate;
             break;
         }
-    }
-    if (!link) {
-        if (knownSession) return;  // belongs to a live link; never reset it on an unproven packet
-
-        // Traffic from a client this host does not know (e.g. the host restarted): make it re-hello now.
-        if (m.type != MsgType::Bye) {
-            Message bye;
-            bye.type = MsgType::Bye;
-            sendMsg(bye, from, fromLen);
+        if (!link) {
+            // Traffic from a client this host has no link with (e.g. the host restarted): a hint to hello again.
+            if (m.type != MsgType::Bye) {
+                Message reset;
+                reset.type = MsgType::Reset;
+                sendMsg(reset, from, fromLen);
+            }
+            return;
         }
+    } else if (!authentic(*link, r, from, fromLen)) {
         return;
+    }
+    if (!link->up && m.type != MsgType::Bye) {
+        // The client holds the link keys: it verified our welcome. Game data may flow now.
+        link->up = true;
+        logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(link->puid).c_str(),
+             addrToString(from, fromLen).c_str(), clients_.size());
+        rosterChanged();
     }
     if (m.type == MsgType::Bye) {
         std::string gone = link->puid;  // copy: erase must not take a key owned by the node
@@ -721,13 +816,12 @@ void DirectNet::onHostDatagram(const Message& m, const sockaddr_storage& from, i
     onLinkCommon(*link, m, now);
 }
 
-void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now) {
+void DirectNet::onClientDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now) {
     // A host on a wildcard socket answers from the source address its OS picks, which need not be the
     // one we dialled (IPv6 hosts prefer a temporary address). So the host's packets are recognised by
-    // their session (our hello nonce, the host nonce, the link epoch), not by their source address,
-    // and we keep sending to the address we dialled.
-    bool fromHost = sameAddr(from, fromLen, hostAddr_, hostAddrLen_) ||
-                    (hostReplyAddrLen_ > 0 && sameAddr(from, fromLen, hostReplyAddr_, hostReplyAddrLen_));
+    // their session and link keys, not by their source address, and we keep sending to the address we
+    // dialled.
+    const Message& m = r.msg;
     switch (m.type) {
         case MsgType::Challenge: {
             // The host keeps nothing for us until we echo this cookie in a hello signed with our identity.
@@ -737,50 +831,101 @@ void DirectNet::onClientDatagram(const Message& m, const sockaddr_storage& from,
             if (fresh && active_ && !localPuid_.empty()) sendHello(now);  // a repeat waits for the next retry
             return;
         }
-        case MsgType::Welcome: {
-            if (hostAddrLen_ == 0 || m.welcome.clientNonce != localNonce_) return;  // not an answer to our hello
-            if (!hostLink_ || hostLink_->peerNonce != m.welcome.hostNonce) {
-                hostLink_.emplace();
-                hostLink_->addr = hostAddr_;
-                hostLink_->addrLen = hostAddrLen_;
-                hostLink_->peerNonce = m.welcome.hostNonce;
-                hostLink_->epoch = linkEpoch(localNonce_, m.welcome.hostNonce);
-                bool other = !sameAddr(from, fromLen, hostAddr_, hostAddrLen_);
-                logf("DIRECT connected to host %s at %s%s%s", shortId(m.welcome.hostPuid).c_str(),
-                     addrToString(hostAddr_, hostAddrLen_).c_str(), other ? ", it answers from " : "",
-                     other ? addrToString(from, fromLen).c_str() : "");
-            }
-            hostReplyAddr_ = from;
-            hostReplyAddrLen_ = fromLen;
-            hostLink_->puid = m.welcome.hostPuid;
-            hostLink_->up = true;
-            hostLink_->lastRecvMs = now;
-            roster_ = m.welcome.roster;
+        case MsgType::Welcome:
+            onClientWelcome(m.welcome, from, fromLen, now);
+            return;
+        case MsgType::Reset: {
+            // Anyone can send this; it only speeds up what the link timeout would do anyway.
+            bool fromHost = sameAddr(from, fromLen, hostAddr_, hostAddrLen_) ||
+                            (hostReplyAddrLen_ > 0 && sameAddr(from, fromLen, hostReplyAddr_, hostReplyAddrLen_));
+            if (hostLink_ && fromHost && now - hostLink_->lastRecvMs >= kResetQuietMs)
+                dropHostLink("the host no longer knows our link (restarted?), reconnecting");
             return;
         }
-        case MsgType::Roster:
-            if (hostLink_ && hostLink_->peerNonce == m.roster.hostNonce) {
-                if (roster_ != m.roster.roster)
-                    logf("DIRECT roster now has %zu direct members", m.roster.roster.size());
-                roster_ = m.roster.roster;
-                hostLink_->lastRecvMs = now;
-            }
-            return;
-        case MsgType::Bye:
-            if (hostLink_ && fromHost) {  // carries no session: accepted only from the host's addresses
-                logf("DIRECT host closed the direct link, reconnecting");
-                hostLink_.reset();
-                roster_.clear();
-                newLocalSession();
-                lastHelloMs_ = 0;
-            }
+        case MsgType::Hello:
             return;
         default:
-            // From elsewhere only a packet of the current session counts; stray ones are not even logged.
-            if (hostLink_ && (fromHost || (isLinkScoped(m.type) && m.epoch == hostLink_->epoch)))
-                onLinkCommon(*hostLink_, m, now);
-            return;
+            break;
     }
+    // Link messages: only from the host, proven by the link keys. Stray ones are not even logged.
+    if (!hostLink_ || !authentic(*hostLink_, r, from, fromLen)) return;
+    if (m.type == MsgType::Bye) {
+        dropHostLink("the host closed the direct link, reconnecting");
+        return;
+    }
+    if (m.type == MsgType::Roster) {
+        // A member list older than the one applied (reordered in flight) would bring back a member
+        // the host already dropped.
+        if (m.counter < hostLink_->rosterCounter || m.roster.hostNonce != hostLink_->peerNonce) return;
+        hostLink_->rosterCounter = m.counter;
+        if (roster_ != m.roster.roster) logf("DIRECT roster now has %zu direct members", m.roster.roster.size());
+        roster_ = m.roster.roster;
+    }
+    onLinkCommon(*hostLink_, m, now);
+}
+
+// Why the welcome `w` (an answer to our current hello) is not from the host we may accept, or nullptr.
+const char* DirectNet::welcomeRefusal(const WelcomeMsg& w) {
+    if (roomOwner_.empty() || roomOwnerId_.empty())
+        return "the room owner's direct-link identity has not reached us yet (or it runs no plugin, or "
+               "EDF6DirectNet 0.4.0 or older)";
+    if (w.hostPuid != roomOwner_) return "it is not the room owner";
+    if (identityCommitment(w.publicKey) != roomOwnerId_)
+        return "it is not signed by the identity the room owner published (someone else answering on the "
+               "host's address?)";
+    auto digest = localEcdh_ ? welcomeDigest(w, localEcdh_->publicKey()) : std::nullopt;
+    if (!digest || !verifySignature(w.publicKey, *digest, w.signature))
+        return "its signature does not verify (someone else answering on the host's address?)";
+    return nullptr;
+}
+
+void DirectNet::onClientWelcome(const WelcomeMsg& w, const sockaddr_storage& from, int fromLen, uint64_t now) {
+    if (hostAddrLen_ == 0 || w.clientNonce != localNonce_) return;  // not an answer to our hello
+    if (hostLink_ && hostLink_->peerNonce == w.hostNonce) return;  // a repeat: the link is up already
+    if (const char* why = welcomeRefusal(w)) {
+        logRateLimited(why, 10000, "DIRECT refused the welcome of %s from %s: %s; the game stays on EOS",
+                       shortId(w.hostPuid).c_str(), addrToString(from, fromLen).c_str(), why);
+        return;
+    }
+    HelloMsg hello;  // what the host derived the keys from (see sendHello)
+    hello.nonce = localNonce_;
+    hello.session = localSession_;
+    hello.puid = localPuid_;
+    hello.ecdh = localEcdh_->publicKey();
+    auto shared = localEcdh_->agree(w.ecdh);
+    auto keys = shared ? deriveLinkKeys(*shared, opt_.key, hello, w) : std::nullopt;
+    Link link;
+    if (keys) {
+        link.txMac = LinkMac(keys->clientToHost);
+        link.rxMac = LinkMac(keys->hostToClient);
+    }
+    if (!link.txMac.valid() || !link.rxMac.valid()) {
+        logRateLimited("link-keys", 10000, "DIRECT cannot make link keys with host %s: %s", shortId(w.hostPuid).c_str(),
+                       shared ? "Windows crypto failed" : "its key exchange value is invalid");
+        return;
+    }
+    link.addr = hostAddr_;
+    link.addrLen = hostAddrLen_;
+    link.puid = w.hostPuid;
+    link.peerNonce = w.hostNonce;
+    link.epoch = linkEpoch(localNonce_, w.hostNonce);
+    link.up = true;
+    link.lastRecvMs = now;
+    hostLink_ = std::move(link);
+    hostReplyAddr_ = from;
+    hostReplyAddrLen_ = fromLen;
+    roster_ = w.roster;
+    bool other = !sameAddr(from, fromLen, hostAddr_, hostAddrLen_);
+    logf("DIRECT connected to host %s at %s%s%s", shortId(w.hostPuid).c_str(), addrToString(hostAddr_, hostAddrLen_).c_str(),
+         other ? ", it answers from " : "", other ? addrToString(from, fromLen).c_str() : "");
+}
+
+void DirectNet::dropHostLink(const char* why) {
+    logf("DIRECT %s", why);
+    hostLink_.reset();
+    roster_.clear();
+    newLocalSession();
+    lastHelloMs_ = 0;
 }
 
 void DirectNet::processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen,
@@ -792,7 +937,8 @@ void DirectNet::processDatagram(const uint8_t* data, size_t size, const sockaddr
         memcpy(&theirs, data + 6, 2);
         logRateLimited("protocol", 30000,
                        "DIRECT %s speaks direct-link protocol %u, we speak %u: it runs another EDF6DirectNet version "
-                       "(0.3.6 and older speak 2). No direct link with it; the game talks to it over EOS as usual",
+                       "(0.3.6 and older speak 2, 0.4.0 speaks 3). No direct link with it; the game talks to it over "
+                       "EOS as usual",
                        addrToString(from, fromLen).c_str(), theirs, kProtocol);
         return;
     }
@@ -802,11 +948,12 @@ void DirectNet::processDatagram(const uint8_t* data, size_t size, const sockaddr
                            addrToString(from, fromLen).c_str(), decodeErrorName(err));
         return;
     }
+    Received r{data, size, *msg};
     std::lock_guard<std::mutex> lock(mu_);
     if (opt_.mode == Mode::Host)
-        onHostDatagram(*msg, from, fromLen, now);
+        onHostDatagram(r, from, fromLen, now);
     else
-        onClientDatagram(*msg, from, fromLen, now);
+        onClientDatagram(r, from, fromLen, now);
 }
 
 void DirectNet::rosterChanged() {
@@ -820,7 +967,7 @@ void DirectNet::broadcastRoster() {
     r.roster.hostNonce = localNonce_;
     r.roster.roster = rosterLocked();
     lastRoster_ = r.roster.roster;
-    for (auto& [id, link] : clients_) sendMsg(r, link.addr, link.addrLen);
+    for (auto& [id, link] : clients_) sendLink(link, r);
     lastRosterMs_ = nowMs();
 }
 
@@ -872,7 +1019,9 @@ bool DirectNet::resolveHost() {
 
 void DirectNet::tick(uint64_t now) {
     auto pollLink = [&](Link& link) {
-        link.tx.poll(now, [&](const std::vector<uint8_t>& dg) { sendRaw(dg, link.addr, link.addrLen); });
+        // A resent packet goes out with a new counter: the peer takes every counter once, and must be
+        // able to acknowledge again a packet whose acknowledgement was lost.
+        link.tx.poll(now, [&](std::vector<uint8_t>& dg) { sendSealed(link, dg); });
         if (now - link.lastPingMs >= opt_.pingIntervalMs) {
             Message p;
             p.type = MsgType::Ping;
@@ -918,12 +1067,7 @@ void DirectNet::tick(uint64_t now) {
         return;
     }
 
-    if (hostLink_ && closing(*hostLink_, "host link")) {
-        logf("DIRECT reconnecting to the host");
-        hostLink_.reset();
-        roster_.clear();
-        newLocalSession();
-    }
+    if (hostLink_ && closing(*hostLink_, "host link")) dropHostLink("reconnecting to the host");
     if (hostLink_) {
         pollLink(*hostLink_);
         return;
@@ -931,16 +1075,17 @@ void DirectNet::tick(uint64_t now) {
     if (active_ && !localPuid_.empty() && hostAddrLen_ > 0 && now - lastHelloMs_ >= kHelloIntervalMs) sendHello(now);
 }
 
-// Our hello: plain until the host sent a cookie, then signed with our identity.
+// Our hello: plain until the host sent a cookie, then with our ECDH key, signed with our identity.
 void DirectNet::sendHello(uint64_t now) {
     Message h;
     h.type = MsgType::Hello;
     h.hello.nonce = localNonce_;
     h.hello.session = localSession_;
     h.hello.puid = localPuid_;
-    if (cookie_ && identity_) {
+    if (cookie_ && identity_ && localEcdh_) {
         h.hello.cookie = *cookie_;
         h.hello.publicKey = identity_->publicKey();
+        h.hello.ecdh = localEcdh_->publicKey();
         auto digest = helloDigest(h.hello);
         auto signature = digest ? identity_->sign(*digest) : std::nullopt;
         if (signature) h.hello.signature = *signature;

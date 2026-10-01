@@ -45,6 +45,7 @@ $sources = @{
     'HANDSHAKE_RECOVERY_JA.md'       = Join-Path $root 'packaging\HANDSHAKE_RECOVERY_JA.md'
     'LOADER_FIX_JA.md'               = Join-Path $root 'packaging\LOADER_FIX_JA.md'
     'loader-fix.json'               = $loaderFix
+    'RELEASE_NOTES_EDF6MultiSlot.md' = Join-Path $root "release-notes\$baseVersion.md"
 }
 foreach ($source in $sources.Values) {
     if (-not (Test-Path -LiteralPath $source)) { throw "Missing $source (run build.cmd first?)" }

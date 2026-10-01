@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -72,23 +73,51 @@ void testWire() {
     m.data.channel = 3;
     m.data.reliability = 2;
     m.data.payload = payloadFor(7);
-    for (const std::string key : {"", "secret"}) {
+    m.counter = 77;
+    for (const std::string key : {"", "secret"}) {  // link messages carry the link tag, not the Key's
         auto dg = dn::encode(m, key);
         dn::DecodeError err;
         auto back = dn::decode(dg.data(), dg.size(), key, &err);
-        CHECK(back && err == dn::DecodeError::None);
+        CHECK(back && err == dn::DecodeError::None && back->counter == 77);
         CHECK(back && back->data.payload == m.data.payload && back->data.src == kA && back->data.dst == kB &&
               back->data.socketName == "EDF6" && back->data.channel == 3 && back->data.seq == 42);
     }
-    auto tagged = dn::encode(m, "secret");
+    // Handshake messages carry the shared Key's tag.
+    dn::Message challenge;
+    challenge.type = dn::MsgType::Challenge;
+    challenge.challenge.clientNonce = 5;
+    auto tagged = dn::encode(challenge, "secret");
     dn::DecodeError err;
+    CHECK(dn::decode(tagged.data(), tagged.size(), "secret", &err).has_value());
     CHECK(!dn::decode(tagged.data(), tagged.size(), "other", &err) && err == dn::DecodeError::TagMismatch);
     CHECK(!dn::decode(tagged.data(), tagged.size(), "", &err) && err == dn::DecodeError::TagUnexpected);
-    auto plain = dn::encode(m, "");
+    auto plain = dn::encode(challenge, "");
     CHECK(!dn::decode(plain.data(), plain.size(), "secret", &err) && err == dn::DecodeError::TagMissing);
-    tagged[20] ^= 1;
+    tagged[10] ^= 1;
     CHECK(!dn::decode(tagged.data(), tagged.size(), "secret", &err) && err == dn::DecodeError::TagMismatch);
     CHECK(!dn::decode(plain.data(), 10, "", &err) && err == dn::DecodeError::Truncated);
+
+    // Link tags: made with one direction's key, checked with it; any changed byte or other key fails.
+    dn::LinkKey k1{}, k2{};
+    k1.fill(1);
+    k2.fill(2);
+    dn::LinkMac mac1(k1), mac1b(k1), mac2(k2);
+    CHECK(mac1.valid() && mac2.valid());
+    auto dg = dn::encode(m, "");
+    CHECK(dn::sealLink(dg, 9, mac1));
+    CHECK(dn::linkTagValid(dg.data(), dg.size(), mac1b) && !dn::linkTagValid(dg.data(), dg.size(), mac2));
+    auto back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->counter == 9);
+    bool everyByte = true;
+    for (size_t i = 0; i < dg.size(); ++i) {
+        auto bent = dg;
+        bent[i] ^= 0x40;
+        everyByte &= !dn::linkTagValid(bent.data(), bent.size(), mac1b);
+    }
+    CHECK(everyByte);
+    auto resent = dg;  // a retransmission: same datagram, new counter, new tag
+    CHECK(dn::sealLink(resent, 10, mac1) && resent != dg && dn::linkTagValid(resent.data(), resent.size(), mac1b));
+    CHECK(!dn::linkTagValid(dg.data(), 20, mac1b));
 
     dn::Message ack;
     ack.type = dn::MsgType::Ack;
@@ -108,9 +137,14 @@ void testWire() {
     w.welcome.clientNonce = 9;
     w.welcome.hostPuid = kHost;
     w.welcome.roster = {kHost, kA, kB};
-    auto dg = dn::encode(w, "");
-    auto back = dn::decode(dg.data(), dg.size(), "", &err);
-    CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9);
+    w.welcome.ecdh.fill(3);
+    w.welcome.publicKey.fill(4);
+    w.welcome.signature.fill(5);
+    dg = dn::encode(w, "");
+    back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->welcome.roster == w.welcome.roster && back->welcome.clientNonce == 9 &&
+          back->welcome.ecdh == w.welcome.ecdh && back->welcome.publicKey == w.welcome.publicKey &&
+          back->welcome.signature == w.welcome.signature);
 }
 
 // One of every message type, with fields filled in.
@@ -123,6 +157,7 @@ std::vector<dn::Message> sampleMessages() {
     m.hello.puid = kA;
     m.hello.cookie.fill(3);
     m.hello.publicKey.fill(4);
+    m.hello.ecdh.fill(8);
     m.hello.signature.fill(5);
     all.push_back(m);
     m = {};
@@ -136,9 +171,13 @@ std::vector<dn::Message> sampleMessages() {
     m.welcome.clientNonce = 9;
     m.welcome.hostPuid = kHost;
     m.welcome.roster = {kHost, kA, kB};
+    m.welcome.ecdh.fill(9);
+    m.welcome.publicKey.fill(10);
+    m.welcome.signature.fill(11);
     all.push_back(m);
     m = {};
     m.type = dn::MsgType::Roster;
+    m.counter = 3;
     m.roster.hostNonce = 5;
     m.roster.roster = {kHost, kB};
     all.push_back(m);
@@ -157,7 +196,7 @@ std::vector<dn::Message> sampleMessages() {
     m.ack.cumulative = 4;
     m.ack.set(7);
     all.push_back(m);
-    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye}) {
+    for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye, dn::MsgType::Reset}) {
         m = {};
         m.type = t;
         m.ping.timeMs = 1234;
@@ -171,7 +210,8 @@ void testWireRejectsMalformed() {
     dn::DecodeError err;
     auto decodes = [&](const std::vector<uint8_t>& dg) { return dn::decode(dg.data(), dg.size(), "", &err).has_value(); };
 
-    // Data: header(8) epoch(4) seq(4), then src as u8 length + bytes.
+    // Data: header(8) epoch(4) counter(8) seq(4), then src as u8 length + bytes; the link tag last.
+    const size_t tag = dn::kLinkTagBytes;
     dn::Message m;
     m.type = dn::MsgType::Data;
     m.data.seq = 1;
@@ -181,16 +221,16 @@ void testWireRejectsMalformed() {
     auto dg = dn::encode(m, "");
     CHECK(decodes(dg));  // the limits themselves are fine
     auto longId = dg;
-    longId[16] = static_cast<uint8_t>(dn::kMaxString + 1);
-    longId.insert(longId.begin() + 17, 'a');
+    longId[24] = static_cast<uint8_t>(dn::kMaxString + 1);
+    longId.insert(longId.begin() + 25, 'a');
     CHECK(!decodes(longId) && err == dn::DecodeError::Malformed);  // an id the encoder would have cut
     m.data.src = kA;
     m.data.payload.clear();
     dg = dn::encode(m, "");
     auto big = dg;  // payload length is the last field before the payload
     uint16_t over = static_cast<uint16_t>(dn::kMaxPayload + 1);
-    memcpy(&big[big.size() - 2], &over, 2);
-    big.insert(big.end(), dn::kMaxPayload + 1, 7);
+    memcpy(&big[big.size() - tag - 2], &over, 2);
+    big.insert(big.end() - tag, dn::kMaxPayload + 1, 7);
     CHECK(!decodes(big) && err == dn::DecodeError::Malformed);
 
     dn::Message r;
@@ -198,7 +238,7 @@ void testWireRejectsMalformed() {
     r.roster.roster.assign(32, kA);
     dg = dn::encode(r, "");
     CHECK(decodes(dg));
-    dg[12] = 33;  // roster count, after the host nonce
+    dg[24] = 33;  // roster count, after epoch, counter and host nonce
     dg.push_back(static_cast<uint8_t>(kA.size()));
     dg.insert(dg.end(), kA.begin(), kA.end());
     CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
@@ -342,6 +382,9 @@ dn::DirectOptions joinOptions(const std::string& address, double drop, const std
     o.listenPort = 0;
     o.hostAddress = address;
     o.key = key;
+    // The room is kHost's, which published this process's identity like every test host proves.
+    o.roomOwner = kHost;
+    o.roomOwnerIdentity = dn::processIdentity()->commitment();
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     return o;
@@ -448,16 +491,29 @@ std::optional<dn::Message> receiveFrom(RawPeer& peer, dn::MsgType type, int ms, 
     return std::nullopt;
 }
 
+// Sends an already encoded datagram to 127.0.0.1:`port` from `peer`'s socket.
+void sendRawTo(RawPeer& peer, uint16_t port, const std::vector<uint8_t>& dg) {
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(peer.s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+           reinterpret_cast<sockaddr*>(&to), sizeof(to));
+}
+
 // A hand-driven client: says hello as `puid`, proves it with `identity` once the host sent a cookie,
-// and keeps the link epoch the host welcomed it with.
+// and keeps the link epoch and keys the host welcomed it with.
 struct RawClient {
     RawPeer peer;
     std::shared_ptr<const dn::Identity> identity = dn::processIdentity();
+    std::unique_ptr<dn::EcdhKey> ecdh = dn::EcdhKey::generate();  // new for every connect()
     std::string key;
     uint16_t port = 0;
     std::string puid;
     uint32_t nonce = 0;
     uint32_t epoch = 0;
+    dn::LinkMac tx;  // client -> host link key
+    uint64_t counter = 0;
     dn::Message lastHello;  // the last proven hello sent
 
     // A hello of session `session`; signed when `cookie` is given.
@@ -470,6 +526,7 @@ struct RawClient {
         if (cookie) {
             h.hello.cookie = *cookie;
             h.hello.publicKey = identity->publicKey();
+            h.hello.ecdh = ecdh->publicKey();
             h.hello.signature = identity->sign(*dn::helloDigest(h.hello)).value();
         }
         return h;
@@ -478,27 +535,53 @@ struct RawClient {
         sendTo(peer, port, h, key);
         auto w = receiveFrom(peer, dn::MsgType::Welcome, ms, key);
         if (!w || w->welcome.clientNonce != h.hello.nonce) return false;
-        epoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        auto shared = ecdh->agree(w->welcome.ecdh);
+        auto keys = shared ? dn::deriveLinkKeys(*shared, key, h.hello, w->welcome) : std::nullopt;
+        if (!keys) return false;
+        uint32_t welcomedEpoch = dn::linkEpoch(h.hello.nonce, w->welcome.hostNonce);
+        if (welcomedEpoch != epoch) counter = 0;  // a new link; a repeated welcome keeps the old one going
+        epoch = welcomedEpoch;
+        tx = dn::LinkMac(keys->clientToHost);
         return true;
     }
+    // Connects and confirms the link keys the way a real client does (any datagram with them), then
+    // waits for the member list the host sends once the link is up.
     bool connect(uint16_t hostPort, const std::string& id, uint32_t sessionNonce, int attempts = 5) {
         port = hostPort;
         puid = id;
         nonce = sessionNonce;
+        ecdh = dn::EcdhKey::generate();
         uint64_t session = identity->nextSession();
         for (int attempt = 0; attempt < attempts; ++attempt) {
             sendTo(peer, port, hello(session, nullptr), key);
             auto c = receiveFrom(peer, dn::MsgType::Challenge, 500, key);
             if (!c || c->challenge.clientNonce != nonce) continue;
             lastHello = hello(session, &c->challenge.cookie);
-            if (welcomed(lastHello, 500)) return true;
+            if (!welcomed(lastHello, 500)) continue;
+            dn::Message ping;
+            ping.type = dn::MsgType::Ping;
+            link(ping);
+            auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+            while (std::chrono::steady_clock::now() < end) {
+                auto r = receiveFrom(peer, dn::MsgType::Roster, 100, key);
+                if (r && std::find(r->roster.roster.begin(), r->roster.roster.end(), puid) != r->roster.roster.end())
+                    return true;
+            }
+            return false;
         }
         return false;
     }
+    // Encodes and seals a link message with this client's link.
+    std::vector<uint8_t> sealed(dn::Message m) {
+        m.epoch = epoch;
+        auto dg = dn::encode(m, key);
+        dn::sealLink(dg, ++counter, tx);
+        return dg;
+    }
+    void link(const dn::Message& m) { sendRawTo(peer, port, sealed(m)); }
     void data(uint32_t seq, const std::string& dst, const std::vector<uint8_t>& payload) {
         dn::Message m;
         m.type = dn::MsgType::Data;
-        m.epoch = epoch;
         m.data.seq = seq;
         m.data.src = puid;
         m.data.dst = dst;
@@ -506,9 +589,335 @@ struct RawClient {
         m.data.channel = 1;
         m.data.reliability = seq ? 1 : 0;
         m.data.payload = payload;
-        sendTo(peer, port, m, key);
+        link(m);
     }
 };
+
+// Someone on the network path between a joiner and its host: the joiner dials the tap, which forwards
+// every datagram both ways, keeps a copy of each and may alter or drop them, or send its own.
+struct Tap {
+    struct Copy {
+        bool toHost;
+        std::vector<uint8_t> dg;
+    };
+    RawPeer sock;
+    uint16_t hostPort;
+    std::mutex mu;
+    sockaddr_storage joiner{};  // guarded by mu
+    int joinerLen = 0;
+    std::vector<Copy> copies;
+    // Called on every forwarded datagram; false drops it.
+    std::function<bool(std::vector<uint8_t>&, bool toHost)> alter;
+    std::atomic<bool> running{true};
+    std::thread thread;
+
+    explicit Tap(uint16_t host) : hostPort(host), thread([this] { run(); }) {}
+    ~Tap() {
+        running = false;
+        thread.join();
+    }
+    uint16_t port() {
+        sockaddr_in bound{};
+        int len = sizeof(bound);
+        getsockname(sock.s, reinterpret_cast<sockaddr*>(&bound), &len);
+        return ntohs(bound.sin_port);
+    }
+    void run() {
+        while (running) {
+            uint8_t buf[2048];
+            sockaddr_storage from{};
+            int fromLen = sizeof(from);
+            int got = recvfrom(sock.s, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from),
+                               &fromLen);
+            if (got <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            bool toHost = ntohs(reinterpret_cast<sockaddr_in*>(&from)->sin_port) != hostPort;
+            std::vector<uint8_t> dg(buf, buf + got);
+            std::lock_guard<std::mutex> lock(mu);
+            if (toHost) {
+                joiner = from;
+                joinerLen = fromLen;
+            }
+            copies.push_back({toHost, dg});
+            if (alter && !alter(dg, toHost)) continue;
+            send(dg, toHost);
+        }
+    }
+    // Sends `dg` on, as if it had come through the tap. Caller holds mu.
+    void send(const std::vector<uint8_t>& dg, bool toHost) {
+        if (toHost) {
+            sendRawTo(sock, hostPort, dg);
+        } else if (joinerLen) {
+            sendto(sock.s, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&joiner), joinerLen);
+        }
+    }
+    void inject(const std::vector<uint8_t>& dg, bool toHost) {
+        std::lock_guard<std::mutex> lock(mu);
+        send(dg, toHost);
+    }
+    // The datagrams of `type` that went through in one direction and satisfy `match`, oldest first.
+    std::vector<std::vector<uint8_t>> captured(dn::MsgType type, bool toHost,
+                                               const std::function<bool(const dn::Message&)>& match = nullptr) {
+        std::lock_guard<std::mutex> lock(mu);
+        std::vector<std::vector<uint8_t>> out;
+        for (const auto& c : copies) {
+            auto m = dn::decode(c.dg.data(), c.dg.size(), "", nullptr);
+            if (c.toHost == toHost && m && m->type == type && (!match || match(*m))) out.push_back(c.dg);
+        }
+        return out;
+    }
+    void setAlter(std::function<bool(std::vector<uint8_t>&, bool)> f) {
+        std::lock_guard<std::mutex> lock(mu);
+        alter = std::move(f);
+    }
+};
+
+// Pops every packet `net` has for the game right now.
+std::vector<dn::Delivered> popAll(dn::DirectNet& net) {
+    std::vector<dn::Delivered> out;
+    dn::Delivered d;
+    while (net.pop(nullptr, 1170, d)) out.push_back(d);
+    return out;
+}
+
+void testLinkPacketsAuthenticated() {
+    printf("direct: without a Key, someone on the path can neither alter, inject nor replay link packets\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.upgradeUnreliable = false;  // unreliable packets show a replay: nothing below would drop a copy
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    Tap tap(host.boundPort());
+    dn::DirectOptions ao = joinOptions("127.0.0.1:" + std::to_string(tap.port()), 0);
+    ao.upgradeUnreliable = false;
+    dn::DirectNet a, b;  // A talks to the host through the tap, B directly
+    CHECK(a.start(ao));
+    CHECK(b.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    b.setLocalUser(kB);
+    CHECK(waitFor([&] { return a.canRoute(kB) && b.canRoute(kA) && host.canRoute(kA) && host.canRoute(kB); }, 5000));
+    // The real peers exchange data, also relayed by the host from B to A (re-tagged for A's link).
+    CHECK(streamInOrder(a, kHost, host, kA, 200));
+    CHECK(streamInOrder(host, kA, a, kHost, 200));
+    CHECK(streamInOrder(b, kA, a, kB, 200));
+    CHECK(a.rejectedPackets() == 0 && host.rejectedPackets() == 0);
+
+    // One flipped byte in a game packet to A: dropped. Unreliable, it is simply lost; reliable, the
+    // resend (a new datagram) delivers the original.
+    auto p = payloadFor(501);
+    int flips = 0;  // guarded by tap.mu
+    tap.setAlter([&](std::vector<uint8_t>& dg, bool toHost) {
+        auto m = dn::decode(dg.data(), dg.size(), "", nullptr);
+        if (!toHost && m && m->type == dn::MsgType::Data && m->data.payload == p && flips++ == 0)
+            dg[dg.size() - dn::kLinkTagBytes - 3] ^= 0x01;  // in the payload: only the first copy
+        return true;
+    });
+    CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+    CHECK(!waitFor([&] { return !popAll(a).empty(); }, 500) && a.rejectedPackets() == 1);
+    {
+        std::lock_guard<std::mutex> lock(tap.mu);
+        flips = 0;
+        p = payloadFor(502);
+    }
+    CHECK(host.send(kA, "EDF6", 1, 2, p.data(), p.size()));
+    std::vector<dn::Delivered> got;
+    CHECK(waitFor([&] {
+        auto more = popAll(a);
+        got.insert(got.end(), more.begin(), more.end());
+        return !got.empty();
+    }, 2000));
+    CHECK(got.size() == 1 && got[0].data == p && a.rejectedPackets() == 2);
+    tap.setAlter(nullptr);
+
+    // A packet from elsewhere with a valid-looking header (A's link epoch, a new counter) and no key:
+    // dropped by A, and it does not move A's link at the host either.
+    auto seen = tap.captured(dn::MsgType::Data, false);
+    CHECK(!seen.empty());
+    uint32_t epoch = seen.empty() ? 0 : dn::decode(seen[0].data(), seen[0].size(), "", nullptr)->epoch;
+    RawPeer evil;
+    dn::Message forged;
+    forged.type = dn::MsgType::Data;
+    forged.epoch = epoch;
+    forged.counter = 1u << 20;
+    forged.data.src = kHost;
+    forged.data.dst = kA;
+    forged.data.socketName = "EDF6";
+    forged.data.channel = 1;
+    forged.data.payload = payloadFor(503);
+    auto forgedDg = dn::encode(forged, "");
+    dn::LinkKey guess{};
+    dn::LinkMac guessMac(guess);
+    dn::sealLink(forgedDg, forged.counter, guessMac);
+    uint64_t hostRejected = host.rejectedPackets();
+    for (int i = 0; i < 5; ++i) {
+        sendRawTo(evil, a.boundPort(), forgedDg);
+        forged.data.src = kA;
+        forged.data.dst = kHost;
+        sendRawTo(evil, host.boundPort(), dn::encode(forged, ""));
+    }
+    CHECK(!waitFor([&] { return !popAll(a).empty() || !popAll(host).empty(); }, 500));
+    CHECK(a.rejectedPackets() == 7 && host.rejectedPackets() == hostRejected + 5);
+    CHECK(streamInOrder(host, kA, a, kHost, 50));  // the host still sends to the real A (via the tap)
+
+    // A captured game packet played back: dropped, however often.
+    p = payloadFor(504);
+    CHECK(host.send(kA, "EDF6", 1, 0, p.data(), p.size()));
+    CHECK(waitFor([&] { return popAll(a).size() == 1; }, 2000));
+    auto copies = tap.captured(dn::MsgType::Data, false, [&](const dn::Message& m) { return m.data.payload == p; });
+    CHECK(copies.size() == 1);
+    uint64_t aRejected = a.rejectedPackets();
+    for (int i = 0; i < 3 && !copies.empty(); ++i) tap.inject(copies[0], false);
+    CHECK(!waitFor([&] { return !popAll(a).empty(); }, 500) && a.rejectedPackets() == aRejected + 3);
+
+    // An unauthenticated Reset "from the host" does not end a working link.
+    dn::Message reset;
+    reset.type = dn::MsgType::Reset;
+    tap.inject(dn::encode(reset, ""), false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(a.canRoute(kHost) && a.canRoute(kB));
+
+    // A captured member list that still names B, played back after B left: A does not route to B again.
+    auto withB = tap.captured(dn::MsgType::Roster, false, [&](const dn::Message& m) {
+        return std::find(m.roster.roster.begin(), m.roster.roster.end(), kB) != m.roster.roster.end();
+    });
+    CHECK(!withB.empty());
+    b.stop();
+    CHECK(waitFor([&] { return !a.canRoute(kB) && !host.canRoute(kB); }, 3000));
+    aRejected = a.rejectedPackets();
+    tap.inject(withB.back(), false);
+    tap.inject(withB.front(), false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(!a.canRoute(kB) && a.rejectedPackets() == aRejected + 2);
+
+    // A's goodbye, played back to the host after A reconnected: the new link stays.
+    a.setActive(false);
+    CHECK(waitFor([&] { return !host.canRoute(kA); }, 2000));
+    auto byes = tap.captured(dn::MsgType::Bye, true);
+    CHECK(byes.size() >= 1);
+    a.setActive(true);
+    CHECK(waitFor([&] { return host.canRoute(kA) && a.canRoute(kHost); }, 5000));
+    hostRejected = host.rejectedPackets();
+    for (const auto& bye : byes) tap.inject(bye, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(host.canRoute(kA) && host.rejectedPackets() == hostRejected + byes.size());
+    CHECK(streamInOrder(a, kHost, host, kA, 50));
+}
+
+void testReplayWindow() {
+    printf("wire: link counters are taken once, within a 1024-packet reordering window\n");
+    dn::ReplayWindow w;
+    CHECK(!w.fresh(0) && w.fresh(1) && w.fresh(5000));
+    for (uint64_t c = 1; c <= 5; ++c) w.mark(c);
+    CHECK(!w.fresh(3) && w.fresh(6) && w.highest() == 5);
+    w.mark(8);
+    CHECK(w.fresh(7) && w.fresh(6) && !w.fresh(8));  // reordered ones still arrive, once
+    w.mark(7);
+    CHECK(!w.fresh(7) && w.fresh(6));
+    for (uint64_t c = 9; c <= 1024; ++c) w.mark(c);
+    w.mark(1030);  // moves the window: slots of 1025-1029 held 1-5, which are now out of it
+    CHECK(w.fresh(1027) && !w.fresh(1030) && !w.fresh(3) && !w.fresh(6) && w.fresh(1029));
+    CHECK(!w.fresh(1030 - 1024) && !w.fresh(1024) && w.fresh(1025));
+    w.mark(100000);  // a jump beyond the window forgets everything older
+    CHECK(!w.fresh(1027) && !w.fresh(100000 - 1024) && w.fresh(100000 - 1023) && !w.fresh(100000));
+}
+
+void testLinkTagSpeed() {
+    printf("wire: tagging and checking 10000 full-size link packets\n");
+    dn::LinkKey k{};
+    k.fill(7);
+    dn::LinkMac tx(k), rx(k);
+    dn::Message m;
+    m.type = dn::MsgType::Data;
+    m.data.seq = 1;
+    m.data.src = kA;
+    m.data.dst = kB;
+    m.data.socketName = "EDF6";
+    m.data.payload.assign(1100, 9);
+    auto dg = dn::encode(m, "");
+    bool ok = true;
+    auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 1; i <= 10000; ++i) {
+        ok &= dn::sealLink(dg, i, tx);
+        ok &= dn::linkTagValid(dg.data(), dg.size(), rx);
+    }
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    printf("  %zu-byte datagrams: %.1f ms for 10000 seal+check\n", dg.size(), ms);
+    CHECK(ok && ms < 500.0);
+}
+
+void testWelcomeProvesTheRoomOwner() {
+    printf("direct: a joiner accepts as host only the room owner, proven by the identity it published\n");
+    auto impostor = dn::Identity::generate();
+    std::string addr;
+    {
+        // Someone answering on the advertised address with a key the room owner never published.
+        dn::DirectOptions ho = hostOptions(0, 0);
+        ho.identity = impostor;
+        dn::DirectNet host;
+        CHECK(host.start(ho));
+        host.setLocalUser(kHost);
+        dn::DirectNet a;
+        CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2500));
+        // The host proved A and answered, but A never confirmed: nothing is sent into that link.
+        CHECK(!host.canRoute(kA) && host.directMembers().size() == 1);
+        CHECK(a.statusLine().find("host answered") != std::string::npos);
+        // Had the room owner published that key, it would be the host: the same instance connects.
+        a.setRoomOwner(kHost, impostor->commitment());
+        CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 3000));
+        CHECK(streamInOrder(host, kA, a, kHost, 50));
+    }
+    {
+        // The owner's identity key is public: a welcome carrying it but not signed with it is refused.
+        dn::DirectOptions ho = hostOptions(0, 0);
+        ho.identity = impostor;
+        dn::DirectNet host;
+        CHECK(host.start(ho));
+        host.setLocalUser(kHost);
+        Tap tap(host.boundPort());
+        tap.setAlter([](std::vector<uint8_t>& dg, bool toHost) {
+            auto m = dn::decode(dg.data(), dg.size(), "", nullptr);
+            if (toHost || !m || m->type != dn::MsgType::Welcome) return true;
+            m->welcome.publicKey = dn::processIdentity()->publicKey();
+            dg = dn::encode(*m, "");
+            return true;
+        });
+        dn::DirectNet a;
+        CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(tap.port()), 0)));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost) || host.canRoute(kA); }, 2500));
+        CHECK(!tap.captured(dn::MsgType::Welcome, false).empty());
+    }
+    {
+        // A real plugin player (its own published identity) that is not the room owner.
+        dn::DirectNet host;
+        CHECK(host.start(hostOptions(0, 0)));
+        host.setLocalUser(kB);
+        dn::DirectNet a;
+        CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kB) || host.canRoute(kA); }, 2500));
+    }
+    {
+        // The room owner's identity has not reached the joiner yet: it waits, then connects.
+        dn::DirectNet host;
+        CHECK(host.start(hostOptions(0, 0)));
+        host.setLocalUser(kHost);
+        dn::DirectOptions ao = joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0);
+        ao.roomOwner.clear();
+        ao.roomOwnerIdentity.clear();
+        dn::DirectNet a;
+        CHECK(a.start(ao));
+        a.setLocalUser(kA);
+        CHECK(!waitFor([&] { return a.canRoute(kHost); }, 2000));
+        a.setRoomOwner(kHost, dn::processIdentity()->commitment());
+        CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 3000));
+    }
+}
 
 void testNoReflectionToSender() {
     printf("direct: the host never sends a client's packets back to that client\n");
@@ -542,12 +951,13 @@ void testIdentityCrypto() {
     auto sig = a->sign(*digest);
     CHECK(sig && dn::verifySignature(a->publicKey(), *digest, *sig));
     CHECK(!dn::verifySignature(b->publicKey(), *digest, *sig));  // someone else's key
-    for (auto change : {0, 1, 2, 3}) {  // every signed field matters
+    for (auto change : {0, 1, 2, 3, 4}) {  // every signed field matters
         dn::HelloMsg t = h;
         if (change == 0) t.nonce ^= 1;
         if (change == 1) ++t.session;
         if (change == 2) t.puid = kB;
         if (change == 3) t.cookie[0] ^= 1;
+        if (change == 4) t.ecdh[0] ^= 1;
         CHECK(!dn::verifySignature(a->publicKey(), *dn::helloDigest(t), *sig));
     }
     dn::PublicKey offCurve{};
@@ -726,11 +1136,15 @@ void testReplayedHelloIgnored() {
     CHECK(d && d->epoch == live);
 }
 
-void testOlderPluginStaysOnEos() {
-    printf("direct: peers speaking the 0.3.6 protocol are ignored both ways, nothing breaks\n");
-    // A 0.3.6 hello: header with protocol 2, nonce, id.
-    std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, 2, 0, 7, 0, 0, 0, static_cast<uint8_t>(kA.size())};
+void testOlderProtocolStaysOnEos(uint8_t protocol) {
+    printf("direct: peers speaking protocol %u (%s) are ignored both ways, nothing breaks\n", protocol,
+           protocol == 2 ? "0.3.6" : "0.4.0");
+    // An old hello: header with the old protocol, nonce, (protocol 3: session,) id.
+    std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, protocol, 0, 7, 0, 0, 0};
+    if (protocol == 3) old.insert(old.end(), 8, 1);
+    old.push_back(static_cast<uint8_t>(kA.size()));
     old.insert(old.end(), kA.begin(), kA.end());
+    if (protocol == 3) old.insert(old.end(), 8 + 64 + 64, 0);  // cookie, public key, signature
     dn::DecodeError err;
     CHECK(!dn::decode(old.data(), old.size(), "", &err) && err == dn::DecodeError::BadProtocol);
     dn::DirectNet host;
@@ -753,7 +1167,7 @@ void testOlderPluginStaysOnEos() {
     }
     CHECK(replies == 0 && !host.canRoute(kA));
 
-    // A 0.3.6 host: it cannot read our hello, whatever it sends back is not a protocol-3 answer.
+    // An old host: it cannot read our hello, whatever it sends back is not an answer we read.
     RawPeer oldHost;
     sockaddr_in bound{};
     int len = sizeof(bound);
@@ -774,12 +1188,17 @@ void testOlderPluginStaysOnEos() {
             continue;
         }
         ++hellos;
-        // 0.3.6 answers a hello it understood with a protocol-2 Welcome; send one anyway.
-        std::vector<uint8_t> welcome = {0x45, 0x44, 0x4E, 0x31, 2, 0, 2, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
-        sendto(oldHost.s, reinterpret_cast<const char*>(welcome.data()), static_cast<int>(welcome.size()), 0,
+        // 0.3.6 answers a hello it understood with a Welcome, 0.4.0 with a Challenge; send one anyway.
+        std::vector<uint8_t> answer = {0x45, 0x44, 0x4E, 0x31, 2, 0, protocol, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
+        if (protocol == 3) answer = {0x45, 0x44, 0x4E, 0x31, 9, 0, 3, 0, 7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+        sendto(oldHost.s, reinterpret_cast<const char*>(answer.data()), static_cast<int>(answer.size()), 0,
                reinterpret_cast<sockaddr*>(&from), fromLen);
     }
-    CHECK(hellos >= 2 && !a.canRoute(kHost));
+    CHECK(hellos >= 2 && !a.canRoute(kHost) && a.statusLine().find("host answered") == std::string::npos);
+}
+
+void testOlderPluginStaysOnEos() {
+    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}}) testOlderProtocolStaysOnEos(protocol);
 }
 
 void testRetiredInstanceIsFreed() {
@@ -1396,6 +1815,11 @@ void testKeyMismatch() {
     CHECK(waitFor([&] { return good.canRoute(kHost); }, 5000));
     CHECK(!waitFor([&] { return bad.canRoute(kHost); }, 2500));
     CHECK(!host.canRoute(kA));
+    // The Key goes into the link keys too: with it everything works as without.
+    CHECK(waitFor([&] { return host.canRoute(kB); }, 2000));
+    CHECK(streamInOrder(good, kHost, host, kB, 200));
+    CHECK(streamInOrder(host, kB, good, kHost, 200));
+    CHECK(good.rejectedPackets() == 0 && host.rejectedPackets() == 0);
 }
 
 void testIat(const wchar_t* edfPath) {
@@ -1461,6 +1885,47 @@ void testReliableBacklogLimit() {
         ++tracked;
     }
     CHECK(tracked < 8192 && bytes.pendingBytes() > (8u << 20) && bytes.pendingBytes() <= (8u << 20) + 1200);
+}
+
+void testRetransmitTimeout() {
+    printf("reliable: the retransmission timeout stays above a steady RTT; duplicates are counted\n");
+    // A steady 62 ms link (what real games showed): every sample the same, so RTTVAR goes to zero. The
+    // timeout must not then equal the RTT, which resent nearly every packet.
+    dn::ReliableSender tx;
+    uint64_t now = 1000;
+    for (int i = 0; i < 64; ++i) {
+        uint32_t seq = tx.nextSeq();
+        tx.track(seq, std::vector<uint8_t>(20), now);
+        dn::AckMsg ack;
+        ack.cumulative = seq;
+        now += 62;
+        tx.onAck(ack, now);
+    }
+    CHECK(tx.srttMs() == 62 && tx.rtoMs() >= 150);
+    // A slow link keeps SRTT plus a margin above the floor.
+    dn::ReliableSender slow;
+    now = 1000;
+    for (int i = 0; i < 64; ++i) {
+        uint32_t seq = slow.nextSeq();
+        slow.track(seq, std::vector<uint8_t>(20), now);
+        dn::AckMsg ack;
+        ack.cumulative = seq;
+        now += 300;
+        slow.onAck(ack, now);
+    }
+    CHECK(slow.rtoMs() >= 305);
+
+    dn::ReliableReceiver rx;
+    std::vector<dn::DataMsg> ready;
+    dn::DataMsg m;
+    m.reliability = 1;
+    m.seq = 1;
+    rx.onData(m, ready);
+    rx.onData(m, ready);  // resent after it had arrived
+    m.seq = 3;
+    rx.onData(m, ready);
+    rx.onData(m, ready);  // resent while buffered out of order
+    CHECK(ready.size() == 2 && rx.duplicates() == 2);
 }
 
 void testUnacknowledgedLinkIsDropped() {
@@ -1964,6 +2429,7 @@ int wmain(int argc, wchar_t** argv) {
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
     testReliableBacklogLimit();
+    testRetransmitTimeout();
     testUnacknowledgedLinkIsDropped();
     testNoReflectionToSender();
     testIdentityCrypto();
@@ -1974,6 +2440,10 @@ int wmain(int argc, wchar_t** argv) {
     testReplayedHelloIgnored();
     testOlderPluginStaysOnEos();
     testRetiredInstanceIsFreed();
+    testReplayWindow();
+    testLinkTagSpeed();
+    testWelcomeProvesTheRoomOwner();
+    testLinkPacketsAuthenticated();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

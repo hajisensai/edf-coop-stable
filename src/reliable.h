@@ -24,8 +24,9 @@ public:
     void track(uint32_t seq, std::vector<uint8_t> datagram, uint64_t nowMs);
     // Returns the number of packets newly acknowledged.
     size_t onAck(const AckMsg& ack, uint64_t nowMs);
-    // Calls `resend` for every packet whose retransmission timer expired.
-    void poll(uint64_t nowMs, const std::function<void(const std::vector<uint8_t>&)>& resend);
+    // Calls `resend` for every packet whose retransmission timer expired. It may rewrite the datagram
+    // in place (a new link counter and tag) but not change its size.
+    void poll(uint64_t nowMs, const std::function<void(std::vector<uint8_t>&)>& resend);
     // Age of the oldest unacknowledged packet (0 when nothing is pending).
     uint64_t oldestPendingAgeMs(uint64_t nowMs) const;
     size_t pendingCount() const { return pending_.size(); }
@@ -59,6 +60,9 @@ public:
     AckMsg onData(DataMsg msg, std::vector<DataMsg>& deliver);
     uint32_t expected() const { return expected_; }
     size_t buffered() const { return buffer_.size(); }
+    // Reliable packets received again after they had arrived: set against the sender's retransmits,
+    // the share of its resends that were not needed.
+    uint64_t duplicates() const { return duplicates_; }
 
 private:
     AckMsg currentAck() const;
@@ -70,6 +74,7 @@ private:
 
     uint32_t expected_ = 1;
     std::map<uint32_t, Slot> buffer_;
+    uint64_t duplicates_ = 0;
 };
 
 }  // namespace dn

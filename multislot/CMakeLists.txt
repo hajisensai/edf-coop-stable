@@ -74,7 +74,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_D
 add_library(EDF6MultiSlot SHARED
     src/plugin.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
-    src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp)
+    src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp)
 target_link_libraries(EDF6MultiSlot PRIVATE winhttp)
 target_include_directories(EDF6MultiSlot PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(EDF6MultiSlot PRIVATE ${WARNINGS})
@@ -101,9 +101,15 @@ add_test(NAME LoaderProxyRace COMMAND LoaderProxyTests
 add_executable(HandshakeTests tests/handshake_test.cpp src/joinlog.cpp src/identity.cpp src/log.cpp)
 target_compile_options(HandshakeTests PRIVATE ${WARNINGS})
 add_test(NAME HandshakeUserSnapshots COMMAND HandshakeTests "${CMAKE_BINARY_DIR}/handshake-diagnostics-test.log")
-add_executable(NetLogForwardTests tests/netlog_forward_test.cpp src/joinlog.cpp src/identity.cpp src/log.cpp)
+add_executable(PeerTimeoutTests tests/peertimeout_test.cpp src/peertimeout.cpp src/identity.cpp src/log.cpp)
+target_compile_options(PeerTimeoutTests PRIVATE ${WARNINGS})
+add_test(NAME PeerTimeoutKeepsRoom COMMAND PeerTimeoutTests "${CMAKE_BINARY_DIR}/peer-timeout-test.log")
+add_executable(NetLogForwardTests tests/netlog_forward_test.cpp src/joinlog.cpp src/identity.cpp src/log.cpp src/packetfit.cpp)
 target_compile_options(NetLogForwardTests PRIVATE ${WARNINGS})
 add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests)
+add_executable(PacketFitTests tests/packetfit_test.cpp src/packetfit.cpp src/log.cpp)
+target_compile_options(PacketFitTests PRIVATE ${WARNINGS})
+add_test(NAME MissionStartMessageFits COMMAND PacketFitTests "${CMAKE_BINARY_DIR}/packetfit-test.log")
 set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 # The tests against the game's code are registered either way. Without EDF.dll they report themselves skipped
 # (exit code 77), so ctest names them in its summary instead of a configure warning nobody reads in CI.
@@ -182,7 +188,7 @@ add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6MultiSlot)
-foreach(mode off host4 host8 fresh nomission recoveryoff quiet smooth)
+foreach(mode off host4 host8 fresh nomission recoveryoff keeproomoff quiet smooth)
     add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
              "${CMAKE_BINARY_DIR}/loadtest" ${mode})
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

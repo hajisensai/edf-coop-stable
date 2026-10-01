@@ -287,6 +287,25 @@ std::vector<CallSite> MissionCalls() {
     };
 }
 
+std::vector<CallSite> PacketFitCalls() {
+    return {
+        // MissionSync_Res (78D0E0, host): every player's record is read back from their reply (78D6E3) and written
+        // into the start message here; the message has no room for twelve, and EOS none for eight (packetfit.h).
+        {"MissionSync_Res writes a loadout record", 0x78D6FA, 0x773840},
+        // MissionSync_Update (790600, everyone): reads the records of the start message, a stub as the record it
+        // stands for.
+        {"MissionSync_Update reads a loadout record", 0x790873, 0x773740},
+    };
+}
+
+std::vector<MidSite> PacketFitHooks() {
+    return {
+        // MissionSync_Res after its record loop (`mov r12d, [rsp+0x20]`, the player count, before it is stored):
+        // the records held back are written here; the output stream is at rsp+0x60 (78D11B).
+        {"MissionSync_Res after its records", 0x78D756, {0x44, 0x8B, 0x64, 0x24, 0x20}, 0, 5},
+    };
+}
+
 std::vector<MidSite> ArmorHooks() {
     return {
         // `mov reg, [GameStatus + index*4 + 0x6F88]`, index = slot * 0xF98 + class. The room keeps showing the
@@ -353,6 +372,19 @@ std::vector<CallSite> DiagnosticCalls() {
 
 std::vector<CallSite> RecoveryCalls() {
     return {{"handshake final hello recovery", 0x12D5B9B, 0x12C8F50}};
+}
+
+std::vector<MidSite> PeerTimeoutHooks() {
+    return {
+        // Users::Add (12B7F50) right after make_shared<eos::User> (12B7610): `mov r12, [rax]; mov rsi, [rax+8]`
+        // takes the new user out of the returned shared_ptr; rbx is still the {ProductUserId, bool remote} argument.
+        {"room user joined (join time)", 0x12B80E0, {0x4C, 0x8B, 0x20, 0x48, 0x8B, 0x70, 0x08}, 0, 7},
+    };
+}
+
+std::vector<CallSite> PeerTimeoutCalls() {
+    // Online room update (788460): `if (!IsLocalHost(room) && AnyLinkTimedOut(room))` leaves the room (787090).
+    return {{"leave the room when a P2P handshake timed out", 0x788ABF, 0x12BE750}};
 }
 
 std::vector<PointerSlot> MissionSlots() {

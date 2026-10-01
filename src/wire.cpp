@@ -1,6 +1,7 @@
 #include "wire.h"
 
 #include <cstring>
+#include <utility>
 
 #include "auth.h"
 
@@ -9,6 +10,8 @@ namespace {
 
 constexpr size_t kMaxRoster = 32;
 constexpr size_t kHeaderBytes = 8;
+constexpr size_t kCounterOffset = kHeaderBytes + 4;  // after the epoch
+constexpr size_t kLinkOverhead = kCounterOffset + 8 + kLinkTagBytes;
 
 class Writer {
 public:
@@ -92,7 +95,10 @@ std::vector<std::string> readRoster(Reader& r) {
 }
 
 void writeBody(Writer& w, const Message& m) {
-    if (isLinkScoped(m.type)) w.u32(m.epoch);
+    if (isLinkScoped(m.type)) {
+        w.u32(m.epoch);
+        w.u64(m.counter);
+    }
     switch (m.type) {
         case MsgType::Hello:
             w.u32(m.hello.nonce);
@@ -100,6 +106,7 @@ void writeBody(Writer& w, const Message& m) {
             w.str(m.hello.puid);
             w.raw(m.hello.cookie.data(), m.hello.cookie.size());
             w.raw(m.hello.publicKey.data(), m.hello.publicKey.size());
+            w.raw(m.hello.ecdh.data(), m.hello.ecdh.size());
             w.raw(m.hello.signature.data(), m.hello.signature.size());
             break;
         case MsgType::Challenge:
@@ -111,6 +118,9 @@ void writeBody(Writer& w, const Message& m) {
             w.u32(m.welcome.clientNonce);
             w.str(m.welcome.hostPuid);
             writeRoster(w, m.welcome.roster);
+            w.raw(m.welcome.ecdh.data(), m.welcome.ecdh.size());
+            w.raw(m.welcome.publicKey.data(), m.welcome.publicKey.size());
+            w.raw(m.welcome.signature.data(), m.welcome.signature.size());
             break;
         case MsgType::Roster:
             w.u32(m.roster.hostNonce);
@@ -135,12 +145,16 @@ void writeBody(Writer& w, const Message& m) {
             w.u64(m.ping.timeMs);
             break;
         case MsgType::Bye:
+        case MsgType::Reset:
             break;
     }
 }
 
 bool readBody(Reader& r, Message& m) {
-    if (isLinkScoped(m.type)) m.epoch = r.u32();
+    if (isLinkScoped(m.type)) {
+        m.epoch = r.u32();
+        m.counter = r.u64();
+    }
     switch (m.type) {
         case MsgType::Hello:
             m.hello.nonce = r.u32();
@@ -148,6 +162,7 @@ bool readBody(Reader& r, Message& m) {
             m.hello.puid = r.str();
             r.fixed(m.hello.cookie);
             r.fixed(m.hello.publicKey);
+            r.fixed(m.hello.ecdh);
             r.fixed(m.hello.signature);
             return true;
         case MsgType::Challenge:
@@ -159,6 +174,9 @@ bool readBody(Reader& r, Message& m) {
             m.welcome.clientNonce = r.u32();
             m.welcome.hostPuid = r.str();
             m.welcome.roster = readRoster(r);
+            r.fixed(m.welcome.ecdh);
+            r.fixed(m.welcome.publicKey);
+            r.fixed(m.welcome.signature);
             return true;
         case MsgType::Roster:
             m.roster.hostNonce = r.u32();
@@ -185,21 +203,27 @@ bool readBody(Reader& r, Message& m) {
             m.ping.timeMs = r.u64();
             return true;
         case MsgType::Bye:
+        case MsgType::Reset:
             return true;
     }
     return false;
 }
 
+void writeKey(Writer& w, const PublicKey& key) { w.raw(key.data(), key.size()); }
+
 }  // namespace
 
 std::vector<uint8_t> encode(const Message& msg, const std::string& key) {
+    bool link = isLinkScoped(msg.type);
     Writer w;
     w.u32(kMagic);
     w.u8(static_cast<uint8_t>(msg.type));
-    w.u8(key.empty() ? 0 : kFlagTagged);
+    w.u8(key.empty() || link ? 0 : kFlagTagged);
     w.u16(kProtocol);
     writeBody(w, msg);
-    if (!key.empty()) {
+    if (link) {
+        w.buf.resize(w.buf.size() + kLinkTagBytes);  // sealLink() writes the tag
+    } else if (!key.empty()) {
         // Without a tag (crypto failure) the zero bytes simply fail verification on the other side.
         auto tag = hmacTag(key, w.buf.data(), w.buf.size()).value_or(std::array<uint8_t, kTagBytes>{});
         w.raw(tag.data(), tag.size());
@@ -221,11 +245,17 @@ std::optional<Message> decode(const uint8_t* data, size_t size, const std::strin
     uint8_t flags = header.u8();
     if (header.u16() != kProtocol) return fail(DecodeError::BadProtocol);
 
-    bool tagged = (flags & kFlagTagged) != 0;
-    if (!key.empty() && !tagged) return fail(DecodeError::TagMissing);
-    if (key.empty() && tagged) return fail(DecodeError::TagUnexpected);
     size_t bodyEnd = size;
-    if (tagged) {
+    bool tagged = (flags & kFlagTagged) != 0;
+    if (isLinkScoped(m.type)) {
+        // The shared Key is part of the link keys (deriveLinkKeys): the link tag covers it.
+        if (size < kLinkOverhead) return fail(DecodeError::Truncated);
+        bodyEnd = size - kLinkTagBytes;
+    } else if (!key.empty() && !tagged) {
+        return fail(DecodeError::TagMissing);
+    } else if (key.empty() && tagged) {
+        return fail(DecodeError::TagUnexpected);
+    } else if (tagged) {
         if (size < kHeaderBytes + kTagBytes) return fail(DecodeError::Truncated);
         bodyEnd = size - kTagBytes;
         auto expect = hmacTag(key, data, bodyEnd);
@@ -240,14 +270,94 @@ std::optional<Message> decode(const uint8_t* data, size_t size, const std::strin
     return m;
 }
 
+bool sealLink(std::vector<uint8_t>& datagram, uint64_t counter, LinkMac& mac) {
+    if (datagram.size() < kLinkOverhead) return false;
+    memcpy(datagram.data() + kCounterOffset, &counter, 8);
+    size_t body = datagram.size() - kLinkTagBytes;
+    return mac.tag(datagram.data(), body, datagram.data() + body);
+}
+
+bool linkTagValid(const uint8_t* data, size_t size, LinkMac& mac) {
+    if (size < kLinkOverhead) return false;
+    size_t body = size - kLinkTagBytes;
+    return mac.check(data, body, data + body);
+}
+
 std::optional<Digest> helloDigest(const HelloMsg& hello) {
     Writer w;
-    w.raw("EDF6DN hello 3", 14);
+    w.raw("EDF6DN hello 4", 14);
     w.raw(hello.cookie.data(), hello.cookie.size());
     w.u32(hello.nonce);
     w.u64(hello.session);
     w.str(hello.puid);
+    writeKey(w, hello.ecdh);
     return sha256(w.buf.data(), w.buf.size());
+}
+
+std::optional<Digest> welcomeDigest(const WelcomeMsg& welcome, const PublicKey& clientEcdh) {
+    Writer w;
+    w.raw("EDF6DN welcome 4", 16);
+    w.u32(welcome.hostNonce);
+    w.u32(welcome.clientNonce);
+    w.str(welcome.hostPuid);
+    writeKey(w, clientEcdh);
+    writeKey(w, welcome.ecdh);
+    writeKey(w, welcome.publicKey);
+    writeRoster(w, welcome.roster);
+    return sha256(w.buf.data(), w.buf.size());
+}
+
+std::optional<LinkKeys> deriveLinkKeys(const Digest& shared, const std::string& key, const HelloMsg& hello,
+                                       const WelcomeMsg& welcome) {
+    // Extract: a pseudorandom key from the shared secret, salted with the shared Key (if any).
+    auto prk = hmacSha256("EDF6DN link 4|" + key, shared.data(), shared.size());
+    if (!prk) return std::nullopt;
+    // Expand: one key per direction, bound to this handshake. The cookie is left out: a client may
+    // get a new one between its hello and the host's answer.
+    std::string prkKey(reinterpret_cast<const char*>(prk->data()), prk->size());
+    Writer info;
+    info.u32(hello.nonce);
+    info.u32(welcome.hostNonce);
+    info.u32(linkEpoch(hello.nonce, welcome.hostNonce));
+    info.u64(hello.session);
+    info.str(hello.puid);
+    info.str(welcome.hostPuid);
+    writeKey(info, hello.ecdh);
+    writeKey(info, welcome.ecdh);
+    LinkKeys keys;
+    for (auto [label, out] : {std::pair<const char*, LinkKey*>{"client->host", &keys.clientToHost},
+                              std::pair<const char*, LinkKey*>{"host->client", &keys.hostToClient}}) {
+        std::vector<uint8_t> in(label, label + strlen(label));
+        in.insert(in.end(), info.buf.begin(), info.buf.end());
+        auto k = hmacSha256(prkKey, in.data(), in.size());
+        if (!k) return std::nullopt;
+        *out = *k;
+    }
+    return keys;
+}
+
+bool ReplayWindow::fresh(uint64_t counter) const {
+    if (counter == 0) return false;
+    if (counter > highest_) return true;
+    return highest_ - counter < kSize && !seen(counter);
+}
+
+void ReplayWindow::set(uint64_t counter, bool on) {
+    uint64_t& word = bits_[(counter % kSize) / 64];
+    uint64_t bit = uint64_t{1} << (counter % 64);
+    word = on ? word | bit : word & ~bit;
+}
+
+void ReplayWindow::mark(uint64_t counter) {
+    if (counter > highest_) {
+        // The slots of the counters skipped over held counters now out of the window.
+        if (counter - highest_ >= kSize)
+            bits_.fill(0);
+        else
+            for (uint64_t c = highest_ + 1; c < counter; ++c) set(c, false);
+        highest_ = counter;
+    }
+    set(counter, true);
 }
 
 const char* decodeErrorName(DecodeError e) {

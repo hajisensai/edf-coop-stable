@@ -35,9 +35,13 @@ struct DirectOptions {
     // targets are refused, also after DNS, so a host cannot aim its joiners at themselves or others.
     bool advertisedHost = false;
     std::string key;              // optional shared secret; must be identical for everyone
-    // join: proves our EOS id to the host (see setMemberIdentities). null: processIdentity(), the one
-    // this process publishes in the room.
+    // Proves our EOS id: a joiner's to the host (see setMemberIdentities), a host's to its joiners (see
+    // setRoomOwner). null: processIdentity(), the one this process publishes in the room.
     std::shared_ptr<const Identity> identity;
+    // join: the room owner's EOS id and the identity commitment it published; setRoomOwner() replaces
+    // them.
+    std::string roomOwner;
+    std::string roomOwnerIdentity;
     // host: the room members' published identity commitments (EOS id -> Identity::commitment()) to
     // start with; setMemberIdentities() replaces them.
     std::map<std::string, std::string> memberIds;
@@ -90,6 +94,10 @@ public:
     // X's lobby member attributes. Members that published none (vanilla players, plugin 0.3.6 and
     // older) can never be claimed; their traffic stays on EOS.
     void setMemberIdentities(std::map<std::string, std::string> commitments);
+    // join: which host to accept. A welcome counts only when it comes from the room owner `puid`,
+    // signed by the identity whose commitment it published in the room: the address we dial was
+    // advertised by the room (or typed in), which proves nothing about who answers on it.
+    void setRoomOwner(const std::string& puid, const std::string& commitment);
     // True when packets to `remote` can go over the direct transport right now.
     bool canRoute(const std::string& remote);
     // Sends a game packet over the direct transport. Returns false when `remote` is not routable.
@@ -114,6 +122,9 @@ public:
     std::vector<std::string> directMembers();
     std::string statusLine();
     WireTraffic takeWireTraffic();
+    // Link datagrams dropped since start because they failed authentication: a bad tag (forged,
+    // modified, or of an earlier session), or a counter already seen (replayed).
+    uint64_t rejectedPackets() const { return rejected_; }
 
     // Tests only: silently drop every outgoing datagram (simulates a total network outage).
     void setTestBlackhole(bool on) { testBlackhole_ = on; }
@@ -126,31 +137,57 @@ private:
         uint32_t peerNonce = 0;
         uint64_t session = 0;  // host: the client's HelloMsg::session
         uint32_t epoch = 0;  // linkEpoch(client nonce, host nonce)
+        // A joiner's link is up once the host's welcome verified. A host's link is up once the client
+        // sent a datagram with the link keys (proof it got the welcome): until then data sent to it
+        // would be dropped unread.
         bool up = false;
         uint64_t lastRecvMs = 0;
         uint64_t lastPingMs = 0;
         uint32_t rttMs = 0;
         ReliableSender tx;
         ReliableReceiver rx;
+        LinkMac txMac, rxMac;  // our direction's key, the peer's
+        uint64_t txCounter = 0;
+        ReplayWindow replay;
+        uint64_t rosterCounter = 0;  // joiner: counter of the newest member list applied
+        PublicKey peerEcdh{};  // host: the client's ECDH key of this session
+        WelcomeMsg welcome;  // host: what we answer this session's hellos with (signed on demand)
+        std::vector<uint8_t> welcomeDatagram;  // ...and its last encoding, reused while the roster stays
     };
 
     // A link that carries game packets now: up, and not being closed for an unacknowledged backlog.
     static bool usable(const Link& link) { return link.up && !link.tx.overloaded(); }
     void run();
+    // A received datagram: its bytes (a link message's tag is checked against them) and decoding.
+    struct Received {
+        const uint8_t* data;
+        size_t size;
+        const Message& msg;
+    };
+
     void processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen, uint64_t now);
-    void onHostDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void onHostDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);
+    bool openHostLink(Link& link, const HelloMsg& h);
+    void sendWelcome(Link& link, const sockaddr_storage& to, int toLen);
     std::optional<Cookie> cookieFor(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t bucket);
     const char* identityRefusal(const HelloMsg& h);
+    const char* welcomeRefusal(const WelcomeMsg& w);
     void sendHello(uint64_t now);
     void newLocalSession();
-    void onClientDatagram(const Message& m, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void onClientDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void onClientWelcome(const WelcomeMsg& w, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void dropHostLink(const char* why);
+    const char* linkRefusal(Link& link, const Received& r);
+    bool authentic(Link& link, const Received& r, const sockaddr_storage& from, int fromLen);
     void onLinkCommon(Link& link, const Message& m, uint64_t now);
     void routeData(DataMsg msg);
     void deliverLocal(DataMsg msg);
     void sendData(Link& link, DataMsg msg, uint64_t now);
     void sendMsg(const Message& m, const sockaddr_storage& to, int toLen);
     void sendLink(Link& link, Message m);
+    void sendSealed(Link& link, std::vector<uint8_t>& dg);
+    void sendBye();
     void sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen);
     void tick(uint64_t now);
     void broadcastRoster();
@@ -166,7 +203,7 @@ private:
     uint16_t boundPort_ = 0;
     std::atomic<bool> running_{false};
     std::atomic<bool> testBlackhole_{false};
-    std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0};
+    std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0}, rejected_{0};
     std::thread thread_;
     std::mutex mu_;
 
@@ -193,7 +230,9 @@ private:
     // Join mode.
     std::optional<Link> hostLink_;
     uint64_t localSession_ = 0;  // HelloMsg::session of our current session
+    std::unique_ptr<EcdhKey> localEcdh_;  // our ECDH key of the current session
     std::optional<Cookie> cookie_;  // the host's cookie for our current session
+    std::string roomOwner_, roomOwnerId_;  // see setRoomOwner
     std::vector<std::string> roster_;
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;

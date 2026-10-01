@@ -6,8 +6,14 @@
 namespace dn {
 namespace {
 
-constexpr uint32_t kMinRtoMs = 60;
+// Real games showed a 60 ms floor retransmitting nearly every packet on 45-65 ms links (RTO about the RTT):
+// the ACK only has to come back a little late. Game data was sent unreliably by the game itself, so a lost
+// packet arriving some tens of ms later costs little, while a spurious resend doubles the traffic.
+constexpr uint32_t kMinRtoMs = 150;
 constexpr uint32_t kMaxRtoMs = 1000;
+// RFC 6298: RTO = SRTT + max(G, 4 * RTTVAR), G the clock granularity (nowMs() is in milliseconds; a few ms
+// of scheduling jitter as well).
+constexpr double kClockGranularityMs = 5.0;
 constexpr size_t kMaxReorderBuffer = 4096;
 // Retransmission rate limit (token bucket). After a long stall thousands of packets are pending and
 // all their timers expire together; the budget caps the resend burst (~2.4 MB/s at full packets)
@@ -62,11 +68,11 @@ size_t ReliableSender::onAck(const AckMsg& ack, uint64_t nowMs) {
 }
 
 uint32_t ReliableSender::rtoMs() const {
-    double rto = srtt_ + 4 * rttvar_;
+    double rto = srtt_ + std::max(kClockGranularityMs, 4 * rttvar_);
     return std::clamp(static_cast<uint32_t>(rto), kMinRtoMs, kMaxRtoMs);
 }
 
-void ReliableSender::poll(uint64_t nowMs, const std::function<void(const std::vector<uint8_t>&)>& resend) {
+void ReliableSender::poll(uint64_t nowMs, const std::function<void(std::vector<uint8_t>&)>& resend) {
     if (lastBudgetMs_ == 0) lastBudgetMs_ = nowMs;
     budget_ = std::min(kRetransmitBurst, budget_ + (nowMs - lastBudgetMs_) * kRetransmitPerSecond / 1000.0);
     lastBudgetMs_ = nowMs;
@@ -105,7 +111,10 @@ AckMsg ReliableReceiver::currentAck() const {
 AckMsg ReliableReceiver::onData(DataMsg msg, std::vector<DataMsg>& deliver) {
     uint32_t seq = msg.seq;
     // Already delivered (below the cumulative point) or already held: a retransmitted duplicate.
-    if (seq < expected_ || buffer_.count(seq)) return currentAck();
+    if (seq < expected_ || buffer_.count(seq)) {
+        ++duplicates_;  // the sender resent it: our ACK was late or lost (or the resend was spurious)
+        return currentAck();
+    }
     if (seq == expected_) {
         deliver.push_back(std::move(msg));
         ++expected_;

@@ -105,6 +105,28 @@ int wmain(int argc, wchar_t** argv) {
               "real diagnostic path emits counts before and after an unavailable room");
         Check(text.find("ROOM USERS unavailable: unexpected or unreadable room type") != std::string::npos,
               "failed room guard is visible instead of silently dropping diagnostics");
+        // Link::OnInitial takes its timeout branch on every frame once the deadline passed: one line per link.
+        const MidHandler timeout = JoinLogHookHandler(0x12D5C90);
+        Check(timeout != nullptr, "the handshake timeout site has a handler");
+        if (timeout) {
+            unsigned char link[0xB0]{}, otherLink[0xB0]{};
+            Put(link, 0xA0, 20000.0f);
+            Put(otherLink, 0xA0, 20000.0f);
+            CpuContext context{};
+            context.rbx = reinterpret_cast<std::uintptr_t>(users[last].data());
+            for (int frame = 0; frame < 600; ++frame) {
+                context.rdi = reinterpret_cast<std::uintptr_t>(frame % 3 ? link : otherLink);
+                timeout(&context);
+            }
+            LogFlush();
+            std::ifstream again(argv[1], std::ios::binary);
+            const std::string after((std::istreambuf_iterator<char>(again)), std::istreambuf_iterator<char>());
+            std::size_t lines = 0;
+            for (auto at = after.find("HANDSHAKE TIMEOUT: EOS"); at != std::string::npos; at = after.find("HANDSHAKE TIMEOUT: EOS", at + 1))
+                ++lines;
+            Check(lines == 2, "600 frames of two timed-out links log one line per link, not one per frame");
+            Check(after.find("HANDSHAKE STILL TIMED OUT") == std::string::npos, "no reminder within 30 s");
+        }
         Put(room, 0x160, std::uintptr_t{0});
         Check(!ReadCurrentRoomUsers(base, currentUsers, reason) && reason, "missing Users has a diagnostic reason");
         VirtualFree(image, 0, MEM_RELEASE);

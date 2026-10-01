@@ -126,6 +126,12 @@ std::vector<CallSite> MissionCalls();
 // Callback vtable slots replaced by mission handlers (mission.h, MissionSlotHandler).
 std::vector<PointerSlot> MissionSlots();
 
+// The mission start message (packetfit.h), applied with [Mission] Extend=1: the host's MissionSync_Res record writes
+// and everyone's MissionSync_Update record reads are redirected, and a hook after the host's record loop writes
+// the records it held back. A message that fits one EOS packet is written exactly as before.
+std::vector<CallSite> PacketFitCalls();
+std::vector<MidSite> PacketFitHooks();
+
 // Enemy spawn counts for 5-8 players (spawn.h), applied with [Mission] Extend=1 and ExtraEnemies=1.
 // Only online missions with more than four players get different counts.
 std::vector<MidSite> SpawnHooks();
@@ -139,6 +145,10 @@ std::vector<MidSite> DiagnosticHooks();
 std::vector<CallSite> DiagnosticCalls();
 // Experimental final-hello recovery, independently switchable with HandshakeRecovery=0.
 std::vector<CallSite> RecoveryCalls();
+// KeepRoomOnPeerTimeout=1 (peertimeout.h): Users::Add records when each user joined, and the room update's
+// "a P2P handshake timed out, so leave the room" check is redirected to PeerTimeoutLeaveCheck.
+std::vector<MidSite> PeerTimeoutHooks();
+std::vector<CallSite> PeerTimeoutCalls();
 
 // Solo test harness ([Test] GhostPlayers=N, needs Extend=1): when the online player count written by
 // the mission sync is 1 (host alone), it becomes 1+N; players 2..N+1 are created as remote copies of

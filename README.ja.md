@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
-EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協力プレイ安定化プラグイン **EDF6DirectNet** です。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグインとして動作します。
+**EDF6Coop** は EARTH DEFENSE FORCE 6（PC / Steam）のオンライン協力プレイを大人数・安定にします：最大 8・10・12・16・24・32 人の部屋（8Player MOD）、Epic が不安定でも切れないプレイヤー間の直結、失われたパケットの再送。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグイン `EDF6Coop.dll` 1つで、これまでの EDF6DirectNet と EDF6MultiSlot の2つを置き換えます。
 
 地球防衛軍シリーズ向けのオンライン安定化 Mod です。現在の対応作品：**EDF6**。EDF6 が安定したら EDF5 などほかの作品にも対応する予定です。
 
@@ -10,9 +10,11 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 >
 > **ステータス：実験的。** 900 件以上の自動テストに合格。自動直結と切断猶予は実際の 4 人オンラインプレイで検証済み（0.3.2：全員が直結し、7 回の接続切れをゲームに気付かせませんでした）。問題があればログを添えて [Issue](https://github.com/hajisensai/edf-coop-stable/issues) を立ててください。
 
-## EDF6MultiSlot：8人協力プレイ（10 / 12人は任意）
+## 部屋の人数と古いプラグイン
 
-8人協力プレイのプラグイン EDF6MultiSlot（作者 momotori01、パブリックドメイン）は [multislot/](multislot/README.md) にあり、ビルド・パッケージ・説明書も独立しています。EDF6DirectNet と一緒に使えます。
+部屋の人数ごとにパッケージがあります：**8p・10p・12p・16p・24p・32p**（`EDF6Coop-<バージョン>-<N>p.zip`）。ある人数の部屋には同じ人数の版でしか入れないので、同じ部屋の全員が同じパッケージを使います。迷ったら 8p です。いちばん遊ばれているのは 8p、10p と 12p はそれより少なめです。**16p・24p・32p は 2.0.0 で追加したもので、今のところオフラインのゴースト隊員でしか確認していません**（実際にその人数でのオンラインはまだ試していません）。部屋が大きいほどホストに必要な上り回線が増えます。直結では全員のデータがホストを通るためです。
+
+部屋の部分（8Player MOD：5人以上、部屋画面、ミッション、アーマーコピー）は **momotori01** さんが EDF6MultiSlot として書いたものです（パブリックドメイン、[multislot/LICENSE](multislot/LICENSE)）。履歴とテストは [multislot/](multislot/README.md) にあります。2.0.0 から EDF6DirectNet と DLL 1つ・ログ1つ（`EDF6Coop.log`）・設定ファイル1つ（`EDF6Coop.ini`）にまとまりました。インストール時に古い `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` は `.disabled` に改名されます。古い設定ファイルは残り、初回起動時にその値が `EDF6Coop.ini` に引き継がれます。
 
 ## 何を解決するか
 
@@ -27,19 +29,19 @@ EARTH DEFENSE FORCE 6（地球防衛軍6）（PC / Steam）のオンライン協
 
 ## インストール
 
-1. [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) から `EDF6DirectNet-v*.zip` をダウンロードし、任意のフォルダに**すべて展開**します。
+1. [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) から部屋の人数に合った `EDF6Coop-<バージョン>-<N>p.zip`（上記参照）をダウンロードし、任意のフォルダに**すべて展開**します。
 2. **`INSTALL.bat`** をダブルクリック：Steam ライブラリから EDF6 を自動で見つけてインストールします。
    - EDFModLoader が入っていない場合は同梱のローダーを導入します：[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10（MIT）に、**公式版のマルチスレッドの不具合の修正**を入れたものです（関数の転送口が同じ呼び出し先変数を共有していたため、複数スレッドが同時に呼ぶと別の関数へ飛ぶことがありました。詳細は [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)）。既存の `winmm.dll` は上書きしませんが、公式 v1.0.10 とバイト単位で完全に同じ場合だけは例外で、修正版に置き換え、元のファイルを `winmm.dll.bak-official` として残します。それ以外のローダー（新しい版やパッチ済みのもの）には手を付けません。
    - ゲームが見つからない場合はゲームフォルダのパスを貼り付けるよう求められます（Steam ライブラリで EDF6 を右クリック → 管理 → ローカルファイルを閲覧）。
-3. いつも通り Steam からゲームを起動します。初回起動後に `Mods\Plugins\EDF6DirectNet.ini`（設定）と `EDF6DirectNet.log`（ログ）が生成されます。
+3. いつも通り Steam からゲームを起動します。初回起動後に `Mods\Plugins\EDF6Coop.ini`（設定）と `EDF6Coop.log`（ログ）が生成されます。
 
-zip には README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt（中文）、README_EDF6DirectNet_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
+zip には README_EDF6Coop.txt（English）、README_EDF6Coop_zh.txt（中文）、README_EDF6Coop_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
 
-アップデート：プラグインは自動で更新されます。ゲーム起動時に裏で GitHub の最新リリースを確認し、新しい版があれば `EDF6DirectNet.dll` と署名付きマニフェスト `EDF6DirectNet.dll.sig` をダウンロードして DLL を置き換え、次回の起動から有効になります（ログに `UPDATE installed ...` と出ます）。GitHub に接続できなくてもゲームには影響しません（通信はシステムのプロキシ設定に従います）。新しい版の `INSTALL.bat` を手動で実行する方法も従来どおり使え、設定は保持されます。守られること：
+アップデート：プラグインは自動で更新されます。ゲーム起動時に裏で GitHub の最新リリースを確認し、新しい版があれば同じ人数の `EDF6Coop-<N>p.dll` と署名付きマニフェスト `EDF6Coop-<N>p.dll.sig` をダウンロードして DLL（`EDF6Coop.dll`）を置き換え、次回の起動から有効になります（ログに `UPDATE installed ...` と出ます）。GitHub に接続できなくてもゲームには影響しません（通信はシステムのプロキシ設定に従います）。新しい版の `INSTALL.bat` を手動で実行する方法も従来どおり使え、設定は保持されます。守られること：
 
 - **リリースは署名されています。** マニフェスト（版番号と DLL の SHA-256）は ECDSA P-256 で署名され、秘密鍵はリリースのパイプラインだけが持ちます。対応する公開鍵はプラグインに組み込まれています。署名が正しく、署名された版番号がインストール中のリリースと一致して実行中の版より新しく、DLL の SHA-256 が署名と一致して中の版番号も合っている場合だけインストールされます。有効な署名のないファイルは入れず、ダウンロードもこのリポジトリのリリース URL からだけです。リリースのファイルや通信を書き換えられても、署名できない相手には何もインストールさせられません。
-- **自動ロールバック。** 置き換えられた DLL は、ゲームがタイトル画面に達してから新しい版が 20 秒間動作するまで `EDF6DirectNet.dll.old` として隣に残ります。その前にゲームが落ちたり強制終了されたりした場合、次回の起動で自動的に古い版へ戻し、失敗した版を記録して（`EDF6DirectNet.dll.bad`、再インストールしません）、そのセッションはプラグインなしで動きます。それまでにゲームを普通に終了するのは失敗ではありません。次回の起動でも新しい版のお試しが続きます。
-- **古い版の設定ファイル。** `AutoUpdate` の行がない設定ファイル（古い版は書き出しませんでした）は、0.3.6 と同じく**オン**として扱われ、起動のたびにログにその旨が出ます。止めるには `Mods\Plugins\EDF6DirectNet.ini` の末尾に次の 2 行を追加します：
+- **自動ロールバック。** 置き換えられた DLL は、ゲームがタイトル画面に達してから新しい版が 20 秒間動作するまで `EDF6Coop.dll.old` として隣に残ります。その前にゲームが落ちたり強制終了されたりした場合、次回の起動で自動的に古い版へ戻し、失敗した版を記録して（`EDF6Coop.dll.bad`、再インストールしません）、そのセッションはプラグインなしで動きます。それまでにゲームを普通に終了するのは失敗ではありません。次回の起動でも新しい版のお試しが続きます。
+- **古い版の設定ファイル。** `AutoUpdate` の行がない設定ファイル（古い版は書き出しませんでした）は、0.3.6 と同じく**オン**として扱われ、起動のたびにログにその旨が出ます。止めるには `Mods\Plugins\EDF6Coop.ini` の末尾に次の 2 行を追加します：
 
   ```
   [Update]
@@ -47,7 +49,7 @@ zip には README_EDF6DirectNet.txt（English）、README_EDF6DirectNet_zh.txt�
   ```
 
   現在の版が新しく作る設定ファイルには `AutoUpdate=1` が入っています。`AutoUpdate=0` でダウンロードを止められます（ロールバックは働きます）。
-アンインストール：`UNINSTALL.bat` をダブルクリック（EDFModLoader や他の Mod には触れません。インストーラーが置き換えたローダーもそのままで、バックアップ `winmm.dll.bak-official` も残ります）。プラグイン本体、設定、ログ、アップデートの残りファイル（`EDF6DirectNet.dll.old` など）と、プラグインがルーターに作った UPnP のポート開放（この PC 宛てで名前が `EDF6DirectNet` のものだけ。UPnP のないルーターは飛ばします）を削除します。ファイアウォール規則を追加していた場合は、`UNINSTALL.bat` を管理者として実行すると一緒に削除されます。管理者権限がないときは削除コマンドを表示します。
+アンインストール：`UNINSTALL.bat` をダブルクリック（EDFModLoader や他の Mod には触れません。インストーラーが置き換えたローダーもそのままで、バックアップ `winmm.dll.bak-official` も残ります）。プラグイン本体、設定、ログ、アップデートの残りファイル（`EDF6Coop.dll.old` など）と、プラグインがルーターに作った UPnP のポート開放（この PC 宛てで名前が `EDF6DirectNet` のものだけ。UPnP のないルーターは飛ばします）を削除します。ファイアウォール規則を追加していた場合は、`UNINSTALL.bat` を管理者として実行すると一緒に削除されます。管理者権限がないときは削除コマンドを表示します。
 
 zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォルダ）に展開してもかまいません。
 
@@ -55,15 +57,15 @@ zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォル�
 
 設定が必要なのはホストだけです。参加者はプラグインを入れて `AutoJoin=1`（デフォルト）であれば、入室後に自動で直結します。
 
-1. `Mods\Plugins\EDF6DirectNet.ini` を開き、`Mode=host` に変更します。
-2. ゲームフォルダ内の `EDF6DirectNet_AllowFirewall.bat` を右クリック → **管理者として実行**（初回のみ）。この規則は `EDF6.exe` に対して、ini の `ListenPort`（未設定なら 27015）の UDP だけを許可し、すべての UDP ポートを開けるわけではありません。`ListenPort` を変えたら再度実行してください。
+1. `Mods\Plugins\EDF6Coop.ini` を開き、`Mode=host` に変更します。
+2. ゲームフォルダ内の `EDF6Coop_AllowFirewall.bat` を右クリック → **管理者として実行**（初回のみ）。この規則は `EDF6.exe` に対して、ini の `ListenPort`（未設定なら 27015）の UDP だけを許可し、すべての UDP ポートを開けるわけではありません。`ListenPort` を変えたら再度実行してください。
 3. インターネットから自分に接続できるようにします。どちらか一方：
    - **自動**：`PublicAddress` を空のままにします。プラグインがルーターの UPnP で UDP 27015 をポート開放し、この PC のグローバル IPv6 も自動で通知します。
    - **手動**：ルーターで UDP ポートをこの PC に転送し、`PublicAddress=グローバルIP:外部ポート` を設定します（DDNS のホスト名も可。例：`myroom.ddns.net:40000`）。
    - **PC で直接ダイヤルアップ接続している（PPPoE、ルーターなし）**：この種のアダプターはプラグインが認識できず、アドレスを自動で通知しません。`PublicAddress=グローバルIP:27015` を手動で設定してください。
 4. ゲームを再起動し、いつも通り部屋を作ります。
 
-成功したかの確認方法（ログ `Mods\Plugins\EDF6DirectNet.log` を見る）：
+成功したかの確認方法（ログ `Mods\Plugins\EDF6Coop.log` を見る）：
 
 | ログ | 意味 |
 |---|---|
@@ -73,7 +75,7 @@ zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォル�
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | キャリアグレード NAT（多くのプロバイダーで一般的）の内側にいてグローバル IPv4 がないため、IPv4 直結は不可能。IPv6 に頼るか、プロバイダーにグローバル IP を申請するしかない |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | ルーター上でこのポートが LAN 内の別の機器にすでに転送されている。プラグインはそれを削除しない。`ListenPort` を変えるか、手動で開放する |
 | `DIRECT client ... connected from ...`（ホスト） / `DIRECT connected to host ...`（参加者） | 直結が確立した |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 参加者がホストに接続できない（ファイアウォール / ポート開放 / Key の不一致 / EDF6DirectNet のバージョン違い）。ゲームは通常通り Epic 経由で続行し、60 秒後に再試行する |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | 参加者がホストに接続できない（ファイアウォール / ポート開放 / Key の不一致 / EDF6Coop のバージョン違い）。ゲームは通常通り Epic 経由で続行し、60 秒後に再試行する |
 
 参加者は IPv4 → IPv6 の順に各アドレスを 10 秒ずつ試し、どれもつながらなければ EOS のままになります。通常のプレイには影響しません。
 
@@ -81,7 +83,9 @@ zip の中身を手動でゲームフォルダ（`EDF6.exe` があるフォル�
 
 **プライバシー**：ホストのグローバルアドレスはロビーのメンバー属性に書かれるため、その部屋が見える人なら誰でも読み取れます。直結で参加する人（`AutoJoin=1`）は自分のグローバルアドレスからホストへ接続するので、ホストにはそのアドレスが見えます（通常の EOS のピアツーピアでも、多くの場合お互いのアドレスは見えています）。参加先のホストに自分のアドレスを見せたくない場合は `AutoJoin=0` にしてください。EOS のまま遊べます。
 
-## 設定リファレンス（`EDF6DirectNet.ini`、変更後はゲームを再起動すると反映）
+## 設定リファレンス（`EDF6Coop.ini`、変更後はゲームを再起動すると反映）
+
+以下は直結の設定です。同じファイルには大きな部屋用の `[MultiSlot]`・`[Smoothing]`・`[RoomScreen]`・`[Mission]`・`[CopyArmor]` もあり、ファイル内のコメントがすべての設定を説明しています。`[MultiSlot] Enabled=0` と `[DirectNet] Enabled=0` を両方設定するとプラグインは自分から外れます。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
@@ -128,7 +132,7 @@ EDF6 は受信した EOS パケットをすべてゲームデータとして解�
 
 ## トラブルシューティング
 
-- **まずログを見る**：`Mods\Plugins\EDF6DirectNet.log`（2MB を超えると `.log.1` にローテーション）。先頭に `==== EDF6DirectNet x.y.z starting` の行があればプラグインは読み込まれています。この行がなければ EDFModLoader が正しく入っていません。
+- **まずログを見る**：`Mods\Plugins\EDF6Coop.log`（約 2MB を超えないよう自分で整理します。直結の行は `[DN]` で始まります）。`==== EDF6Coop x.y.z-<N>p ====` の行があればプラグインは読み込まれています。この行がなければ EDFModLoader が正しく入っていません。
 - `EOS hooks FAILED`：ゲームのアップデートでインポートテーブルが合わなくなりました。プラグインは自動で直結を停止します。Issue を立ててください。
 - `LOBBY plugin detection UNAVAILABLE`：相手がプラグインを入れているか判別できないため、切断猶予は直結メンバーにのみ適用されます。
 - `EOS incoming packet queue FULL`：EOS のキューが溢れてパケットが落ち始めています。ログを添えて Issue を立ててください。
@@ -142,42 +146,50 @@ EDF6 は受信した EOS パケットをすべてゲームデータとして解�
 
 ## ビルド
 
-Visual Studio 2022（MSVC x64）が必要です。
+必要なもの：Windows x64、「C++ によるデスクトップ開発」入りの Visual Studio 2022（付属の CMake と Ninja を使います）、Python 3.10+ と `pip install numpy pillow pefile==2024.8.26 capstone==5.0.9`、インストール済みの地球防衛軍6（EDF.dll ビルド `678CCB46`）。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1 -Test
-# リリースパッケージを手動で作る：公式 EDFModLoader.zip を展開したフォルダが必要（winmm.dll、ModLoader.ini、およびその LICENSE.txt を含む）
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDir <フォルダ>
+$env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 8 -Test    # -> multislot\dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 12 -Test   # -> multislot\dist-12p\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> release\EDF6Coop-<version>-8p.zip (+ .sha256)
 ```
 
-成果物：`build\EDF6DirectNet.dll`（静的 CRT、システム DLL のみに依存）、`build\edf6_directnet_tests.exe`（ユニットテスト + ローカルループバックのマルチノードテスト。20%～40% のパケットロス、回線断、再起動のシナリオを含む。`EDF.dll` のインポートテーブルテストはこの PC にゲームがインストールされている必要があり、なければスキップ）、`build\probe_join.exe`（手動での接続確認用の直結プローブ）。
+- `-Players` で部屋の人数（8・10・12・16・24・32）を選びます。人数ごとに別のビルドです。`-Test` でテストを実行します（ユニットテスト、ループバックの複数ノード直結テスト、全パッチ箇所をゲームの `EDF.dll` と照合するテスト。ゲームがなければ照合はスキップ）。
+- ゲームフォルダは読むだけです：`Root.cpk` から「8Player MOD」表示付きのメニュー枠を作り（`multislot/tools/make_menu_label.py` が `multislot/assets/LYT_MAINFRAME.SGO` を書きます。ゲーム由来なのでコミットしません）、`EDF.dll` はテストに使います。
+- `build.ps1` は公式 EDFModLoader v1.0.10 の `winmm.dll` を取得し（SHA-256 で確認）、パッケージに入れる修正版ローダーを作ります（`multislot/tools/fix_winmm_proxy.py`）。
+- `package.ps1` は人数やバージョンの合わないビルド、ソースより古い DLL、CI ビルド（`build.ps1 -CI` はゲームのメニュー素材なしでビルドし、仮のデータを入れます）をパッケージにしません。
 
 ## リリース
 
-リリースは GitHub Actions（`.github/workflows/release.yml`）で自動的に行われます：
+リリースパッケージにはゲームのメニュー素材が必要で、それはビルドサーバーに置けません。そのためリリースパッケージはゲームのある PC でビルドします。GitHub Actions は CI のビルドとテストを行います（`.github/workflows/ci.yml`、全人数）。
 
-1. バージョン番号を変更：`src/plugin.cpp` の `kVersionMajor/Minor/Patch` と `kVersionText`、および同梱説明書 3 つ `dist/README_EDF6DirectNet*.txt` の 1 行目。
-2. リリースノート `release-notes/<バージョン>.md` を書く（Release ページの本文になります。これがないとパイプラインが失敗します）。
-3. `main` にコミットし、タグをプッシュ：`git tag v0.3.3 && git push origin v0.3.3`。
+1. バージョンを上げる：`multislot/CMakeLists.txt` の `project(EDF6Coop VERSION x.y.z)` と、同梱の説明書 3 つ `dist/README_EDF6Coop*.txt` の 1 行目。
+2. リリースノート `release-notes/<バージョン>.md` を書く（Release ページの本文で、パッケージ内の `RELEASE_NOTES_EDF6Coop.md` にもなります）。
+3. `main` にコミットし、タグを付けて push します：`git tag v2.0.0 && git push origin v2.0.0`。
+4. ゲームのある PC で、そのコミットの状態で `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload` を実行します。人数ごとに `build.ps1 -Players <N> -Test` と `package.ps1 -Players <N>` を実行し、`EDF6Coop-<N>p.dll`・`EDF6Coop-<バージョン>-<N>p.zip` とその `.sha256` を入れた**下書き**の Release を作ります（`-Upload` なしなら `release\upload-<バージョン>\` に置くだけ）。署名はしません。
+5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：タグが `main` 上にありバージョンと一致すること、下書きに全人数がそろっていること、各 zip が `.sha256` と一致しその DLL を含むこと、CI ビルドでないことを確認し、`sign-update.ps1 -Players <N>` で各 DLL に署名し（鍵はリポジトリの secret `EDF6DN_UPDATE_SIGNING_KEY`。読み取り専用トークンの job にだけ渡します）、`EDF6Coop-<N>p.dll.sig` と `.dll.sha256` をアップロードして、Release を最新として公開します。
 
-パイプラインはビルド、テスト実行、公式 EDFModLoader v1.0.10 のダウンロード（SHA-256 で検証）、`EDF6DirectNet-v<バージョン>.zip` のパッケージングを行い、Release を作成します。タグ、ソースのバージョン番号、説明書のバージョン番号の 3 つが一致しない場合、`package.ps1` はパッケージングを拒否します。Actions ページから手動実行した場合はビルドとパッケージングのみ行い（成果物は実行記録の Artifacts にあります）、公開はしません。
+インストール済みのすべてのプラグインは、最新の Release から自分の人数の `EDF6Coop-<N>p.dll` / `.dll.sig` をダウンロードします。そのため Release は 6 種類の人数がそろってから最新にします。
 
 ## ディレクトリ構成
 
 | パス | 内容 |
 |---|---|
-| `src/plugin.cpp` | EDFModLoader のエントリポイント。設定を読み込み、直結を起動 |
-| `src/config.*` | INI の読み込みとデフォルト設定ファイル（コメントは Windows の表示言語に応じて中国語 / 日本語 / 英語で書かれる） |
-| `src/eos_min.h` | 使用する EOS SDK の構造体（公式 1.15.5 のヘッダーに基づく。ゲームは 1.16.1） |
-| `src/eos_hooks.cpp`, `src/iat.*` | `EDF.dll` のインポートテーブルを書き換え、EOS P2P / ロビーの呼び出しを横取り |
+| `multislot/src/plugin.cpp` | EDFModLoader のエントリポイント：`EDF6Coop.ini` を読み（古い設定ファイルの値を引き継ぐ）、部屋の部分と直結を起動 |
+| `multislot/src/` | 部屋の部分（8Player MOD）：パッチ、部屋画面、ミッション、アーマーコピー、メニュー配置、ログ |
+| `src/config.*` | 直結の設定とそのコメント（Windows の表示言語で中国語 / 日本語 / 英語） |
+| `src/eos_min.h` | 使用する EOS SDK の構造体（公式 1.15.5 ヘッダより。ゲームは 1.16.1） |
+| `src/eos_hooks.cpp`、`src/iat.*` | `EDF.dll` のインポートテーブルを書き換え、EOS P2P / ロビーの呼び出しを引き受ける |
 | `src/hold.*` | 切断猶予 |
-| `src/lobby_marker.*` | ロビーのメンバー属性：誰がプラグインを入れているかの判別、ホストアドレスの配布 |
-| `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | 直結トランスポート |
-| `src/netif.*`, `src/upnp.*` | 物理アダプターの識別、UPnP |
-| `src/log.*` | ログ |
-| `dist/` | インストールスクリプトと同梱説明書（中 / 英 / 日） |
-| `tests/` | テスト |
-| `multislot/` | EDF6MultiSlot：8 / 10 / 12人協力プレイのプラグイン（ビルドと説明書は独立） |
+| `src/lobby_marker.*` | ロビーメンバー属性：プラグインの有無の判別、ホストアドレスの配布 |
+| `src/direct_net.*`、`src/reliable.*`、`src/wire.*`、`src/auth.*` | 直結の通信 |
+| `src/netif.*`、`src/upnp.*` | 物理アダプターの判別、UPnP |
+| `src/updater.*`、`src/product.h` | 署名付きの自動更新。各リリースが持つ部屋の人数とバージョン |
+| `multislot/CMakeLists.txt` | ビルドと唯一のバージョン番号（`project(EDF6Coop VERSION x.y.z)`） |
+| `multislot/packaging/` | パッケージに同梱するローダー修正とハンドシェイク回復の説明 |
+| `dist/` | インストールスクリプトと同梱の説明書（英語 / 中国語 / 日本語） |
+| `tests/`、`multislot/tests/` | テスト |
 
 ## 既知の制限
 
@@ -191,4 +203,4 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDi
 
 ## ライセンス
 
-MIT、[LICENSE](LICENSE) を参照。同梱の EDFModLoader は MIT で、ライセンスはパッケージ内の `EDFModLoader\LICENSE.txt` にあります。
+MIT、[LICENSE](LICENSE) を参照。同梱の EDFModLoader は MIT で、ライセンスはパッケージ内の `EDFModLoader_LICENSE.txt` にあります。部屋の部分（`multislot/`、momotori01 作）はパブリックドメイン（[Unlicense](multislot/LICENSE)）です。

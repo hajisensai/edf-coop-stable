@@ -240,6 +240,9 @@ bool DirectNet::start(const DirectOptions& options) {
         return false;
     }
     cookieSecret_ = std::move(secret);
+    retransmitBudget_ = opt_.retransmitBudget ? opt_.retransmitBudget : processRetransmitBudget();
+    testUplinkTokens_ = 0;
+    testUplinkMs_ = 0;
     memberIds_ = opt_.memberIds;
     roomOwner_ = opt_.roomOwner;
     roomOwnerId_ = opt_.roomOwnerIdentity;
@@ -350,7 +353,7 @@ bool DirectNet::send(const std::string& remote, const std::string& socketName, u
     msg.dst = remote;
     msg.socketName = socketName;
     msg.channel = channel;
-    msg.reliability = reliability == 0 && opt_.upgradeUnreliable ? 1 : reliability;
+    msg.reliability = reliability;
     msg.payload.assign(data, data + size);
     sendData(*link, std::move(msg), nowMs());
     return true;
@@ -443,10 +446,19 @@ std::string DirectNet::statusLine() {
     std::lock_guard<std::mutex> lock(mu_);
     char buf[256];
     std::string s;
+    // Counts are totals since the link opened. retx: our resends; dup: the peer's resends of packets we
+    // had; gaveup: unreliable game packets we stopped resending; skipped: the peer's that never came;
+    // held: time our resends waited for credit (the link delivers less than it loses); credit: resends
+    // the link may send now.
     auto describe = [&](const Link& l) {
-        snprintf(buf, sizeof(buf), " [%s %s rtt=%ums rto=%ums pending=%zu retx=%llu dup=%llu]", shortId(l.puid).c_str(),
-                 addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.rtoMs(), l.tx.pendingCount(),
-                 static_cast<unsigned long long>(l.tx.retransmits()), static_cast<unsigned long long>(l.rx.duplicates()));
+        snprintf(buf, sizeof(buf),
+                 " [%s %s rtt=%ums rto=%ums pending=%zu retx=%llu dup=%llu gaveup=%llu skipped=%llu held=%llums "
+                 "credit=%.0f]",
+                 shortId(l.puid).c_str(), addrToString(l.addr, l.addrLen).c_str(), l.rttMs, l.tx.rtoMs(),
+                 l.tx.pendingCount(), static_cast<unsigned long long>(l.tx.retransmits()),
+                 static_cast<unsigned long long>(l.rx.duplicates()), static_cast<unsigned long long>(l.tx.abandoned()),
+                 static_cast<unsigned long long>(l.rx.skipped()), static_cast<unsigned long long>(l.tx.limitedMs()),
+                 l.tx.credit());
         s += buf;
     };
     if (opt_.mode == Mode::Host) {
@@ -460,18 +472,41 @@ std::string DirectNet::statusLine() {
         s += " roster=" + std::to_string(roster_.size());
     }
     if (uint64_t n = rejected_) s += " rejected=" + std::to_string(n);
+    if (uint64_t n = sendFailures_) s += " send-refused=" + std::to_string(n);
+    if (uint64_t n = retransmitBudget_ ? retransmitBudget_->refusals() : 0) s += " shared-retx-cap-hit=" + std::to_string(n);
     return s;
 }
 
-void DirectNet::sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen) {
-    if (testBlackhole_) return;
+// False when the socket refused the datagram. A full send buffer (WSAEWOULDBLOCK, WSAENOBUFS) is our own
+// uplink congested: callers stop resending (ReliableSender::sendRefused) instead of piling more on.
+bool DirectNet::sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen) {
+    if (testBlackhole_) return true;
     wireOut_ += dg.size();
     if (opt_.testDropRate > 0.0) {
         static thread_local std::mt19937 rng(12345);
-        if (std::uniform_real_distribution<double>(0.0, 1.0)(rng) < opt_.testDropRate) return;
+        if (std::uniform_real_distribution<double>(0.0, 1.0)(rng) < opt_.testDropRate) return true;
     }
-    sendto(sock_, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
-           reinterpret_cast<const sockaddr*>(&to), toLen);
+    if (uint64_t rate = opt_.testUplinkBytesPerSecond) {
+        uint64_t now = nowMs();
+        double queue = static_cast<double>(rate) / 10;  // 100 ms
+        if (testUplinkMs_ == 0) testUplinkTokens_ = queue;
+        testUplinkTokens_ = std::min(queue, testUplinkTokens_ + static_cast<double>((now - testUplinkMs_) * rate) / 1000);
+        testUplinkMs_ = now;
+        if (testUplinkTokens_ < static_cast<double>(dg.size())) return true;  // lost in the router, unseen by us
+        testUplinkTokens_ -= static_cast<double>(dg.size());
+    }
+    if (sendto(sock_, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+               reinterpret_cast<const sockaddr*>(&to), toLen) != SOCKET_ERROR)
+        return true;
+    int err = WSAGetLastError();
+    uint64_t n = ++sendFailures_;
+    bool full = err == WSAEWOULDBLOCK || err == WSAENOBUFS;
+    logRateLimited(full ? "send-full" : "send-fail", 10000, "DIRECT cannot send to %s: %s (WSA error %d, %llu so far)",
+                   addrToString(to, toLen).c_str(),
+                   full ? "the send buffer is full, our uplink is congested; holding back retransmissions"
+                        : "the socket refused the datagram",
+                   err, static_cast<unsigned long long>(n));
+    return false;
 }
 
 void DirectNet::sendMsg(const Message& m, const sockaddr_storage& to, int toLen) {
@@ -480,26 +515,30 @@ void DirectNet::sendMsg(const Message& m, const sockaddr_storage& to, int toLen)
 
 // Stamps a link datagram with the link's next counter and tag, and sends it. Nothing goes out when
 // crypto fails: an unsealed datagram would only be dropped by the peer.
-void DirectNet::sendSealed(Link& link, std::vector<uint8_t>& dg) {
+// False when the datagram did not leave (see sendRaw).
+bool DirectNet::sendSealed(Link& link, std::vector<uint8_t>& dg) {
     if (!sealLink(dg, ++link.txCounter, link.txMac)) {
         logRateLimited("seal", 10000, "DIRECT cannot authenticate a packet to %s (Windows crypto failed)",
                        shortId(link.puid).c_str());
-        return;
+        return false;
     }
-    sendRaw(dg, link.addr, link.addrLen);
+    return sendRaw(dg, link.addr, link.addrLen);
 }
 
 void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
     Message m;
     m.type = MsgType::Data;
     m.epoch = link.epoch;
-    bool reliable = msg.reliability != 0;
-    msg.seq = reliable ? link.tx.nextSeq() : 0;
+    // An unreliable packet keeps its reliability 0 on the wire: a host relaying it applies its own
+    // upgradeUnreliable, and gives it up after the deadline like the sender does.
+    bool upgraded = msg.reliability == 0 && opt_.upgradeUnreliable;
+    bool tracked = msg.reliability != 0 || upgraded;
+    msg.seq = tracked ? link.tx.nextSeq() : 0;
     uint32_t seq = msg.seq;
     m.data = std::move(msg);
     std::vector<uint8_t> dg = encode(m, opt_.key);
-    sendSealed(link, dg);
-    if (reliable) link.tx.track(seq, std::move(dg), now);
+    if (!sendSealed(link, dg)) link.tx.sendRefused();  // still tracked: resent once the link has credit again
+    if (tracked) link.tx.track(seq, std::move(dg), now, upgraded);
 }
 
 void DirectNet::deliverLocal(DataMsg msg) {
@@ -586,15 +625,16 @@ void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
         case MsgType::Ack:
             link.tx.onAck(m.ack, now);
             break;
-        case MsgType::Data: {
-            if (m.data.seq == 0) {
+        case MsgType::Data:
+        case MsgType::Forward: {
+            if (m.type == MsgType::Data && m.data.seq == 0) {
                 routeData(m.data);
                 break;
             }
             std::vector<DataMsg> ready;
             Message ack;
             ack.type = MsgType::Ack;
-            ack.ack = link.rx.onData(m.data, ready);
+            ack.ack = m.type == MsgType::Data ? link.rx.onData(m.data, ready) : link.rx.onForward(m.forward.floor, ready);
             sendLink(link, ack);
             for (auto& d : ready) routeData(std::move(d));
             break;
@@ -937,7 +977,7 @@ void DirectNet::processDatagram(const uint8_t* data, size_t size, const sockaddr
         memcpy(&theirs, data + 6, 2);
         logRateLimited("protocol", 30000,
                        "DIRECT %s speaks direct-link protocol %u, we speak %u: it runs another EDF6DirectNet version "
-                       "(0.3.6 and older speak 2, 0.4.0 speaks 3). No direct link with it; the game talks to it over "
+                       "(0.3.6 and older speak 2, 0.4.0 speaks 3, 0.4.1 speaks 4). No direct link with it; the game talks to it over "
                        "EOS as usual",
                        addrToString(from, fromLen).c_str(), theirs, kProtocol);
         return;
@@ -1021,7 +1061,13 @@ void DirectNet::tick(uint64_t now) {
     auto pollLink = [&](Link& link) {
         // A resent packet goes out with a new counter: the peer takes every counter once, and must be
         // able to acknowledge again a packet whose acknowledgement was lost.
-        link.tx.poll(now, [&](std::vector<uint8_t>& dg) { sendSealed(link, dg); });
+        link.tx.poll(now, [&](std::vector<uint8_t>& dg) { return sendSealed(link, dg); }, retransmitBudget_.get());
+        if (auto floor = link.tx.forwardDue(now)) {
+            Message f;
+            f.type = MsgType::Forward;
+            f.forward.floor = *floor;
+            sendLink(link, f);
+        }
         if (now - link.lastPingMs >= opt_.pingIntervalMs) {
             Message p;
             p.type = MsgType::Ping;
@@ -1030,21 +1076,28 @@ void DirectNet::tick(uint64_t now) {
             link.lastPingMs = now;
         }
     };
-    auto timedOut = [&](const Link& link) {
-        return now - link.lastRecvMs > opt_.linkTimeoutMs || link.tx.oldestPendingAgeMs(now) > opt_.linkTimeoutMs;
-    };
-    // True (and logged) when `link` has to close: silent too long, or holding more unacknowledged data
-    // than a working peer ever lets pile up.
+    // True (and logged) when `link` has to close: silent too long, stuck on a packet the game sent
+    // reliably, or holding more unacknowledged data than a working peer ever lets pile up.
     auto closing = [&](const Link& link, const char* who) {
         if (link.tx.overloaded()) {
             logf("DIRECT %s dropped: %zu packets (%zu KB) sent but never acknowledged", who, link.tx.pendingCount(),
                  link.tx.pendingBytes() / 1024);
             return true;
         }
-        if (!timedOut(link)) return false;
-        logf("DIRECT %s timed out (no reply for %u ms, %zu packets unacknowledged)", who, opt_.linkTimeoutMs,
-             link.tx.pendingCount());
-        return true;
+        if (now - link.lastRecvMs > opt_.linkTimeoutMs) {
+            logf("DIRECT %s timed out: nothing received for %llu ms (limit %u ms), %zu packets unacknowledged", who,
+                 static_cast<unsigned long long>(now - link.lastRecvMs), opt_.linkTimeoutMs, link.tx.pendingCount());
+            return true;
+        }
+        if (uint64_t age = link.tx.oldestReliableAgeMs(now); age > opt_.stallTimeoutMs) {
+            logf("DIRECT %s stalled: a packet the game sent reliably is unacknowledged after %llu ms (limit %u ms) "
+                 "although the peer answers (last heard %llu ms ago); %zu packets unacknowledged, %llu resends",
+                 who, static_cast<unsigned long long>(age), opt_.stallTimeoutMs,
+                 static_cast<unsigned long long>(now - link.lastRecvMs), link.tx.pendingCount(),
+                 static_cast<unsigned long long>(link.tx.retransmits()));
+            return true;
+        }
+        return false;
     };
 
     if (opt_.mode == Mode::Host) {

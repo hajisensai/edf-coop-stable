@@ -2,7 +2,7 @@
 //
 // Handshake (Hello, Challenge, Welcome, Reset):
 //   u32 magic 'EDN1' | u8 type | u8 flags | u16 protocol | body ... | [8-byte HMAC tag if flags&kFlagTagged]
-// Link (Data, Ack, Ping, Pong, Roster, Bye), sent only on an established link:
+// Link (Data, Ack, Forward, Ping, Pong, Roster, Bye), sent only on an established link:
 //   u32 magic | u8 type | u8 flags | u16 protocol | u32 epoch | u64 counter | body ... | 16-byte tag
 //
 // Strings are u8 length + bytes (max 64). The handshake tag is keyed with the shared Key= (when set).
@@ -14,8 +14,11 @@
 // only with a signature matching the identity that id published in the room. Protocol 4 adds link
 // keys: both hellos and welcomes carry an ephemeral ECDH key signed with the sender's published
 // identity (the joiner checks the room owner's), and every link datagram is authenticated with the
-// keys agreed on. Peers of different protocols reject each other's datagrams (BadProtocol) and so
-// keep using EOS with each other.
+// keys agreed on. Protocol 5 acknowledges with ranges (every packet the receiver holds, not only the
+// 256 after its cumulative point), carries the game's own reliability (0 = sent unreliably, carried
+// with a sequence number but given up after a deadline) and adds Forward, which moves the receiver
+// past packets the sender gave up. Peers of different protocols reject each other's datagrams
+// (BadProtocol) and so keep using EOS with each other.
 #pragma once
 #include <array>
 #include <cstdint>
@@ -28,7 +31,7 @@
 namespace dn {
 
 constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
-constexpr uint16_t kProtocol = 4;
+constexpr uint16_t kProtocol = 5;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
 // Longest id / socket name on the wire. Decoding rejects longer ones instead of reading a string the
@@ -53,6 +56,7 @@ enum class MsgType : uint8_t {
     // host -> a sender it has no link with (e.g. the host restarted). Unauthenticated, so only a hint:
     // a joiner acts on it only when its link has gone quiet anyway.
     Reset = 10,
+    Forward = 11,  // sender -> receiver: every sequence number below this is acknowledged or given up
 };
 
 struct HelloMsg {
@@ -91,20 +95,40 @@ struct DataMsg {
     std::string dst;
     std::string socketName;
     uint8_t channel = 0;
-    uint8_t reliability = 0;  // EOS_EPacketReliability
+    // EOS_EPacketReliability the game sent it with. With a sequence number and reliability 0 it is an
+    // unreliable packet carried reliably until a deadline (DirectOptions::upgradeUnreliable).
+    uint8_t reliability = 0;
     std::vector<uint8_t> payload;
 };
 
-constexpr uint32_t kAckBits = 256;
+// Sequence numbers first .. first + count - 1, all received.
+struct AckRange {
+    uint32_t first = 0;
+    uint16_t count = 0;
+};
+
+// Ranges one Ack carries at most (6 bytes each). A receiver holding more gaps than this names the
+// lowest ones and the one the acknowledged packet is in (see ReliableReceiver), so every packet it
+// holds is acknowledged at the latest when the sender resends it.
+constexpr size_t kMaxAckRanges = 32;
 
 struct AckMsg {
-    uint32_t cumulative = 0;  // every seq <= cumulative received
-    uint32_t bitmap[kAckBits / 32] = {};  // bit i => seq cumulative + 2 + i received
+    uint32_t cumulative = 0;  // every seq <= cumulative received (or given up by the sender)
+    std::vector<AckRange> ranges;  // received above the cumulative point
 
-    bool has(uint32_t bit) const { return bit < kAckBits && (bitmap[bit / 32] >> (bit % 32)) & 1u; }
-    void set(uint32_t bit) {
-        if (bit < kAckBits) bitmap[bit / 32] |= 1u << (bit % 32);
+    bool has(uint32_t seq) const {
+        if (seq <= cumulative) return true;
+        for (const AckRange& r : ranges)
+            if (seq >= r.first && uint64_t{seq} < uint64_t{r.first} + r.count) return true;
+        return false;
     }
+};
+
+// Like PR-SCTP's FORWARD-TSN: the sender will not send any sequence number below `floor` again, and
+// every one of them it did not see acknowledged it gave up (an unreliable game packet past its
+// deadline). The receiver moves its cumulative point there instead of waiting for them.
+struct ForwardMsg {
+    uint32_t floor = 0;
 };
 
 struct PingMsg {
@@ -124,13 +148,14 @@ struct Message {
     RosterMsg roster;
     DataMsg data;
     AckMsg ack;
+    ForwardMsg forward;
     PingMsg ping;  // also used for Pong
 };
 
 // Messages sent only on an established link, authenticated with its keys (see sealLink()).
 inline bool isLinkScoped(MsgType t) {
-    return t == MsgType::Data || t == MsgType::Ack || t == MsgType::Ping || t == MsgType::Pong ||
-           t == MsgType::Roster || t == MsgType::Bye;
+    return t == MsgType::Data || t == MsgType::Ack || t == MsgType::Forward || t == MsgType::Ping ||
+           t == MsgType::Pong || t == MsgType::Roster || t == MsgType::Bye;
 }
 
 inline uint32_t linkEpoch(uint32_t clientNonce, uint32_t hostNonce) {

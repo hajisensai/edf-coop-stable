@@ -20,9 +20,9 @@ struct IniEntry {
 };
 
 const char* const kIniTitle[3] = {
-    "EDF6DirectNet 设置（改完重启游戏生效）",
-    "EDF6DirectNet 設定（変更後はゲームを再起動すると反映されます）",
-    "EDF6DirectNet settings (restart the game after editing)",
+    "EDF6Coop 设置（改完重启游戏生效）",
+    "EDF6Coop 設定（変更後はゲームを再起動すると反映されます）",
+    "EDF6Coop settings (restart the game after editing)",
 };
 
 const IniEntry kIniEntries[] = {
@@ -124,7 +124,7 @@ class Ini {
 public:
     explicit Ini(const std::wstring& path) {
         std::wstring text = decode(readAll(path));
-        std::wstring section;
+        std::wstring section, writtenSection;
         for (size_t at = 0; at < text.size();) {
             size_t end = text.find(L'\n', at);
             if (end == std::wstring::npos) end = text.size();
@@ -133,14 +133,26 @@ public:
             if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
             if (line[0] == L'[') {
                 size_t close = line.find(L']');
-                section = lower(trim(line.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1)));
+                writtenSection = trim(line.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1));
+                section = lower(writtenSection);
                 continue;
             }
             size_t eq = line.find(L'=');
             if (eq == std::wstring::npos) continue;
-            entries_.push_back({section, lower(trim(line.substr(0, eq))), value(line.substr(eq + 1))});
+            std::wstring key = trim(line.substr(0, eq));
+            entries_.push_back({section, lower(key), value(line.substr(eq + 1)), writtenSection, key});
         }
     }
+
+    // Every entry as written, in file order.
+    std::vector<IniValue> values() const {
+        std::vector<IniValue> out;
+        for (const Entry& e : entries_) out.push_back({e.writtenSection, e.writtenKey, e.value});
+        return out;
+    }
+
+    static std::wstring decodeText(const std::string& bytes) { return decode(bytes); }
+    static std::wstring trimmed(const std::wstring& s) { return trim(s); }
 
     // The first value of `key` in `section` (both case-insensitive, like Windows); nullptr when absent.
     const std::wstring* find(const wchar_t* section, const wchar_t* key) const {
@@ -152,7 +164,8 @@ public:
 
 private:
     struct Entry {
-        std::wstring section, key, value;
+        std::wstring section, key, value;  // section and key in lower case
+        std::wstring writtenSection, writtenKey;
     };
     std::vector<Entry> entries_;
 
@@ -259,6 +272,121 @@ std::string defaultIni(unsigned short langId) {
     return s;
 }
 
+std::vector<IniValue> readIniValues(const std::wstring& path) { return Ini(path).values(); }
+
+namespace {
+
+// An INI text cut into the lines before its first section and one block per section (header line first).
+struct IniBlocks {
+    std::vector<std::string> preamble;
+    struct Section {
+        std::wstring name;  // lower case
+        std::vector<std::string> lines;
+    };
+    std::vector<Section> sections;
+};
+
+std::wstring sectionName(const std::string& line) {
+    std::wstring w = lower(Ini::trimmed(Ini::decodeText(line)));
+    if (w.empty() || w[0] != L'[') return {};
+    size_t close = w.find(L']');
+    return Ini::trimmed(w.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1));
+}
+
+IniBlocks cutIni(const std::string& text) {
+    IniBlocks blocks;
+    size_t at = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::wstring name = sectionName(line);
+        if (!name.empty()) blocks.sections.push_back({name, {}});
+        (blocks.sections.empty() ? blocks.preamble : blocks.sections.back().lines).push_back(line);
+    }
+    return blocks;
+}
+
+void appendLines(std::vector<std::string>& out, const std::vector<std::string>& lines, size_t from) {
+    if (from >= lines.size()) return;
+    if (!out.empty() && !out.back().empty()) out.push_back({});
+    out.insert(out.end(), lines.begin() + static_cast<std::ptrdiff_t>(from), lines.end());
+}
+
+}  // namespace
+
+std::string mergeIniTexts(const std::string& base, const std::string& extra) {
+    IniBlocks b = cutIni(base), e = cutIni(extra);
+    std::vector<std::string> out = b.preamble;
+    std::vector<bool> taken(e.sections.size(), false);
+    for (const IniBlocks::Section& section : b.sections) {
+        appendLines(out, section.lines, 0);
+        for (size_t i = 0; i < e.sections.size(); ++i) {
+            if (taken[i] || e.sections[i].name != section.name) continue;
+            appendLines(out, e.sections[i].lines, 1);  // without its header: it continues this section
+            taken[i] = true;
+        }
+    }
+    appendLines(out, e.preamble, 0);
+    for (size_t i = 0; i < e.sections.size(); ++i)
+        if (!taken[i]) appendLines(out, e.sections[i].lines, 0);
+    while (!out.empty() && out.back().empty()) out.pop_back();
+    std::string text = base.compare(0, 3, "\xEF\xBB\xBF") == 0 ? "\xEF\xBB\xBF" : "";
+    for (const std::string& line : out) text += line + "\r\n";
+    return text;
+}
+
+std::string applyIniValues(const std::string& text, const std::vector<IniValue>& values,
+                           std::vector<std::string>* dropped) {
+    IniBlocks blocks = cutIni(text);
+    std::vector<bool> used(values.size(), false);
+    // The first value of each [section] key wins, as when the file is read; later ones are not written.
+    auto firstOf = [&](size_t i) {
+        for (size_t j = 0; j < i; ++j)
+            if (lower(values[j].section) == lower(values[i].section) && lower(values[j].key) == lower(values[i].key))
+                return false;
+        return true;
+    };
+    for (IniBlocks::Section& section : blocks.sections) {
+        for (std::string& line : section.lines) {
+            std::wstring w = Ini::trimmed(Ini::decodeText(line));
+            size_t eq = w.find(L'=');
+            if (w.empty() || w[0] == L';' || w[0] == L'#' || w[0] == L'[' || eq == std::wstring::npos) continue;
+            std::wstring key = Ini::trimmed(w.substr(0, eq));
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (used[i] || lower(values[i].section) != section.name || lower(values[i].key) != lower(key)) continue;
+                used[i] = true;
+                if (firstOf(i)) line = toUtf8(key) + "=" + toUtf8(values[i].value);
+            }
+        }
+    }
+    for (size_t i = 0; i < values.size(); ++i)
+        if (!used[i] && dropped)
+            dropped->push_back("[" + toUtf8(values[i].section) + "] " + toUtf8(values[i].key) + "=" +
+                               toUtf8(values[i].value));
+    std::string out;
+    for (const std::string& line : blocks.preamble) out += line + "\r\n";
+    for (const IniBlocks::Section& section : blocks.sections)
+        for (const std::string& line : section.lines) out += line + "\r\n";
+    return (text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? "\xEF\xBB\xBF" : "") + out;
+}
+
+bool writeNewIniUtf16(const std::wstring& path, const std::string& utf8) {
+    std::wstring text = Ini::decodeText(utf8);  // drops a UTF-8 BOM
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::string bytes = "\xFF\xFE";
+    bytes.append(reinterpret_cast<const char*>(text.data()), text.size() * sizeof(wchar_t));
+    DWORD written = 0;
+    bool ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
+              written == bytes.size();
+    CloseHandle(file);
+    if (!ok) DeleteFileW(path.c_str());
+    return ok;
+}
+
 Config loadConfig(const std::wstring& iniPath) {
     if (GetFileAttributesW(iniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         FILE* f = _wfopen(iniPath.c_str(), L"wb");
@@ -299,7 +427,7 @@ Config loadConfig(const std::wstring& iniPath) {
     bool autoUpdateWritten = ini.find(L"Update", L"AutoUpdate") != nullptr;
     c.autoUpdate = readBool(ini, L"Update", L"AutoUpdate", true, w);
     if (!autoUpdateWritten)
-        w.push_back("UPDATE automatic updates are on (EDF6DirectNet.ini has no AutoUpdate line, written by an older "
+        w.push_back("UPDATE automatic updates are on (the settings file has no AutoUpdate line, written by an older "
                     "version). To turn them off, add the two lines [Update] and AutoUpdate=0 at its end");
     c.graceMs =
         static_cast<uint32_t>(std::clamp(readInt(ini, L"Resilience", L"GraceSeconds", 30, 0, 999999999, w), 1, 600)) * 1000u;

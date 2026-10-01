@@ -14,17 +14,19 @@
 #include <thread>
 
 #include "log.h"
+#include "product.h"
 
 namespace dn {
 namespace {
 
-constexpr const wchar_t* kAgent = L"EDF6DirectNet";
+constexpr const wchar_t* kAgent = coop::kNameW;
 constexpr const char* kLatestRelease = "https://api.github.com/repos/hajisensai/edf-coop-stable/releases/latest";
 // Every asset must come from here (followed by "<tag>/<name>").
 constexpr const char* kDownloadPrefix = "https://github.com/hajisensai/edf-coop-stable/releases/download/";
 constexpr const char* kReleasePage = "https://github.com/hajisensai/edf-coop-stable/releases";
-constexpr const char* kDllAsset = "EDF6DirectNet.dll";
-constexpr const char* kSigAsset = "EDF6DirectNet.dll.sig";
+// This room size's assets (product.h): an 8-player build never downloads a 12-player one.
+const std::string kDllAsset = std::string(coop::kVariant) + ".dll";
+const std::string kSigAsset = kDllAsset + ".sig";
 constexpr size_t kMaxJson = 1024 * 1024;
 constexpr size_t kMaxDll = 16 * 1024 * 1024;
 constexpr size_t kMaxSig = 4096;
@@ -52,6 +54,13 @@ std::wstring widen(const std::string& s) {
     std::wstring w(n > 0 ? n - 1 : 0, L'\0');
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
+}
+
+std::string narrow(const std::wstring& w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n - 1 : 0, '\0');
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+    return s;
 }
 
 // One HTTPS GET (redirects followed, system proxy honoured) into `out`, at most `maxBytes`.
@@ -239,8 +248,8 @@ bool sameGameRunning(DWORD pid) {
 // The version a DLL file says it is ("?" when it does not say).
 std::string fileVersionImpl(const std::wstring& path) {
     std::string data = readFile(path, kMaxDll);
-    // The marker is "EDF6DN_VERSION=x.y.z" and a NUL; the prefix alone also appears in the updater's own code.
-    const std::string prefix = "EDF6DN_VERSION=";
+    // The marker is "EDF6COOP_<n>P_VERSION=x.y.z" and a NUL; the prefix alone also appears in the updater's own code.
+    const std::string prefix = coop::kVersionMarkerPrefix;
     for (size_t at = data.find(prefix); at != std::string::npos; at = data.find(prefix, at + 1)) {
         size_t from = at + prefix.size(), end = data.find('\0', from);
         if (end == std::string::npos || end - from > 20) continue;
@@ -269,18 +278,18 @@ std::string updateOnceImpl(const std::wstring& installed, const std::string& cur
     std::string latestText = versionText(latest);
     if (badVersion(installed) == latest) {
         return format("UPDATE %s is out, but it was rolled back here after it failed to run; waiting for a newer "
-                      "release (delete EDF6DirectNet.dll.bad to try it again)",
-                      latestText.c_str());
+                      "release (delete %ls.bad to try it again)",
+                      latestText.c_str(), coop::kDllFileW);
     }
     std::string dllUrl = assetUrl(json, kDllAsset), sigUrl = assetUrl(json, kSigAsset);
     if (dllUrl.empty()) {
-        return format("UPDATE %s is out but has no %s to update from; get it from %s", latestText.c_str(), kDllAsset,
-                      kReleasePage);
+        return format("UPDATE %s is out but has no %s to update from; get it from %s", latestText.c_str(),
+                      kDllAsset.c_str(), kReleasePage);
     }
     if (sigUrl.empty()) {
         return format("UPDATE %s rejected: the release has no signature (%s), so it cannot be checked; get it from %s "
                       "if you trust it",
-                      latestText.c_str(), kSigAsset, kReleasePage);
+                      latestText.c_str(), kSigAsset.c_str(), kReleasePage);
     }
     std::vector<uint8_t> dll, sig;
     if (!httpGet(dllUrl, false, kMaxDll, dll, &why) || !httpGet(sigUrl, false, kMaxSig, sig, &why)) {
@@ -377,7 +386,7 @@ std::string sha256Hex(const std::vector<uint8_t>& data) {
 
 std::string versionMarker(const Version& v) {
     char buf[48];
-    snprintf(buf, sizeof(buf), "EDF6DN_VERSION=%d.%d.%d", v.major, v.minor, v.patch);
+    snprintf(buf, sizeof(buf), "%s%d.%d.%d", coop::kVersionMarkerPrefix, v.major, v.minor, v.patch);
     return buf;
 }
 
@@ -426,7 +435,7 @@ bool readSignedManifest(const std::string& sigFile, const std::vector<uint8_t>& 
         at = end + 1;
     }
     Version version = parseVersion(lines[0]);
-    bool shaped = at == sigFile.size() && version.valid() && lines[0] == "EDF6DirectNet " + versionText(version) &&
+    bool shaped = at == sigFile.size() && version.valid() && lines[0] == std::string(coop::kName) + " " + versionText(version) &&
                   lowerHexLine(lines[1], 64) && lowerHexLine(lines[2], 128);
     if (!shaped) {
         *why = "the signature file is malformed";
@@ -435,7 +444,7 @@ bool readSignedManifest(const std::string& sigFile, const std::vector<uint8_t>& 
     uint8_t signature[64];
     for (size_t i = 0; i < 64; ++i) signature[i] = static_cast<uint8_t>(std::stoi(lines[2].substr(2 * i, 2), nullptr, 16));
     if (!verifySignature(lines[0] + "\n" + lines[1] + "\n", signature, publicKey)) {
-        *why = "the signature is not valid (not signed by the EDF6DirectNet release key)";
+        *why = "the signature is not valid (not signed by the EDF6Coop release key)";
         return false;
     }
     out->version = version;
@@ -497,7 +506,7 @@ bool swapIn(const std::wstring& target, const std::wstring& replacement, const s
     DWORD error = GetLastError();
     *why = "cannot put the new file in place (error " + std::to_string(error) + ")";
     if (!exists(target) && !MoveFileExW(aside.c_str(), target.c_str(), 0))  // back to what was there
-        *why += "; EDF6DirectNet.dll is now MISSING: rename EDF6DirectNet.dll.old back to EDF6DirectNet.dll";
+        *why += "; " + narrow(target) + " is now MISSING: rename " + narrow(aside) + " back to it";
     return false;
 }
 
@@ -554,9 +563,9 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
     bool rolledBackBefore = badVersion(installed) == me;  // an older updater installed it again
     if (!rolledBackBefore && !(trial.version == me)) {
         writeText(trialPath, versionText(me) + " " + std::to_string(GetCurrentProcessId()) + "\n");
-        logf("UPDATE first run of %s: keeping %s as EDF6DirectNet.dll.old until this version has run for %u seconds "
+        logf("UPDATE first run of %s: keeping %s as %ls.old until this version has run for %u seconds "
              "past the game's first EOS tick",
-             versionString.c_str(), fileVersionImpl(old).c_str(), kHealthySeconds);
+             versionString.c_str(), fileVersionImpl(old).c_str(), coop::kDllFileW, kHealthySeconds);
         return RunState::Trial;
     }
     if (!rolledBackBefore && sameGameRunning(trial.pid)) return RunState::Trial;  // that game's trial, not over
@@ -576,7 +585,7 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
     writeText(sibling(installed, L".bad"), versionText(me) + "\n");
     DeleteFileW(trialPath.c_str());
     logf("UPDATE ROLLED BACK: %s %s; %s is restored and runs from the next game start, and %s will not be "
-         "installed again (a newer release will). EDF6DirectNet is off for this session. Please report this at %s",
+         "installed again (a newer release will). EDF6Coop is off for this session. Please report this at %s",
          versionString.c_str(),
          rolledBackBefore ? "was rolled back before and has been installed again"
                           : "crashed or was killed before it had run for a while last time",

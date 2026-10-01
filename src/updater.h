@@ -48,7 +48,7 @@ std::string jsonString(const std::string& json, const std::string& field, size_t
 std::string assetUrl(const std::string& releaseJson, const std::string& name);
 
 std::string sha256Hex(const std::vector<uint8_t>& data);
-// The marker every build carries, e.g. "EDF6DN_VERSION=0.3.6".
+// The marker every build carries, e.g. "EDF6COOP_8P_VERSION=0.3.6".
 std::string versionMarker(const Version& v);
 // The digest part of a check: `dll` has the digest in `shaText` ("<hex>  name"), is a DLL, and carries
 // the version marker of `version`. `why` says what failed.
@@ -119,7 +119,7 @@ void noteGameRunning();
 // it back. Never waits for the file lock (a thread that died at exit may hold it); false when not marked.
 // A process killed outright (Task Manager, __fastfail - EDF6VR aborts the game at quit) cannot say so.
 bool noteCleanExit(const std::wstring& installed, const std::string& version);
-// The version a DLL file says it is (its "EDF6DN_VERSION=x.y.z" marker), "?" when it does not say.
+// The version a DLL file says it is (its "EDF6COOP_<n>P_VERSION=x.y.z" marker), "?" when it does not say.
 std::string fileVersion(const std::wstring& path);
 // The version recorded in installed.bad, invalid when none.
 Version badVersion(const std::wstring& installed);

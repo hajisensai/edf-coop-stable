@@ -1,9 +1,9 @@
 // A plugin that refuses is unloaded at once: EDFModLoader calls FreeLibrary as soon as EML6_Load returns false
 // (its dllmain.cpp). 1.5.13 had already started the log's writer thread with the first line, and that thread
 // woke up inside the unmapped DLL about 200 ms later and took the game down. This loads the built plugin the way
-// the loader does, without the game: with no EDF.dll in the process it refuses exactly as it does against an
-// unsupported game build, and with Enabled=0 it refuses before looking.
-//   RefusalTests EDF6MultiSlot.dll work-folder
+// the loader does, without the game: with no EDF.dll in the process it refuses before touching any file.
+// (Enabled=0 against the real game is PluginLoad_off.)
+//   RefusalTests EDF6Coop.dll work-folder
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -92,36 +92,37 @@ void LoadAndRefuse(const std::wstring& dll, const char* mode) {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 3) {
-        std::printf("usage: RefusalTests EDF6MultiSlot.dll work-folder\n");
+        std::printf("usage: RefusalTests EDF6Coop.dll work-folder\n");
         return 2;
     }
     if (GetModuleHandleW(L"EDF.dll")) {
         std::printf("FAIL: this test needs a process without EDF.dll\n");
         return 1;
     }
-    for (const bool disabled : {true, false}) {
-        const std::wstring folder = std::wstring(argv[2]) + (disabled ? L"\\disabled" : L"\\refused");
+    {
+        const std::wstring folder = std::wstring(argv[2]) + L"\\refused";
         const std::wstring plugins = folder + L"\\Mods\\Plugins";
         for (const auto& path : {std::wstring(argv[2]), folder, folder + L"\\Mods", plugins}) CreateDirectoryW(path.c_str(), nullptr);
-        const std::wstring dll = plugins + L"\\EDF6MultiSlot.dll";
-        const std::wstring log = plugins + L"\\EDF6MultiSlot.log";
-        const std::wstring ini = plugins + L"\\EDF6MultiSlot.ini";
+        const std::wstring dll = plugins + L"\\EDF6Coop.dll";
+        const std::wstring log = plugins + L"\\EDF6Coop.log";
+        const std::wstring ini = plugins + L"\\EDF6Coop.ini";
+        const std::wstring replaced = plugins + L"\\EDF6MultiSlot.dll";
         CopyFileW(argv[1], dll.c_str(), FALSE);
-        for (const auto& path : {log, log + multislot::kLogQueueSuffix, ini}) DeleteFileW(path.c_str());
-        // Enabled=0 turns the plugin away before anything else; with no INI it writes the defaults, goes on, and
-        // refuses the missing game.
-        if (disabled) std::ofstream(ini, std::ios::binary | std::ios::trunc) << "[MultiSlot]\r\nEnabled=0\r\n";
+        for (const auto& path : {log, log + multislot::kLogQueueSuffix, ini, replaced, replaced + L".disabled"})
+            DeleteFileW(path.c_str());
+        std::ofstream(replaced, std::ios::binary | std::ios::trunc) << "MZ not loaded";
         // A clean run of an earlier start before this one: the log has seen a SHUTDOWN, so a run without one
         // after its banner would be called cut.
-        const char* seed = "[2026-09-20 00:00:00.000] ==== EDF6MultiSlot 1.5.12 ====\r\n"
+        const char* seed = "[2026-09-20 00:00:00.000] ==== EDF6Coop 2.0.0 ====\r\n"
                            "[2026-09-20 00:09:00.000] SHUTDOWN the game exited\r\n";
         std::ofstream(log, std::ios::binary | std::ios::trunc) << seed;
-        const char* mode = disabled ? "Enabled=0 asks the loader to unload" : "without the supported EDF.dll the plugin refuses";
+        const char* mode = "without EDF.dll the plugin refuses";
 
         LoadAndRefuse(dll, mode);
         std::string text = ReadText(log);
-        Check(Contains(text, disabled ? "Enabled=0: game left untouched" : "REFUSED: EDF.dll is not the supported build"),
-              "the reason is logged");
+        Check(Contains(text, "REFUSED: EDF.dll is not loaded"), "the reason is logged");
+        Check(GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES, "outside the game no settings file is written");
+        Check(GetFileAttributesW(replaced.c_str()) != INVALID_FILE_ATTRIBUTES, "and no replaced plugin is renamed");
         Check(Contains(text, "] UNLOADED the plugin was unloaded"), "the unload is logged as an unload");
         Check(text.find("SHUTDOWN", std::strlen(seed)) == std::string::npos, "and not as the game exiting, which it did not");
         const HANDLE queue = CreateFileW((log + multislot::kLogQueueSuffix).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,

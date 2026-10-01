@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(EDF6MultiSlot VERSION 1.5.15 LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
+# EDF6Coop: the room part (src/ here) and the direct-link part (../src) as one plugin, EDF6Coop.dll.
+project(EDF6Coop VERSION 2.0.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Room size of this build (patches.h): 8 is the distributed build; 10 and 12 are families of their own whose
@@ -71,16 +72,35 @@ string(REGEX REPLACE "(${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}$
 configure_file(src/menu_layout.h.in "${CMAKE_BINARY_DIR}/generated/menu_layout.h" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini")
 
-add_library(EDF6MultiSlot SHARED
-    src/plugin.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
+# The direct-link part, compiled with its own flags (it is not built for /permissive- and defines what the room
+# part's sources define themselves).
+set(DIRECTNET_DIR "${CMAKE_SOURCE_DIR}/../src")
+set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traffic updater upnp)
+list(TRANSFORM DIRECTNET_CORE PREPEND "${DIRECTNET_DIR}/")
+list(TRANSFORM DIRECTNET_CORE APPEND ".cpp")
+set(DIRECTNET_DEFINES WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS
+    MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
+add_library(DirectNetCore STATIC ${DIRECTNET_CORE})
+target_compile_definitions(DirectNetCore PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(DirectNetCore PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(DirectNetCore PUBLIC ws2_32 iphlpapi bcrypt ole32 oleaut32 winhttp)
+add_library(DirectNetPart STATIC "${DIRECTNET_DIR}/lobby_marker.cpp" "${DIRECTNET_DIR}/eos_hooks.cpp"
+    "${DIRECTNET_DIR}/dn_part.cpp")
+target_compile_definitions(DirectNetPart PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(DirectNetPart PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(DirectNetPart PUBLIC DirectNetCore)
+
+add_library(EDF6Coop SHARED
+    src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp)
-target_link_libraries(EDF6MultiSlot PRIVATE winhttp)
-target_include_directories(EDF6MultiSlot PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
-target_compile_options(EDF6MultiSlot PRIVATE ${WARNINGS})
-target_link_options(EDF6MultiSlot PRIVATE /DYNAMICBASE /NXCOMPAT /INCREMENTAL:NO /PDBALTPATH:EDF6MultiSlot.pdb)
-set_target_properties(EDF6MultiSlot PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MULTISLOT_DIST}")
+target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
+# "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
+target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(EDF6Coop PRIVATE ${WARNINGS})
+target_link_options(EDF6Coop PRIVATE /DYNAMICBASE /NXCOMPAT /INCREMENTAL:NO /PDBALTPATH:EDF6Coop.pdb)
+set_target_properties(EDF6Coop PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MULTISLOT_DIST}")
 
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -190,17 +210,30 @@ add_test(NAME CrashDumpInPlugin COMMAND CrashDumpTests "${CMAKE_BINARY_DIR}/cras
 add_executable(RefusalTests tests/refusal_test.cpp)
 target_include_directories(RefusalTests PRIVATE ${MODLOADER_INCLUDE})
 target_compile_options(RefusalTests PRIVATE ${WARNINGS})
-add_dependencies(RefusalTests EDF6MultiSlot)
-add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6MultiSlot>" "${CMAKE_BINARY_DIR}/refusaltest")
+add_dependencies(RefusalTests EDF6Coop)
+add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6Coop>" "${CMAKE_BINARY_DIR}/refusaltest")
 
 add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
-add_dependencies(MultiSlotLoadTest EDF6MultiSlot)
-foreach(mode off host4 host8 fresh nomission recoveryoff keeproomoff quiet smooth)
-    add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6MultiSlot>"
+add_dependencies(MultiSlotLoadTest EDF6Coop)
+foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff quiet smooth)
+    add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6Coop>"
              "${CMAKE_BINARY_DIR}/loadtest" ${mode})
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 endforeach()
 
-configure_file(EDF6MultiSlot.ini "${MULTISLOT_DIST}/EDF6MultiSlot.ini" @ONLY)
+# The direct-link part's own tests (they need no game) and its join probe. The direct-link code is the
+# same in every room size apart from the room size in its version marker, and the suite's signed update
+# fixtures are made over 8-player markers, so it runs in the 8-player build (which CI always builds).
+if(MULTISLOT_MAX_PLAYERS EQUAL 8)
+    add_executable(DirectNetTests "${CMAKE_SOURCE_DIR}/../tests/test_main.cpp")
+    target_compile_definitions(DirectNetTests PRIVATE ${DIRECTNET_DEFINES})
+    target_compile_options(DirectNetTests PRIVATE /W4 /WX /utf-8 /EHsc)
+    target_link_libraries(DirectNetTests PRIVATE DirectNetCore)
+    add_test(NAME DirectNet COMMAND DirectNetTests)
+endif()
+add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
+target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(DirectNetProbeJoin PRIVATE DirectNetCore)

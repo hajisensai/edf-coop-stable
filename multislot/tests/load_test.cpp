@@ -2,7 +2,7 @@
 // its initialisation, then calls the patched SEARCH_TYPE functions (all leaf code) to check what
 // they now return, compared with what the same functions returned before the plugin loaded.
 // The plugin sits in <work-folder>\<mode>\Mods\Plugins, as in a game folder.
-//   MultiSlotLoadTest EDF.dll EDF6MultiSlot.dll work-folder off|host4|host8|fresh|nomission
+//   MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -44,6 +44,17 @@ void Check(bool condition, const char* what) {
 std::string ReadText(const std::wstring& path) {
     std::ifstream in(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// An INI as text: UTF-16LE with its BOM is turned into UTF-8, anything else is returned as it is.
+std::string ReadIniText(const std::wstring& path) {
+    const std::string raw = ReadText(path);
+    if (raw.size() < 2 || static_cast<unsigned char>(raw[0]) != 0xFF || static_cast<unsigned char>(raw[1]) != 0xFE) return raw;
+    const std::wstring wide(reinterpret_cast<const wchar_t*>(raw.data() + 2), (raw.size() - 2) / sizeof(wchar_t));
+    const int n = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string text(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), text.data(), n, nullptr, nullptr);
+    return text;
 }
 
 bool Contains(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
@@ -211,7 +222,7 @@ std::vector<unsigned char> ReadBytes(const std::wstring& path) {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 5) {
-        std::printf("usage: MultiSlotLoadTest EDF.dll EDF6MultiSlot.dll work-folder off|host4|host8|fresh|nomission\n");
+        std::printf("usage: MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission\n");
         return 2;
     }
     const std::wstring mode = argv[4];
@@ -234,13 +245,26 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring uiFolder = mods + L"\\UI";
     const std::wstring layoutPath = uiFolder + L"\\LYT_MAINFRAME.SGO";
     for (const auto& path : {std::wstring(argv[3]), folder, mods, plugins}) CreateDirectoryW(path.c_str(), nullptr);
-    const std::wstring dll = plugins + L"\\EDF6MultiSlot.dll";
-    const std::wstring logPath = plugins + L"\\EDF6MultiSlot.log";
+    const std::wstring dll = plugins + L"\\EDF6Coop.dll";
+    const std::wstring logPath = plugins + L"\\EDF6Coop.log";
     CopyFileW(argv[2], dll.c_str(), FALSE);
     DeleteFileW(logPath.c_str());
-    const std::wstring iniPath = plugins + L"\\EDF6MultiSlot.ini";
+    const std::wstring iniPath = plugins + L"\\EDF6Coop.ini";
     DeleteFileW(iniPath.c_str());
-    const bool fresh = mode == L"fresh";  // no INI at all: defaults are written and used
+    // The two plugins EDF6Coop replaces, as a player upgrading from them has them in Mods\Plugins.
+    const std::wstring oldRooms = plugins + L"\\EDF6MultiSlot", oldDirect = plugins + L"\\EDF6DirectNet";
+    for (const auto& old : {oldRooms, oldDirect})
+        for (const wchar_t* ext : {L".dll", L".dll.disabled", L".ini"}) DeleteFileW((old + ext).c_str());
+    const bool upgrade = mode == L"upgrade";  // no EDF6Coop.ini, but the replaced plugins and their settings
+    const bool fresh = mode == L"fresh" || upgrade;  // no EDF6Coop.ini: one is written and used
+    if (upgrade) {
+        std::ofstream(oldRooms + L".dll", std::ios::binary) << "MZ not loaded";
+        std::ofstream(oldDirect + L".dll", std::ios::binary) << "MZ not loaded";
+        std::ofstream(oldRooms + L".ini", std::ios::binary)
+            << "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\n[RoomScreen]\r\nPageKeys=F2,Tab\r\n";
+        std::ofstream(oldDirect + L".ini", std::ios::binary)
+            << "\xEF\xBB\xBF[DirectNet]\r\nEnabled=1\r\nKey=secret\r\n[Update]\r\nAutoUpdate=0\r\n";
+    }
     if (!fresh) {
         const char* ini = mode == L"off"         ? "[MultiSlot]\r\nEnabled=0\r\nEightPlayerRooms=1\r\n"
                           : mode == L"recoveryoff" ? "[MultiSlot]\r\nEnabled=1\r\nHandshakeRecovery=0\r\n"
@@ -321,7 +345,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(Contains(unloaded, "] UNLOADED the plugin was unloaded") && !Contains(unloaded, "SHUTDOWN"),
               "the process goes on, and the log calls it an unload, not the game exiting");
     } else {
-        const bool eightPlayers = mode == L"host8";
+        const bool eightPlayers = mode == L"host8" || upgrade;  // upgrade carries EightPlayerRooms=1 over
         // NetLog defaults to on: only host4's INI turns it off.
         const bool netLog = mode != L"host4" && mode != L"quiet";
         const bool recovery = mode != L"recoveryoff" && mode != L"quiet";
@@ -342,7 +366,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!netLog && recovery)
             Check(Contains(log, "Recovery transport: 1 EOS import redirected"), "recovery works independently of NetLog");
         Check(loaded, "EML6_Load succeeds against the supported EDF.dll");
-        Check(info.infoVersion == PluginInfo::MaxInfoVer && info.name && std::strcmp(info.name, "EDF6 MultiSlot") == 0,
+        Check(info.infoVersion == PluginInfo::MaxInfoVer && info.name && std::strcmp(info.name, "EDF6Coop") == 0,
               "PluginInfo is filled in");
         Check(info.version.major == MULTISLOT_VERSION_MAJOR && info.version.minor == MULTISLOT_VERSION_MINOR &&
                   info.version.patch == MULTISLOT_VERSION_PATCH && info.version.build == 0,
@@ -366,15 +390,31 @@ int wmain(int argc, wchar_t** argv) {
         Check(SlotInto(base, LobbySlot(), plugin), "HUiLobby OnUpdate vtable slot points into the plugin");
         Check(Contains(log, ("Hosting: " + std::to_string(kModRoomCapacity) + "Player MOD " + (eightPlayers ? "ON" : "OFF")).c_str()),
               "the host mode setting is logged");
-        if (fresh) {
-            const std::string written = ReadText(iniPath);
+        if (upgrade) {
+            const std::string written = ReadIniText(iniPath);
+            Check(Contains(written, "EightPlayerRooms=1\r\n") && Contains(written, "PageKeys=F2,Tab\r\n") &&
+                      Contains(written, "Key=secret\r\n") && Contains(written, "AutoUpdate=0\r\n"),
+                  "the replaced plugins' settings are carried into EDF6Coop.ini");
+            Check(!Contains(written, "MaxPlayers="), "a setting that no longer exists is not carried over");
+            Check(Contains(log, "MaxPlayers=8 is no longer a setting"), "and the log says which one was dropped");
+            for (const auto& old : {oldRooms, oldDirect})
+                Check(GetFileAttributesW((old + L".dll").c_str()) == INVALID_FILE_ATTRIBUTES &&
+                          GetFileAttributesW((old + L".dll.disabled").c_str()) != INVALID_FILE_ATTRIBUTES,
+                      "a replaced plugin is renamed to .disabled, so the loader skips it from now on");
+            Check(GetFileAttributesW((oldRooms + L".ini").c_str()) != INVALID_FILE_ATTRIBUTES,
+                  "the old settings files are left where they were");
+        }
+        if (fresh && !upgrade) {
+            const std::string written = ReadIniText(iniPath);
+            Check(ReadText(iniPath).rfind("\xFF\xFE", 0) == 0, "the INI is written as UTF-16LE with a BOM");
             Check(Contains(written, "[RoomScreen]") && Contains(written, "EightPlayerRooms=0\r\n") && Contains(written, "NetLog=1\r\n") &&
+                      Contains(written, "[DirectNet]") && Contains(written, "[Update]") &&
                       Contains(written, "DummyMembers=0") && Contains(written, "PageKeys=F3,Tab\r\n") &&
                       Contains(written, "[CopyArmor]") && Contains(written, "PadButton=LeftStick\r\n") &&
                       Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "PageKey=") &&
                       !Contains(written, "@MULTISLOT_"),
                   "missing INI is written with the documented defaults (CRLF)");
-            Check(Contains(log, "Wrote default settings"), "writing the default INI is logged");
+            Check(Contains(log, "Settings: wrote EDF6Coop.ini with the defaults"), "writing the default INI is logged");
             // A dump copies the game's memory, so it must never be on for someone who only installed
             // the package. The default INI says 0 and the plugin must read 0 when the key is absent.
             Check(Contains(written, "CrashDump=0\r\n"), "the default INI leaves crash dumps off");
@@ -413,7 +453,8 @@ int wmain(int argc, wchar_t** argv) {
         // marker never fires and every start misreports the last one as cut, which is what 1.5.2-1.5.8 did.
         Check(Contains(log, "Exit marker: a normal quit now writes SHUTDOWN"),
               "the TerminateProcess import is wrapped, so a clean exit can be recorded");
-        Check(Contains(log, "switched with F3/Tab/RS"), "member pages switch with F3, Tab and the right stick");
+        Check(Contains(log, upgrade ? "switched with Tab/RS" : "switched with F3/Tab/RS"),
+              "member pages switch with the configured keys (F3, Tab; upgrade carries Tab alone) and the right stick");
         if (mode == L"host8") {
             // An INI from 0.5.0: PageKey=F2 and dummy keys F3/F4.
             Check(Contains(log, "PageKey is no longer used"), "the old page key is reported as unused");

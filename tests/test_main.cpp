@@ -1644,12 +1644,11 @@ void testUpdater() {
     GetTempPathW(MAX_PATH, tmp);
     std::wstring dir = std::wstring(tmp) + L"edf6dn_update_test\\";
     CreateDirectoryW(dir.c_str(), nullptr);
-    std::wstring installed = dir + L"EDF6DirectNet.dll";
+    std::wstring installed = dir + L"EDF6Coop.dll";
     DeleteFileW((installed + L".old").c_str());
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
-    CHECK(CopyFileW(built.c_str(), installed.c_str(), FALSE));
+    CHECK(CopyFileW(self, installed.c_str(), FALSE));  // any image does: it is mapped, not run
     HMODULE loaded = LoadLibraryExW(installed.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
     CHECK(dn::installOver(installed, dll, &why));
@@ -1668,7 +1667,7 @@ void testUpdater() {
           INVALID_FILE_ATTRIBUTES);
     // A game that quit between writing its download and renaming it leaves installed.new<pid>.
     std::wstring stale = installed + L".new4242", other = installed + L".newer";
-    CHECK(CopyFileW(built.c_str(), stale.c_str(), FALSE) && CopyFileW(built.c_str(), other.c_str(), FALSE));
+    CHECK(CopyFileW(self, stale.c_str(), FALSE) && CopyFileW(self, other.c_str(), FALSE));
     dn::removeUpdateLeftovers(installed);
     CHECK(GetFileAttributesW(stale.c_str()) == INVALID_FILE_ATTRIBUTES);
     CHECK(GetFileAttributesW(other.c_str()) != INVALID_FILE_ATTRIBUTES);  // not ours: left alone
@@ -2050,20 +2049,20 @@ void testConfig() {
 // signatures over manifests of testDll("0.3.7") and testDll("0.3.5"), made the way the release workflow
 // signs.
 const std::vector<uint8_t> kTestKey = {
-    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x03, 0x95, 0xbe, 0x95, 0x54, 0x5d, 0xe1, 0xbc, 0xc8, 0x6c,
-    0x11, 0xf9, 0x92, 0x0e, 0x76, 0xec, 0x91, 0x4a, 0x50, 0x28, 0xc3, 0x95, 0xad, 0xa6, 0x8e, 0xb7, 0x19, 0x75,
-    0x44, 0x4e, 0x07, 0x0e, 0xba, 0x6b, 0xd2, 0x28, 0x98, 0x11, 0x69, 0xf0, 0x56, 0x4a, 0x8e, 0x9b, 0x42, 0xf9,
-    0x47, 0xf7, 0x03, 0xd7, 0xda, 0xb3, 0x08, 0xc9, 0x0b, 0x01, 0xf9, 0x2a, 0x67, 0x17, 0x82, 0x4f, 0x6e, 0x90};
+    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x8c, 0x51, 0xd7, 0x8f, 0xb1, 0xbd, 0xda, 0x7c, 0xe2, 0xbb,
+    0x6a, 0xbc, 0xf7, 0x5c, 0xd4, 0xfa, 0x00, 0xb2, 0x86, 0x25, 0xa8, 0xa4, 0x29, 0xed, 0x23, 0x53, 0xd3, 0xaa,
+    0x00, 0xd8, 0x98, 0x9d, 0x04, 0x7d, 0xdc, 0x9f, 0x81, 0x32, 0x7c, 0x68, 0xca, 0xae, 0x27, 0x1f, 0x7c, 0x7f,
+    0x02, 0x3e, 0xf0, 0xf9, 0x66, 0xb3, 0x5a, 0x65, 0x80, 0x1e, 0xa3, 0x74, 0x4d, 0x35, 0x37, 0x99, 0x23, 0x07};
 const char* const kTestSig037 =
-    "EDF6DirectNet 0.3.7\n"
-    "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d\n"
-    "0eeed29a0bd1595119798327f0a5f3bb8dbdb09a101734747355139df0456cba"
-    "58f065c04b40800adac57da10a8ff836caa19f1e187b91ed94f083eedd073b10\n";
+    "EDF6Coop 0.3.7\n"
+    "0329d9c9448e8c45fefa4ff02902a8431860a8bc27541da65a7d146a30e23ade\n"
+    "eb59b2778b862a50d07ba205c809f81041b050fa75eed652773961c462d2d6c6"
+    "33e5413330649e2b55ff6ed056b2310ee98122c7a6ffc3097ce3f81935544ecb\n";
 const char* const kTestSig035 =
-    "EDF6DirectNet 0.3.5\n"
-    "661665d34625dd6cf62577435eae547b2b30d73a85a74f01c7f2ef94b28e43f2\n"
-    "82082f5551989fc3792d8f4fed80f3f44448c6abfa12d2532666e866c71acfab"
-    "09dde9021d56ba265e40e3427747ba140d3012cec9620469a66fc700d2db8c4a\n";
+    "EDF6Coop 0.3.5\n"
+    "ff3f8c2236226dea1a07aec9204632e2565c386fec82424e0343bb9c80756b61\n"
+    "914efe3aba41de393cd3895617ed8c2730beaf406ef6657844415b3c54fb0108"
+    "c54ac4e10ea34a9e2d53ff5aad64e8b2f83420584c8a763681dc3b161ad729ea\n";
 
 // 4 KiB: "MZ", zeros, the version marker at 1000.
 std::vector<uint8_t> testDll(const char* version) {
@@ -2081,7 +2080,7 @@ void testUpdateSigning() {
     std::string why;
     std::vector<uint8_t> dll = testDll("0.3.7");
     dn::Version v037 = parseVersion("0.3.7"), v036 = parseVersion("0.3.6");
-    CHECK(dn::sha256Hex(dll) == "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d");
+    CHECK(dn::sha256Hex(dll) == "0329d9c9448e8c45fefa4ff02902a8431860a8bc27541da65a7d146a30e23ade");
     dn::SignedManifest m;
     CHECK(dn::readSignedManifest(kTestSig037, kTestKey, &m, &why) && m.version == v037);
     CHECK(dn::verifyRelease(dll, kTestSig037, v037, v036, kTestKey, &why));
@@ -2091,7 +2090,7 @@ void testUpdateSigning() {
     CHECK(why.find("signature is not valid") != std::string::npos);
     // The signature binds version and digest.
     std::string other = kTestSig037;
-    other[16] = '8';  // "EDF6DirectNet 0.3.8"
+    other[13] = '8';  // "EDF6Coop 0.3.8"
     CHECK(!dn::readSignedManifest(other, kTestKey, &m, &why));
     other = kTestSig037;
     other[20] = other[20] == 'd' ? 'e' : 'd';  // first digest digit
@@ -2114,8 +2113,9 @@ void testUpdateSigning() {
     std::string good = kTestSig037;
     for (const std::string& bad :
          {std::string(), good.substr(0, good.size() - 1), good + "\n", good + "x", "\n" + good,
-          std::string("EDF6DirectNet 00.3.7") + good.substr(19), std::string("EDF6DirectNet  0.3.7") + good.substr(19),
-          std::string("EDF6DirectNet v0.3.7") + good.substr(19), std::string("edf6directnet 0.3.7") + good.substr(19)}) {
+          std::string("EDF6Coop 00.3.7") + good.substr(14), std::string("EDF6Coop  0.3.7") + good.substr(14),
+          std::string("EDF6Coop v0.3.7") + good.substr(14), std::string("edf6coop 0.3.7") + good.substr(14),
+          std::string("EDF6DirectNet 0.3.7") + good.substr(14)}) {
         CHECK(!dn::readSignedManifest(bad, kTestKey, &m, &why));
     }
     std::string crlf;
@@ -2185,14 +2185,14 @@ void testUpdateRollback() {
     printf("update: rollback state machine (trial, healthy, rolled back, bad version)\n");
     std::wstring dir = freshDir(L"edf6dn_rollback_test");
     std::wstring dll = dir + L"EDF6DirectNet.dll", old = dll + L".old", trial = dll + L".trial", bad = dll + L".bad";
-    auto install = [&](const char* version) { putFile(dll, "MZ EDF6DN_VERSION=" + std::string(version)); };
+    auto install = [&](const char* version) { putFile(dll, "MZ EDF6COOP_8P_VERSION=" + std::string(version)); };
     std::string why;
 
     // The version a DLL says it is, past the marker prefix its own updater code also contains.
-    const char marked[] = "MZ EDF6DN_VERSION=\0%s\0 EDF6DN_VERSION=1.2\0 EDF6DN_VERSION=0.3.6\0";
+    const char marked[] = "MZ EDF6COOP_8P_VERSION=\0%s\0 EDF6COOP_8P_VERSION=1.2\0 EDF6COOP_8P_VERSION=0.3.6\0";
     putFile(dll, std::string(marked, sizeof(marked) - 1));
     CHECK(dn::fileVersion(dll) == "0.3.6");
-    const char unmarked[] = "MZ EDF6DN_VERSION=\0 no marker\0";
+    const char unmarked[] = "MZ EDF6COOP_8P_VERSION=\0 no marker\0";
     putFile(dll, std::string(unmarked, sizeof(unmarked) - 1));
     CHECK(dn::fileVersion(dll) == "?");
 
@@ -2204,7 +2204,7 @@ void testUpdateRollback() {
     // 0.3.7 updates itself to 0.3.8: 0.3.7 is kept as .old.
     std::vector<uint8_t> v038 = testDll("0.3.8");
     CHECK(dn::installOver(dll, v038, &why));
-    CHECK(fileText(old).find("EDF6DN_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
+    CHECK(fileText(old).find("EDF6COOP_8P_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
     // The first start of 0.3.8 is a trial; healthy after a while: the trial and .old go.
     CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Trial);
     CHECK(fileText(trial) == "0.3.8 " + std::to_string(GetCurrentProcessId()) + "\n");
@@ -2227,8 +2227,8 @@ void testUpdateRollback() {
     // Then a game running it dies before it is healthy (no clean exit): pid 4 is System, never a game.
     putFile(trial, "0.3.9 4\n");
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
-    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
-    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.3.9") != std::string::npos);
+    CHECK(fileText(dll).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
+    CHECK(fileText(dll + L".rolledback").find("EDF6COOP_8P_VERSION=0.3.9") != std::string::npos);
     CHECK(!fileExists(old) && !fileExists(trial));
     CHECK(dn::badVersion(dll) == dn::parseVersion("0.3.9"));
     // The next start is 0.3.8 again, normal; the moved-aside DLL is cleaned up.
@@ -2237,7 +2237,7 @@ void testUpdateRollback() {
     // An older updater installs 0.3.9 again anyway: rolled back at once, without another trial.
     CHECK(dn::installOver(dll, v039, &why));
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
-    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
+    CHECK(fileText(dll).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);
 
     // Another game running the same trial right now (this process) is not a failed run.
     CHECK(dn::installOver(dll, testDll("0.4.0"), &why));
@@ -2247,8 +2247,8 @@ void testUpdateRollback() {
     // A version on trial that installs the next one gives up its own trial: its health check must not
     // delete the new version's rollback target, and that target stays the proven 0.3.8, not unproven 0.4.0.
     CHECK(dn::installOver(dll, testDll("0.4.1"), &why));
-    CHECK(!fileExists(trial) && fileText(old).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
-    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.4.0") != std::string::npos);
+    CHECK(!fileExists(trial) && fileText(old).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);
+    CHECK(fileText(dll + L".rolledback").find("EDF6COOP_8P_VERSION=0.4.0") != std::string::npos);
     dn::confirmHealthy(dll, "0.4.0");
     CHECK(fileExists(old));
 
@@ -2267,7 +2267,7 @@ void testSwapKeepsDllLoadable() {
     std::wstring dll = dir + L"EDF6DirectNet.dll";
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
+    const std::wstring built = self;  // any image will do: this test program is one the loader can map
     CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
     HMODULE loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
@@ -2291,14 +2291,14 @@ void testSwapKeepsDllLoadable() {
     CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
     loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
-    putFile(dll + L".old", "MZ EDF6DN_VERSION=0.3.9");
+    putFile(dll + L".old", "MZ EDF6COOP_8P_VERSION=0.3.9");
     putFile(dll + L".trial", "0.9.9 4\n");  // its game (pid 4 is System, never a game) died on trial
     bool rolledBack = dn::beginRun(dll, "0.9.9") == dn::RunState::RolledBack;
     done = true;
     watcher.join();
     CHECK(allOk && rolledBack);
     CHECK(missing == 0 && looks > 0);
-    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    CHECK(fileText(dll) == "MZ EDF6COOP_8P_VERSION=0.3.9");
     if (loaded) FreeLibrary(loaded);
     DeleteFileW((dll + L".rolledback").c_str());
     DeleteFileW((dll + L".bad").c_str());
@@ -2306,7 +2306,7 @@ void testSwapKeepsDllLoadable() {
     CHECK(CopyFileW(built.c_str(), (dll + L".old").c_str(), FALSE));
     HANDLE lock = CreateFileW((dll + L".old").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     CHECK(!dn::installOver(dll, testDll("0.4.0"), &why));  // the old backup cannot be removed
-    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    CHECK(fileText(dll) == "MZ EDF6COOP_8P_VERSION=0.3.9");
     CHECK(!fileExists(dll + L".new" + std::to_wstring(GetCurrentProcessId())));
     if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
     for (const wchar_t* f : {L"", L".old", L".trial"}) DeleteFileW((dll + f).c_str());

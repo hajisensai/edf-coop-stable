@@ -14,7 +14,7 @@ namespace {
 
 constexpr const wchar_t* kHost = L"api.github.com";
 constexpr const wchar_t* kPath = L"/repos/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD/releases/latest";
-constexpr const wchar_t* kAgent = L"EDF6MultiSlot";
+constexpr const wchar_t* kAgent = L"EDF6Coop";
 constexpr DWORD kTimeoutMs = 8000;
 constexpr std::size_t kNoticeChars = 64;
 constexpr std::size_t kReplyBytes = 256 * 1024;  // a release JSON is a few KB; this is the ceiling

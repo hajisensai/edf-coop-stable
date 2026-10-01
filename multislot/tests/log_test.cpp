@@ -136,7 +136,7 @@ void QueueRecoveryTests(const std::wstring& folder) {
     const std::wstring killed = folder + L"\\killed.log";
     DeleteFileW(killed.c_str());
     DeleteFileW((killed + kLogQueueSuffix).c_str());
-    WriteText(killed, "[2026-09-20 00:00:00.000] ==== EDF6MultiSlot 1.5.13 ====\r\n");
+    WriteText(killed, "[2026-09-20 00:00:00.000] ==== EDF6Coop 1.5.13 ====\r\n");
     wchar_t self[MAX_PATH]{};
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     std::wstring command = L"\"" + std::wstring(self) + L"\" --killed \"" + killed + L"\"";
@@ -368,7 +368,7 @@ int wmain(int argc, wchar_t** argv) {
         LogOpen(mark.c_str());
         return PreviousRun();
     };
-    const std::string banner = line("[2026-09-20 00:00:00.000] ==== EDF6MultiSlot 1.5.2 ====");
+    const std::string banner = line("[2026-09-20 00:00:00.000] ==== EDF6Coop 1.5.2 ====");
     const std::string ended = line("[2026-09-20 00:09:00.000] SHUTDOWN the game exited");
     const std::string busy = line("[2026-09-20 00:00:01.000] LOBBY room list refresh: ok 1, EOS result 0");
     Check(write("", false) == LastRun::Unknown, "no log at all says nothing about a previous run");
@@ -386,11 +386,11 @@ int wmain(int argc, wchar_t** argv) {
     Check(write(banner + banner + ended) == LastRun::Ended, "and an earlier cut run does not spoil the last one");
     // The marks have to match the lines the plugin really writes.
     write("", false);
-    Log("==== EDF6MultiSlot %s ====", "1.5.2");
+    Log("==== EDF6Coop %s ====", "1.5.2");
     LogShutdown("the game exited");
     LogShutdown("twice");  // only the first one is written
     const std::string written = ReadText(mark);
-    Check(written.find("==== EDF6MultiSlot 1.5.2 ====") != std::string::npos &&
+    Check(written.find("==== EDF6Coop 1.5.2 ====") != std::string::npos &&
               written.find("] SHUTDOWN the game exited") != std::string::npos &&
               written.find("twice") == std::string::npos,
           "the real banner and shutdown lines are the ones the marks look for, and shutdown is written once");
@@ -428,8 +428,8 @@ int wmain(int argc, wchar_t** argv) {
           "SHUTDOWN without the timestamp in front is not the mark");
     Check(write(banner + line("[2026-09-2x 00:09:00.000] SHUTDOWN the game exited")) == LastRun::Unknown,
           "nor with something that only looks like one");
-    Check(write(line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====") + ended) == LastRun::Ended &&
-              write(ended + line("[2026-09-20 00:00:00.000] name ==== EDF6MultiSlot 9 ====")) == LastRun::Ended,
+    Check(write(line("[2026-09-20 00:00:00.000] name ==== EDF6Coop 9 ====") + ended) == LastRun::Ended &&
+              write(ended + line("[2026-09-20 00:00:00.000] name ==== EDF6Coop 9 ====")) == LastRun::Ended,
           "and a banner inside a line is no banner either");
     // A plugin that refused and was unloaded writes UNLOADED: its run's end cannot be seen, so nothing is claimed.
     const std::string unloaded = line("[2026-09-20 00:00:02.000] UNLOADED the plugin was unloaded");

@@ -16,6 +16,7 @@ FILE* g_file = nullptr;
 std::wstring g_path;
 size_t g_maxBytes = 0;
 std::unordered_map<std::string, ULONGLONG> g_lastByKey;
+LogSink g_sink = nullptr;
 
 void rotateIfNeeded() {
     if (!g_file || g_maxBytes == 0) return;
@@ -28,6 +29,12 @@ void rotateIfNeeded() {
 }
 
 void writeLine(const char* fmt, va_list ap) {
+    if (g_sink) {
+        char line[1024];
+        vsnprintf(line, sizeof(line), fmt, ap);
+        g_sink(line);
+        return;
+    }
     if (!g_file) return;
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -46,6 +53,11 @@ void logOpen(const std::wstring& path, size_t maxBytes) {
     g_path = path;
     g_maxBytes = maxBytes;
     g_file = _wfopen(path.c_str(), L"ab");
+}
+
+void logToSink(LogSink sink) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_sink = sink;
 }
 
 void logClose() {

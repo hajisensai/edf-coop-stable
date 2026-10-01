@@ -22,6 +22,7 @@
 #include "joinlog.h"
 #include "log.h"
 #include "loaderproxy.h"
+#include "lobbystate.h"
 #include "menulayout.h"
 #include "midhook.h"
 #include "mission.h"
@@ -35,28 +36,23 @@
 #include "smoothing.h"
 #include "updatecheck.h"
 #include "spawn.h"
+#include "coop.h"
+#include "src/config.h"
+#include "src/dn_part.h"
+#include "src/log.h"
+#include "src/product.h"
+#include "src/updater.h"
 
 namespace multislot {
 namespace {
 
-constexpr const char* kVersion = "1.5.15";
-// CMake's project VERSION is the one EDFModLoader is told (PluginInfo); kVersion adds only a pre-release tag to it.
-#define MULTISLOT_TEXT2(x) #x
-#define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)
-constexpr const char* kProjectVersion =
-    MULTISLOT_TEXT(MULTISLOT_VERSION_MAJOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_MINOR) "." MULTISLOT_TEXT(MULTISLOT_VERSION_PATCH);
-constexpr bool SameRelease(const char* version, const char* project) {
-    for (; *project; ++version, ++project)
-        if (*version != *project) return false;
-    return *version == 0 || *version == '-';
-}
-static_assert(SameRelease(kVersion, kProjectVersion), "kVersion must be CMakeLists.txt's project VERSION (plus a -tag)");
-// Which room-size build this is (patches.h); empty for the distributed eight.
-#if MULTISLOT_MAX_PLAYERS == 8
-constexpr const char* kRoomTag = "";
-#else
-constexpr const char* kRoomTag = "-" MULTISLOT_TEXT(MULTISLOT_MAX_PLAYERS) "p";
-#endif
+// CMakeLists.txt's project VERSION, the one version of EDF6Coop: EDFModLoader is told it (PluginInfo), the
+// updater compares it with the latest release, and the exported marker below carries it.
+#define EDF6COOP_VERSION_TEXT \
+    EDF6COOP_TEXT(MULTISLOT_VERSION_MAJOR) "." EDF6COOP_TEXT(MULTISLOT_VERSION_MINOR) "." EDF6COOP_TEXT(MULTISLOT_VERSION_PATCH)
+constexpr const char* kVersion = EDF6COOP_VERSION_TEXT;
+// Which room-size build this is (patches.h).
+constexpr const char* kRoomTag = "-" EDF6COOP_TEXT(MULTISLOT_MAX_PLAYERS) "p";
 HMODULE self = nullptr;
 
 // out: MAX_PATH characters. Refuses paths too long to also hold the rotated log name (log.cpp), instead of
@@ -64,29 +60,13 @@ HMODULE self = nullptr;
 bool SiblingPath(wchar_t* out, const wchar_t* extension) {
     const DWORD length = GetModuleFileNameW(self, out, MAX_PATH);
     if (!length || length >= MAX_PATH) return false;
-    wchar_t* dot = wcsrchr(out, L'.');
-    if (!dot) return false;
-    const std::size_t stem = static_cast<std::size_t>(dot - out), added = wcslen(extension);
-    if (stem + added + 8 >= MAX_PATH) return false;
-    wmemcpy(dot, extension, added + 1);
+    const std::wstring module(out, length);
+    const std::size_t dot = module.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    const std::wstring path = module.substr(0, dot) + extension;
+    if (path.size() + 8 >= MAX_PATH) return false;  // room for the rotated log name's suffix
+    out[path.copy(out, path.size())] = L'\0';
     return true;
-}
-
-// The package ships no INI, so an update never overwrites someone's settings; the first run
-// writes the documented defaults for them to edit.
-void WriteDefaultIni(const wchar_t* path) {
-    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) return;
-    std::string text;
-    for (const char* c = kDefaultIni; *c; ++c) {
-        if (*c == '\n' && (text.empty() || text.back() != '\r')) text.push_back('\r');
-        text.push_back(*c);
-    }
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    DWORD written = 0;
-    WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
-    CloseHandle(file);
-    Log("Wrote default settings to EDF6MultiSlot.ini");
 }
 
 std::wstring IniText(const wchar_t* ini, const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
@@ -324,7 +304,9 @@ void KeepMenuLayout(bool active) {
     wchar_t path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(self, plugin, MAX_PATH);
     if (!length || length >= MAX_PATH || !MenuLayoutPath(plugin, path, MAX_PATH)) {
-        if (active) Log("Menu: the plugin is not in Mods\\Plugins, so the 8Player MOD label is not shown (F2 still works)");
+        if (active)
+            Log("Menu: the plugin is not in Mods\\Plugins, so the %dPlayer MOD label is not shown (F2 still works)",
+                kModRoomCapacity);
         return;
     }
     if (!active) {
@@ -342,17 +324,17 @@ void KeepMenuLayout(bool active) {
 #else
     switch (InstallMenuLayout(path)) {
         case LayoutInstall::Written:
-            Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the 8Player MOD label)");
+            Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the %dPlayer MOD label)", kModRoomCapacity);
             break;
         case LayoutInstall::Updated: Log("Menu: updated Mods\\UI\\LYT_MAINFRAME.SGO"); break;
         case LayoutInstall::Current: break;
         case LayoutInstall::Foreign:
-            Log("Menu: Mods\\UI\\LYT_MAINFRAME.SGO belongs to another mod and was left alone; the 8Player MOD label is "
-                "not shown (F2 still works)");
+            Log("Menu: Mods\\UI\\LYT_MAINFRAME.SGO belongs to another mod and was left alone; the %dPlayer MOD label "
+                "is not shown (F2 still works)", kModRoomCapacity);
             break;
         case LayoutInstall::Failed:
-            Log("Menu: could not write Mods\\UI\\LYT_MAINFRAME.SGO (error %lu); the 8Player MOD label is not shown (F2 "
-                "still works)", GetLastError());
+            Log("Menu: could not write Mods\\UI\\LYT_MAINFRAME.SGO (error %lu); the %dPlayer MOD label is not shown "
+                "(F2 still works)", GetLastError(), kModRoomCapacity);
             break;
     }
 #endif
@@ -364,31 +346,14 @@ ThunkPage thunks;
 }  // namespace multislot
 
 namespace {
-bool LoadPlugin(PluginInfo* info) {
+// The room part: rooms of up to MULTISLOT_MAX_PLAYERS, the missions and room screen for them, and the crash log.
+// Returns whether it runs; when it does not, it has changed nothing and started nothing.
+bool LoadRooms(const wchar_t* iniPath) {
     using namespace multislot;
-    if (!info) return false;
-    wchar_t iniPath[MAX_PATH]{};
-    wchar_t logPath[MAX_PATH]{};
-    if (!SiblingPath(iniPath, L".ini") || !SiblingPath(logPath, L".log")) return false;
-    LogOpen(logPath);
-    info->infoVersion = PluginInfo::MaxInfoVer;
-    info->name = "EDF6 MultiSlot";
-    info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
-
-    Log("==== EDF6MultiSlot %s%s ====", kVersion, kRoomTag);
-    const auto loader = GetModuleHandleW(L"winmm.dll");
-    for (const auto name : {"timeBeginPeriod", "timeEndPeriod", "PlaySoundW"})
-        Log("LOADER %s proxy=%s", name, LoaderProxyStyle(loader ? reinterpret_cast<const void*>(GetProcAddress(loader, name)) : nullptr));
-    // Whether the game that wrote the lines above this one was closed or died. Without it a log that simply
-    // stops says nothing, which is where two of the 2026-09-19 reports ran out of evidence.
-    if (PreviousRun() == LastRun::Cut)
-        Log("PREVIOUS RUN ended without a shutdown line: the game was killed, hung, or died without reaching "
-            "the crash handler. Lines above this one are its last");
-    WriteDefaultIni(iniPath);
     const bool enabled = GetPrivateProfileIntW(L"MultiSlot", L"Enabled", 1, iniPath) != 0;
     const bool eightPlayers = GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", 0, iniPath) != 0;
     const bool crashLog = GetPrivateProfileIntW(L"MultiSlot", L"CrashLog", 1, iniPath) != 0;
-    // The only thing here that contacts anything outside the game: one read of the VR mod's release page,
+    // The room part's only contact outside the game: one read of the VR mod's release page,
     // so the menu can say when a newer package exists. Nothing is downloaded (updatecheck.h).
     const bool checkUpdates = GetPrivateProfileIntW(L"Update", L"CheckEDF6VR", 1, iniPath) != 0;
     // How fast a remote player's drawn position catches up (smoothing.h). A percentage, so the INI holds
@@ -410,7 +375,7 @@ bool LoadPlugin(PluginInfo* info) {
     const bool keepRoom = GetPrivateProfileIntW(L"MultiSlot", L"KeepRoomOnPeerTimeout", 1, iniPath) != 0;
     SetDetailLog(netLog);
     if (!enabled) {
-        Log("Enabled=0: game left untouched, plugin unloaded");
+        Log("[MultiSlot] Enabled=0: rooms, missions and the room screen are left untouched");
         KeepMenuLayout(false);
         return false;
     }
@@ -592,6 +557,13 @@ bool LoadPlugin(PluginInfo* info) {
         Log("Mission: Extend=0, mission code untouched (only rooms of up to four players can start safely)");
     if (ghosts > 0)
         Log("Test: GhostPlayers=%d - a mission started alone online gets %d idle copies of you as extra players", ghosts, ghosts);
+    // First, so its wrappers sit next to EOS: what a room update publishes is read from the lobby, and a
+    // machine never stays behind in a lobby it closed or left (lobbystate.h).
+    if (InstallLobbyState(game, &RedirectGameImport))
+        Log("Lobby state: room updates keep the lobby's own kind and size; a close of a lobby someone else owns, "
+            "or one that fails, leaves it");
+    else
+        Log("Lobby state: UNAVAILABLE - room updates publish the game's own values (%d players)", kVanillaPlayers);
     // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
     if (mission) {
         const int imports = InstallPacketFit(game, &RedirectGameImport);
@@ -666,9 +638,83 @@ bool LoadPlugin(PluginInfo* info) {
 }
 }  // namespace
 
+
+// The version as the updater checks it inside a downloaded file (exported, so the linker keeps it). It names
+// the room size too (product.h), so a download of another size is refused. package.ps1 checks it.
+extern "C" __declspec(dllexport) const char EDF6CoopVersion[] = EDF6COOP_MARKER_PREFIX EDF6COOP_VERSION_TEXT;
+
+namespace {
+
+// This DLL's path while its version is on trial after an update (never destroyed): a game that ends the normal
+// way says so, so that quitting early is not taken for a crash (dn::noteCleanExit).
+std::wstring* onTrial = nullptr;
+
+// Everything up to the parts: the log, the plugins EDF6Coop replaces, the settings file, and the update state.
+// Then the direct-link part, then the room part (the order the two separate plugins loaded in, which is the
+// order their wrappers of the game's EOS imports were built in). Returns whether anything runs.
+bool LoadCoop(PluginInfo* info) {
+    using namespace multislot;
+    if (!info) return false;
+    wchar_t iniPath[MAX_PATH]{}, logPath[MAX_PATH]{}, dllPath[MAX_PATH]{};
+    if (!SiblingPath(iniPath, L".ini") || !SiblingPath(logPath, L".log") || !SiblingPath(dllPath, L".dll"))
+        return false;
+    LogOpen(logPath);
+    dn::logToSink(&ForwardDirectNetLine);
+    info->infoVersion = PluginInfo::MaxInfoVer;
+    info->name = "EDF6Coop";
+    info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
+
+    Log("==== EDF6Coop %s%s ====", kVersion, kRoomTag);
+    const auto loader = GetModuleHandleW(L"winmm.dll");
+    for (const auto name : {"timeBeginPeriod", "timeEndPeriod", "PlaySoundW"})
+        Log("LOADER %s proxy=%s", name, LoaderProxyStyle(loader ? reinterpret_cast<const void*>(GetProcAddress(loader, name)) : nullptr));
+    // Whether the game that wrote the lines above this one was closed or died. Without it a log that simply
+    // stops says nothing, which is where two of the 2026-09-19 reports ran out of evidence.
+    if (PreviousRun() == LastRun::Cut)
+        Log("PREVIOUS RUN ended without a shutdown line: the game was killed, hung, or died without reaching "
+            "the crash handler. Lines above this one are its last");
+
+    // Before any file is touched: outside the game nothing is renamed or written.
+    const HMODULE game = GetModuleHandleW(L"EDF.dll");
+    if (!game) {
+        Log("REFUSED: EDF.dll is not loaded, so this is not the game; nothing was changed");
+        return false;
+    }
+    const std::wstring plugin = dllPath, dir = plugin.substr(0, plugin.find_last_of(L"\\/") + 1);
+    if (!RetireReplacedPlugins(dir)) return false;
+    PrepareSettings(dir, iniPath, kDefaultIni);
+    const dn::Config settings = dn::loadConfig(iniPath);
+    // Before anything that could fail in a new version: a version whose previous run crashed is replaced by the
+    // one before it, and this session runs without the plugin.
+    const dn::RunState run = dn::beginRun(plugin, kVersion);
+    if (run == dn::RunState::RolledBack) return false;
+
+    const dn::PartState direct = dn::startPart(settings, dir, game, GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll"));
+    const bool rooms = LoadRooms(iniPath);
+    if (!direct.running && !rooms) {
+        Log("Neither part runs (see above why): the game goes on without EDF6Coop");
+        // Not a failed run of this version: the next start goes on with its trial instead of rolling it back.
+        if (run == dn::RunState::Trial) dn::noteCleanExit(plugin, kVersion);
+        return false;
+    }
+    if (run == dn::RunState::Trial) {
+        onTrial = new std::wstring(plugin);
+        dn::startHealthWatch(plugin, kVersion);
+        // Without the EOS hooks no EOS tick says the game is up; the trial then counts from here.
+        if (!direct.eosHooked) dn::noteGameRunning();
+    }
+    if (settings.autoUpdate)
+        dn::startAutoUpdate(plugin, kVersion);
+    else
+        Log("UPDATE automatic updates are off ([Update] AutoUpdate=0)");
+    return true;  // stays loaded: call stubs, import wrappers, threads and the exception handler point here
+}
+
+}  // namespace
+
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
     // Every line so far was written by this thread, so the startup report is on disk already.
-    const bool loaded = LoadPlugin(info);
+    const bool loaded = LoadCoop(info);
     if (loaded) {
         // Staying for the life of the process: from here on the writer thread keeps up, and the game's threads
         // never wait on the disk.
@@ -677,6 +723,7 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
         // EDFModLoader unloads a plugin that refuses (FreeLibrary as soon as this returns). 1.5.13 had started
         // the writer thread with the first line, and it woke up inside the unmapped DLL about 200 ms later and
         // took the game down with it. No thread was started, and the queue file is let go here.
+        dn::logToSink(nullptr);
         multislot::LogClose();
     }
     return loaded;
@@ -687,10 +734,15 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         multislot::self = instance;
         DisableThreadLibraryCalls(instance);
     }
-    // The last thing the log gets from this run. Both are raw Win32 with no heap and no CRT, which is what
-    // makes them safe this late. `reserved` is null when the DLL is unloaded (FreeLibrary after a refusal) and
-    // set when the process ends: only the second is the game exiting.
+    // `reserved` is null when the DLL is unloaded (FreeLibrary after a refusal) and set when the process ends:
+    // only the second is the game exiting, through ExitProcess, which is how EDF6 quits from its menu (measured).
     if (reason == DLL_PROCESS_DETACH) {
+        // At exit the direct link's worker thread is already killed (possibly holding a lock) and static objects
+        // are about to be destroyed, while EDF.dll may still call EOS through the hooks. Never wait here.
+        dn::detachPart();
+        if (reserved && onTrial) dn::noteCleanExit(*onTrial, multislot::kVersion);
+        // The last thing the log gets from this run. Both are raw Win32 with no heap and no CRT, which is what
+        // makes them safe this late.
         if (reserved)
             multislot::LogShutdown("the game exited");
         else

@@ -14,6 +14,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "../src/auth.h"
@@ -123,12 +124,22 @@ void testWire() {
     ack.type = dn::MsgType::Ack;
     ack.epoch = dn::linkEpoch(7, 9);
     ack.ack.cumulative = 100;
-    ack.ack.set(0);
-    ack.ack.set(255);
+    ack.ack.ranges = {{102, 1}, {400, 3000}};
     auto adg = dn::encode(ack, "");
     auto aback = dn::decode(adg.data(), adg.size(), "", &err);
-    CHECK(aback && aback->epoch == ack.epoch && aback->ack.cumulative == 100 && aback->ack.has(0) &&
-          aback->ack.has(255) && !aback->ack.has(1));
+    CHECK(aback && aback->epoch == ack.epoch && aback->ack.cumulative == 100 && aback->ack.has(100) &&
+          !aback->ack.has(101) && aback->ack.has(102) && !aback->ack.has(103) && aback->ack.has(400) &&
+          aback->ack.has(3399) && !aback->ack.has(3400));
+    ack.ack.ranges.assign(dn::kMaxAckRanges + 5, dn::AckRange{500, 1});  // the encoder keeps what fits
+    adg = dn::encode(ack, "");
+    aback = dn::decode(adg.data(), adg.size(), "", &err);
+    CHECK(aback && aback->ack.ranges.size() == dn::kMaxAckRanges);
+    dn::Message fwd;
+    fwd.type = dn::MsgType::Forward;
+    fwd.forward.floor = 77777;
+    auto fdg = dn::encode(fwd, "");
+    auto fback = dn::decode(fdg.data(), fdg.size(), "", &err);
+    CHECK(fback && fback->type == dn::MsgType::Forward && fback->forward.floor == 77777);
     CHECK(dn::linkEpoch(7, 9) != dn::linkEpoch(9, 7) && dn::linkEpoch(7, 9) != dn::linkEpoch(8, 9));
 
     dn::Message w;
@@ -194,7 +205,11 @@ std::vector<dn::Message> sampleMessages() {
     m = {};
     m.type = dn::MsgType::Ack;
     m.ack.cumulative = 4;
-    m.ack.set(7);
+    m.ack.ranges = {{7, 2}, {12, 300}};
+    all.push_back(m);
+    m = {};
+    m.type = dn::MsgType::Forward;
+    m.forward.floor = 9;
     all.push_back(m);
     for (auto t : {dn::MsgType::Ping, dn::MsgType::Pong, dn::MsgType::Bye, dn::MsgType::Reset}) {
         m = {};
@@ -246,6 +261,21 @@ void testWireRejectsMalformed() {
     dg = dn::encode(sampleMessages()[0], "");
     dg[4] = 99;  // a message type this version does not know
     CHECK(!decodes(dg) && err == dn::DecodeError::Malformed);
+
+    // Ack: header(8) epoch(4) counter(8) cumulative(4), then the range count and ranges (first, count).
+    dn::Message a;
+    a.type = dn::MsgType::Ack;
+    a.ack.ranges = {{5, 1}};
+    dg = dn::encode(a, "");
+    CHECK(decodes(dg));
+    auto emptyRange = dg;
+    emptyRange[29] = 0;  // the range's count
+    emptyRange[30] = 0;
+    CHECK(!decodes(emptyRange) && err == dn::DecodeError::Malformed);
+    auto tooMany = dg;
+    tooMany[24] = static_cast<uint8_t>(dn::kMaxAckRanges + 1);
+    tooMany.insert(tooMany.end() - tag, dn::kMaxAckRanges * 6, 1);
+    CHECK(!decodes(tooMany) && err == dn::DecodeError::Malformed);
 
     // Every strict prefix of every valid message is rejected, tagged or not.
     bool prefixesRejected = true;
@@ -328,7 +358,10 @@ void testReliableUnderLoss() {
             tx.track(m.data.seq, dg, now);
             push(dg, false);
         }
-        tx.poll(now, [&](const std::vector<uint8_t>& dg) { push(dg, false); });
+        tx.poll(now, [&](const std::vector<uint8_t>& dg) {
+            push(dg, false);
+            return true;
+        });
         std::vector<InFlight> due;
         std::stable_partition(wire.begin(), wire.end(), [&](const InFlight& f) { return f.at > now; });
         while (!wire.empty() && wire.back().at <= now) {
@@ -373,6 +406,7 @@ dn::DirectOptions hostOptions(uint16_t port, double drop, const std::string& key
     o.memberIds = {{kA, dn::processIdentity()->commitment()}, {kB, dn::processIdentity()->commitment()}};
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
+    o.retransmitBudget = std::make_shared<dn::RetransmitBudget>();  // its own machine, not this process's
     return o;
 }
 
@@ -387,6 +421,7 @@ dn::DirectOptions joinOptions(const std::string& address, double drop, const std
     o.roomOwnerIdentity = dn::processIdentity()->commitment();
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
+    o.retransmitBudget = std::make_shared<dn::RetransmitBudget>();
     return o;
 }
 
@@ -1138,13 +1173,18 @@ void testReplayedHelloIgnored() {
 
 void testOlderProtocolStaysOnEos(uint8_t protocol) {
     printf("direct: peers speaking protocol %u (%s) are ignored both ways, nothing breaks\n", protocol,
-           protocol == 2 ? "0.3.6" : "0.4.0");
+           protocol == 2 ? "0.3.6" : protocol == 3 ? "0.4.0" : "0.4.1");
     // An old hello: header with the old protocol, nonce, (protocol 3: session,) id.
     std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, protocol, 0, 7, 0, 0, 0};
     if (protocol == 3) old.insert(old.end(), 8, 1);
     old.push_back(static_cast<uint8_t>(kA.size()));
     old.insert(old.end(), kA.begin(), kA.end());
     if (protocol == 3) old.insert(old.end(), 8 + 64 + 64, 0);  // cookie, public key, signature
+    if (protocol == 4) {  // the handshake of 0.4.1 is ours; only the version differs
+        dn::Message hello = sampleMessages()[0];
+        old = dn::encode(hello, "");
+        old[6] = protocol;
+    }
     dn::DecodeError err;
     CHECK(!dn::decode(old.data(), old.size(), "", &err) && err == dn::DecodeError::BadProtocol);
     dn::DirectNet host;
@@ -1191,6 +1231,15 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
         // 0.3.6 answers a hello it understood with a Welcome, 0.4.0 with a Challenge; send one anyway.
         std::vector<uint8_t> answer = {0x45, 0x44, 0x4E, 0x31, 2, 0, protocol, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
         if (protocol == 3) answer = {0x45, 0x44, 0x4E, 0x31, 9, 0, 3, 0, 7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+        if (protocol == 4) {  // a Challenge for this very hello, as 0.4.1 answers it
+            dn::Message hello = *dn::decode(buf, static_cast<size_t>(got), "", nullptr);
+            dn::Message c;
+            c.type = dn::MsgType::Challenge;
+            c.challenge.clientNonce = hello.hello.nonce;
+            c.challenge.cookie.fill(9);
+            answer = dn::encode(c, "");
+            answer[6] = protocol;
+        }
         sendto(oldHost.s, reinterpret_cast<const char*>(answer.data()), static_cast<int>(answer.size()), 0,
                reinterpret_cast<sockaddr*>(&from), fromLen);
     }
@@ -1198,7 +1247,7 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
 }
 
 void testOlderPluginStaysOnEos() {
-    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}}) testOlderProtocolStaysOnEos(protocol);
+    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}, uint8_t{4}}) testOlderProtocolStaysOnEos(protocol);
 }
 
 void testRetiredInstanceIsFreed() {
@@ -1280,16 +1329,84 @@ void testHelloFloodIsBounded() {
     dn::DirectNet host;
     CHECK(host.start(hostOptions(0, 0)));
     host.setLocalUser(kHost);
-    std::vector<RawPeer> attackers(40);  // one source port each: a single address only replaces itself
+    std::vector<RawPeer> attackers(80);  // one source port each: a single address only replaces itself
     char id[40];
-    for (int i = 0; i < 40; ++i) {
+    for (int i = 0; i < 80; ++i) {
         snprintf(id, sizeof(id), "0002ffffffffffffffffffffffff%04d", i);
         attackers[i].hello(host.boundPort(), id, 100 + i);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     size_t members = host.directMembers().size();
     printf("  members after the flood: %zu\n", members);
-    CHECK(members <= 1 + 16);
+    CHECK(members <= 1 + 64);
+}
+
+// A full room of 32 players: 31 clients on one host. Every client learns every other member from the
+// host's member list (exactly as long as the wire allows) and reaches it through the host.
+void testFullRoom() {
+    printf("direct: a room of 32 players, 31 clients on one host\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    std::vector<std::string> ids;
+    char id[40];
+    for (int i = 0; i < 31; ++i) {
+        snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+        ids.push_back(id);
+        ho.memberIds[id] = dn::processIdentity()->commitment();
+    }
+    // The largest handshake and link messages of a full room fit the receive buffer (2048 bytes).
+    dn::Message w;
+    w.type = dn::MsgType::Welcome;
+    w.welcome.hostPuid = kHost;
+    w.welcome.roster = ids;
+    w.welcome.roster.insert(w.welcome.roster.begin(), kHost);
+    size_t welcomeSize = dn::encode(w, "key").size();
+    dn::Message r;
+    r.type = dn::MsgType::Roster;
+    r.roster.roster = w.welcome.roster;
+    size_t rosterSize = dn::encode(r, "").size();
+    printf("  32 members: Welcome %zu bytes (with a Key), Roster %zu bytes\n", welcomeSize, rosterSize);
+    CHECK(welcomeSize < 2048 && rosterSize < 2048);
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    std::string addr = "127.0.0.1:" + std::to_string(host.boundPort());
+    std::vector<std::unique_ptr<dn::DirectNet>> clients;
+    for (const std::string& client : ids) {
+        clients.push_back(std::make_unique<dn::DirectNet>());
+        CHECK(clients.back()->start(joinOptions(addr, 0)));
+        clients.back()->setLocalUser(client);
+    }
+    auto everyoneRoutes = [&] {
+        if (host.directMembers().size() != 32) return false;
+        for (size_t i = 0; i < clients.size(); ++i) {
+            if (!clients[i]->canRoute(kHost)) return false;
+            for (const std::string& other : ids)
+                if (other != ids[i] && !clients[i]->canRoute(other)) return false;
+        }
+        return true;
+    };
+    bool full = waitFor(everyoneRoutes, 20000);
+    printf("  host members: %zu\n", host.directMembers().size());
+    CHECK(full);
+    // Each client sends a few packets to the next one, relayed by the host.
+    const uint32_t kPackets = 5;
+    for (size_t i = 0; i < clients.size(); ++i)
+        for (uint32_t k = 0; k < kPackets; ++k) {
+            auto p = payloadFor(k);
+            CHECK(clients[i]->send(ids[(i + 1) % ids.size()], "EDF6", 1, 2, p.data(), p.size()));
+        }
+    std::vector<uint32_t> got(clients.size());
+    auto allArrived = [&] {
+        for (size_t i = 0; i < clients.size(); ++i) {
+            dn::Delivered d;
+            while (clients[i]->pop(nullptr, 1170, d))
+                if (d.src == ids[(i + clients.size() - 1) % clients.size()] && d.data == payloadFor(got[i])) ++got[i];
+        }
+        for (uint32_t n : got)
+            if (n != kPackets) return false;
+        return true;
+    };
+    CHECK(waitFor(allArrived, 10000));
 }
 
 void testThreeNodesOverLoopback() {
@@ -1424,7 +1541,10 @@ void testReliableUnordered() {
             tx.track(m.data.seq, dg, now);
             push(dg, false);
         }
-        tx.poll(now, [&](const std::vector<uint8_t>& dg) { push(dg, false); });
+        tx.poll(now, [&](const std::vector<uint8_t>& dg) {
+            push(dg, false);
+            return true;
+        });
         auto due = std::move(wire);
         wire.clear();
         std::shuffle(due.begin(), due.end(), rng);
@@ -1455,7 +1575,7 @@ void testReliableUnordered() {
 }
 
 void testDirectUpgradesUnreliable() {
-    printf("direct: game packets sent unreliable arrive completely under 20%% loss (upgraded)\n");
+    printf("direct: game packets sent unreliable are repaired under 20%% loss (upgraded, given up after 2 s)\n");
     dn::DirectNet host;
     CHECK(host.start(hostOptions(0, 0.2)));
     host.setLocalUser(kHost);
@@ -1470,6 +1590,8 @@ void testDirectUpgradesUnreliable() {
     }
     std::vector<int> seen(500, 0);
     size_t got = 0;
+    // A packet is sent up to four times before it is given up (ReliableSender::kExpireMs): all four lost
+    // happens to 0.2^4 = 0.16% of them, under one of the 500 on average.
     waitFor(
         [&] {
             dn::Delivered d;
@@ -1481,27 +1603,307 @@ void testDirectUpgradesUnreliable() {
             }
             return got >= 500;
         },
-        15000);
+        dn::ReliableSender::kExpireMs + 2000);
     std::this_thread::sleep_for(std::chrono::milliseconds(300));  // catch late duplicates, if any
     dn::Delivered d;
     while (host.pop(nullptr, 1170, d)) ++got;
-    bool exactlyOnce = std::all_of(seen.begin(), seen.end(), [](int n) { return n == 1; });
-    printf("  received %zu/500, exactly once: %s\n", got, exactlyOnce ? "yes" : "NO");
-    CHECK(got == 500 && exactlyOnce);
+    bool atMostOnce = std::all_of(seen.begin(), seen.end(), [](int n) { return n <= 1; });
+    printf("  received %zu/500, at most once: %s\n", got, atMostOnce ? "yes" : "NO");
+    CHECK(got >= 495 && atMostOnce);  // without the repair, 100 of them would be lost
 }
 
-void testRetransmitBudget() {
-    printf("reliable: a large stalled backlog is retransmitted at a bounded rate\n");
+void testRetransmitsFollowDelivery() {
+    printf("reliable: resends follow what the link delivers, and all links share one cap\n");
     dn::ReliableSender tx;
     for (uint32_t i = 0; i < 3000; ++i) tx.track(tx.nextSeq(), std::vector<uint8_t>(1000), 1);
     size_t sent = 0;
-    auto count = [&](const std::vector<uint8_t>&) { ++sent; };
+    auto count = [&](std::vector<uint8_t>&) {
+        ++sent;
+        return true;
+    };
     tx.poll(60000, count);  // every timer expired during a 60 s stall
     CHECK(sent <= 64);
     size_t burst = sent;
+    // Nothing acknowledged: a link the network drops everything of only probes, ~10 a second.
     for (uint64_t t = 60005; t <= 61000; t += 5) tx.poll(t, count);
-    printf("  burst=%zu, first second=%zu\n", burst, sent);
-    CHECK(sent >= 1900 && sent <= 2100);
+    printf("  burst=%zu, then %zu in a second without acknowledgements\n", burst, sent - burst);
+    CHECK(sent - burst <= 12 && tx.limitedMs() >= 990);
+    // Acknowledgements earn resends again (two each, up to the burst).
+    dn::AckMsg ack;
+    ack.cumulative = 100;
+    CHECK(tx.onAck(ack, 61000) == 100);
+    size_t before = sent;
+    tx.poll(61005, count);
+    CHECK(sent - before == 64);
+
+    // The shared cap: two links that may each resend 64 packets of 1000 bytes get 64 KB together.
+    dn::RetransmitBudget shared;
+    dn::ReliableSender x, y;
+    for (uint32_t i = 0; i < 200; ++i) {
+        x.track(x.nextSeq(), std::vector<uint8_t>(1000), 1);
+        y.track(y.nextSeq(), std::vector<uint8_t>(1000), 1);
+    }
+    size_t bytes = 0;
+    auto countBytes = [&](std::vector<uint8_t>& dg) {
+        bytes += dg.size();
+        return true;
+    };
+    x.poll(5000, countBytes, &shared);
+    y.poll(5000, countBytes, &shared);
+    printf("  two links resent %zu bytes under the shared cap\n", bytes);
+    CHECK(bytes <= 64 * 1024 && bytes >= 60000 && shared.refusals() > 0);
+
+    // A socket that refuses a datagram (send buffer full) is congestion: the round stops there.
+    dn::ReliableSender z;
+    for (uint32_t i = 0; i < 10; ++i) z.track(z.nextSeq(), std::vector<uint8_t>(100), 1);
+    int tries = 0;
+    z.poll(5000, [&](std::vector<uint8_t>&) {
+        ++tries;
+        return false;
+    });
+    CHECK(tries == 1 && z.credit() < 1.0 && z.retransmits() == 0 && z.pendingCount() == 10);
+}
+
+// Feeds `count` packets (reliability `rel`) through a receiver, dropping those `lost` picks, and every
+// ACK back to the sender. Returns the sender's packets still unacknowledged.
+size_t ackAllExcept(dn::ReliableSender& tx, dn::ReliableReceiver& rx, uint32_t count, uint8_t rel,
+                    const std::function<bool(uint32_t)>& lost, std::vector<dn::DataMsg>& ready) {
+    for (uint32_t i = 0; i < count; ++i) {
+        dn::Message m;
+        m.type = dn::MsgType::Data;
+        m.data.reliability = rel;
+        m.data.seq = tx.nextSeq();
+        m.data.payload = payloadFor(i);
+        tx.track(m.data.seq, dn::encode(m, ""), 1);
+        if (lost(m.data.seq)) continue;
+        dn::Message ack;
+        ack.type = dn::MsgType::Ack;
+        ack.ack = rx.onData(m.data, ready);
+        auto dg = dn::encode(ack, "");  // through the wire format
+        tx.onAck(dn::decode(dg.data(), dg.size(), "", nullptr)->ack, 2);
+    }
+    return tx.pendingCount();
+}
+
+void testAckCoversLongGap() {
+    printf("reliable: every packet received behind a gap is acknowledged, however far and however many gaps\n");
+    // The first packet lost: 2000 behind it held. The 256-bit bitmap left all but 256 unacknowledged,
+    // resent every second for as long as the gap stayed open.
+    dn::ReliableSender tx;
+    dn::ReliableReceiver rx;
+    std::vector<dn::DataMsg> ready;
+    size_t pending = ackAllExcept(tx, rx, 2001, 2, [](uint32_t seq) { return seq == 1; }, ready);
+    CHECK(pending == 1 && ready.empty() && rx.buffered() == 2000);
+    // Every tenth lost: 200 gaps, more than one ACK names. Each packet is named by the ACK it brings.
+    dn::ReliableSender tx2;
+    dn::ReliableReceiver rx2;
+    std::vector<dn::DataMsg> ready2;
+    pending = ackAllExcept(tx2, rx2, 2000, 1, [](uint32_t seq) { return seq % 10 == 0; }, ready2);
+    printf("  one gap: %zu unacknowledged; 200 gaps: %zu unacknowledged\n", tx.pendingCount(), pending);
+    CHECK(pending == 200 && ready2.size() == 1800);
+    // Resending the lost ones closes every gap: one burst of credit, refilled by what it acknowledges.
+    std::vector<std::vector<uint8_t>> wire;
+    auto resend = [&](std::vector<uint8_t>& dg) {
+        wire.push_back(dg);
+        return true;
+    };
+    auto deliver = [&](uint64_t now) {
+        for (auto& dg : wire) tx2.onAck(rx2.onData(dn::decode(dg.data(), dg.size(), "", nullptr)->data, ready2), now);
+        size_t n = wire.size();
+        wire.clear();
+        return n;
+    };
+    tx2.poll(10000, resend);
+    CHECK(deliver(10001) == 64 && tx2.pendingCount() == 136);
+    for (uint64_t t = 10005; tx2.pendingCount() > 0 && t < 20000; t += 5) {
+        tx2.poll(t, resend);
+        deliver(t + 1);
+    }
+    CHECK(tx2.pendingCount() == 0 && rx2.expected() == 2001 && rx2.buffered() == 0 && ready2.size() == 2000);
+}
+
+void testAbandonAndSkip() {
+    printf("reliable: an unreliable game packet is given up after its deadline and the receiver moves past it\n");
+    dn::ReliableSender tx;
+    dn::ReliableReceiver rx;
+    auto data = [&](uint8_t rel, uint64_t now) {
+        dn::Message m;
+        m.type = dn::MsgType::Data;
+        m.data.reliability = rel;
+        m.data.seq = tx.nextSeq();
+        m.data.payload = payloadFor(m.data.seq);
+        tx.track(m.data.seq, dn::encode(m, ""), now, rel == 0);
+        return m.data;
+    };
+    std::vector<dn::DataMsg> ready;
+    dn::DataMsg lost = data(0, 0);     // seq 1, never arrives
+    dn::DataMsg ordered = data(2, 0);  // seq 2, waits for seq 1
+    dn::DataMsg unordered = data(0, 0);  // seq 3, handed out on arrival
+    tx.onAck(rx.onData(ordered, ready), 10);
+    tx.onAck(rx.onData(unordered, ready), 10);
+    CHECK(ready.size() == 1 && ready[0].seq == 3 && tx.pendingCount() == 1);
+    CHECK(!tx.forwardDue(20));  // nothing given up yet
+    // Retried (lost again) until the deadline, then given up.
+    size_t resends = 0;
+    auto lose = [&](std::vector<uint8_t>&) {
+        ++resends;
+        return true;
+    };
+    for (uint64_t t = 20; t < dn::ReliableSender::kExpireMs; t += 5) tx.poll(t, lose);
+    CHECK(tx.pendingCount() == 1 && tx.abandoned() == 0 && resends >= 3 && resends <= 4);
+    tx.poll(dn::ReliableSender::kExpireMs, lose);
+    CHECK(tx.pendingCount() == 0 && tx.abandoned() == 1);
+    // The receiver learns from a Forward, repeated every RTO until an ACK shows it arrived.
+    auto floor = tx.forwardDue(dn::ReliableSender::kExpireMs);
+    CHECK(floor && *floor == 4);
+    CHECK(!tx.forwardDue(dn::ReliableSender::kExpireMs + 1));  // lost, say
+    floor = tx.forwardDue(dn::ReliableSender::kExpireMs + tx.rtoMs());
+    CHECK(floor && *floor == 4);
+    ready.clear();
+    tx.onAck(rx.onForward(*floor, ready), dn::ReliableSender::kExpireMs + 500);
+    CHECK(ready.size() == 1 && ready[0].seq == 2);  // the ordered packet that only waited for the lost one
+    CHECK(rx.expected() == 4 && rx.skipped() == 1 && rx.buffered() == 0);
+    CHECK(!tx.forwardDue(dn::ReliableSender::kExpireMs + 5000));
+    // The lost packet turning up late is not delivered any more; the next ones flow normally.
+    ready.clear();
+    rx.onData(lost, ready);
+    tx.onAck(rx.onData(data(1, 3000), ready), 3010);
+    CHECK(ready.size() == 1 && ready[0].seq == 4 && tx.pendingCount() == 0);
+
+    // Packets the game sent reliably never expire, and only they count towards a stalled link.
+    dn::ReliableSender mixed;
+    mixed.track(mixed.nextSeq(), std::vector<uint8_t>(100), 0, true);
+    CHECK(mixed.oldestReliableAgeMs(1000) == 0);
+    mixed.track(mixed.nextSeq(), std::vector<uint8_t>(100), 500);
+    CHECK(mixed.oldestReliableAgeMs(1000) == 500);
+    for (uint64_t t = 0; t <= 100000; t += 50) mixed.poll(t, [](std::vector<uint8_t>&) { return true; });
+    CHECK(mixed.pendingCount() == 1 && mixed.abandoned() == 1 && mixed.oldestReliableAgeMs(100000) == 99500);
+    floor = mixed.forwardDue(100000);
+    CHECK(floor && *floor == 2);  // past the given-up packet, not past the reliable one
+    // A reliable packet older than the given-up one holds the floor: no Forward until it is through.
+    dn::ReliableSender older;
+    older.track(older.nextSeq(), std::vector<uint8_t>(100), 0);
+    older.track(older.nextSeq(), std::vector<uint8_t>(100), 0, true);
+    for (uint64_t t = 0; t <= 3000; t += 50) older.poll(t, [](std::vector<uint8_t>&) { return true; });
+    CHECK(older.abandoned() == 1 && !older.forwardDue(3000));
+    dn::AckMsg first;
+    first.cumulative = 1;
+    older.onAck(first, 3000);
+    floor = older.forwardDue(3000);
+    CHECK(floor && *floor == 3);
+}
+
+// A host and three clients each sending to everyone at EDF6's rate (25 packets/s per player, ~600 B)
+// for 6 s, 80% unreliable and 20% ordered reliable, with 2% loss everywhere and the host's uplink capped
+// just above what it needs, cut off entirely for 2 s in the middle. Lost packets are resent into an
+// uplink with little room left: the resends must follow what gets through, not bury it. The transport of
+// 0.4.1 fails this (wire 2.3 x payload, two of the three links dropped, two thirds of the data delivered).
+void testBottleneckDoesNotCollapse() {
+    printf("direct: a capped host uplink with loss and an outage carries the game without resends burying it\n");
+    dn::DirectOptions ho = hostOptions(0, 0.02);
+    // Host sends ~54 KB/s of its own, relays ~108 KB/s and acknowledges ~11 KB/s: ~175 KB/s.
+    ho.testUplinkBytesPerSecond = 200 * 1024;
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    const std::string kC = "0002dddddddddddddddddddddddddddd";
+    ho.memberIds[kC] = dn::processIdentity()->commitment();
+    host.setMemberIdentities(ho.memberIds);
+    std::string addr = "127.0.0.1:" + std::to_string(host.boundPort());
+    dn::DirectNet a, b, c;
+    std::vector<std::pair<dn::DirectNet*, std::string>> nodes = {{&host, kHost}, {&a, kA}, {&b, kB}, {&c, kC}};
+    for (size_t i = 1; i < nodes.size(); ++i) {
+        CHECK(nodes[i].first->start(joinOptions(addr, 0.02)));
+        nodes[i].first->setLocalUser(nodes[i].second);
+    }
+    auto allRoute = [&] {
+        for (auto& [from, fromId] : nodes)
+            for (auto& [to, toId] : nodes)
+                if (from != to && !from->canRoute(toId)) return false;
+        return true;
+    };
+    CHECK(waitFor(allRoute, 10000));
+    for (auto& [net, id] : nodes) net->takeWireTraffic();
+
+    // Payload: u32 sender index, u32 receiver index, u32 packet number, u32 reliable number (or ~0).
+    const size_t n = nodes.size();
+    std::vector<std::vector<uint32_t>> sentAll(n, std::vector<uint32_t>(n)), sentReliable = sentAll;
+    std::vector<std::vector<uint32_t>> gotUnreliable = sentAll, nextReliable = sentAll;
+    bool inOrder = true;
+    uint64_t payloadBytes = 0;
+    auto drain = [&] {
+        for (size_t to = 0; to < n; ++to) {
+            dn::Delivered d;
+            while (nodes[to].first->pop(nullptr, 1170, d)) {
+                uint32_t f[4] = {};
+                memcpy(f, d.data.data(), sizeof(f));
+                if (f[0] >= n || f[1] != to || d.src != nodes[f[0]].second) {
+                    inOrder = false;
+                    continue;
+                }
+                if (f[3] == ~0u)
+                    ++gotUnreliable[f[0]][to];
+                else
+                    inOrder &= f[3] == nextReliable[f[0]][to]++;
+            }
+        }
+    };
+    auto start = std::chrono::steady_clock::now();
+    bool linksUp = true;
+    for (uint32_t tick = 0; tick < 150; ++tick) {  // 6 s of 40 ms ticks
+        host.setTestBlackhole(tick >= 50 && tick < 100);
+        for (size_t from = 0; from < n; ++from) {
+            for (size_t to = 0; to < n; ++to) {
+                if (from == to) continue;
+                uint32_t number = sentAll[from][to]++;
+                bool reliable = number % 5 == 0;
+                std::vector<uint8_t> p(300 + (number * 37 + from * 101 + to * 13) % 600, static_cast<uint8_t>(number));
+                uint32_t f[4] = {static_cast<uint32_t>(from), static_cast<uint32_t>(to), number,
+                                 reliable ? sentReliable[from][to]++ : ~0u};
+                memcpy(p.data(), f, sizeof(f));
+                linksUp &= nodes[from].first->send(nodes[to].second, "EDF6", 1, reliable ? 2 : 0, p.data(), p.size());
+                payloadBytes += p.size();
+            }
+        }
+        drain();
+        std::this_thread::sleep_until(start + std::chrono::milliseconds(40 * (tick + 1)));
+    }
+    host.setTestBlackhole(false);
+    auto reliableDone = [&] {
+        drain();
+        for (size_t from = 0; from < n; ++from)
+            for (size_t to = 0; to < n; ++to)
+                if (nextReliable[from][to] != sentReliable[from][to]) return false;
+        return true;
+    };
+    bool delivered = waitFor(reliableDone, 15000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(dn::ReliableSender::kExpireMs));  // the rest given up
+    drain();
+    linksUp &= allRoute();
+    uint64_t wire = 0, relayed = 0;
+    for (auto& [net, id] : nodes) {
+        dn::WireTraffic w = net->takeWireTraffic();
+        wire += w.out;
+        relayed += w.relayed;
+    }
+    uint64_t unreliableSent = 0, unreliableGot = 0;
+    for (size_t from = 0; from < n; ++from)
+        for (size_t to = 0; to < n; ++to) {
+            unreliableSent += sentAll[from][to] - sentReliable[from][to];
+            unreliableGot += gotUnreliable[from][to];
+        }
+    // Payload bytes crossing a link: what the players sent plus what the host forwarded between clients.
+    double ratio = static_cast<double>(wire) / static_cast<double>(payloadBytes + relayed);
+    double share = 100.0 * static_cast<double>(unreliableGot) / static_cast<double>(unreliableSent);
+    printf("  wire %.2f x payload, reliable all delivered in order: %s, unreliable delivered %.1f%%, links up: %s\n",
+           ratio, delivered && inOrder ? "yes" : "NO", share, linksUp ? "yes" : "NO");
+    printf("  host: %s\n", host.statusLine().c_str());
+    // Every datagram carries ~120 bytes of header and tag on ~600 of payload and brings back an ACK.
+    CHECK(ratio < 2.0);
+    CHECK(delivered && inOrder && linksUp);
+    // Everything crosses the host, so the outage held a third of all traffic; what it held for less than
+    // kExpireMs is repaired (89-93% arrives in all; 0.4.1 delivered 64-68%).
+    CHECK(share > 80.0);
 }
 
 void testLobbyStatusHold() {
@@ -1554,6 +1956,96 @@ void testLobbyStatusHold() {
     CHECK(!h.abandon(kA));
     CHECK(h.offer(kA, true, 0, deliver) && h.abandon(kA) && h.isHeld(kA) && delivered == 7);
     CHECK(h.poll(1, reachable).size() == 1 && delivered == 8 && !h.isHeld(kA));
+}
+
+void testLobbyStatusHoldKeys() {
+    printf("hold: statuses held by key, checked against another member's link, without grace\n");
+    const std::string host = kA, member = kB;
+    int delivered = 0, newer = 0;
+    auto deliver = [&] { ++delivered; };
+    std::unordered_set<std::string> up{host, member};
+    auto reachable = [&](const std::string& r) { return up.count(r) != 0; };
+    dn::LobbyStatusHold h(30000);
+
+    // Room closed by Epic: held while the host's link is up, delivered on the first poll it is down.
+    CHECK(!h.offer("#room", host, false, 0, false, 0, deliver) && !h.isHeld("#room"));
+    CHECK(h.offer("#room", host, true, 0, false, 0, deliver) && h.isHeld("#room"));
+    CHECK(h.poll(60000, reachable).empty() && delivered == 0);  // never expires while the link lives
+    up.erase(host);
+    auto gone = h.poll(60001, reachable);
+    CHECK(gone.size() == 1 && gone[0] == "#room" && delivered == 1);
+    up.insert(host);
+
+    // A member that left Epic's lobby: no grace, and a join swallows the pair.
+    CHECK(h.offer(member, member, true, 0, false, 0, deliver));
+    CHECK(h.poll(10, reachable).empty() && h.isHeld(member));  // up on the very poll after: still held
+    CHECK(h.onStatus(member, 0) && !h.isHeld(member) && delivered == 1);
+
+    // A newer owner replaces the held one; the older is never delivered.
+    CHECK(h.offer("#owner", host, true, 0, true, 0, deliver));
+    CHECK(h.offer("#owner", host, false, 0, true, 0, [&] { ++newer; }) && h.heldCount() == 1);
+    up.erase(host);
+    CHECK(h.poll(1, reachable).size() == 1 && newer == 1 && delivered == 1);
+    up.insert(host);
+
+    // Discarded: Epic gave the room back, nothing to tell.
+    CHECK(h.offer("#owner", host, true, 0, true, 0, deliver));
+    CHECK(h.discard("#owner") && !h.discard("#owner") && h.heldCount() == 0);
+    up.erase(host);
+    CHECK(h.poll(2, reachable).empty() && delivered == 1);
+
+    // Delivered together: members first, then the owner, the room last (closing it leaves it).
+    up = {host, member};
+    std::string order;
+    CHECK(h.offer("#room", host, true, 0, false, 0, [&] { order += "R"; }));
+    CHECK(h.offer("#owner", host, true, 0, true, 0, [&] { order += "O"; }));
+    CHECK(h.offer(member, host, true, 0, false, 0, [&] { order += "M"; }));
+    up.clear();
+    CHECK(h.poll(3, reachable).size() == 3 && order == "MOR");
+
+    // A member's LEFT replaces its hidden disconnect: no grace, and the game is told the LEFT.
+    int left = 0;
+    up = {member};
+    CHECK(h.offer(member, true, 0, deliver));                                       // disconnected, 30 s grace
+    CHECK(h.offer(member, member, true, 0, true, 0, [&] { ++left; }) && h.heldCount() == 1);
+    up.clear();
+    CHECK(h.poll(4, reachable).size() == 1 && left == 1 && delivered == 1);
+}
+
+void testLobbyOwnerPin() {
+    printf("owner pin: Epic's owner changes do not move the room while the pinned owner's link is up\n");
+    const std::string host = kA, me = kB, other = "0002dddddddddddddddddddddddddddd";
+    dn::LobbyOwnerPin pin;
+
+    pin.entered(host);
+    CHECK(pin.pinned() == host && pin.usurper().empty() && pin.kickAuthorized());
+
+    // Epic makes us owner while the host still plays: hidden, and handed back.
+    auto p = pin.onPromoted(me, me, true);
+    CHECK(p.hide && p.promoteBack && pin.pinned() == host && pin.usurper() == me && !pin.kickAuthorized());
+    CHECK(pin.onPinnedJoined(me));  // the host back in the lobby: hand it back (again) now
+    p = pin.onPromoted(host, me, true);  // handed back
+    CHECK(p.hide && !p.promoteBack && pin.usurper().empty() && pin.kickAuthorized() && !pin.onPinnedJoined(me));
+
+    // Someone else made owner: hidden, not ours to hand back.
+    p = pin.onPromoted(other, me, true);
+    CHECK(p.hide && !p.promoteBack && pin.usurper() == other && !pin.onPinnedJoined(me));
+    pin.follow(other);  // the host's link died: the hidden promotion reached the game
+    CHECK(pin.pinned() == other && pin.usurper().empty() && pin.kickAuthorized());
+
+    // The pinned owner unreachable at the promotion: the room follows Epic at once.
+    pin.entered(host);
+    p = pin.onPromoted(me, me, false);
+    CHECK(!p.hide && !p.promoteBack && pin.pinned() == me && pin.kickAuthorized());
+
+    // Owner unknown on entering: the first promotion pins, and reaches the game.
+    pin.entered("");
+    CHECK(pin.kickAuthorized() && pin.usurper().empty());
+    p = pin.onPromoted(other, me, true);
+    CHECK(!p.hide && pin.pinned() == other);
+
+    pin.left();
+    CHECK(pin.pinned().empty() && pin.usurper().empty() && pin.kickAuthorized() && !pin.onPinnedJoined(me));
 }
 
 void testTrafficMeter() {
@@ -1644,12 +2136,11 @@ void testUpdater() {
     GetTempPathW(MAX_PATH, tmp);
     std::wstring dir = std::wstring(tmp) + L"edf6dn_update_test\\";
     CreateDirectoryW(dir.c_str(), nullptr);
-    std::wstring installed = dir + L"EDF6DirectNet.dll";
+    std::wstring installed = dir + L"EDF6Coop.dll";
     DeleteFileW((installed + L".old").c_str());
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
-    CHECK(CopyFileW(built.c_str(), installed.c_str(), FALSE));
+    CHECK(CopyFileW(self, installed.c_str(), FALSE));  // any image does: it is mapped, not run
     HMODULE loaded = LoadLibraryExW(installed.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
     CHECK(dn::installOver(installed, dll, &why));
@@ -1668,7 +2159,7 @@ void testUpdater() {
           INVALID_FILE_ATTRIBUTES);
     // A game that quit between writing its download and renaming it leaves installed.new<pid>.
     std::wstring stale = installed + L".new4242", other = installed + L".newer";
-    CHECK(CopyFileW(built.c_str(), stale.c_str(), FALSE) && CopyFileW(built.c_str(), other.c_str(), FALSE));
+    CHECK(CopyFileW(self, stale.c_str(), FALSE) && CopyFileW(self, other.c_str(), FALSE));
     dn::removeUpdateLeftovers(installed);
     CHECK(GetFileAttributesW(stale.c_str()) == INVALID_FILE_ATTRIBUTES);
     CHECK(GetFileAttributesW(other.c_str()) != INVALID_FILE_ATTRIBUTES);  // not ours: left alone
@@ -2050,20 +2541,20 @@ void testConfig() {
 // signatures over manifests of testDll("0.3.7") and testDll("0.3.5"), made the way the release workflow
 // signs.
 const std::vector<uint8_t> kTestKey = {
-    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x03, 0x95, 0xbe, 0x95, 0x54, 0x5d, 0xe1, 0xbc, 0xc8, 0x6c,
-    0x11, 0xf9, 0x92, 0x0e, 0x76, 0xec, 0x91, 0x4a, 0x50, 0x28, 0xc3, 0x95, 0xad, 0xa6, 0x8e, 0xb7, 0x19, 0x75,
-    0x44, 0x4e, 0x07, 0x0e, 0xba, 0x6b, 0xd2, 0x28, 0x98, 0x11, 0x69, 0xf0, 0x56, 0x4a, 0x8e, 0x9b, 0x42, 0xf9,
-    0x47, 0xf7, 0x03, 0xd7, 0xda, 0xb3, 0x08, 0xc9, 0x0b, 0x01, 0xf9, 0x2a, 0x67, 0x17, 0x82, 0x4f, 0x6e, 0x90};
+    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x8c, 0x51, 0xd7, 0x8f, 0xb1, 0xbd, 0xda, 0x7c, 0xe2, 0xbb,
+    0x6a, 0xbc, 0xf7, 0x5c, 0xd4, 0xfa, 0x00, 0xb2, 0x86, 0x25, 0xa8, 0xa4, 0x29, 0xed, 0x23, 0x53, 0xd3, 0xaa,
+    0x00, 0xd8, 0x98, 0x9d, 0x04, 0x7d, 0xdc, 0x9f, 0x81, 0x32, 0x7c, 0x68, 0xca, 0xae, 0x27, 0x1f, 0x7c, 0x7f,
+    0x02, 0x3e, 0xf0, 0xf9, 0x66, 0xb3, 0x5a, 0x65, 0x80, 0x1e, 0xa3, 0x74, 0x4d, 0x35, 0x37, 0x99, 0x23, 0x07};
 const char* const kTestSig037 =
-    "EDF6DirectNet 0.3.7\n"
-    "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d\n"
-    "0eeed29a0bd1595119798327f0a5f3bb8dbdb09a101734747355139df0456cba"
-    "58f065c04b40800adac57da10a8ff836caa19f1e187b91ed94f083eedd073b10\n";
+    "EDF6Coop 0.3.7\n"
+    "0329d9c9448e8c45fefa4ff02902a8431860a8bc27541da65a7d146a30e23ade\n"
+    "eb59b2778b862a50d07ba205c809f81041b050fa75eed652773961c462d2d6c6"
+    "33e5413330649e2b55ff6ed056b2310ee98122c7a6ffc3097ce3f81935544ecb\n";
 const char* const kTestSig035 =
-    "EDF6DirectNet 0.3.5\n"
-    "661665d34625dd6cf62577435eae547b2b30d73a85a74f01c7f2ef94b28e43f2\n"
-    "82082f5551989fc3792d8f4fed80f3f44448c6abfa12d2532666e866c71acfab"
-    "09dde9021d56ba265e40e3427747ba140d3012cec9620469a66fc700d2db8c4a\n";
+    "EDF6Coop 0.3.5\n"
+    "ff3f8c2236226dea1a07aec9204632e2565c386fec82424e0343bb9c80756b61\n"
+    "914efe3aba41de393cd3895617ed8c2730beaf406ef6657844415b3c54fb0108"
+    "c54ac4e10ea34a9e2d53ff5aad64e8b2f83420584c8a763681dc3b161ad729ea\n";
 
 // 4 KiB: "MZ", zeros, the version marker at 1000.
 std::vector<uint8_t> testDll(const char* version) {
@@ -2081,7 +2572,7 @@ void testUpdateSigning() {
     std::string why;
     std::vector<uint8_t> dll = testDll("0.3.7");
     dn::Version v037 = parseVersion("0.3.7"), v036 = parseVersion("0.3.6");
-    CHECK(dn::sha256Hex(dll) == "de617cd97f26103fdf974aaa4b78e49de03a76513ce472414a7e872ec9f51d0d");
+    CHECK(dn::sha256Hex(dll) == "0329d9c9448e8c45fefa4ff02902a8431860a8bc27541da65a7d146a30e23ade");
     dn::SignedManifest m;
     CHECK(dn::readSignedManifest(kTestSig037, kTestKey, &m, &why) && m.version == v037);
     CHECK(dn::verifyRelease(dll, kTestSig037, v037, v036, kTestKey, &why));
@@ -2091,7 +2582,7 @@ void testUpdateSigning() {
     CHECK(why.find("signature is not valid") != std::string::npos);
     // The signature binds version and digest.
     std::string other = kTestSig037;
-    other[16] = '8';  // "EDF6DirectNet 0.3.8"
+    other[13] = '8';  // "EDF6Coop 0.3.8"
     CHECK(!dn::readSignedManifest(other, kTestKey, &m, &why));
     other = kTestSig037;
     other[20] = other[20] == 'd' ? 'e' : 'd';  // first digest digit
@@ -2114,8 +2605,9 @@ void testUpdateSigning() {
     std::string good = kTestSig037;
     for (const std::string& bad :
          {std::string(), good.substr(0, good.size() - 1), good + "\n", good + "x", "\n" + good,
-          std::string("EDF6DirectNet 00.3.7") + good.substr(19), std::string("EDF6DirectNet  0.3.7") + good.substr(19),
-          std::string("EDF6DirectNet v0.3.7") + good.substr(19), std::string("edf6directnet 0.3.7") + good.substr(19)}) {
+          std::string("EDF6Coop 00.3.7") + good.substr(14), std::string("EDF6Coop  0.3.7") + good.substr(14),
+          std::string("EDF6Coop v0.3.7") + good.substr(14), std::string("edf6coop 0.3.7") + good.substr(14),
+          std::string("EDF6DirectNet 0.3.7") + good.substr(14)}) {
         CHECK(!dn::readSignedManifest(bad, kTestKey, &m, &why));
     }
     std::string crlf;
@@ -2185,14 +2677,14 @@ void testUpdateRollback() {
     printf("update: rollback state machine (trial, healthy, rolled back, bad version)\n");
     std::wstring dir = freshDir(L"edf6dn_rollback_test");
     std::wstring dll = dir + L"EDF6DirectNet.dll", old = dll + L".old", trial = dll + L".trial", bad = dll + L".bad";
-    auto install = [&](const char* version) { putFile(dll, "MZ EDF6DN_VERSION=" + std::string(version)); };
+    auto install = [&](const char* version) { putFile(dll, "MZ EDF6COOP_8P_VERSION=" + std::string(version)); };
     std::string why;
 
     // The version a DLL says it is, past the marker prefix its own updater code also contains.
-    const char marked[] = "MZ EDF6DN_VERSION=\0%s\0 EDF6DN_VERSION=1.2\0 EDF6DN_VERSION=0.3.6\0";
+    const char marked[] = "MZ EDF6COOP_8P_VERSION=\0%s\0 EDF6COOP_8P_VERSION=1.2\0 EDF6COOP_8P_VERSION=0.3.6\0";
     putFile(dll, std::string(marked, sizeof(marked) - 1));
     CHECK(dn::fileVersion(dll) == "0.3.6");
-    const char unmarked[] = "MZ EDF6DN_VERSION=\0 no marker\0";
+    const char unmarked[] = "MZ EDF6COOP_8P_VERSION=\0 no marker\0";
     putFile(dll, std::string(unmarked, sizeof(unmarked) - 1));
     CHECK(dn::fileVersion(dll) == "?");
 
@@ -2204,7 +2696,7 @@ void testUpdateRollback() {
     // 0.3.7 updates itself to 0.3.8: 0.3.7 is kept as .old.
     std::vector<uint8_t> v038 = testDll("0.3.8");
     CHECK(dn::installOver(dll, v038, &why));
-    CHECK(fileText(old).find("EDF6DN_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
+    CHECK(fileText(old).find("EDF6COOP_8P_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
     // The first start of 0.3.8 is a trial; healthy after a while: the trial and .old go.
     CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Trial);
     CHECK(fileText(trial) == "0.3.8 " + std::to_string(GetCurrentProcessId()) + "\n");
@@ -2227,8 +2719,8 @@ void testUpdateRollback() {
     // Then a game running it dies before it is healthy (no clean exit): pid 4 is System, never a game.
     putFile(trial, "0.3.9 4\n");
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
-    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
-    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.3.9") != std::string::npos);
+    CHECK(fileText(dll).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);  // 0.3.8 runs from the next start
+    CHECK(fileText(dll + L".rolledback").find("EDF6COOP_8P_VERSION=0.3.9") != std::string::npos);
     CHECK(!fileExists(old) && !fileExists(trial));
     CHECK(dn::badVersion(dll) == dn::parseVersion("0.3.9"));
     // The next start is 0.3.8 again, normal; the moved-aside DLL is cleaned up.
@@ -2237,7 +2729,7 @@ void testUpdateRollback() {
     // An older updater installs 0.3.9 again anyway: rolled back at once, without another trial.
     CHECK(dn::installOver(dll, v039, &why));
     CHECK(dn::beginRun(dll, "0.3.9") == dn::RunState::RolledBack);
-    CHECK(fileText(dll).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
+    CHECK(fileText(dll).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);
 
     // Another game running the same trial right now (this process) is not a failed run.
     CHECK(dn::installOver(dll, testDll("0.4.0"), &why));
@@ -2247,8 +2739,8 @@ void testUpdateRollback() {
     // A version on trial that installs the next one gives up its own trial: its health check must not
     // delete the new version's rollback target, and that target stays the proven 0.3.8, not unproven 0.4.0.
     CHECK(dn::installOver(dll, testDll("0.4.1"), &why));
-    CHECK(!fileExists(trial) && fileText(old).find("EDF6DN_VERSION=0.3.8") != std::string::npos);
-    CHECK(fileText(dll + L".rolledback").find("EDF6DN_VERSION=0.4.0") != std::string::npos);
+    CHECK(!fileExists(trial) && fileText(old).find("EDF6COOP_8P_VERSION=0.3.8") != std::string::npos);
+    CHECK(fileText(dll + L".rolledback").find("EDF6COOP_8P_VERSION=0.4.0") != std::string::npos);
     dn::confirmHealthy(dll, "0.4.0");
     CHECK(fileExists(old));
 
@@ -2267,7 +2759,7 @@ void testSwapKeepsDllLoadable() {
     std::wstring dll = dir + L"EDF6DirectNet.dll";
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring built = std::wstring(self).substr(0, std::wstring(self).find_last_of(L'\\') + 1) + L"EDF6DirectNet.dll";
+    const std::wstring built = self;  // any image will do: this test program is one the loader can map
     CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
     HMODULE loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
@@ -2291,14 +2783,14 @@ void testSwapKeepsDllLoadable() {
     CHECK(CopyFileW(built.c_str(), dll.c_str(), FALSE));
     loaded = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     CHECK(loaded != nullptr);
-    putFile(dll + L".old", "MZ EDF6DN_VERSION=0.3.9");
+    putFile(dll + L".old", "MZ EDF6COOP_8P_VERSION=0.3.9");
     putFile(dll + L".trial", "0.9.9 4\n");  // its game (pid 4 is System, never a game) died on trial
     bool rolledBack = dn::beginRun(dll, "0.9.9") == dn::RunState::RolledBack;
     done = true;
     watcher.join();
     CHECK(allOk && rolledBack);
     CHECK(missing == 0 && looks > 0);
-    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    CHECK(fileText(dll) == "MZ EDF6COOP_8P_VERSION=0.3.9");
     if (loaded) FreeLibrary(loaded);
     DeleteFileW((dll + L".rolledback").c_str());
     DeleteFileW((dll + L".bad").c_str());
@@ -2306,7 +2798,7 @@ void testSwapKeepsDllLoadable() {
     CHECK(CopyFileW(built.c_str(), (dll + L".old").c_str(), FALSE));
     HANDLE lock = CreateFileW((dll + L".old").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     CHECK(!dn::installOver(dll, testDll("0.4.0"), &why));  // the old backup cannot be removed
-    CHECK(fileText(dll) == "MZ EDF6DN_VERSION=0.3.9");
+    CHECK(fileText(dll) == "MZ EDF6COOP_8P_VERSION=0.3.9");
     CHECK(!fileExists(dll + L".new" + std::to_wstring(GetCurrentProcessId())));
     if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
     for (const wchar_t* f : {L"", L".old", L".trial"}) DeleteFileW((dll + f).c_str());
@@ -2409,10 +2901,15 @@ int wmain(int argc, wchar_t** argv) {
     testIat(edf);
     testKeyMismatch();
     testReliableUnordered();
-    testRetransmitBudget();
+    testRetransmitsFollowDelivery();
+    testAckCoversLongGap();
+    testAbandonAndSkip();
     testDirectUpgradesUnreliable();
+    testBottleneckDoesNotCollapse();
     testDisconnectHold();
     testLobbyStatusHold();
+    testLobbyStatusHoldKeys();
+    testLobbyOwnerPin();
     testTrafficMeter();
     testUpdater();
     testUpdateSigning();
@@ -2428,6 +2925,7 @@ int wmain(int argc, wchar_t** argv) {
     testHelloCannotHijackLiveLink();
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
+    testFullRoom();
     testReliableBacklogLimit();
     testRetransmitTimeout();
     testUnacknowledgedLinkIsDropped();

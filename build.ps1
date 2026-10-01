@@ -1,28 +1,36 @@
-# Builds build\EDF6DirectNet.dll and build\edf6_directnet_tests.exe with MSVC (x64, static CRT).
-param([switch]$Test)
-$ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'MSVC x64 toolset not found' }
-$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-$env:PATH = "$(Split-Path $vswhere);$env:PATH"  # vcvars calls vswhere itself
-New-Item -ItemType Directory -Force (Join-Path $root 'build') | Out-Null
-
-$common = '/nologo /std:c++20 /O2 /MT /EHsc /W4 /WX /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS'
-$core = 'src\log.cpp src\auth.cpp src\wire.cpp src\reliable.cpp src\direct_net.cpp src\netif.cpp src\config.cpp src\iat.cpp src\hold.cpp src\traffic.cpp src\updater.cpp src\upnp.cpp'
-$libs = 'ws2_32.lib iphlpapi.lib bcrypt.lib ole32.lib oleaut32.lib winhttp.lib'
-
-$steps = @(
-    "call `"$vcvars`" >nul",
-    "cd /d `"$root`"",
-    "cl $common /LD $core src\lobby_marker.cpp src\eos_hooks.cpp src\plugin.cpp /Fobuild\ /Febuild\EDF6DirectNet.dll /link $libs",
-    "cl $common $core tests\test_main.cpp /Fobuild\ /Febuild\edf6_directnet_tests.exe /link $libs",
-    "cl $common $core tests\probe_join.cpp /Fobuild\ /Febuild\probe_join.exe /link $libs"
+# Builds EDF6Coop.dll (the direct link and the room part in one plugin) with CMake + Ninja + MSVC x64.
+#   build.ps1 [-Players 8|10|12|16|24|32] [-Test] [-CI]
+# The 8-player build lands in multislot\dist\, the others in multislot\dist-<N>p\ (each with the race-fixed
+# EDFModLoader winmm.dll next to it). Rooms of one size are a family of their own: only the same build joins.
+# Set EDF6_GAME_DIR to the game folder (holds EDF.dll and Root.cpk; only read) for the menu asset and the
+# tests against the game's code. -CI builds without the game's menu asset (placeholder; cannot be packaged).
+param(
+    [ValidateSet(8, 10, 12, 16, 24, 32)] [int]$Players = 8,
+    [switch]$Test,
+    [switch]$CI
 )
+$ErrorActionPreference = 'Stop'
+$multislot = Join-Path $PSScriptRoot 'multislot'
+$buildDir = if ($Players -eq 8) { Join-Path $multislot 'build' } else { Join-Path $multislot "build-${Players}p" }
+
+if (-not (Test-Path -LiteralPath (Join-Path $multislot 'third_party\EDFModLoader\winmm.dll'))) {
+    & (Join-Path $multislot 'tools\fetch_modloader.ps1')
+    if ($LASTEXITCODE) { throw "fetch_modloader.ps1 failed ($LASTEXITCODE)" }
+}
+if (-not $CI -and -not (Test-Path -LiteralPath (Join-Path $multislot 'assets\LYT_MAINFRAME.SGO'))) {
+    python -B (Join-Path $multislot 'tools\make_menu_label.py')
+    if ($LASTEXITCODE) { throw "make_menu_label.py failed ($LASTEXITCODE); set EDF6_GAME_DIR to the game folder" }
+}
+
+$configure = "cmake -S `"$multislot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMULTISLOT_MAX_PLAYERS=$Players"
+if ($CI) { $configure += ' -DMULTISLOT_CI=ON' }
+if ($env:LOADER_PYTHON) { $configure += " `"-DPython3_EXECUTABLE=$env:LOADER_PYTHON`"" }
+$steps = @(
+    "call `"$(Join-Path $multislot 'tools\msvc-x64-env.cmd')`" >nul",
+    'set VSLANG=1033',
+    $configure,
+    "cmake --build `"$buildDir`""
+)
+if ($Test) { $steps += "ctest --test-dir `"$buildDir`" --output-on-failure --no-tests=error" }
 cmd /c ($steps -join ' && ')
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
-if ($Test) {
-    & (Join-Path $root 'build\edf6_directnet_tests.exe')
-    if ($LASTEXITCODE -ne 0) { throw "tests failed ($LASTEXITCODE)" }
-}

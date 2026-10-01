@@ -47,7 +47,7 @@ std::atomic<int> dumpBudget{1};
 // stack overflow leaves the faulting thread no stack to write it with): a thread made when the dump is armed
 // writes it while the faulting thread waits. It still runs in the failing process, so if the fault came while
 // the game held a lock the dump needs (the process heap's, say), it cannot finish; the faulting thread stops
-// waiting after kDumpWaitMs and lets the crash go on (EDF6MultiSlot.ini says so next to CrashDump).
+// waiting after kDumpWaitMs and lets the crash go on (EDF6Coop.ini says so next to CrashDump).
 constexpr DWORD kDumpWaitMs = 30000;
 HANDLE dumpRequest = nullptr;
 HANDLE dumpDone = nullptr;

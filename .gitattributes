@@ -1,0 +1,3 @@
+# cmd.exe misreads labels and goto in batch files with LF line ends; the packages ship these as checked out.
+*.bat text eol=crlf
+*.cmd text eol=crlf

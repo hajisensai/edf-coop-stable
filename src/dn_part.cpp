@@ -1,5 +1,5 @@
-// EDF6DirectNet: EDFModLoader plugin entry point.
-#include <windows.h>
+// The direct-link part of EDF6Coop (dn_part.h).
+#include "dn_part.h"
 
 #include <cstdint>
 #include <mutex>
@@ -10,47 +10,14 @@
 #include "eos_hooks.h"
 #include "log.h"
 #include "netif.h"
-#include "updater.h"
+#include "product.h"
 #include "upnp.h"
 
 namespace {
 
-constexpr uint32_t kVersionMajor = 0, kVersionMinor = 4, kVersionPatch = 1;
-constexpr const char* kVersionText = "0.4.1";
-
-}  // namespace
-
-// The version as the auto-updater of an older build checks it inside a downloaded file (exported,
-// so the linker keeps it). package.ps1 checks that it matches kVersionText.
-extern "C" __declspec(dllexport) const char EDF6DirectNetVersion[] = "EDF6DN_VERSION=0.4.1";
-
-namespace {
-
-// EDFModLoader's plugin info block (infoVersion 1): the loader rejects 0 and anything above 1.
-struct PluginInfo {
-    uint32_t infoVersion;
-    const char* name;
-    uint32_t version;
-};
-
 // Deliberately never destroyed: tearing down threads/Winsock from DllMain at process exit (loader
 // lock held) deadlocks or crashes. The OS reclaims the socket; the host times the link out.
 dn::DirectNet* g_net = nullptr;
-
-// This DLL's own file.
-std::wstring pluginPath() {
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&pluginPath), &self);
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(self, path, MAX_PATH);
-    return path;
-}
-
-std::wstring pluginDirectory() {
-    std::wstring path = pluginPath();
-    return path.substr(0, path.find_last_of(L"\\/") + 1);
-}
 
 void logInterface(const dn::PhysicalInterface& pi) {
     dn::logf("NET physical adapter '%s' (%s), LAN IPv4 %s, ifIndex v4=%u v6=%u", pi.name.c_str(),
@@ -132,75 +99,38 @@ bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
     return false;
 }
 
-// This DLL's path while its version is on trial after an update (never destroyed, like g_net): a game that
-// ends the normal way says so, so that quitting early is not taken for a crash (dn::noteCleanExit).
-std::wstring* g_onTrial = nullptr;
-
 }  // namespace
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) {
-    // At exit the worker thread is already killed (possibly holding a lock) and static objects are
-    // about to be destroyed, while EDF.dll may still call EOS through our hooks.
-    if (reason == DLL_PROCESS_DETACH) {
-        dn::eosHooksShutdown();
-        // reserved set: the process is ending through ExitProcess, which is how EDF6 quits from its menu
-        // (measured; EDF.dll's TerminateProcess import is not the quit path). Never wait here (loader lock).
-        if (reserved && g_onTrial) dn::noteCleanExit(*g_onTrial, kVersionText);
-    }
-    return TRUE;
-}
+namespace dn {
 
-extern "C" __declspec(dllexport) bool EML6_Load(PluginInfo* info) {
-    info->infoVersion = 1;
-    info->name = "EDF6DirectNet";
-    info->version = (kVersionMajor << 24) | (kVersionMinor << 16) | (kVersionPatch << 8);
-
-    std::wstring dir = pluginDirectory();
-    dn::Config config = dn::loadConfig(dir + L"EDF6DirectNet.ini");
-    dn::logOpen(dir + L"EDF6DirectNet.log", 2 * 1024 * 1024);
-    dn::logf("==== EDF6DirectNet %s starting: Mode=%s ListenPort=%u HostAddress=%s Key=%s EOS FixedPort=%u Relay=%s",
-             kVersionText, dn::modeName(config.direct.mode), config.direct.listenPort,
-             config.direct.hostAddress.empty() ? "-" : config.direct.hostAddress.c_str(),
-             config.direct.key.empty() ? "no" : "yes", config.eosFixedPort, dn::relayName(config.eosRelay));
+PartState startPart(const Config& settings, const std::wstring& dir, HMODULE game, HMODULE eos) {
+    Config config = settings;
+    logf("direct link: Mode=%s ListenPort=%u HostAddress=%s Key=%s EOS FixedPort=%u Relay=%s",
+         modeName(config.direct.mode), config.direct.listenPort,
+         config.direct.hostAddress.empty() ? "-" : config.direct.hostAddress.c_str(),
+         config.direct.key.empty() ? "no" : "yes", config.eosFixedPort, relayName(config.eosRelay));
+    for (const std::string& warning : config.warnings) logf("%s", warning.c_str());
     if (!config.enabled) {
-        dn::logf("disabled by Enabled=0");
-        dn::logClose();
-        return false;  // the loader unloads us
+        logf("[DirectNet] Enabled=0: no direct link, and the game's EOS calls are left alone");
+        return {};
     }
-
-    for (const std::string& warning : config.warnings) dn::logf("%s", warning.c_str());
-    HMODULE game = GetModuleHandleW(L"EDF.dll");
-    HMODULE eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
-    if (!game || !eos) {
-        // Not the game (or not one we know): the update state belongs to the game's runs, so leave it be.
-        dn::logf("EDF.dll or EOSSDK-Win64-Shipping.dll is not loaded; nothing to do");
-        return true;
+    if (!eos) {
+        logf("EOSSDK-Win64-Shipping.dll is not loaded: no online play, so the direct link stays off");
+        return {};
     }
-    // Before anything that could fail in a new version: a version whose previous run crashed is replaced
-    // by the one before it, and this session runs without the plugin.
-    std::wstring self = pluginPath();
-    dn::RunState run = dn::beginRun(self, kVersionText);
-    if (run == dn::RunState::RolledBack) {
-        dn::logClose();
-        return false;  // the loader unloads us
-    }
-    if (run == dn::RunState::Trial) {
-        g_onTrial = new std::wstring(self);
-        dn::startHealthWatch(self, kVersionText);
-    }
-    if (config.autoUpdate)
-        dn::startAutoUpdate(self, kVersionText);
-    else
-        dn::logf("UPDATE automatic updates are off");
-
     // A router mapping lives until a start that does not map it: at game exit there is no safe point
     // for the network calls removing it (DllMain runs under the loader lock with the other threads gone).
-    std::wstring upnpRecord = dir + L"EDF6DirectNet.upnp";
-    if (!startDirect(config, upnpRecord)) dn::upnpRemoveRecordedAsync(upnpRecord);
-    if (!dn::installEosHooks(game, eos, config, g_net) && g_net) {
+    std::wstring upnpRecord = dir + coop::kNameW + L".upnp";
+    if (!startDirect(config, upnpRecord)) upnpRemoveRecordedAsync(upnpRecord);
+    if (installEosHooks(game, eos, config, g_net)) return {true, true};
+    if (g_net) {
         g_net->stop();
         delete g_net;
         g_net = nullptr;
     }
-    return true;
+    return {true, false};  // the UPnP thread may still be at work
 }
+
+void detachPart() { eosHooksShutdown(); }
+
+}  // namespace dn

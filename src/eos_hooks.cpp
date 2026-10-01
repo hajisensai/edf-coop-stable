@@ -67,6 +67,8 @@ struct Api {
     PFN_EOS_Lobby_LeaveOrDestroy gameDestroyLobby = nullptr;
     PFN_EOS_Lobby_KickMember gameKick = nullptr;
     PFN_EOS_Lobby_UpdateLobby gameUpdateLobby = nullptr;
+    PFN_EOS_LobbyDetails_GetLobbyOwner gameGetOwner = nullptr;
+    PFN_EOS_Lobby_PromoteMember promote = nullptr;  // resolved from the SDK: hands a usurped lobby back
 };
 
 // The game's connection-closed handler, which we sit in front of. Never freed: its address is the
@@ -131,6 +133,10 @@ struct State {
     std::atomic<EOS_ProductUserId> lobbyUser{nullptr};
     std::unique_ptr<DisconnectHold> hold;
     std::unique_ptr<LobbyStatusHold> lobbyHold;
+    LobbyOwnerPin ownerPin;
+    std::mutex roomMutex;
+    EOS_HLobby roomLobby = nullptr;  // the lobby we are in, for handing it back to its pinned owner
+    std::string roomId;
     LobbyMarker marker;
     std::atomic<bool> markerReady{false};
     std::atomic<bool> lobbyTracked{false};  // we see entering and leaving rooms: direct links follow the room
@@ -350,6 +356,7 @@ void applyLobbyStatus(const std::string& target, bool self, int32_t s) {
     size_t released = 0;
     if (g.hold && gone) released = g.hold->release(target);
     if (g.hold && s == kClosed) released = g.hold->releaseAll();
+    if (g.lobbyHold && s == kClosed) g.lobbyHold->releaseAll();  // the members' statuses go before the room's
     if (gone && !self) g.marker.memberGone(target);
     if (self && s == kPromoted) g.marker.promoted();
     if (!self && s == kJoined) g.marker.memberJoined();
@@ -374,6 +381,116 @@ void deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
     e->handler->callback(&e->info);
 }
 
+// Hands the lobby back to its pinned owner: Epic made us owner while the pinned one still hosts the
+// game over the direct link. EOS calls: run on the EOS tick only.
+void promoteBack(const char* why) {
+    const std::string pinned = g.ownerPin.pinned();
+    EOS_ProductUserId me = g.lobbyUser.load();
+    EOS_ProductUserId target = pinned.empty() ? nullptr : idHandle(pinned);
+    EOS_HLobby lobby = nullptr;
+    std::string room;
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        lobby = g.roomLobby;
+        room = g.roomId;
+    }
+    if (!g.api.promote || !lobby || room.empty() || !me || !target) return;
+    logf("RESILIENCE Epic made us the room owner: handing it back to %s (%s)", shortId(pinned).c_str(), why);
+    EOS_Lobby_PromoteMemberOptions o{1, room.c_str(), me, target};
+    g.api.promote(lobby, &o, nullptr, [](const EOS_Lobby_LobbyIdCallbackInfo* i) {
+        if (g.api.isComplete && !g.api.isComplete(i->ResultCode)) return;
+        if (i->ResultCode != EOS_Success)
+            logf("RESILIENCE handing the room back failed (%s): done again when the owner rejoins the lobby",
+                 resultName(i->ResultCode));
+    });
+}
+
+// Holds a lobby status the game must not see while the direct link shows the room still playing.
+// Returns true when held (or swallowed). Each status is checked against whose link decides it:
+//   DISCONNECTED  the member lost Epic's lobby service: its own link, for the configured grace;
+//   LEFT          someone else left Epic's lobby: its own link (a member that quits closes it);
+//   KICKED        by an owner Epic made, not the pinned one: the kicked member's link (ours: any);
+//   CLOSED        Epic closed the room under us: the pinned owner's link (we own it: any link);
+//   PROMOTED      Epic moved the room away from the pinned owner: the pinned owner's link.
+// Whatever is held reaches the game once that link is down.
+bool holdLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
+    const int32_t s = e->info.CurrentStatus;
+    const uint64_t now = GetTickCount64();
+    const std::string self = idString(g.lobbyUser.load());
+    auto deliver = [e] { deliverLobbyStatus(e); };
+    auto offer = [&](const std::string& key, const std::string& probe, uint32_t graceMs, bool replace,
+                     std::function<void()> fn) {
+        return !probe.empty() &&
+               g.lobbyHold->offer(key, probe, reachableDirectly(probe), graceMs, replace, now, std::move(fn));
+    };
+    // A member's own LEFT or KICKED while its link is up replaces a disconnect hidden for it: the game is
+    // told the newer status, without the disconnect's grace. With the link down both reach the game now.
+    auto offerFinal = [&]() {
+        return reachableDirectly(e->target) && offer(e->target, e->target, 0, true, deliver);
+    };
+    const char* who = e->self ? "we" : nullptr;
+    const std::string label = who ? who : shortId(e->target);
+    switch (s) {
+    case kDisconnected:
+        if (!offer(e->target, e->target, g.config.graceMs, false, deliver)) return false;
+        logf("RESILIENCE %s lost Epic's lobby service but the direct link is up: hidden from the game", label.c_str());
+        return true;
+    case kLeft:
+        if (e->self || !offerFinal()) return false;
+        logf("RESILIENCE %s left Epic's lobby but still plays over the direct link: hidden from the game",
+             label.c_str());
+        return true;
+    case kKicked: {
+        // The pinned owner gone from the direct link too: whoever Epic made owner rules the room now.
+        const std::string pinned = g.ownerPin.pinned();
+        if (g.ownerPin.kickAuthorized() || pinned.empty() || !reachableDirectly(pinned) || !offerFinal()) return false;
+        logf("RESILIENCE %s kicked by %s, whom Epic made the room owner, while the direct link is up: hidden "
+             "from the game",
+             label.c_str(), shortId(g.ownerPin.usurper()).c_str());
+        return true;
+    }
+    case kClosed: {
+        if (!g.marker.inLobby()) return false;
+        const std::string pinned = g.ownerPin.pinned();
+        if (!offer("#room", pinned, 0, false, deliver)) return false;
+        logf("RESILIENCE Epic closed the room but %s: hidden from the game",
+             pinned == self ? "our direct links are up" : "the host's direct link is up");
+        return true;
+    }
+    case kPromoted: {
+        const std::string pinned = g.ownerPin.pinned();
+        const LobbyOwnerPin::Promotion p =
+            g.ownerPin.onPromoted(e->target, self, !pinned.empty() && reachableDirectly(pinned));
+        if (!p.hide) {
+            g.lobbyHold->discard("#owner");  // superseded: delivering it later would roll the owner back
+            return false;
+        }
+        g.lobbyHold->onStatus(e->target, s);  // a promotion ends a hidden disconnect, as before
+        if (e->target == pinned) {
+            g.lobbyHold->discard("#owner");  // Epic gave it back; the game never saw it go
+            logf("RESILIENCE the room is %s's again in Epic's lobby", pinned == self ? "ours" : shortId(pinned).c_str());
+            return true;
+        }
+        const std::string target = e->target;
+        // Delivered once the pinned owner's link is down: the room follows Epic's newest owner then.
+        if (!offer("#owner", pinned, 0, true, [e, target] {
+                g.ownerPin.follow(target);
+                deliverLobbyStatus(e);
+            })) {
+            g.ownerPin.follow(target);
+            g.lobbyHold->discard("#owner");
+            return false;
+        }
+        logf("RESILIENCE Epic made %s the room owner while %s still hosts over the direct link: hidden from the game",
+             label.c_str(), pinned == self ? "this machine" : shortId(pinned).c_str());
+        if (p.promoteBack) promoteBack("the pinned owner's direct link is up");
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* i) {
     auto* handler = static_cast<MemberStatusHandler*>(i->ClientData);
     auto e = std::make_shared<LobbyStatusEvent>();
@@ -392,21 +509,16 @@ void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* 
     logf("LOBBY member %s -> %s%s", shortId(e->target).c_str(), s >= 0 && s < 6 ? names[s] : "?",
          s == kDisconnected ? " (lost its connection to Epic's lobby service, not the P2P link)" : "");
 
-    // Epic's lobby service dropping someone says nothing about the game when its traffic runs over
-    // our direct link: while that link shows the member (or us) still playing, the game is not told.
-    if (s == kDisconnected && g.lobbyHold && !e->target.empty() &&
-        g.lobbyHold->offer(e->target, reachableDirectly(e->target), GetTickCount64(), [e] { deliverLobbyStatus(e); })) {
-        logf("RESILIENCE %s lost Epic's lobby service but the direct link is up: hidden from the game",
-             e->self ? "we" : shortId(e->target).c_str());
-        return;
-    }
-    if (g.lobbyHold && !e->target.empty() && g.lobbyHold->onStatus(e->target, s)) {
+    if (!g.lobbyHold || e->target.empty()) return deliverLobbyStatus(e);
+    if (holdLobbyStatus(e)) return;
+    if (s == kJoined && e->target == g.ownerPin.pinned() && g.ownerPin.onPinnedJoined(idString(g.lobbyUser.load())))
+        promoteBack("the pinned owner is back in the lobby");
+    if (g.lobbyHold->onStatus(e->target, s)) {
         logf("RESILIENCE %s back in Epic's lobby service; the game never saw the drop",
              e->self ? "we are" : (shortId(e->target) + " is").c_str());
         g.marker.memberJoined();  // a member coming back needs our attributes (and ours may be gone)
         return;
     }
-    if (s == kClosed && g.lobbyHold) g.lobbyHold->releaseAll();
     deliverLobbyStatus(e);
 }
 
@@ -472,6 +584,15 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     if (!g_shutdown && i->ResultCode == EOS_Success) {
         g.lobbyUser = call->localUser;
         g.marker.entered(call->lobby, i->LobbyId, call->localUser, call->owner);
+        {
+            std::lock_guard<std::mutex> lock(g.roomMutex);
+            g.roomLobby = call->lobby;
+            g.roomId = i->LobbyId ? i->LobbyId : "";
+        }
+        // The room keeps this owner for as long as its direct link lives (see LobbyOwnerPin).
+        EOS_ProductUserId owner = nullptr;
+        if (!call->owner) g.marker.ownerAddress(&owner);
+        g.ownerPin.entered(idString(call->owner ? call->localUser : owner));
         if (std::shared_ptr<DirectNet> base = g.baseNet.load()) base->setActive(true);
     }
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
@@ -520,6 +641,12 @@ void stopAutoJoinLocked(const char* why) {
 void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.marker.left();
+    g.ownerPin.left();
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        g.roomLobby = nullptr;
+        g.roomId.clear();
+    }
     if (g.lobbyHold) g.lobbyHold->clear();  // the game left too; other members' statuses are moot
     if (std::shared_ptr<DirectNet> base = g.baseNet.load(); base && g.lobbyTracked) base->setActive(false);
     {
@@ -590,6 +717,20 @@ void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* cl
 void hookUpdateLobby(EOS_HLobby h, const EOS_Lobby_UpdateLobbyOptions* o, void* clientData, EOS_Lobby_OnLobbyIdCallback cb) {
     if (!g_shutdown) logRateLimited("game-update-lobby", 30000, "GAME updated the room info");
     g.api.gameUpdateLobby(h, o, clientData, cb);
+}
+
+// The owner the game reads from a lobby's details: Epic's, except that an owner Epic made over the
+// pinned one reads as the pinned owner while its direct link is up (the game would make the usurper the
+// host otherwise). Only Epic's current owner of our room is rewritten: anyone else's lobby is untouched.
+EOS_ProductUserId hookGetLobbyOwner(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetLobbyOwnerOptions* o) {
+    EOS_ProductUserId owner = g.api.gameGetOwner(h, o);
+    if (!owner || g_shutdown) return owner;
+    const std::string usurper = g.ownerPin.usurper();
+    if (usurper.empty() || idString(owner) != usurper) return owner;
+    const std::string pinned = g.ownerPin.pinned();
+    if (pinned.empty() || !reachableDirectly(pinned)) return owner;
+    EOS_ProductUserId id = idHandle(pinned);
+    return id ? id : owner;
 }
 
 void hookLeaveLobby(EOS_HLobby h, const void* o, void* clientData, void* cb) {
@@ -790,22 +931,25 @@ void maybeLogStats() {
     TrafficSummary t = g.gameOut.take();
     std::shared_ptr<DirectNet> net = g.net.load();
     WireTraffic w = net ? net->takeWireTraffic() : WireTraffic{};
-    if (!(dOut | dIn | eOut | eIn | fail)) return;
+    // Nothing sent or received by the game (menus, idle links only pinging): nothing to report.
+    if (!(dOut | dIn | eOut | eIn | fail | t.packets)) return;
     // kbps = bytes * 8 / 1000 / seconds
     auto kbps = [](uint64_t bytes, double seconds) { return static_cast<double>(bytes) * 8.0 / 1000.0 / seconds; };
-    logf("TRAFFIC last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
+    logKickRepeats();
+    // One line: what the game sent, what that cost on our socket (resends, acks and pings included, so
+    // "wire up" far above "game sends" is the transport's own overhead), and each link's resend state.
+    logf("STATS last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
          "(largest %u), %.0f%% copies of the same data to another player, %.1f%% of packets repeat one sent to the "
-         "same player within 5 s | direct link up %.0f kbps down %.0f kbps, relayed for others %.0f kbps",
+         "same player within 5 s | wire up %.0f kbps down %.0f kbps, relayed for others %.0f kbps | direct packets "
+         "out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
          t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
          t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
          t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
-         kbps(w.in, 60.0), kbps(w.relayed, 60.0));
-    logKickRepeats();
-    logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
-         static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
-         static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
-         static_cast<unsigned long long>(fail), net ? " | " : "", net ? net->statusLine().c_str() : "");
+         kbps(w.in, 60.0), kbps(w.relayed, 60.0), static_cast<unsigned long long>(dOut),
+         static_cast<unsigned long long>(dIn), static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg),
+         static_cast<unsigned long long>(eIn), static_cast<unsigned long long>(fail), net ? " | " : "",
+         net ? net->statusLine().c_str() : "");
 }
 
 // A direct-link host lets a player in only as the room member whose published identity it proves
@@ -844,8 +988,8 @@ void hookPlatformTick(EOS_HPlatform platform) {
     }
     if (g.lobbyHold && g.lobbyHold->heldCount()) {
         for (const auto& remote : g.lobbyHold->poll(GetTickCount64(), reachableDirectly))
-            logf("RESILIENCE %s: lobby disconnect handed to the game (direct link silent for %u s, or kicked)",
-                 shortId(remote).c_str(), g.config.graceMs / 1000);
+            logf("RESILIENCE %s: held lobby status handed to the game (its direct link is down, or the game kicked)",
+                 remote[0] == '#' ? remote.c_str() : shortId(remote).c_str());
     }
 }
 
@@ -970,6 +1114,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     resolve(eos, "EOS_EResult_ToString", g.api.resultToString);
     resolve(eos, "EOS_EResult_IsOperationComplete", g.api.isComplete);
     resolve(eos, "EOS_P2P_AcceptConnection", g.api.accept);
+    resolve(eos, "EOS_Lobby_PromoteMember", g.api.promote);
 
     // Every player publishes its direct-link identity with its plugin marker; hosts check hellos against it.
     if (auto identity = processIdentity())
@@ -1003,6 +1148,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     hook(game, "EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived", hookRemoveNotifyMemberStatus,
          g.api.gameRemoveMemberStatus);
     hook(game, "EOS_Lobby_UpdateLobby", hookUpdateLobby, g.api.gameUpdateLobby);
+    hook(game, "EOS_LobbyDetails_GetLobbyOwner", hookGetLobbyOwner, g.api.gameGetOwner);
     logf("LOBBY plugin detection %s", g.markerReady ? "enabled" : "UNAVAILABLE (only direct-link players can be held)");
     if (!g.markerReady && config.direct.mode == Mode::Host)
         logf("DIRECT without the lobby functions we cannot check who connects: nobody can connect to us directly");

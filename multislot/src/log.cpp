@@ -20,7 +20,7 @@ std::atomic<bool> detailLog{false};
 // The marks that say where one run of the game ends and the next begins, as plugin.cpp, LogShutdown and
 // LogUnloaded write them. Checked against the real banner by the tests. They count only as the first thing
 // after a line's own timestamp: text inside a line (a member's name, an EOS message) cannot fake one.
-constexpr const char* kBannerMark = "==== EDF6MultiSlot ";
+constexpr const char* kBannerMark = "==== EDF6Coop ";
 constexpr const char* kShutdownMark = "SHUTDOWN ";
 constexpr const char* kUnloadedMark = "UNLOADED ";
 // "[2026-09-20 00:09:00.000] ": what every line the plugin writes starts with.

@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-**EDF6DirectNet** is an online co-op stability plugin for EARTH DEFENSE FORCE 6 (PC / Steam). It runs as an [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) plugin.
+**EDF6Coop** makes online co-op in EARTH DEFENSE FORCE 6 (PC / Steam) bigger and steadier: rooms for up to 8, 10, 12, 16, 24 or 32 players (8Player MOD), a direct link between players that survives Epic hiccups, and lost-packet resending. It is one [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) plugin, `EDF6Coop.dll`; it replaces the two earlier plugins EDF6DirectNet and EDF6MultiSlot.
 
 Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: **EDF6**. Support for EDF5 and other titles is planned once EDF6 is stable.
 
@@ -10,9 +10,11 @@ Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: *
 >
 > **Status: experimental.** 900+ automated tests pass; auto direct connect and the disconnect grace period have been verified in real four-player online play (0.3.2: every player connected directly, and 7 connection drops were hidden from the game). If something goes wrong, please open an [Issue](https://github.com/hajisensai/edf-coop-stable/issues) with your log attached.
 
-## EDF6MultiSlot: 8-player co-op (10 / 12 optional)
+## Room sizes and the old plugins
 
-The 8-player co-op plugin EDF6MultiSlot (by momotori01, public domain) lives in [multislot/](multislot/README.md), with its own build, package and manual. It works alongside EDF6DirectNet.
+There is one package per room size: **8p, 10p, 12p, 16p, 24p, 32p** (`EDF6Coop-<version>-<N>p.zip`). A room of one size can only be joined with the same size build, so everyone in a room uses the same package; when unsure, use 8p. 8p is played the most, 10p and 12p less. **16p, 24p and 32p are new in 2.0.0 and have only been checked offline with ghost players**, not yet in real online play with that many people. The bigger the room, the more upload bandwidth the host needs: with the direct link every player's data goes through the host.
+
+The room part (8Player MOD: more than four players, the room screen, missions, armor copy) was written by **momotori01** as EDF6MultiSlot (public domain, [multislot/LICENSE](multislot/LICENSE)); its history and tests live in [multislot/](multislot/README.md). From 2.0.0 it and EDF6DirectNet are one DLL with one log (`EDF6Coop.log`) and one settings file (`EDF6Coop.ini`). Installing renames an old `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` to `.disabled`; their settings files are kept and their values carried into `EDF6Coop.ini` at the first start.
 
 ## What it fixes
 
@@ -27,19 +29,19 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 ## Install
 
-1. Download `EDF6DirectNet-v*.zip` from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
+1. Download the `EDF6Coop-<version>-<N>p.zip` of your room size (see above) from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
 2. Double-click **`INSTALL.bat`**: it finds EDF6 in your Steam library automatically and installs.
    - If EDFModLoader is not present, the bundled loader is installed: [BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10 (MIT) **with a fix for a multithread bug in the official build** (its call forwarders shared one target variable, so a call from several threads at once could jump to the wrong function; details in [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)). An existing `winmm.dll` is never overwritten, with one exception: if it is byte-for-byte the official v1.0.10 file, it is replaced by the fixed build and the original is kept as `winmm.dll.bak-official`. Any other (newer or patched) loader is left alone.
    - If the game cannot be found, you will be asked to paste the game folder (in your Steam library, right-click EDF6 → Manage → Browse local files).
-3. Start the game from Steam as usual. The first launch creates `Mods\Plugins\EDF6DirectNet.ini` (settings) and `EDF6DirectNet.log` (log).
+3. Start the game from Steam as usual. The first launch creates `Mods\Plugins\EDF6Coop.ini` (settings) and `EDF6Coop.log` (log).
 
-The zip contains README_EDF6DirectNet.txt (English), README_EDF6DirectNet_zh.txt (中文) and README_EDF6DirectNet_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
+The zip contains README_EDF6Coop.txt (English), README_EDF6Coop_zh.txt (中文) and README_EDF6Coop_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
 
-Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6DirectNet.dll` and the signed manifest `EDF6DirectNet.dll.sig` and puts the DLL in place, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
+Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6Coop-<N>p.dll` of its own room size and the signed manifest `EDF6Coop-<N>p.dll.sig` and puts the DLL in place as `EDF6Coop.dll`, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
 
 - **Signed releases.** The manifest (version and SHA-256 of the DLL) is signed with ECDSA P-256 by a key that only the release pipeline holds; the matching public key is built into the plugin. A download is rejected unless the signature verifies, the signed version is the release being installed and newer than the running one, and the DLL has the signed SHA-256 and says it is that version. Files without a valid signature are never installed, and downloads only come from this repository's release URLs. Someone who can alter the release assets or your connection but cannot sign gets nothing installed.
-- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6DirectNet.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game crashes or is killed before that, the next start puts the old version back by itself, remembers the failed version (`EDF6DirectNet.dll.bad`, it is not installed again) and runs that session without the plugin. Quitting the game normally before then is no failure: the new version simply stays on trial at the next start.
-- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) keeps automatic updates **on**, as 0.3.6 did; the log says so at every start. To turn them off, add these two lines at the end of `Mods\Plugins\EDF6DirectNet.ini`:
+- **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6Coop.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game crashes or is killed before that, the next start puts the old version back by itself, remembers the failed version (`EDF6Coop.dll.bad`, it is not installed again) and runs that session without the plugin. Quitting the game normally before then is no failure: the new version simply stays on trial at the next start.
+- **Settings files from older versions.** A settings file that has no `AutoUpdate` line (older versions did not write one) keeps automatic updates **on**, as 0.3.6 did; the log says so at every start. To turn them off, add these two lines at the end of `Mods\Plugins\EDF6Coop.ini`:
 
   ```
   [Update]
@@ -47,7 +49,7 @@ Upgrade: the plugin updates itself. At game start it asks GitHub for the latest 
   ```
 
   A settings file created by a current version has `AutoUpdate=1`. `AutoUpdate=0` turns downloading off (rollback still works).
-Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone, including a loader the installer upgraded; its backup `winmm.dll.bak-official` stays). It removes the plugin, settings, log and update leftovers (`EDF6DirectNet.dll.old` and friends), and the UPnP mapping the plugin made on your router (only one that points to this PC and is named `EDF6DirectNet`; a router without UPnP is simply skipped). If you added the firewall rule, run `UNINSTALL.bat` as administrator to remove it too; without administrator rights it shows the command to remove it.
+Uninstall: double-click `UNINSTALL.bat` (EDFModLoader and other mods are left alone, including a loader the installer upgraded; its backup `winmm.dll.bak-official` stays). It removes the plugin, settings, log and update leftovers (`EDF6Coop.dll.old` and friends), and the UPnP mapping the plugin made on your router (only one that points to this PC and is named `EDF6DirectNet`; a router without UPnP is simply skipped). If you added the firewall rule, run `UNINSTALL.bat` as administrator to remove it too; without administrator rights it shows the command to remove it.
 
 You can also extract the zip contents into the game folder (the folder containing `EDF6.exe`) by hand.
 
@@ -55,15 +57,15 @@ You can also extract the zip contents into the game folder (the folder containin
 
 Only the host needs to set this up; joiners who have the plugin installed with `AutoJoin=1` (the default) connect directly on their own after joining the room.
 
-1. Open `Mods\Plugins\EDF6DirectNet.ini` and set `Mode=host`.
-2. Right-click `EDF6DirectNet_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once). The rule allows inbound UDP for `EDF6.exe` on the `ListenPort` from your ini only (27015 if unset), not every UDP port; run it again after changing `ListenPort`.
+1. Open `Mods\Plugins\EDF6Coop.ini` and set `Mode=host`.
+2. Right-click `EDF6Coop_AllowFirewall.bat` in the game folder → **Run as administrator** (only needed once). The rule allows inbound UDP for `EDF6.exe` on the `ListenPort` from your ini only (27015 if unset), not every UDP port; run it again after changing `ListenPort`.
 3. Make yourself reachable from the internet, pick one:
    - **Automatic**: leave `PublicAddress` empty. The plugin maps UDP 27015 via your router's UPnP and also advertises this PC's public IPv6 automatically.
    - **Manual**: forward the UDP port to this PC on your router, then set `PublicAddress=public IP:external port` (a DDNS hostname also works, e.g. `myroom.ddns.net:40000`).
    - **PC dials the internet directly (PPPoE, no router)**: the plugin cannot detect this kind of adapter and will not advertise an address automatically; set `PublicAddress=public IP:27015` by hand.
 4. Restart the game and create a room as usual.
 
-How to confirm it worked (check the log `Mods\Plugins\EDF6DirectNet.log`):
+How to confirm it worked (check the log `Mods\Plugins\EDF6Coop.log`):
 
 | Log | Meaning |
 |---|---|
@@ -73,7 +75,7 @@ How to confirm it worked (check the log `Mods\Plugins\EDF6DirectNet.log`):
 | `UPNP WARNING: the router WAN address ... is private (carrier-grade NAT)` | You are behind carrier-grade NAT (common with many ISPs) and have no public IPv4, so IPv4 direct connect is impossible; you can only rely on IPv6 or ask your ISP for a public IP |
 | `UPNP UDP 27015 is already forwarded to ...; left alone` | This port on the router is already forwarded to another device on your LAN; the plugin will not delete it. Pick a different `ListenPort`, or forward manually |
 | `DIRECT client ... connected from ...` (host) / `DIRECT connected to host ...` (joiner) | Direct connection established |
-| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch / a different EDF6DirectNet version); the game keeps using Epic as usual and retries after 60 seconds |
+| `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch / a different EDF6Coop version); the game keeps using Epic as usual and retries after 60 seconds |
 
 Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works they stay on EOS, and normal play is not affected.
 
@@ -81,7 +83,9 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 
 **Privacy**: the host's public address is stored in the lobby member attributes, so anyone who can see the room can read it. A player who joins directly (`AutoJoin=1`) connects to the host from their own public address, so the host sees it (vanilla EOS peer-to-peer usually exposes both addresses to each other too). Set `AutoJoin=0` if you do not want hosts of rooms you join to see your address; you then stay on EOS.
 
-## Settings reference (`EDF6DirectNet.ini`, restart the game after editing)
+## Settings reference (`EDF6Coop.ini`, restart the game after editing)
+
+The direct link's keys are below. The same file also has `[MultiSlot]`, `[Smoothing]`, `[RoomScreen]`, `[Mission]` and `[CopyArmor]` for the bigger rooms; the comments in the file explain every key. `[MultiSlot] Enabled=0` and `[DirectNet] Enabled=0` together unload the plugin.
 
 | Key | Default | Description |
 |---|---|---|
@@ -128,56 +132,64 @@ Every plugin player also writes `EDF6DN_ID`: the fingerprint (SHA-256) of an ECD
 
 ## Troubleshooting
 
-- **Check the log first**: `Mods\Plugins\EDF6DirectNet.log` (rotated to `.log.1` once it exceeds 2MB). A first line `==== EDF6DirectNet x.y.z starting` means the plugin loaded; if that line is missing, EDFModLoader is not installed correctly.
+- **Check the log first**: `Mods\Plugins\EDF6Coop.log` (it keeps itself below about 2MB; direct-link lines start with `[DN]`). A line `==== EDF6Coop x.y.z-<N>p ====` means the plugin loaded; if that line is missing, EDFModLoader is not installed correctly.
 - `EOS hooks FAILED`: a game update changed the import table; the plugin disables direct connect automatically. Please open an Issue.
 - `LOBBY plugin detection UNAVAILABLE`: the plugin cannot tell whether the other player has it installed, so disconnect grace only applies to direct-connect members.
 - `EOS incoming packet queue FULL`: the EOS queue is full and packets are being dropped. Please open an Issue with your log attached.
 - `RESILIENCE ... RECOVERED` means a disconnect was hidden successfully; `did not come back within` means it was handed to the game after the timeout.
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`: Epic's lobby service dropped a player and let them back in; the game never saw it. `direct link silent for ...` means the player really was gone and the game was told.
 - `GAME kicks ... from the room (direct link up/down, ...)`: the game removed a player by itself (or you kicked them). It records whether the direct link still showed that player playing at that moment.
-- `STATS last 60s: ...` is a one-line send/receive summary every minute; if `send-failures` is not 0, please attach your log.
-- `TRAFFIC last 60s: ...` shows how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, how many packets repeat one sent to the same player within 5 s (the game's own resends, if it has any), and what the direct link really uses, including what the host relays for others.
+- `STATS last 60s: ...` is one line per minute while the game sends or receives anything: how much the game itself sends (average and busiest second, in kbps; the game keeps its routine sync under about 320 kbps and drops less important updates near its budget), how much of it is the same data sent to several players, how many packets repeat one sent to the same player within 5 s (the game's own resends, if it has any), what the direct link really uses on the wire (`wire up`/`down`, resends included, plus what the host relays for others), packet counts, and per link: `retx` our resends, `dup` the other side's resends we already had, `gaveup` packets the game sent unreliably that we stopped resending after 2 s, `skipped` theirs that never came, `held` how long resends waited because the link delivered too little, `credit` resends allowed right now. If `send-failures` or `send-refused` is not 0, please attach your log.
+- `DIRECT ... timed out: nothing received for ...` means the other side went silent; `DIRECT ... stalled: a packet the game sent reliably is unacknowledged ...` means the other side still answers but one packet the game needs never got through.
 - `DIRECT refused hello for ...`: someone tried to connect directly as a player and could not prove it. `published no direct-link identity` for a second or two after a player joins is normal (their room info has not reached the host yet; they retry every second); for a player without the plugin, or with 0.3.6 and older, it means they stay on EOS. `not signed by the identity that player published` means someone else claimed to be that player; they were rejected and cannot disturb that player.
-- `DIRECT ... speaks direct-link protocol 3, we speak 4`: that player runs a different EDF6DirectNet version (0.4.0; 2 is 0.3.6 or older). There is no direct link between you, the game keeps working over EOS; update both to the same version.
+- `DIRECT ... speaks direct-link protocol 4, we speak 5`: that player runs a different version (5 is EDF6Coop 2.0.0; 4 is EDF6DirectNet 0.4.1, 3 is 0.4.0, 2 is 0.3.6 or older). There is no direct link between you, the game keeps working over EOS; update both to the same version.
 
 ## Build
 
-Requires Visual Studio 2022 (MSVC x64).
+Requires Windows x64, Visual Studio 2022 with *Desktop development with C++* (its CMake and Ninja are used), Python 3.10+ with `pip install numpy pillow pefile==2024.8.26 capstone==5.0.9`, and EARTH DEFENSE FORCE 6 installed (EDF.dll build `678CCB46`).
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1 -Test
-# Package a release by hand: needs the extracted official EDFModLoader.zip folder (with winmm.dll, ModLoader.ini, plus its LICENSE.txt)
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 0.3.3 -ModLoaderDir <folder>
+$env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 8 -Test    # -> multislot\dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File build.ps1 -Players 12 -Test   # -> multislot\dist-12p\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> release\EDF6Coop-<version>-8p.zip (+ .sha256)
 ```
 
-Outputs: `build\EDF6DirectNet.dll` (static CRT, depends only on system DLLs), `build\edf6_directnet_tests.exe` (unit tests + local loopback multi-node tests, including 20%–40% packet loss, network drop and restart scenarios; the `EDF.dll` import-table test needs the game installed on this PC, otherwise it is skipped), `build\probe_join.exe` (direct-connect probe for manual debugging).
+- `-Players` picks the room size (8, 10, 12, 16, 24, 32); each size is its own build. `-Test` runs the tests (unit tests, loopback multi-node direct-link tests, and the checks of every patch site against the game's `EDF.dll`, which are skipped without the game).
+- The game folder is only read: `Root.cpk` for the menu frame with the "8Player MOD" label (`multislot/tools/make_menu_label.py` writes `multislot/assets/LYT_MAINFRAME.SGO`, which is derived from the game and therefore never committed) and `EDF.dll` for the tests.
+- `build.ps1` fetches the official EDFModLoader v1.0.10 `winmm.dll` (checked by SHA-256) and builds the race-fixed loader the package ships (`multislot/tools/fix_winmm_proxy.py`).
+- `package.ps1` refuses a build that is not this room size and version, a DLL older than its sources, and a CI build (`build.ps1 -CI` builds without the game's menu asset and embeds a placeholder).
 
 ## Release
 
-Releases are produced automatically by GitHub Actions (`.github/workflows/release.yml`):
+Release packages need the game's menu asset, which cannot be on a build server, so they are built on a machine with the game; GitHub Actions runs the CI builds and tests (`.github/workflows/ci.yml`, every room size).
 
-1. Bump the version: `kVersionMajor/Minor/Patch` and `kVersionText` in `src/plugin.cpp`, plus the first line of the three bundled readmes `dist/README_EDF6DirectNet*.txt`.
-2. Write the release notes `release-notes/<version>.md` (this is the body of the Release page; the pipeline fails without it).
-3. Commit to `main` and push the tag: `git tag v0.3.3 && git push origin v0.3.3`.
+1. Bump the version: `project(EDF6Coop VERSION x.y.z)` in `multislot/CMakeLists.txt` and the first line of the three bundled readmes `dist/README_EDF6Coop*.txt`.
+2. Write the release notes `release-notes/<version>.md` (the body of the Release page and `RELEASE_NOTES_EDF6Coop.md` in the package).
+3. Commit to `main`, tag it and push the tag: `git tag v2.0.0 && git push origin v2.0.0`.
+4. On the machine with the game, at that commit: `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`. For every room size it runs `build.ps1 -Players <N> -Test` and `package.ps1 -Players <N>`, then creates a **draft** Release with `EDF6Coop-<N>p.dll`, `EDF6Coop-<version>-<N>p.zip` and its `.sha256` (without `-Upload` it only stages them in `release\upload-<version>\`). It never signs.
+5. `gh workflow run release.yml -f tag=v2.0.0` (`.github/workflows/release.yml`): checks that the tag is on `main` and matches the version, that every room size is in the draft, that each zip matches its `.sha256` and carries exactly that DLL, and that none is a CI build; signs each DLL with `sign-update.ps1 -Players <N>` (the key is the repository secret `EDF6DN_UPDATE_SIGNING_KEY`, only in a job with a read-only token); uploads `EDF6Coop-<N>p.dll.sig` and `.dll.sha256`; and publishes the Release as latest.
 
-The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10 (verified by SHA-256), packages `EDF6DirectNet-v<version>.zip` and creates the Release. `package.ps1` refuses to package if the tag, the source version and the readme version do not all match. Running it manually from the Actions page only builds and packages (the output is under Artifacts in the run), without publishing.
+The auto-updater of every installed copy downloads `EDF6Coop-<N>p.dll` / `.dll.sig` of its own size from the latest Release, so a Release must carry all six sizes before it is marked latest.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `src/plugin.cpp` | EDFModLoader entry point, reads the config, starts direct connect |
-| `src/config.*` | INI reading and the default settings file (comments written in Chinese / Japanese / English based on the Windows display language) |
+| `multislot/src/plugin.cpp` | EDFModLoader entry point: reads `EDF6Coop.ini` (carrying over the old settings files), starts the room part and the direct link |
+| `multislot/src/` | The room part (8Player MOD): patches, room screen, missions, armor copy, menu layout, log |
+| `src/config.*` | The direct link's settings and their comments (Chinese / Japanese / English after the Windows display language) |
 | `src/eos_min.h` | The EOS SDK structs in use (from the official 1.15.5 headers; the game uses 1.16.1) |
 | `src/eos_hooks.cpp`, `src/iat.*` | Patches the `EDF.dll` import table to take over EOS P2P / lobby calls |
 | `src/hold.*` | Disconnect grace |
 | `src/lobby_marker.*` | Lobby member attributes: detecting who has the plugin, distributing the host address |
 | `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | Direct-connect transport |
 | `src/netif.*`, `src/upnp.*` | Physical adapter detection, UPnP |
-| `src/log.*` | Logging |
-| `dist/` | Install scripts and bundled readmes (Chinese / English / Japanese) |
-| `tests/` | Tests |
-| `multislot/` | EDF6MultiSlot, the 8 / 10 / 12-player co-op plugin (own build and readme) |
+| `src/updater.*`, `src/product.h` | Signed automatic updates; the room size and version every release carries |
+| `multislot/CMakeLists.txt` | The build and the one version number (`project(EDF6Coop VERSION x.y.z)`) |
+| `multislot/packaging/` | Loader fix and handshake recovery notes shipped in the package |
+| `dist/` | Install scripts and bundled readmes (English / Chinese / Japanese) |
+| `tests/`, `multislot/tests/` | Tests |
 
 ## Known limitations
 
@@ -191,4 +203,4 @@ The pipeline builds, runs the tests, downloads the official EDFModLoader v1.0.10
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The bundled EDFModLoader is MIT; its license is included in the package as `EDFModLoader\LICENSE.txt`.
+MIT, see [LICENSE](LICENSE). The bundled EDFModLoader is MIT; its license is included in the package as `EDFModLoader_LICENSE.txt`. The room part (`multislot/`, by momotori01) is public domain ([Unlicense](multislot/LICENSE)).

@@ -8,6 +8,8 @@
 namespace dn {
 namespace {
 
+// Members a Welcome or Roster names, the host included: a room of 32 players. A Welcome of 32 EOS ids
+// is 1306 bytes with a Key tag (each more adds 33); 64 would not fit the 2048-byte receive buffer.
 constexpr size_t kMaxRoster = 32;
 constexpr size_t kHeaderBytes = 8;
 constexpr size_t kCounterOffset = kHeaderBytes + 4;  // after the epoch
@@ -136,9 +138,18 @@ void writeBody(Writer& w, const Message& m) {
             w.u16(static_cast<uint16_t>(m.data.payload.size()));
             w.raw(m.data.payload.data(), m.data.payload.size());
             break;
-        case MsgType::Ack:
+        case MsgType::Ack: {
             w.u32(m.ack.cumulative);
-            for (uint32_t word : m.ack.bitmap) w.u32(word);
+            size_t n = m.ack.ranges.size() < kMaxAckRanges ? m.ack.ranges.size() : kMaxAckRanges;
+            w.u8(static_cast<uint8_t>(n));
+            for (size_t i = 0; i < n; ++i) {
+                w.u32(m.ack.ranges[i].first);
+                w.u16(m.ack.ranges[i].count);
+            }
+            break;
+        }
+        case MsgType::Forward:
+            w.u32(m.forward.floor);
             break;
         case MsgType::Ping:
         case MsgType::Pong:
@@ -194,9 +205,23 @@ bool readBody(Reader& r, Message& m) {
             else
                 r.reject();
             return true;
-        case MsgType::Ack:
+        case MsgType::Ack: {
             m.ack.cumulative = r.u32();
-            for (uint32_t& word : m.ack.bitmap) word = r.u32();
+            size_t n = r.u8();
+            if (n > kMaxAckRanges) {
+                r.reject();
+                return true;
+            }
+            m.ack.ranges.resize(n);
+            for (AckRange& range : m.ack.ranges) {
+                range.first = r.u32();
+                range.count = r.u16();
+                if (r.ok() && range.count == 0) r.reject();  // an empty range: no valid sender writes one
+            }
+            return true;
+        }
+        case MsgType::Forward:
+            m.forward.floor = r.u32();
             return true;
         case MsgType::Ping:
         case MsgType::Pong:

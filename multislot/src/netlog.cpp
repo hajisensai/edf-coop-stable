@@ -6,12 +6,14 @@
 #include <iterator>
 #include <cstddef>
 #include <intrin.h>
+#include <string>
 
 #include "crashlog.h"
 #include "log.h"
 #include "identity.h"
 #include "joinlog.h"
 #include "packetfit.h"
+#include "patches.h"  // kMaxPlayers
 
 namespace multislot {
 namespace {
@@ -195,6 +197,120 @@ bool IsHello(const void* data, std::uint32_t length) {
     });
 }
 
+// The final hello (12C90F2) goes out again and again until the peer answers: one line per peer and handshake
+// instead of one per packet (1.5.15 logged each, hundreds a minute). A run ends when no hello went to that peer
+// for kHelloRunGapMs, when its connection is closed or when the lobby is left; its line says which. A send that
+// fails is logged on its own as well, as it happens.
+// One run per peer of a full room at once: fewer, and handshaking peers push each other out, a line each time.
+constexpr std::size_t kHelloRuns = 2 * kMaxPlayers > 16 ? 2 * kMaxPlayers : 16;
+constexpr ULONGLONG kHelloRunGapMs = 3000;
+struct HelloRun {
+    const void* remote = nullptr;  // EOS_ProductUserId; null: a free entry
+    const void* local = nullptr;
+    ULONGLONG first = 0, last = 0;
+    unsigned sends = 0, failed = 0, answers = 0;
+    std::uint32_t bytes = 0;
+    std::uint8_t channel = 0;
+    std::int32_t delayed = 0, reliability = 0;
+    EOS_EResult result = 0;
+};
+// Sends, receives and closes come from the game's thread, but nothing promises it: guarded.
+SRWLOCK helloLock = SRWLOCK_INIT;
+HelloRun helloRuns[kHelloRuns];
+std::atomic<ULONGLONG> helloSweepAt{~0ULL};  // the earliest a run can end by its gap
+
+void LogHelloRun(const HelloRun& run, const char* end) {
+    if (!HandshakeBudget()) return;
+    char local[40]{}, remote[40]{};
+    ProductUserIdText(run.local, local, sizeof(local));
+    ProductUserIdText(run.remote, remote, sizeof(remote));
+    Log("HANDSHAKE SEND: %s -> %s %u hello(s) over %llu ms (bytes=%u channel=%u delayed=%d reliability=%d), %u failed, "
+        "last result=%d, %u hello(s) received from it; %s",
+        local, remote, run.sends, static_cast<unsigned long long>(run.last - run.first), run.bytes, run.channel,
+        run.delayed, run.reliability, run.failed, run.result, run.answers, end);
+}
+
+// Ends the runs `match` picks, copied to `out` to be logged once the lock is released. Caller holds helloLock.
+template <typename Match>
+std::size_t TakeRunsLocked(Match match, HelloRun* out) {
+    std::size_t taken = 0;
+    ULONGLONG next = ~0ULL;
+    for (auto& run : helloRuns) {
+        if (!run.remote) continue;
+        if (match(run)) {
+            out[taken++] = run;
+            run = HelloRun{};
+        } else if (run.last + kHelloRunGapMs < next) {
+            next = run.last + kHelloRunGapMs;
+        }
+    }
+    helloSweepAt.store(next);
+    return taken;
+}
+
+// remote null: every run.
+void EndHelloRuns(const void* remote, const char* why) {
+    HelloRun ended[kHelloRuns];
+    AcquireSRWLockExclusive(&helloLock);
+    const std::size_t count = TakeRunsLocked([&](const HelloRun& run) { return !remote || run.remote == remote; }, ended);
+    ReleaseSRWLockExclusive(&helloLock);
+    for (std::size_t i = 0; i < count; ++i) LogHelloRun(ended[i], why);
+}
+
+void SweepHelloRuns() {
+    const ULONGLONG now = GetTickCount64();
+    if (now < helloSweepAt.load()) return;
+    HelloRun ended[kHelloRuns];
+    AcquireSRWLockExclusive(&helloLock);
+    const std::size_t count = TakeRunsLocked([&](const HelloRun& run) { return now - run.last > kHelloRunGapMs; }, ended);
+    ReleaseSRWLockExclusive(&helloLock);
+    for (std::size_t i = 0; i < count; ++i) LogHelloRun(ended[i], "no further hello for 3 s");
+}
+
+void NoteHelloSend(const SendPacketOptions& options, EOS_EResult result) {
+    SweepHelloRuns();
+    const ULONGLONG now = GetTickCount64();
+    HelloRun evicted{};
+    AcquireSRWLockExclusive(&helloLock);
+    HelloRun* run = nullptr;
+    HelloRun* unused = nullptr;
+    HelloRun* oldest = &helloRuns[0];
+    for (auto& entry : helloRuns) {
+        if (entry.remote && entry.remote == options.RemoteUserId) run = &entry;
+        if (!entry.remote && !unused) unused = &entry;
+        if (entry.last < oldest->last) oldest = &entry;
+    }
+    if (!run) run = unused;
+    if (!run) {  // more peers in a handshake at once than entries: the longest quiet one is logged now
+        evicted = *oldest;
+        *oldest = HelloRun{};
+        run = oldest;
+    }
+    if (!run->remote) {
+        run->remote = options.RemoteUserId;
+        run->local = options.LocalUserId;
+        run->first = now;
+        run->bytes = options.DataLengthBytes;
+        run->channel = options.Channel;
+        run->delayed = options.AllowDelayedDelivery;
+        run->reliability = options.Reliability;
+    }
+    run->last = now;
+    ++run->sends;
+    if (result != 0) ++run->failed;
+    run->result = result;
+    if (now + kHelloRunGapMs < helloSweepAt.load()) helloSweepAt.store(now + kHelloRunGapMs);
+    ReleaseSRWLockExclusive(&helloLock);
+    if (evicted.remote) LogHelloRun(evicted, "more peers in a handshake than this log follows at once");
+}
+
+void NoteHelloAnswer(const void* remote) {
+    AcquireSRWLockExclusive(&helloLock);
+    for (auto& run : helloRuns)
+        if (run.remote && run.remote == remote) ++run.answers;
+    ReleaseSRWLockExclusive(&helloLock);
+}
+
 // Keep the import wrapper itself small so its return address is always the real game caller.
 EOS_EResult DispatchSendPacket(void* handle, const SendPacketOptions* options, std::uintptr_t caller) {
     const bool finalHello = MatchFinalHello(handle, options, caller);
@@ -212,13 +328,16 @@ EOS_EResult DispatchSendPacket(void* handle, const SendPacketOptions* options, s
     }
     return Probing([&]() -> EOS_EResult {
         __try {
-            if (packetDiagnostics && caller == 0x12C90F2 && effective && HandshakeBudget()) {
-                char local[40]{}, remote[40]{};
-                ProductUserIdText(effective->LocalUserId, local, sizeof(local));
-                ProductUserIdText(effective->RemoteUserId, remote, sizeof(remote));
-                Log("HANDSHAKE SEND: %s -> %s bytes=%u channel=%u delayed=%d reliability=%d result=%d thread=%lu",
-                    local, remote, effective->DataLengthBytes, effective->Channel, effective->AllowDelayedDelivery,
-                    effective->Reliability, result, GetCurrentThreadId());
+            if (packetDiagnostics && caller == 0x12C90F2 && effective) {
+                NoteHelloSend(*effective, result);
+                if (result != 0 && HandshakeBudget()) {
+                    char local[40]{}, remote[40]{};
+                    ProductUserIdText(effective->LocalUserId, local, sizeof(local));
+                    ProductUserIdText(effective->RemoteUserId, remote, sizeof(remote));
+                    Log("HANDSHAKE SEND FAILED: %s -> %s bytes=%u channel=%u delayed=%d reliability=%d result=%d "
+                        "thread=%lu", local, remote, effective->DataLengthBytes, effective->Channel,
+                        effective->AllowDelayedDelivery, effective->Reliability, result, GetCurrentThreadId());
+                }
             }
             // EOS refuses these (the mission start message did at eight players); name the sender once per kind.
             if (packetDiagnostics && effective && effective->DataLengthBytes > kEosMaxPacket)
@@ -238,8 +357,11 @@ EOS_EResult HookReceivePacket(void* handle, const void* options, void** peer, So
                              std::uint8_t* channel, void* data, std::uint32_t* size) {
     const auto caller = GameRva(_ReturnAddress());
     const auto result = originalReceivePacket(handle, options, peer, socket, channel, data, size);
+    // The game polls every frame: the clock that ends a quiet hello run (its summary line) when nothing is sent.
+    if (packetDiagnostics) SweepHelloRuns();
     return Probing([&]() -> EOS_EResult {
         __try {
+            if (packetDiagnostics && result == 0 && size && IsHello(data, *size)) NoteHelloAnswer(peer ? *peer : nullptr);
             if (result == 0 && size && IsHello(data, *size) && HandshakeBudget()) {
                 char remote[40]{};
                 ProductUserIdText(peer ? *peer : nullptr, remote, sizeof(remote));
@@ -258,6 +380,12 @@ EOS_EResult HookCloseConnection(void* handle, const CloseConnectionOptions* opti
     // Taken here, so the frames are this wrapper's callers and not the probe's.
     void* stack[6]{};
     const auto count = CaptureStackBackTrace(0, 6, stack, nullptr);
+    const char* reason = caller == 0x12C7C2C ? "initial-retry" : caller == 0x12C95A2 ? "Users-disconnect-notify" : "other";
+    if (packetDiagnostics && options) {
+        char end[48]{};
+        _snprintf_s(end, _TRUNCATE, "connection closed (%s)", reason);
+        EndHelloRuns(options->RemoteUserId, end);
+    }
     Probing([&] {
         __try {
             if (options && HandshakeBudget()) {
@@ -267,7 +395,7 @@ EOS_EResult HookCloseConnection(void* handle, const CloseConnectionOptions* opti
                 std::uintptr_t frames[6]{};
                 for (USHORT i = 0; i < count; ++i) frames[i] = GameRva(stack[i]);
                 Log("HANDSHAKE CLOSE: %s -> %s reason=%s caller=EDF+%llX thread=%lu stackEDF=%llX,%llX,%llX,%llX,%llX,%llX",
-                    local, remote, caller == 0x12C7C2C ? "initial-retry" : caller == 0x12C95A2 ? "Users-disconnect-notify" : "other",
+                    local, remote, reason,
                     static_cast<unsigned long long>(caller), GetCurrentThreadId(),
                     static_cast<unsigned long long>(frames[0]), static_cast<unsigned long long>(frames[1]),
                     static_cast<unsigned long long>(frames[2]), static_cast<unsigned long long>(frames[3]),
@@ -310,6 +438,7 @@ void HookLeaveLobby(void* handle, const void* options, void* clientData, JoinLob
         static_cast<unsigned long long>(frames[0]), static_cast<unsigned long long>(frames[1]),
         static_cast<unsigned long long>(frames[2]), static_cast<unsigned long long>(frames[3]),
         static_cast<unsigned long long>(frames[4]), static_cast<unsigned long long>(frames[5]));
+    if (packetDiagnostics) EndHelloRuns(nullptr, "the lobby is left");
     originalLeaveLobby(handle, options, clientData, completion);
 }
 
@@ -343,20 +472,75 @@ const char* Printable(const char* text, char* buffer, std::size_t size) {
     });
 }
 
-void LogAttribute(const char* what, const AttributeData* data, std::int32_t extra) {
+// "KEY = value  op/vis=N", as the log has always shown an attribute.
+void FormatAttribute(const AttributeData* data, std::int32_t extra, char* out, std::size_t size) {
     char key[64], text[96];
     if (!data) {
-        Log("EOS %s (null attribute) op/vis=%d", what, extra);
+        _snprintf_s(out, size, _TRUNCATE, "(null attribute) op/vis=%d", extra);
         return;
     }
     const char* name = Printable(data->Key, key, sizeof(key));
     switch (data->ValueType) {
-    case 0: Log("EOS %s %s = bool %d  op/vis=%d", what, name, data->Value.AsBool, extra); break;
-    case 1: Log("EOS %s %s = %lld (0x%llX)  op/vis=%d", what, name, data->Value.AsInt64, data->Value.AsInt64, extra); break;
-    case 2: Log("EOS %s %s = %f  op/vis=%d", what, name, data->Value.AsDouble, extra); break;
-    case 3: Log("EOS %s %s = \"%s\"  op/vis=%d", what, name, Printable(data->Value.AsUtf8, text, sizeof(text)), extra); break;
-    default: Log("EOS %s %s = type %d  op/vis=%d", what, name, data->ValueType, extra); break;
+    case 0: _snprintf_s(out, size, _TRUNCATE, "%s = bool %d  op/vis=%d", name, data->Value.AsBool, extra); break;
+    case 1:
+        _snprintf_s(out, size, _TRUNCATE, "%s = %lld (0x%llX)  op/vis=%d", name, data->Value.AsInt64, data->Value.AsInt64, extra);
+        break;
+    case 2: _snprintf_s(out, size, _TRUNCATE, "%s = %f  op/vis=%d", name, data->Value.AsDouble, extra); break;
+    case 3:
+        _snprintf_s(out, size, _TRUNCATE, "%s = \"%s\"  op/vis=%d", name, Printable(data->Value.AsUtf8, text, sizeof(text)), extra);
+        break;
+    default: _snprintf_s(out, size, _TRUNCATE, "%s = type %d  op/vis=%d", name, data->ValueType, extra); break;
     }
+}
+
+void LogAttribute(const char* what, const AttributeData* data, std::int32_t extra) {
+    char text[192];
+    FormatAttribute(data, extra, text, sizeof(text));
+    Log("EOS %s %s", what, text);
+}
+
+// A room search sets its parameters one call at a time (several per search, a search every few seconds while the
+// room list is open): they go into one line with the search they belong to. One EOS refuses is logged at once.
+constexpr std::size_t kSearches = 4;
+struct SearchParameters {
+    void* search = nullptr;  // EOS_HLobbySearch
+    std::string text;
+    unsigned count = 0;
+};
+SRWLOCK searchLock = SRWLOCK_INIT;
+SearchParameters searches[kSearches];
+std::size_t nextSearch = 0;
+
+void NoteSearchParameter(void* search, const char* parameter) {
+    SearchParameters dropped;
+    AcquireSRWLockExclusive(&searchLock);
+    SearchParameters* entry = nullptr;
+    for (auto& candidate : searches)
+        if (candidate.count && candidate.search == search) entry = &candidate;
+    if (!entry) {
+        entry = &searches[nextSearch];
+        nextSearch = (nextSearch + 1) % kSearches;
+        dropped = std::move(*entry);
+        *entry = SearchParameters{};
+        entry->search = search;
+    }
+    entry->text += entry->count++ ? "; " : "";
+    entry->text += parameter;
+    ReleaseSRWLockExclusive(&searchLock);
+    // A search released without Find: its parameters still reach the log.
+    if (dropped.count) Log("EOS LobbySearch (never run): %u parameter(s): %s", dropped.count, dropped.text.c_str());
+}
+
+SearchParameters TakeSearchParameters(void* search) {
+    SearchParameters taken;
+    AcquireSRWLockExclusive(&searchLock);
+    for (auto& entry : searches)
+        if (entry.count && entry.search == search) {
+            taken = std::move(entry);
+            entry = SearchParameters{};
+        }
+    ReleaseSRWLockExclusive(&searchLock);
+    return taken;
 }
 
 void HookCreateLobby(void* handle, const CreateLobbyOptions* options, void* clientData, void* completion) {
@@ -368,7 +552,12 @@ void HookCreateLobby(void* handle, const CreateLobbyOptions* options, void* clie
     originalCreateLobby(handle, options, clientData, completion);
 }
 
-// Completion delegates are wrapped to log their result: EOS calls each exactly once.
+// Completion delegates are wrapped to log their result. EOS runs one again while its result is not final
+// (EOS_EResult_IsOperationComplete false, as for EOS_OperationWillRetry), so the wrapper lives until the final run.
+using IsCompleteFn = std::int32_t (*)(EOS_EResult);
+IsCompleteFn isOperationComplete = nullptr;  // not resolved: every result is final
+bool FinalResult(EOS_EResult result) { return !isOperationComplete || isOperationComplete(result); }
+
 struct JoinContext {
     void* clientData;
     JoinLobbyCallback callback;
@@ -379,8 +568,9 @@ void OnJoinLobby(const JoinLobbyCallbackInfo* info) {
     JoinLobbyCallbackInfo forwarded = *info;
     forwarded.ClientData = context->clientData;
     Log("EOS JoinLobby result %d", info->ResultCode);
-    if (context->callback) context->callback(&forwarded);
-    delete context;
+    const JoinLobbyCallback callback = context->callback;
+    if (FinalResult(info->ResultCode)) delete context;
+    if (callback) callback(&forwarded);
 }
 
 void HookJoinLobby(void* handle, const void* options, void* clientData, JoinLobbyCallback completion) {
@@ -405,11 +595,15 @@ void OnFind(const FindCallbackInfo* info) {
     FindCallbackInfo forwarded = *info;
     forwarded.ClientData = context->clientData;
     Log("EOS LobbySearch Find result %d", info->ResultCode);
-    if (context->callback) context->callback(&forwarded);
-    delete context;
+    const FindCallback callback = context->callback;
+    if (FinalResult(info->ResultCode)) delete context;
+    if (callback) callback(&forwarded);
 }
 
 void HookFind(void* handle, const void* options, void* clientData, FindCallback completion) {
+    const SearchParameters parameters = TakeSearchParameters(handle);
+    Log("EOS LobbySearch Find: %u parameter(s)%s%s", parameters.count, parameters.count ? ": " : "",
+        parameters.text.c_str());
     originalFind(handle, options, new FindContext{clientData, completion}, &OnFind);
 }
 
@@ -427,7 +621,12 @@ EOS_EResult HookAddAttribute(void* handle, const AddAttributeOptions* options) {
 
 EOS_EResult HookSetParameter(void* handle, const SetParameterOptions* options) {
     const EOS_EResult result = originalSetParameter(handle, options);
-    LogAttribute("LobbySearch SetParameter", options ? options->Parameter : nullptr, options ? options->ComparisonOp : -1);
+    char text[192];
+    FormatAttribute(options ? options->Parameter : nullptr, options ? options->ComparisonOp : -1, text, sizeof(text));
+    if (result != 0)
+        Log("EOS LobbySearch SetParameter %s -> result %d (refused)", text, result);
+    else
+        NoteSearchParameter(handle, text);
     return result;
 }
 
@@ -460,13 +659,38 @@ bool Wanted(const char* category) {
            std::strstr(category, "Connect") || std::strstr(category, "Presence") || std::strstr(category, "CustomInvites");
 }
 
+// LogEOSP2P at Info is mostly per-packet and per-peer bookkeeping (one evening of eight players: "Added new peer"
+// 415 times, "Accepted" 369, ...). Kept are the connection's changes of state; Warnings and Errors always.
+constexpr const char* kP2PInfoKept[] = {"Connection established", "Connection closed", "Connection interrupted",
+                                        "NAT Type", "Received connection invitation request for unknown socket"};
+// The game asks EOS_UI_GetFriendsVisible with an invalid parameter over and over; after the first, the Warning
+// says nothing new.
+std::atomic<bool> friendsVisibleLogged{false};
+
+// Whether an SDK message is logged; `note` gets a remark for its line.
+bool KeepEosLog(const LogMessage& message, const char*& note) {
+    note = "";
+    if (message.Level <= 300) {  // Fatal, Error and Warning
+        if (!std::strstr(message.Message, "GetFriendsVisible")) return true;
+        if (friendsVisibleLogged.exchange(true)) return false;
+        note = "  (further ones are not logged)";
+        return true;
+    }
+    if (!Wanted(message.Category)) return false;
+    if (!std::strstr(message.Category, "P2P")) return true;
+    for (const char* kept : kP2PInfoKept)
+        if (std::strstr(message.Message, kept)) return true;
+    return false;
+}
+
 void OnEosLog(const LogMessage* message) {
     Probing([&] {
         __try {
             // No per-session line limit: the log file drops its oldest lines past 2 MB (log.h), so the lines
             // leading up to a late crash are kept.
-            if (message && message->Category && message->Message && (message->Level <= 300 || Wanted(message->Category)))
-                Log("EOSSDK %d %.40s: %.600s", message->Level, message->Category, message->Message);
+            const char* note = "";
+            if (message && message->Category && message->Message && KeepEosLog(*message, note))
+                Log("EOSSDK %d %.40s: %.600s%s", message->Level, message->Category, message->Message, note);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         if (gameLogCallback) gameLogCallback(message);
@@ -589,6 +813,9 @@ int InstallNetLog(HMODULE game, bool diagnostics, bool recovery) {
     packetDiagnostics = diagnostics;
     handshakeRecovery = false;
     constexpr const char* sdk = "EOSSDK-Win64-Shipping.dll";
+    if (const HMODULE eos = GetModuleHandleA(sdk))
+        isOperationComplete = reinterpret_cast<IsCompleteFn>(
+            reinterpret_cast<void*>(GetProcAddress(eos, "EOS_EResult_IsOperationComplete")));
     struct Entry {
         const char* name;
         void* replacement;

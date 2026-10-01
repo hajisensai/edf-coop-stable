@@ -40,6 +40,26 @@ Config loadConfig(const std::wstring& iniPath);
 // The default settings file for a Windows language id (LANGID).
 std::string defaultIni(unsigned short langId);
 
+// One key=value of a settings file, read the way loadConfig reads it (comment and quotes removed).
+// `section` and `key` are as written; INI names compare without case.
+struct IniValue {
+    std::wstring section, key, value;
+};
+// Every key=value in the file at `path`, in file order; empty when there is no such file.
+std::vector<IniValue> readIniValues(const std::wstring& path);
+// `base` with the lines of `extra` added (both UTF-8 INI text): a section both have gets extra's lines at
+// the end of base's, so it stays one section (the Windows profile functions read only the first of two
+// with the same name); every other section of extra follows base's. Lines end in CRLF.
+std::string mergeIniTexts(const std::string& base, const std::string& extra);
+// `text` (UTF-8 INI) with every value of `values` written over the line of the same [section] key, the first
+// value winning, as when reading. Values whose key `text` does not have are not written; each is listed in
+// `dropped` as "[Section] Key=value".
+std::string applyIniValues(const std::string& text, const std::vector<IniValue>& values,
+                           std::vector<std::string>* dropped);
+// Creates `path` holding `utf8` as UTF-16LE with BOM, the encoding both the Windows profile functions and
+// this reader take without loss; false when the file exists already or cannot be written.
+bool writeNewIniUtf16(const std::wstring& path, const std::string& utf8);
+
 const char* modeName(Mode m);
 const char* relayName(int relay);
 

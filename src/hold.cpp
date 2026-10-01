@@ -152,11 +152,31 @@ std::vector<std::string> DisconnectHold::poll(uint64_t nowMs,
 }
 
 bool LobbyStatusHold::offer(const std::string& remote, bool reachable, uint64_t nowMs, std::function<void()> deliver) {
+    return offer(remote, remote, reachable, graceMs_, false, nowMs, std::move(deliver));
+}
+
+bool LobbyStatusHold::offer(const std::string& key, const std::string& probe, bool reachable, uint32_t graceMs,
+                            bool replace, uint64_t nowMs, std::function<void()> deliver) {
     std::lock_guard<std::mutex> lock(mu_);
-    for (const auto& h : held_)
-        if (h.remote == remote) return true;  // a repeat; the first one is still hidden
+    for (auto& h : held_) {
+        if (h.remote != key) continue;
+        if (replace) {  // the newer status supersedes; the link check carries on
+            h.probe = probe;
+            h.graceMs = graceMs;
+            h.deliver = std::move(deliver);
+        }
+        return true;  // a repeat; the first one is still hidden
+    }
     if (!reachable) return false;
-    held_.push_back(Held{remote, nowMs, false, std::move(deliver)});
+    held_.push_back(Held{key, probe, graceMs, nowMs, false, std::move(deliver)});
+    return true;
+}
+
+bool LobbyStatusHold::discard(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(held_.begin(), held_.end(), [&](const Held& h) { return h.remote == key; });
+    if (it == held_.end()) return false;
+    held_.erase(it);
     return true;
 }
 
@@ -214,22 +234,23 @@ size_t LobbyStatusHold::heldCount() const {
 
 std::vector<std::string> LobbyStatusHold::poll(uint64_t nowMs,
                                                const std::function<bool(const std::string&)>& reachable) {
-    std::vector<std::string> remotes;
+    std::vector<std::string> probes;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        for (const auto& h : held_) remotes.push_back(h.remote);
+        for (const auto& h : held_) probes.push_back(h.probe);
     }
     // Ask the direct transport outside our lock (it has its own).
     std::unordered_set<std::string> alive;
-    for (const auto& r : remotes)
+    for (const auto& r : probes)
         if (reachable && reachable(r)) alive.insert(r);
 
     std::vector<Held> due;
     {
         std::lock_guard<std::mutex> lock(mu_);
         for (auto it = held_.begin(); it != held_.end();) {
-            if (alive.count(it->remote)) it->reachableAtMs = nowMs;
-            if (!it->abandoned && nowMs - it->reachableAtMs < graceMs_) {
+            const bool up = alive.count(it->probe) != 0;
+            if (up) it->reachableAtMs = nowMs;
+            if (!it->abandoned && (up || nowMs - it->reachableAtMs < it->graceMs)) {
                 ++it;
                 continue;
             }
@@ -237,12 +258,75 @@ std::vector<std::string> LobbyStatusHold::poll(uint64_t nowMs,
             it = held_.erase(it);
         }
     }
+    // Members' statuses first, then the owner, the room last: delivering the room's close leaves it, and
+    // nothing of that room may reach the game after it.
+    auto rank = [](const Held& h) { return h.remote.rfind('#', 0) != 0 ? 0 : h.remote == "#room" ? 2 : 1; };
+    std::stable_sort(due.begin(), due.end(), [&](const Held& a, const Held& b) { return rank(a) < rank(b); });
     std::vector<std::string> delivered;
     for (auto& h : due) {
         delivered.push_back(h.remote);
         if (h.deliver) h.deliver();  // unlocked: it may call straight back into us
     }
     return delivered;
+}
+
+void LobbyOwnerPin::entered(const std::string& owner) {
+    std::lock_guard<std::mutex> lock(mu_);
+    pinned_ = owner;
+    epic_ = owner;
+}
+
+void LobbyOwnerPin::left() {
+    std::lock_guard<std::mutex> lock(mu_);
+    pinned_.clear();
+    epic_.clear();
+}
+
+LobbyOwnerPin::Promotion LobbyOwnerPin::onPromoted(const std::string& target, const std::string& self,
+                                                   bool pinnedReachable) {
+    std::lock_guard<std::mutex> lock(mu_);
+    epic_ = target;
+    Promotion p;
+    if (pinned_.empty()) {  // the owner was not known when we joined: Epic's word is all there is
+        pinned_ = target;
+        return p;
+    }
+    if (target == pinned_) {
+        p.hide = true;  // the game never saw the owner change, so it has nothing to undo
+        return p;
+    }
+    if (!pinnedReachable) {
+        pinned_ = target;  // the pinned owner is gone for real: the room follows Epic
+        return p;
+    }
+    p.hide = true;
+    p.promoteBack = !self.empty() && target == self;
+    return p;
+}
+
+bool LobbyOwnerPin::onPinnedJoined(const std::string& self) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return !self.empty() && !pinned_.empty() && epic_ == self && pinned_ != self;
+}
+
+void LobbyOwnerPin::follow(const std::string& owner) {
+    std::lock_guard<std::mutex> lock(mu_);
+    pinned_ = owner;
+}
+
+bool LobbyOwnerPin::kickAuthorized() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return pinned_.empty() || epic_ == pinned_;
+}
+
+std::string LobbyOwnerPin::pinned() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return pinned_;
+}
+
+std::string LobbyOwnerPin::usurper() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return epic_ != pinned_ ? epic_ : std::string();
 }
 
 }  // namespace dn

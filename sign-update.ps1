@@ -1,11 +1,13 @@
 # Signs the auto-update manifest of a release and checks the result (format: src/updater.h).
-# Writes <Dll>.sig: "EDF6DirectNet <Version>\n<sha256 of Dll>\n<ECDSA P-256 signature, r||s in hex>\n".
+# Writes <Dll>.sig: "EDF6Coop <Version>\n<sha256 of Dll>\n<ECDSA P-256 signature, r||s in hex>\n".
 # The private key is the base64 CNG ECCPRIVATE blob in $env:EDF6DN_UPDATE_SIGNING_KEY (repository secret);
 # it must belong to the public key compiled into the updater (read from -Updater, src/updater.cpp), and
 # the signature is verified with that public key before this returns. Works in PowerShell 5.1 and 7.
 param(
     [Parameter(Mandatory)] [string]$Dll,
     [Parameter(Mandatory)] [string]$Version,
+    # The room size the DLL was built for: its marker says EDF6COOP_<n>P_VERSION=.
+    [ValidateSet(8, 10, 12, 16, 24, 32)] [int]$Players = 8,
     [string]$Updater = (Join-Path $PSScriptRoot 'src\updater.cpp'),
     # Test hook only: base64 CNG ECCPUBLIC blob used instead of the kReleaseKey in $Updater. The release
     # workflow never passes it, so releases are always checked against the key clients have compiled in.
@@ -28,12 +30,12 @@ if ($TestPublicKeyBase64) {
 if ($public.Length -ne 72) { throw "public key has $($public.Length) bytes, not 72" }
 
 $dllBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Dll).Path)
-$marker = [Text.Encoding]::ASCII.GetBytes("EDF6DN_VERSION=$Version")
-if ([Text.Encoding]::ASCII.GetString($dllBytes).IndexOf("EDF6DN_VERSION=$Version`0") -lt 0) {
-    throw "$Dll does not carry the version marker EDF6DN_VERSION=$Version"
+$marker = "EDF6COOP_${Players}P_VERSION=$Version"
+if ([Text.Encoding]::ASCII.GetString($dllBytes).IndexOf("$marker`0") -lt 0) {
+    throw "$Dll does not carry the version marker $marker (is it the $Players-player build of ${Version}?)"
 }
 $hash = (Get-FileHash -LiteralPath $Dll -Algorithm SHA256).Hash.ToLowerInvariant()
-$manifest = [Text.Encoding]::ASCII.GetBytes("EDF6DirectNet $Version`n$hash`n")
+$manifest = [Text.Encoding]::ASCII.GetBytes("EDF6Coop $Version`n$hash`n")
 
 $key = [Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($env:EDF6DN_UPDATE_SIGNING_KEY.Trim()),
     [Security.Cryptography.CngKeyBlobFormat]::EccPrivateBlob)
@@ -51,12 +53,12 @@ try {
 if ($signature.Length -ne 64) { throw "unexpected signature length $($signature.Length)" }
 $hex = -join ($signature | ForEach-Object { $_.ToString('x2') })
 $sigPath = "$((Resolve-Path -LiteralPath $Dll).Path).sig"
-[IO.File]::WriteAllBytes($sigPath, [Text.Encoding]::ASCII.GetBytes("EDF6DirectNet $Version`n$hash`n$hex`n"))
+[IO.File]::WriteAllBytes($sigPath, [Text.Encoding]::ASCII.GetBytes("EDF6Coop $Version`n$hash`n$hex`n"))
 
 # Check what was written the way a client sees it: only the public key, the file as bytes.
 $written = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($sigPath))
 $lines = $written.Split("`n")
-if ($lines.Count -ne 4 -or $lines[3] -ne '' -or $lines[0] -ne "EDF6DirectNet $Version" -or $lines[1] -ne $hash -or
+if ($lines.Count -ne 4 -or $lines[3] -ne '' -or $lines[0] -ne "EDF6Coop $Version" -or $lines[1] -ne $hash -or
     $lines[2] -notmatch '^[0-9a-f]{128}$') { throw "$sigPath is malformed" }
 $check = [byte[]]@(0..63 | ForEach-Object { [Convert]::ToByte($lines[2].Substring(2 * $_, 2), 16) })
 $publicKey = [Security.Cryptography.CngKey]::Import($public, [Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)

@@ -47,18 +47,28 @@ struct DirectOptions {
     std::map<std::string, std::string> memberIds;
     uint32_t ifIndexV4 = 0;       // IP_UNICAST_IF: force egress through this adapter (0 = OS routing)
     uint32_t ifIndexV6 = 0;
-    // A stalled link keeps buffering/retransmitting this long. Kept short on purpose: while game data
-    // is stuck in a stalled link the other players may be waiting for it at a sync point.
+    // A link closes when nothing authentic arrived from the peer for this long ("silent").
     uint32_t linkTimeoutMs = 60000;
+    // ...or when a packet the game sent reliably has been unacknowledged this long while the peer is
+    // still heard ("stalled"). Kept short on purpose: while game data is stuck in a stalled link the
+    // other players may be waiting for it at a sync point. Unreliable game packets never stall a link:
+    // they are given up after ReliableSender::kExpireMs.
+    uint32_t stallTimeoutMs = 60000;
     uint32_t pingIntervalMs = 1000;
     // host: the member list sent to joiners names only clients heard from within this long, so every
     // joiner learns within seconds (not after linkTimeoutMs) that a member's link went quiet.
     uint32_t rosterFreshMs = 10000;
-    // EDF6 sends all game data UnreliableUnordered. Carrying it reliably-unordered delivers every
-    // packet exactly once, possibly reordered: a pattern the unreliable transport can produce anyway,
-    // so the game handles it; it just never loses a packet any more.
+    // EDF6 sends all game data UnreliableUnordered, also data whose loss breaks the game. Carrying it
+    // with a sequence number repairs loss (delivered at most once, possibly reordered: a pattern the
+    // unreliable transport can produce anyway, so the game handles it) until ReliableSender::kExpireMs;
+    // a packet the network still has not let through by then is given up, as EOS would have lost it.
     bool upgradeUnreliable = true;
+    // Retransmission allowance shared with other links; null: the one of this process.
+    std::shared_ptr<RetransmitBudget> retransmitBudget;
     double testDropRate = 0.0;  // tests only: drop this fraction of outgoing datagrams
+    // Tests only: an uplink of this many bytes per second (0 = unlimited) with a 100 ms queue; what does
+    // not fit is dropped, as a full router queue does.
+    uint64_t testUplinkBytesPerSecond = 0;
 };
 
 // UDP payload bytes on our socket since the last takeWireTraffic(), retransmits and pings included.
@@ -125,6 +135,8 @@ public:
     // Link datagrams dropped since start because they failed authentication: a bad tag (forged,
     // modified, or of an earlier session), or a counter already seen (replayed).
     uint64_t rejectedPackets() const { return rejected_; }
+    // Datagrams the socket refused to send since start (its buffer full, or no route).
+    uint64_t sendFailures() const { return sendFailures_; }
 
     // Tests only: silently drop every outgoing datagram (simulates a total network outage).
     void setTestBlackhole(bool on) { testBlackhole_ = on; }
@@ -186,9 +198,9 @@ private:
     void sendData(Link& link, DataMsg msg, uint64_t now);
     void sendMsg(const Message& m, const sockaddr_storage& to, int toLen);
     void sendLink(Link& link, Message m);
-    void sendSealed(Link& link, std::vector<uint8_t>& dg);
+    bool sendSealed(Link& link, std::vector<uint8_t>& dg);
     void sendBye();
-    void sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen);
+    bool sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen);
     void tick(uint64_t now);
     void broadcastRoster();
     void rosterChanged();
@@ -203,7 +215,10 @@ private:
     uint16_t boundPort_ = 0;
     std::atomic<bool> running_{false};
     std::atomic<bool> testBlackhole_{false};
-    std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0}, rejected_{0};
+    std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0}, rejected_{0}, sendFailures_{0};
+    std::shared_ptr<RetransmitBudget> retransmitBudget_;
+    double testUplinkTokens_ = 0;  // bytes, see DirectOptions::testUplinkBytesPerSecond
+    uint64_t testUplinkMs_ = 0;
     std::thread thread_;
     std::mutex mu_;
 

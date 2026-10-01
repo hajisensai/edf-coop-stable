@@ -514,6 +514,22 @@ void TestHold() {
     ClearRecords();
     Check(HeldPacketCount() == 0, "leaving the room drops held packets");
 
+    // The ones dropped are the oldest: of ten held, the last eight reach the game, in order.
+    incoming.clear();
+    for (std::size_t i = 0; i < kHeldPackets + 2; ++i) {
+        auto numbered = packet;
+        numbered[1] = static_cast<std::uint8_t>(i);  // the datagram header's random bytes
+        incoming.push_back({numbered, nullptr, 0});
+    }
+    PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size);
+    for (const auto& side : sides) incoming.push_back({side, nullptr, kSideChannel});
+    bool newestKept = true;
+    for (std::size_t i = 2; i < kHeldPackets + 2; ++i)
+        newestKept = newestKept && PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+                     buffer[1] == i;
+    Check(newestKept && HeldPacketCount() == 0, "the oldest held packets are the ones dropped");
+    ClearRecords();
+
     // Given up after kHeldPacketMs: the game has given up on that sync by then.
     incoming.clear();
     incoming.push_back({packet, nullptr, 0});

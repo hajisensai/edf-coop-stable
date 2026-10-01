@@ -151,6 +151,8 @@ void TestLobby(const wchar_t* fakePath) {
     // Two members join: one with the split, one without. The next observation sees them and sends our marker again.
     AddMember("newer", true);
     AddMember("older", false);
+    AddMember("zero", false);
+    Fake<void (*)(const char*, const char*, std::int64_t)>("FakeEos_SetAttribute")("zero", kSplitSyncKey, 0);
     Tick();
     Check(Updates() == 1, "members are observed once a second, not every tick");
     NextObservation();
@@ -160,6 +162,7 @@ void TestLobby(const wchar_t* fakePath) {
     Check(PeerReadsSplitSync(User("newer")) && PeerReadsSplitSync(User("self")), "members with the marker read it");
     Check(!PeerReadsSplitSync(User("older")) && !PeerReadsSplitSync(User("older")), "a member without it does not");
     Check(!PeerReadsSplitSync(User("stranger")), "nor does someone not in the room");
+    Check(!PeerReadsSplitSync(User("zero")), "nor a member whose marker names an older split format");
 
     // Our copy of the lobby loses an attribute: the marker stays.
     Fake<void (*)(const char*)>("FakeEos_ClearAttributes")("newer");

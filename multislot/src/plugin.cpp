@@ -57,16 +57,15 @@ HMODULE self = nullptr;
 
 // out: MAX_PATH characters. Refuses paths too long to also hold the rotated log name (log.cpp), instead of
 // letting a *_s string function end the game over it.
-// `extension` is a literal: its array size, terminator included, is exactly what gets copied.
-template <std::size_t N>
-bool SiblingPath(wchar_t* out, const wchar_t (&extension)[N]) {
+bool SiblingPath(wchar_t* out, const wchar_t* extension) {
     const DWORD length = GetModuleFileNameW(self, out, MAX_PATH);
     if (!length || length >= MAX_PATH) return false;
-    wchar_t* dot = wcsrchr(out, L'.');
-    if (!dot) return false;
-    const std::size_t stem = static_cast<std::size_t>(dot - out);
-    if (stem + N + 7 >= MAX_PATH) return false;
-    wmemcpy(dot, extension, N);
+    const std::wstring module(out, length);
+    const std::size_t dot = module.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    const std::wstring path = module.substr(0, dot) + extension;
+    if (path.size() + 8 >= MAX_PATH) return false;  // room for the rotated log name's suffix
+    out[path.copy(out, path.size())] = L'\0';
     return true;
 }
 

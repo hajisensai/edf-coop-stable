@@ -141,17 +141,46 @@ EosResult FakeSend(void*, const EosSendOptions* options) {
     return 0;
 }
 
-std::deque<std::vector<std::uint8_t>> incoming;
-constexpr EosResult kNotFound = 13;  // EOS_NotFound
-EosResult FakeReceive(void*, const void*, void**, void*, std::uint8_t* channel, void* data, std::uint32_t* size) {
+struct Incoming {
+    Incoming(std::vector<std::uint8_t> b, void* p = nullptr, std::uint8_t c = 0) : bytes(std::move(b)), peer(p), channel(c) {}
+    std::vector<std::uint8_t> bytes;
+    void* peer;
+    std::uint8_t channel;
+};
+std::deque<Incoming> incoming;
+constexpr EosResult kNotFound = 18;  // EOS_NotFound
+struct SocketId {  // EOS_P2P_SocketId
+    std::int32_t ApiVersion;
+    char SocketName[33];
+};
+struct ReceiveOptions {  // EOS_P2P_ReceivePacketOptions
+    std::int32_t ApiVersion;
+    const void* LocalUserId;
+    std::uint32_t MaxDataSizeBytes;
+    const std::uint8_t* RequestedChannel;
+};
+EosResult FakeReceive(void*, const void*, void** peer, void* socket, std::uint8_t* channel, void* data, std::uint32_t* size) {
     if (incoming.empty()) return kNotFound;
     const auto packet = incoming.front();
     incoming.pop_front();
-    std::memcpy(data, packet.data(), packet.size());
-    *size = static_cast<std::uint32_t>(packet.size());
-    if (channel) *channel = 0;
+    std::memcpy(data, packet.bytes.data(), packet.bytes.size());
+    *size = static_cast<std::uint32_t>(packet.bytes.size());
+    if (peer) *peer = packet.peer;
+    if (socket) {
+        auto* id = static_cast<SocketId*>(socket);
+        id->ApiVersion = 1;
+        std::snprintf(id->SocketName, sizeof(id->SocketName), "GAME%d", packet.channel);
+    }
+    if (channel) *channel = packet.channel;
     return 0;
 }
+
+// Who reads a split sync (syncmarker.cpp in the plugin).
+std::vector<const void*> readers;
+bool FakeReaders(const void* remote) { return std::find(readers.begin(), readers.end(), remote) != readers.end(); }
+
+unsigned long long fakeNow = 1000;
+unsigned long long FakeClock() { return fakeNow; }
 
 // The game's datagram around a message: 8 + 12 header bytes and a few bytes of message headers.
 std::vector<std::uint8_t> GamePacket(const std::vector<std::uint8_t>& message) {
@@ -305,6 +334,7 @@ void TestRoundTrip(int players, bool expectMoved) {
 
     // Host sends: the side packets go first, reliable, on their own channel; then the game's packet as it was.
     const int peer = 42;
+    readers = {&peer};
     EosSendOptions options{};
     options.ApiVersion = 3;
     options.RemoteUserId = &peer;
@@ -319,23 +349,26 @@ void TestRoundTrip(int players, bool expectMoved) {
                   IsSidePacket(sent[i].bytes.data(), sent[i].bytes.size()),
               (label + "side packets are reliable, to the same peer, on the side channel").c_str());
 
-    // A member: nothing stored yet. The sync arrives before its side packets and is held back; the side packets are
-    // taken out; the resent sync gets through.
+    // A member: nothing stored yet. The sync arrives before its side packets (they travel apart, and reliable
+    // unordered delivery keeps no order) and is held; the side packets are taken out; then the held sync reaches the
+    // game as it came, from the host on its socket and channel - no resend needed.
     ClearRecords();
     incoming.clear();
-    incoming.push_back(packet);
-    for (std::size_t i = 0; i + 1 < sent.size(); ++i) incoming.push_back(sent[i].bytes);
-    incoming.push_back(packet);
+    int sender = 7;
+    incoming.push_back({packet, &sender, 0});
+    for (std::size_t i = 0; i + 1 < sent.size(); ++i) incoming.push_back({sent[i].bytes, &sender, kSideChannel});
     std::vector<std::uint8_t> buffer(0x1000);
     std::uint32_t size = 0;
     std::uint8_t channel = 0xFF;
     void* from = nullptr;
-    EosResult result = PacketFitReceive(nullptr, nullptr, &from, nullptr, &channel, buffer.data(), &size);
+    SocketId socket{};
+    const ReceiveOptions receive{2, nullptr, 0x1000, nullptr};
+    EosResult result = PacketFitReceive(nullptr, &receive, &from, &socket, &channel, buffer.data(), &size);
     Check(result == 0 && size == packet.size() && std::memcmp(buffer.data(), packet.data(), size) == 0 &&
-              incoming.empty() == (stubCount > 0),
-          (label + "the game receives the sync only once its records are known").c_str());
-    if (stubCount == 0) incoming.clear();
-    Check(PacketFitReceive(nullptr, nullptr, &from, nullptr, &channel, buffer.data(), &size) == kNotFound,
+              incoming.empty() && from == &sender && channel == 0 && std::strcmp(socket.SocketName, "GAME0") == 0,
+          (label + "the game receives the sync once its records are known, from its sender").c_str());
+    Check(HeldPacketCount() == 0, (label + "nothing stays held").c_str());
+    Check(PacketFitReceive(nullptr, &receive, &from, &socket, &channel, buffer.data(), &size) == kNotFound,
           (label + "and nothing else: side packets never reach the game").c_str());
 
     // MissionSync_Update reads every record back, stub or not.
@@ -368,6 +401,146 @@ void TestRoundTrip(int players, bool expectMoved) {
         Check(left == static_cast<int>(stubCount) && matched == players - left && reader.Position() == message.size(),
               (label + "a missing record leaves only its player out").c_str());
     }
+}
+
+// The 8-player sync, split, as the host sends it.
+std::vector<std::uint8_t> SplitPacket() {
+    std::vector<Record> records;
+    for (int i = 0; i < 8; ++i) records.push_back(MakeRecord(i, 143));
+    Stream host;
+    return GamePacket(HostMessage(records, host));
+}
+
+EosSendOptions SendTo(const void* remote, const std::vector<std::uint8_t>& packet) {
+    EosSendOptions options{};
+    options.ApiVersion = 3;
+    options.RemoteUserId = remote;
+    options.Data = packet.data();
+    options.DataLengthBytes = static_cast<std::uint32_t>(packet.size());
+    return options;
+}
+
+void TestSendGate() {
+    ClearRecords();
+    const auto packet = SplitPacket();
+    const int marked = 1, unmarked = 2;
+    readers = {&marked};
+    sent.clear();
+    auto options = SendTo(&unmarked, packet);
+    Check(PacketFitSend(nullptr, &options) == kEosLimitExceeded && sent.empty(),
+          "a member without the split gets neither the sync nor its side packets, and the game hears what EOS said "
+          "before the split");
+    options = SendTo(&marked, packet);
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 2 && sent.back().bytes == packet,
+          "a member with the split gets the side packet and the sync");
+    sent.clear();
+    const std::vector<std::uint8_t> plain(1100, 0x11);
+    options = SendTo(&unmarked, plain);
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 1 && sent[0].bytes == plain,
+          "packets without a stub go to everyone as before");
+    sent.clear();
+    SetSplitSyncReaders(nullptr);
+    options = SendTo(&marked, packet);
+    Check(PacketFitSend(nullptr, &options) == kEosLimitExceeded && sent.empty(),
+          "without the lobby marker nobody gets a split sync");
+    SetSplitSyncReaders(&FakeReaders);
+    ClearRecords();
+}
+
+// Side packets of `packet` as the host would send them.
+std::vector<std::vector<std::uint8_t>> SidesOf(const std::vector<std::uint8_t>& packet) {
+    const int peer = 1;
+    readers = {&peer};
+    sent.clear();
+    auto options = SendTo(&peer, packet);
+    PacketFitSend(nullptr, &options);
+    std::vector<std::vector<std::uint8_t>> sides;
+    for (std::size_t i = 0; i + 1 < sent.size(); ++i) sides.push_back(sent[i].bytes);
+    return sides;
+}
+
+void TestHold() {
+    SetPacketFitClock(&FakeClock);
+    ClearRecords();
+    const auto packet = SplitPacket();
+    const auto sides = SidesOf(packet);
+    ClearRecords();  // the member knows nothing yet
+    std::vector<std::uint8_t> buffer(0x1000);
+    std::uint32_t size = 0;
+    std::uint8_t channel = 0;
+    void* from = nullptr;
+    SocketId socket{};
+
+    // Held packets only go to a caller asking for their channel, with room for them.
+    incoming.clear();
+    incoming.push_back({packet, nullptr, 3});
+    for (const auto& side : sides) incoming.push_back({side, nullptr, kSideChannel});
+    const std::uint8_t other = 4, three = 3;
+    const ReceiveOptions wrongChannel{2, nullptr, 0x1000, &other};
+    Check(PacketFitReceive(nullptr, &wrongChannel, &from, &socket, &channel, buffer.data(), &size) == kNotFound &&
+              HeldPacketCount() == 1,
+          "a held packet is not handed to a caller asking for another channel");
+    const ReceiveOptions small{2, nullptr, 100, nullptr};
+    Check(PacketFitReceive(nullptr, &small, &from, &socket, &channel, buffer.data(), &size) == kNotFound &&
+              HeldPacketCount() == 1,
+          "nor to one without room for it");
+    const ReceiveOptions right{2, nullptr, 0x1000, &three};
+    Check(PacketFitReceive(nullptr, &right, &from, &socket, &channel, buffer.data(), &size) == 0 && channel == 3 &&
+              size == packet.size() && HeldPacketCount() == 0,
+          "but to the next caller that asks for it");
+
+    // Oldest first.
+    ClearRecords();
+    auto second = packet;
+    second[1] ^= 0x55;  // another datagram of the same sync
+    incoming.clear();
+    incoming.push_back({packet, nullptr, 0});
+    incoming.push_back({second, nullptr, 0});
+    for (const auto& side : sides) incoming.push_back({side, nullptr, kSideChannel});
+    Check(PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+              std::memcmp(buffer.data(), packet.data(), size) == 0,
+          "held packets go out oldest first");
+    Check(PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+              std::memcmp(buffer.data(), second.data(), size) == 0 && HeldPacketCount() == 0,
+          "and then the next");
+
+    // Never more than kHeldPackets; the oldest goes.
+    ClearRecords();
+    incoming.clear();
+    for (std::size_t i = 0; i < kHeldPackets + 2; ++i) incoming.push_back({packet, nullptr, 0});
+    Check(PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == kNotFound &&
+              HeldPacketCount() == kHeldPackets,
+          "held packets are bounded");
+    ClearRecords();
+    Check(HeldPacketCount() == 0, "leaving the room drops held packets");
+
+    // The ones dropped are the oldest: of ten held, the last eight reach the game, in order.
+    incoming.clear();
+    for (std::size_t i = 0; i < kHeldPackets + 2; ++i) {
+        auto numbered = packet;
+        numbered[1] = static_cast<std::uint8_t>(i);  // the datagram header's random bytes
+        incoming.push_back({numbered, nullptr, 0});
+    }
+    PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size);
+    for (const auto& side : sides) incoming.push_back({side, nullptr, kSideChannel});
+    bool newestKept = true;
+    for (std::size_t i = 2; i < kHeldPackets + 2; ++i)
+        newestKept = newestKept && PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+                     buffer[1] == i;
+    Check(newestKept && HeldPacketCount() == 0, "the oldest held packets are the ones dropped");
+    ClearRecords();
+
+    // Given up after kHeldPacketMs: the game has given up on that sync by then.
+    incoming.clear();
+    incoming.push_back({packet, nullptr, 0});
+    PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size);
+    fakeNow += kHeldPacketMs;
+    for (const auto& side : sides) incoming.push_back({side, nullptr, kSideChannel});
+    Check(PacketFitReceive(nullptr, nullptr, &from, &socket, &channel, buffer.data(), &size) == kNotFound &&
+              HeldPacketCount() == 0,
+          "a packet held too long is dropped");
+    SetPacketFitClock(nullptr);
+    ClearRecords();
 }
 
 void TestOversizeDiagnostic() {
@@ -418,12 +591,17 @@ std::size_t Count(const std::string& text, const char* needle) {
 
 void TestLogLines(const std::wstring& path) {
     const std::string log = ReadLog(path);
-    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 1 &&
-              Count(log, "1 of them are sent beside it") == 1 && Count(log, "12 loadout records") == 1,
+    // Eight players: the round trip, then the gate and hold tests build that sync again.
+    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 3 &&
+              Count(log, "1 of them are sent beside it") == 3 && Count(log, "12 loadout records") == 1,
           "the host logs each sync that sends records beside the message");
     Check(Count(log, "MISSION sync: 7 loadout records") == 0, "a sync that fits logs nothing");
-    Check(Count(log, "held back until the loadout record") > 0 && Count(log, "arrived beside the start message") > 0,
-          "a member logs a held-back sync and the records that arrive");
+    Check(Count(log, "held until 1 loadout record(s) arrive, the first for player index 7") > 0 &&
+              Count(log, "arrived beside the start message") > 0 && Count(log, "handed to the game") > 0,
+          "a member logs a held sync, the records that arrive and the sync handed on");
+    Check(Count(log, "the oldest is dropped") > 0 && Count(log, "did not arrive within 30 s") == 1,
+          "dropped held packets are logged");
+    Check(Count(log, "nobody is known to read a split start message") == 1, "a missing lobby marker is logged once");
     std::vector<std::uint8_t> packet(1181, 0x33);
     LogOversizePacket(0x12C8C5A, 0, 0, packet.data(), 1170, 0);
     LogOversizePacket(0x5000, 1, 0, packet.data(), 1181, 1);
@@ -445,6 +623,7 @@ int main(int argc, char** argv) {
         LogOpen(logPath.c_str());
     }
     SetRecordFunctions(&FakeWrite, &FakeRead);
+    SetSplitSyncReaders(&FakeReaders);
     Check(InstallPacketFit(nullptr, &FakeRedirect) == 2 && redirected.size() == 2 &&
               redirected[0] == "EOSSDK-Win64-Shipping.dll!EOS_P2P_ReceivePacket" &&
               redirected[1] == "EOSSDK-Win64-Shipping.dll!EOS_P2P_SendPacket",
@@ -459,6 +638,8 @@ int main(int argc, char** argv) {
     TestRoundTrip(8, true);
     TestRoundTrip(10, true);
     TestRoundTrip(12, true);
+    TestSendGate();
+    TestHold();
     TestOversizeDiagnostic();
     if (!logPath.empty()) TestLogLines(logPath);
     if (failures) {

@@ -29,6 +29,7 @@
 #include "packetfit.h"
 #include "patches.h"
 #include "peertimeout.h"
+#include "syncmarker.h"
 #include "roomview.h"
 #include "rooms.h"
 #include "smoothing.h"
@@ -38,7 +39,7 @@
 namespace multislot {
 namespace {
 
-constexpr const char* kVersion = "1.5.14";
+constexpr const char* kVersion = "1.5.15";
 // CMake's project VERSION is the one EDFModLoader is told (PluginInfo); kVersion adds only a pre-release tag to it.
 #define MULTISLOT_TEXT2(x) #x
 #define MULTISLOT_TEXT(x) MULTISLOT_TEXT2(x)
@@ -594,11 +595,14 @@ bool LoadPlugin(PluginInfo* info) {
     // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
     if (mission) {
         const int imports = InstallPacketFit(game, &RedirectGameImport);
+        // The marker says this machine reads a split message: only true once both P2P imports are ours.
+        const bool marker = imports == 2 && InstallSyncMarker(game, &RedirectGameImport);
+        if (marker) SetSplitSyncReaders(&PeerReadsSplitSync);
         if (imports == 2)
             Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "
-                "what fits and sends the other loadout records beside it; smaller ones are unchanged. Everyone in a "
-                "room of more than 4 needs this version",
-                kEosMaxPacket);
+                "what fits and sends the other loadout records beside it; smaller ones are unchanged. It only goes to "
+                "members whose lobby entry says they read it (MultiSlot 1.5.15 or later); lobby marker %s",
+                kEosMaxPacket, marker ? "on" : "UNAVAILABLE, so such a start message is sent to nobody");
         else
             Log("Mission sync: only %d of the 2 EOS P2P imports could be redirected; missions of eight or more players "
                 "cannot start", imports);

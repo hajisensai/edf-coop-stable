@@ -409,6 +409,7 @@ Config loadConfig(const std::wstring& iniPath) {
     c.direct.key = toUtf8(readString(ini, s, L"Key", L""));
     c.direct.linkTimeoutMs =
         static_cast<uint32_t>(std::clamp(readInt(ini, s, L"LinkTimeoutMs", 60000, 0, 999999999, w), 3000, 300000));
+    c.direct.stallTimeoutMs = c.direct.linkTimeoutMs;  // one setting for both ways a link can die
     c.publicAddress = toUtf8(readString(ini, s, L"PublicAddress", L""));
     c.autoJoin = readBool(ini, s, L"AutoJoin", true, w);
     c.upnp = readBool(ini, s, L"UPnP", true, w);

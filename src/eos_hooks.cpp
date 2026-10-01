@@ -931,22 +931,25 @@ void maybeLogStats() {
     TrafficSummary t = g.gameOut.take();
     std::shared_ptr<DirectNet> net = g.net.load();
     WireTraffic w = net ? net->takeWireTraffic() : WireTraffic{};
-    if (!(dOut | dIn | eOut | eIn | fail)) return;
+    // Nothing sent or received by the game (menus, idle links only pinging): nothing to report.
+    if (!(dOut | dIn | eOut | eIn | fail | t.packets)) return;
     // kbps = bytes * 8 / 1000 / seconds
     auto kbps = [](uint64_t bytes, double seconds) { return static_cast<double>(bytes) * 8.0 / 1000.0 / seconds; };
-    logf("TRAFFIC last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
+    logKickRepeats();
+    // One line: what the game sent, what that cost on our socket (resends, acks and pings included, so
+    // "wire up" far above "game sends" is the transport's own overhead), and each link's resend state.
+    logf("STATS last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
          "(largest %u), %.0f%% copies of the same data to another player, %.1f%% of packets repeat one sent to the "
-         "same player within 5 s | direct link up %.0f kbps down %.0f kbps, relayed for others %.0f kbps",
+         "same player within 5 s | wire up %.0f kbps down %.0f kbps, relayed for others %.0f kbps | direct packets "
+         "out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
          kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
          t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
          t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
          t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
-         kbps(w.in, 60.0), kbps(w.relayed, 60.0));
-    logKickRepeats();
-    logf("STATS last 60s: direct out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
-         static_cast<unsigned long long>(dOut), static_cast<unsigned long long>(dIn),
-         static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg), static_cast<unsigned long long>(eIn),
-         static_cast<unsigned long long>(fail), net ? " | " : "", net ? net->statusLine().c_str() : "");
+         kbps(w.in, 60.0), kbps(w.relayed, 60.0), static_cast<unsigned long long>(dOut),
+         static_cast<unsigned long long>(dIn), static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg),
+         static_cast<unsigned long long>(eIn), static_cast<unsigned long long>(fail), net ? " | " : "",
+         net ? net->statusLine().c_str() : "");
 }
 
 // A direct-link host lets a player in only as the room member whose published identity it proves

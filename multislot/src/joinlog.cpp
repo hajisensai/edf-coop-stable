@@ -197,7 +197,8 @@ void NoteHandshakeUser(const char* event, const void* user) {
 // The game takes this branch on every update of the link from then on (it neither retries nor resets the flag),
 // which logged two lines per frame, about 500 a second, and used up the session's line budget in ten seconds.
 // One line per link when it times out, and a reminder with the count while it stays timed out.
-constexpr std::size_t kTimeoutLinks = 16;
+// Room for every link of a full room at once: fewer, and links pushing each other out log every frame again.
+constexpr std::size_t kTimeoutLinks = 2 * kMaxPlayers > 16 ? 2 * kMaxPlayers : 16;
 constexpr ULONGLONG kTimeoutRepeatMs = 30000;
 struct TimeoutEpisode {
     std::uintptr_t link = 0;

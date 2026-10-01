@@ -13,6 +13,7 @@
 #include "identity.h"
 #include "joinlog.h"
 #include "packetfit.h"
+#include "patches.h"  // kMaxPlayers
 
 namespace multislot {
 namespace {
@@ -200,7 +201,8 @@ bool IsHello(const void* data, std::uint32_t length) {
 // instead of one per packet (1.5.15 logged each, hundreds a minute). A run ends when no hello went to that peer
 // for kHelloRunGapMs, when its connection is closed or when the lobby is left; its line says which. A send that
 // fails is logged on its own as well, as it happens.
-constexpr std::size_t kHelloRuns = 16;
+// One run per peer of a full room at once: fewer, and handshaking peers push each other out, a line each time.
+constexpr std::size_t kHelloRuns = 2 * kMaxPlayers > 16 ? 2 * kMaxPlayers : 16;
 constexpr ULONGLONG kHelloRunGapMs = 3000;
 struct HelloRun {
     const void* remote = nullptr;  // EOS_ProductUserId; null: a free entry

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include "../src/joinlog.h"
 #include "../src/log.h"
 
@@ -105,6 +106,32 @@ int wmain(int argc, wchar_t** argv) {
               "real diagnostic path emits counts before and after an unavailable room");
         Check(text.find("ROOM USERS unavailable: unexpected or unreadable room type") != std::string::npos,
               "failed room guard is visible instead of silently dropping diagnostics");
+        // Later reports in the same room list only the slots that changed since the last one listed.
+        auto slotLines = [&]() {
+            LogFlush();
+            std::ifstream now(argv[1], std::ios::binary);
+            const std::string all((std::istreambuf_iterator<char>(now)), std::istreambuf_iterator<char>());
+            std::size_t count = 0, empty = 0;
+            for (auto at = all.find("ROOM USER: slot="); at != std::string::npos; at = all.find("ROOM USER: slot=", at + 1))
+                ++count;
+            for (auto at = all.find(" empty now (was EOS "); at != std::string::npos; at = all.find(" empty now (was EOS ", at + 1))
+                ++empty;
+            return std::make_pair(count, empty);
+        };
+        const auto before = slotLines();
+        Check(before.first == 2 * (kN - 1), "a new Users object lists every occupied slot");
+        Sleep(510);  // NoteUserSlots polls at most every 500 ms
+        Put(users[1].data(), 0x10, std::uint32_t{3});
+        NoteUserSlots(6);
+        const auto confirmed = slotLines();
+        Check(confirmed.first == before.first + 1 && confirmed.second == 0, "one confirmed user lists one slot");
+        Sleep(510);
+        slots[2] = 0;
+        NoteUserSlots(6);
+        const auto vacated = slotLines();
+        Check(vacated.first == confirmed.first + 1 && vacated.second == 1, "a vacated slot is listed as empty now");
+        slots[2] = reinterpret_cast<std::uintptr_t>(users[1].data());
+        Put(users[1].data(), 0x10, std::uint32_t{2});
         // Link::OnInitial takes its timeout branch on every frame once the deadline passed: one line per link.
         const MidHandler timeout = JoinLogHookHandler(0x12D5C90);
         Check(timeout != nullptr, "the handshake timeout site has a handler");

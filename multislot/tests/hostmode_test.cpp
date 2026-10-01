@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../src/hostmode.h"
+#include "../src/lobbystate.h"
 #include "../src/updatecheck.h"
 #include "../src/patches.h"
 
@@ -117,6 +118,22 @@ MenuContext Menu(bool inRoom, bool host, std::size_t members = 0, int page = 0, 
     return context;
 }
 
+// The room object the room update runs on (r13): EOS_HLobby at +0x20, the local user at +0x60 and the lobby id,
+// a std::string, at +0x68 (lobbystate.cpp). The test runs without the EOS SDK, so EOS has no copy of any lobby.
+struct FakeRoom {
+    alignas(8) unsigned char bytes[0x90]{};
+    explicit FakeRoom(const char* id) {
+        const std::uintptr_t lobby = 0x10, user = 0x20;
+        const std::uint64_t size = std::strlen(id), capacity = 15;
+        std::memcpy(bytes + 0x20, &lobby, 8);
+        std::memcpy(bytes + 0x60, &user, 8);
+        std::memcpy(bytes + 0x68, id, size);
+        std::memcpy(bytes + 0x78, &size, 8);
+        std::memcpy(bytes + 0x80, &capacity, 8);
+    }
+    std::uint64_t Address() const { return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(bytes)); }
+};
+
 // The label names the room size, so every expected text follows kModRoomCapacity.
 std::wstring Label(const wchar_t* tail) { return std::to_wstring(kModRoomCapacity) + L"Player MOD" + tail; }
 
@@ -196,8 +213,14 @@ int main() {
     Check(steam.r8 == kModRoomCapacity && RoomCreatedWithEightPlayers(), "ON: Steam lobby created for the mod capacity");
     HostModeHookHandler(0x742A9D)(&create);
     Check(Stack64(frameMemory + 0x20) == kModRoomCapacity && RoomCreatedWithEightPlayers(), "ON: EOS lobby created for the mod capacity");
+    // EOS created it (lobbystate.cpp sees the completion); its updates keep what it was created as.
+    const FakeRoom created("lobby-on");
+    NoteLobbyEntered(reinterpret_cast<void*>(0x10), reinterpret_cast<const void*>(0x20), "lobby-on",
+                     static_cast<std::uint32_t>(kModRoomCapacity));
+    update.r13 = created.Address();
     for (const auto& kind : kinds) {
         CpuContext publish{};
+        publish.r13 = created.Address();
         HostModeHookHandler(kind.first)(&publish);
         Check(publish.rbx == 2 * kSearchTypeCenter - kind.second && publish.rbx >= 2 * kSearchTypeCenter - 0x94 &&
                   publish.rbx <= 2 * kSearchTypeCenter - 0x91,
@@ -216,6 +239,27 @@ int main() {
     UpdateMenuFrame(nullptr, false, outside);
     HostModeHookHandler(0x742A9D)(&create);
     Check(Stack64(frameMemory + 0x20) == 4 && !RoomCreatedWithEightPlayers(), "the next room follows the new setting");
+    // The room update reads the lobby it updates, never the setting: a room this machine did not create (or one
+    // that is not the lobby it created) gets the game's own values while nothing says what it is.
+    InitHostMode(image, nullptr, true, VK_F2, 0xB0, L"F2/LS");
+    CpuContext other{};
+    other.r13 = FakeRoom("lobby-other").Address();
+    HostModeHookHandler(0x749C91)(&other);
+    Check(other.rdx == kVanillaPlayers, "ON: an unknown lobby is not made a MultiSlot room by this machine's setting");
+    NoteLobbyEntered(reinterpret_cast<void*>(0x10), reinterpret_cast<const void*>(0x20), "lobby-on", 0);
+    CpuContext joined{};
+    joined.r13 = created.Address();
+    HostModeHookHandler(0x749C91)(&joined);
+    HostModeHookHandler(0x749CBF)(&joined);
+    Check(joined.rdx == kVanillaPlayers && joined.rbx == 0x93,
+          "ON: a joined lobby EOS has no copy of keeps the game's values (lobbystate_test reads real ones)");
+    InitHostMode(image, nullptr, false, VK_F2, 0xB0, L"F2/LS");
+    NoteLobbyEntered(reinterpret_cast<void*>(0x10), reinterpret_cast<const void*>(0x20), "lobby-on",
+                     static_cast<std::uint32_t>(kModRoomCapacity));
+    HostModeHookHandler(0x749C91)(&joined);
+    Check(joined.rdx == static_cast<std::uint64_t>(kModRoomCapacity),
+          "OFF: the MultiSlot lobby this machine created stays one after F2 (its creation, not the setting)");
+    NoteLobbyLeft();
 
     // One room creation: the Steam lobby step decides, and the EOS lobby made right after it agrees even if F2
     // was pressed in between; an EOS creation with no Steam step before it reads the setting itself.
@@ -268,6 +312,12 @@ int main() {
     Check(Compose(Menu(true, true, 3), false, true) == Label(L" :ON   F3/Tab/RS: Members 5-8"),
           "hosting a MultiSlot room: its setting and the page guide, before anyone is on page 2");
     Check(Compose(Menu(true, true, 3), true, false) == Label(L" :OFF"), "hosting a normal room: no page guide");
+    // The room's own kind, read from its lobby, wins over what this machine created its last room as.
+    MenuContext readOn = Menu(true, true, 3);
+    readOn.roomMode = static_cast<int>(LobbyKind::MultiSlot);
+    Check(Compose(readOn, false, false) == Label(L" :ON   F3/Tab/RS: Members 5-8"), "a MultiSlot lobby shows ON");
+    readOn.roomMode = static_cast<int>(LobbyKind::Normal);
+    Check(Compose(readOn, true, true) == Label(L" :OFF"), "a normal lobby shows OFF");
     Check(Compose(Menu(true, true, 3, 0, false), false, true) == Label(L" :ON"), "no page guide off the room screen");
     Check(Compose(Menu(true, false, 3), true, true) == L" ",
           "a guest with nothing to do here sees nothing");

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <thread>
 #include <stdexcept>
+#include <vector>
 
 using namespace multislot;
 namespace {
@@ -205,8 +206,187 @@ void RecoveryTests() {
     VirtualFree(mappedGame, 0, MEM_RELEASE);
     gameAddress = 0;
 }
+
+// --- log volume: the lines must still carry every change, just not one per packet or parameter ---
+std::wstring logPath;
+std::string ReadLog() {
+    LogFlush();
+    std::string text;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, logPath.c_str(), L"rb") == 0 && file) {
+        char buffer[4096];
+        std::size_t read = 0;
+        while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, read);
+        std::fclose(file);
+    }
+    return text;
 }
-int main() {
+std::size_t Count(const std::string& text, const char* needle) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++count;
+    return count;
+}
+
+EOS_EResult helloResult = 0;
+EOS_EResult FakeHelloSend(void*, const SendPacketOptions*) { return helloResult; }
+EOS_EResult FakeAnyClose(void*, const CloseConnectionOptions*) { return 0; }
+const void* hellofrom = nullptr;
+EOS_EResult FakeHelloReceive(void*, const void*, void** peer, SocketId* socket, std::uint8_t* channel, void* data,
+                             std::uint32_t* size) {
+    if (!hellofrom) return 13;  // EOS_NotFound: nothing waiting, as on most frames
+    *peer = const_cast<void*>(hellofrom);
+    *socket = SocketId{1, "test-socket"};
+    *channel = 0;
+    const std::uint32_t payload[] = {0, 1};
+    std::memcpy(data, payload, sizeof(payload));
+    *size = sizeof(payload);
+    return 0;
+}
+
+void SendHello(const void* to) {
+    SendPacketOptions options{};
+    options.ApiVersion = 3;
+    options.LocalUserId = Peer(0);
+    options.RemoteUserId = to;
+    options.DataLengthBytes = sizeof(helloPayload);
+    options.Data = helloPayload;
+    options.Reliability = 1;
+    DispatchSendPacket(expectedHandle, &options, 0x12C90F2);
+}
+
+void ReceiveOnce(const void* from) {
+    hellofrom = from;
+    void* peer = nullptr;
+    SocketId socket{};
+    std::uint8_t channel = 0;
+    std::uint32_t buffer[2]{}, size = sizeof(buffer);
+    HookReceivePacket(expectedHandle, nullptr, &peer, &socket, &channel, buffer, &size);
+    hellofrom = nullptr;
+}
+
+void HelloSummaryTests() {
+    packetDiagnostics = true;
+    handshakeRecovery = false;
+    originalSendPacket = &FakeHelloSend;
+    originalReceivePacket = &FakeHelloReceive;
+    originalCloseConnection = &FakeAnyClose;
+    const std::string before = ReadLog();
+    for (int i = 0; i < 50; ++i) SendHello(Peer(1));
+    helloResult = 1;  // EOS_NoConnection
+    SendHello(Peer(1));
+    helloResult = 0;
+    ReceiveOnce(Peer(1));
+    CloseConnectionOptions close{1, Peer(0), Peer(1), nullptr};
+    HookCloseConnection(expectedHandle, &close);
+    std::string log = ReadLog().substr(before.size());
+    Check(Count(log, "HANDSHAKE SEND: ") == 1 && Count(log, " 51 hello(s) over ") == 1 && Count(log, ", 1 failed,") == 1 &&
+              Count(log, "1 hello(s) received from it; connection closed (other)") == 1,
+          "51 hellos to one peer are one line, ended by the close");
+    Check(Count(log, "HANDSHAKE SEND FAILED: ") == 1 && Count(log, "result=1 ") == 1, "the failed send has a line of its own");
+    Check(log.find("HANDSHAKE SEND: ") < log.find("HANDSHAKE CLOSE: "), "the summary comes before the close it ends with");
+
+    // A run nobody closes ends after 3 s without hellos, on the next poll.
+    SendHello(Peer(2));
+    SendHello(Peer(3));
+    ReceiveOnce(nullptr);
+    log = ReadLog().substr(before.size());
+    Check(Count(log, "HANDSHAKE SEND: ") == 1, "a run still sending is not cut");
+    Sleep(3100);
+    ReceiveOnce(nullptr);
+    log = ReadLog().substr(before.size());
+    Check(Count(log, "no further hello for 3 s") == 1, "quiet runs end on the next poll after 3 s");
+    // Leaving the lobby ends every run.
+    SendHello(Peer(4));
+    originalLeaveLobby = &FakeLeave;
+    expectedOptions = nullptr;
+    HookLeaveLobby(expectedHandle, nullptr, expectedHandle, &Completion);
+    log = ReadLog().substr(before.size());
+    Check(Count(log, "the lobby is left") == 1, "leaving the lobby ends the runs");
+    // Without the SDK both quiet peers print as "", so the log folds the second line into a repeat count, which it
+    // writes once a different line follows.
+    Check(Count(log, "(repeated 1 more times: HANDSHAKE SEND:") == 1, "both quiet runs were ended");
+    packetDiagnostics = false;
+}
+
+EOS_EResult parameterResult = 0;
+EOS_EResult FakeSetParameter(void*, const SetParameterOptions*) { return parameterResult; }
+int finds = 0;
+void FakeFind(void*, const void*, void*, FindCallback) { ++finds; }
+void SearchTests() {
+    originalSetParameter = &FakeSetParameter;
+    originalFind = &FakeFind;
+    const std::string before = ReadLog();
+    AttributeData type{1, "SEARCH_TYPE", {}, 1};
+    type.Value.AsInt64 = 0x93;
+    AttributeData mission{1, "MISSION", {}, 1};
+    mission.Value.AsInt64 = 7;
+    const SetParameterOptions first{1, &type, 5}, second{1, &mission, 0};
+    int search = 0, other = 0;
+    HookSetParameter(&search, &first);
+    HookSetParameter(&other, &second);
+    parameterResult = 10;
+    HookSetParameter(&search, &second);
+    parameterResult = 0;
+    HookSetParameter(&search, &second);
+    HookFind(&search, nullptr, nullptr, nullptr);
+    HookFind(&search, nullptr, nullptr, nullptr);
+    const std::string log = ReadLog().substr(before.size());
+    Check(Count(log, "EOS LobbySearch Find: 2 parameter(s): SEARCH_TYPE = 147 (0x93)  op/vis=5; MISSION = 7 (0x7)  op/vis=0") == 1,
+          "one search's parameters are one line, in order");
+    Check(Count(log, "EOS LobbySearch SetParameter MISSION = 7 (0x7)  op/vis=0 -> result 10 (refused)") == 1,
+          "a refused parameter is logged at once");
+    Check(Count(log, "EOS LobbySearch Find: 0 parameter(s)") == 1 && finds == 2, "a search run again has none left");
+    Check(Count(log, "MISSION") == 2, "another search's parameters stay with it");
+}
+
+void EosLogFilterTests() {
+    const char* note = nullptr;
+    auto keep = [&](const char* category, const char* message, std::int32_t level) {
+        const LogMessage entry{category, message, level};
+        return KeepEosLog(entry, note);
+    };
+    Check(!keep("LogEOSP2P", "Added new peer 0002fcfd", 400) && !keep("LogEOSP2P", "Accepted connection", 400),
+          "P2P bookkeeping at Info is dropped");
+    Check(keep("LogEOSP2P", "Connection established with peer", 400) && keep("LogEOSP2P", "Connection closed: Timeout", 400) &&
+              keep("LogEOSP2P", "NAT Type: Moderate", 400),
+          "a P2P connection's changes of state are kept");
+    Check(keep("LogEOSP2P", "Added new peer 0002fcfd", 300) && keep("LogEOSP2P", "Added new peer", 200),
+          "every Warning and Error is kept");
+    Check(keep("LogEOSLobby", "Member joined", 400) && keep("LogEOSLobby", "anything at all", 500), "every LogEOSLobby line is kept");
+    Check(!keep("LogEOSAuth", "token refreshed", 400), "unwanted categories stay out");
+    Check(keep("LogEOSUI", "EOS_UI_GetFriendsVisible: Invalid parameter", 200) && note && note[0],
+          "the first friends-visible warning is kept and says the rest are not");
+    Check(!keep("LogEOSUI", "EOS_UI_GetFriendsVisible: Invalid parameter", 200), "the repeats are dropped");
+}
+
+// A completion EOS runs again until its result is final: the wrapper must still be there for the final run.
+std::int32_t TestIsComplete(EOS_EResult result) { return result != 0x99; }
+std::vector<EOS_EResult> joinResults;
+void GameJoined(const JoinLobbyCallbackInfo* info) {
+    joinResults.push_back(info->ResultCode);
+    Check(info->ClientData == expectedHandle, "the game gets its own ClientData on every run");
+}
+void FakeJoinTwice(void*, const void*, void* clientData, JoinLobbyCallback callback) {
+    JoinLobbyCallbackInfo info{0x99, clientData, "lobby"};
+    callback(&info);
+    info.ResultCode = 0;
+    callback(&info);
+}
+void CompletionTests() {
+    isOperationComplete = &TestIsComplete;
+    originalJoinLobby = &FakeJoinTwice;
+    HookJoinLobby(nullptr, nullptr, expectedHandle, &GameJoined);
+    Check(joinResults == std::vector<EOS_EResult>({0x99, 0}), "a not-final run and the final one both reach the game");
+    isOperationComplete = nullptr;
+}
+}
+int main(int argc, char** argv) {
+    if (argc > 1)
+        for (const char* c = argv[1]; *c; ++c) logPath.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*c)));
+    if (!logPath.empty()) {
+        DeleteFileW(logPath.c_str());
+        LogOpen(logPath.c_str());
+    }
     originalSendPacket = &FakeSend;
     originalReceivePacket = &FakeReceive;
     originalCloseConnection = &FakeClose;
@@ -229,6 +409,12 @@ int main() {
     Check(leaveCalls == 1, "leave called once");
     Check(IsHello(payload, 8) && !IsHello(payload, 3) && !IsHello(nullptr, 8), "hello probe checks minimum length");
     RecoveryTests();
+    EosLogFilterTests();
+    CompletionTests();
+    if (!logPath.empty()) {
+        HelloSummaryTests();
+        SearchTests();
+    }
     std::printf("network wrapper forwarding: %d failures\n", failures);
     return failures ? 1 : 0;
 }

@@ -12,6 +12,7 @@
 #include "updatecheck.h"
 #include "identity.h"
 #include "crashlog.h"
+#include "lobbystate.h"
 #include "log.h"
 #include "mission.h"
 #include "patches.h"
@@ -40,10 +41,10 @@ wchar_t iniFile[MAX_PATH]{};
 std::atomic<bool> eightPlayers{false};
 std::atomic<bool> roomEightPlayers{false};
 std::atomic<bool> steamLobbyCaptured{false};  // the Steam lobby step took the setting for the room being created
-std::atomic<bool> labelShownLogged{false};
 
 // Everything below the hooks runs on the game's UI thread (HUiMainFrame::OnUpdate).
 bool keyWasDown = false;
+wchar_t lastLoggedLabel[kLabelChars]{};  // every change of the label is logged, the same text once
 
 struct FrameState {
     void* frame = nullptr;
@@ -175,15 +176,19 @@ void CreateCapacityHandler(CpuContext* context) {
         Log("HOST creating a normal %d-player room (%dPlayer MOD OFF)", kVanillaPlayers, kModRoomCapacity);
 }
 
-// Room update (749C91 `mov edx, 4` before SetMaxMembers).
+// Room update (749C91 `mov edx, 4` before SetMaxMembers; the room object in r13). Whoever updates the lobby -
+// its creator, or a member EOS made its owner - keeps the lobby's own kind and capacity (lobbystate.h). The
+// setting this machine created its last room with says nothing about a room it joined.
 void UpdateCapacityHandler(CpuContext* context) {
-    context->rdx = roomEightPlayers.load() ? kModRoomCapacity : kVanillaPlayers;
+    const RoomUpdate keep = DecideRoomUpdate(static_cast<std::uintptr_t>(context->r13));
+    context->rdx = keep.kind == LobbyKind::MultiSlot ? static_cast<std::uint64_t>(keep.capacity) : kVanillaPlayers;
 }
 
 // Room update: the SEARCH_TYPE published for the room kind (`mov ebx, 0x9x`), mirrored in MultiSlot rooms.
 template <std::uint32_t Vanilla>
 void SearchTypeHandler(CpuContext* context) {
-    context->rbx = roomEightPlayers.load() ? 2 * kSearchTypeCenter - Vanilla : Vanilla;
+    const RoomUpdate keep = DecideRoomUpdate(static_cast<std::uintptr_t>(context->r13));
+    context->rbx = keep.kind == LobbyKind::MultiSlot ? 2 * kSearchTypeCenter - Vanilla : Vanilla;
 }
 
 // Room search (74AC50 `movabs rax, (high << 32) | 0x91`): the SEARCH_TYPE range asked for per room kind, from
@@ -282,9 +287,11 @@ std::uint64_t LobbyOnUpdateHook(void* lobby, void* context) {
 }
 bool RoomCreatedWithEightPlayers() { return roomEightPlayers.load(); }
 
-std::size_t ComposeLabel(const MenuContext& context, bool on, bool roomOn, wchar_t* out, std::size_t outChars) {
+std::size_t ComposeLabel(const MenuContext& context, bool on, bool createdOn, wchar_t* out, std::size_t outChars) {
     if (!out || !outChars) return 0;
     out[0] = 0;
+    // The room's kind as its lobby says, once read; until then what this machine created its room as.
+    const bool roomOn = context.roomMode >= 0 ? context.roomMode != 0 : createdOn;
     // _TRUNCATE: a text that does not fit is cut off (and still terminated).
     if (!context.inRoom) {
         _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%dPlayer MOD :%s",
@@ -373,7 +380,9 @@ void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
     std::wmemcpy(state.label, label, kLabelChars);
     // The title (lyt_SlotFrame) and result (lyt_ResultFrame) screens are HUiMainFrames too and have no MSLabel,
     // so a frame without one is normal; the log only records that the label reached a menu frame.
-    if (ShowLabel(frame, label) && !labelShownLogged.exchange(true)) Log("MENU label shown: \"%ls\"", label);
+    if (!ShowLabel(frame, label) || std::wcscmp(lastLoggedLabel, label) == 0) return;
+    std::wmemcpy(lastLoggedLabel, label, kLabelChars);
+    Log("MENU label shown: \"%ls\"", label);
 }
 
 MidHandler HostModeHookHandler(std::uint32_t rva) {
@@ -416,7 +425,10 @@ std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
     // Out of a room there is nobody to copy from, and an offline mission must not keep the last room's
     // armor: the room screen is the only thing that recomputes it, and it stops running when the room goes.
     if (!menu.inRoom) ForgetRoom();
-    menu.roomHost = menu.inRoom && RoomHost();
+    // The game's IsRoomHost turns false while its creator is still in the room (EOS handed the lobby to
+    // someone else): the creator still sees the room's kind, which is read from the lobby.
+    menu.roomHost = menu.inRoom && (RoomHost() || CreatedCurrentLobby());
+    menu.roomMode = menu.inRoom ? static_cast<int>(CurrentLobbyKind()) : -1;
     menu.pages = CurrentRoomPage();
     menu.pageHint = PageHint();
     menu.ghosts = GhostHarness() ? GhostPlayers() : 0;

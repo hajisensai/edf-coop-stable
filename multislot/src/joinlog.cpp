@@ -27,6 +27,10 @@ std::atomic<int> lines{0};
 bool Budget() { return lines.fetch_add(1) < kLineLimit; }
 UserSlotsSnapshot lastSlots{};
 std::uintptr_t lastUsers = 0;
+// What the log last listed: a report lists only the slots that changed since, and every slot of a new Users
+// object (a new room).
+UserSlotsSnapshot loggedSlots{};
+std::uintptr_t loggedUsers = 0;
 std::size_t lastRosterCount = ~std::size_t{0};
 ULONGLONG lastPoll = 0, lastSlotReport = 0;
 const char* lastSlotFailure = nullptr;
@@ -163,7 +167,8 @@ void MemberStatusHandler(CpuContext* context) {
     Read(context->rdx + 0x18, status);
     char id[40]{};
     ProductUserIdText(user, id, sizeof(id));
-    if (Budget())
+    // PROMOTED (the lobby's new owner) is a change of who updates the lobby: always logged.
+    if (status == 4 || Budget())
         Log("LOBBY member status: %s -> %u (%s)%s", id[0] ? id : "?", status, MemberStatusName(status),
             status == 2 ? "  <- treated the same as LEFT: the user is removed and their connection closed"
                         : "");
@@ -347,22 +352,33 @@ void NoteUserSlots(std::size_t rosterCount) {
     if (!Budget()) return;
     Log("ROOM USERS: occupied=%zu ready=%zu pending=%zu roster=%zu slots=%zu (pending can be normal during join)",
         snapshot.occupied, snapshot.ready, pending, rosterCount, snapshot.capacity);
-    for (std::size_t i = 0; i < snapshot.capacity; ++i) {
+    const bool newRoom = users != loggedUsers;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kMaxPlayers); ++i) {
         const auto& slot = snapshot.slots[i];
-        if (!slot.object) continue;
+        const auto& was = loggedSlots.slots[i];
+        const bool same = slot.object == was.object && slot.productId == was.productId && slot.flags == was.flags &&
+                          slot.index == was.index;
+        if (!newRoom && same) continue;
         char id[40]{};
-        ProductUserIdText(reinterpret_cast<const void*>(slot.productId), id, sizeof(id));
-        Log("ROOM USER: slot=%zu key=%d EOS %s flags=0x%X ready=%u", i, slot.index,
-            id[0] ? id : "?", slot.flags, slot.flags & 1);
+        if (slot.object) {
+            ProductUserIdText(reinterpret_cast<const void*>(slot.productId), id, sizeof(id));
+            Log("ROOM USER: slot=%zu key=%d EOS %s flags=0x%X ready=%u", i, slot.index,
+                id[0] ? id : "?", slot.flags, slot.flags & 1);
+        } else if (!newRoom && was.object) {
+            ProductUserIdText(reinterpret_cast<const void*>(was.productId), id, sizeof(id));
+            Log("ROOM USER: slot=%zu empty now (was EOS %s)", i, id[0] ? id : "?");
+        }
     }
+    loggedUsers = users;
+    loggedSlots = snapshot;
 }
 
 void ForgetUserSlots() {
     lastSlotFailure = nullptr;
-    lastUsers = 0;
+    lastUsers = loggedUsers = 0;
     lastRosterCount = ~std::size_t{0};
     lastPoll = lastSlotReport = 0;
-    lastSlots = {};
+    lastSlots = loggedSlots = {};
 }
 
 void* JoinLogCallHandler(std::uint32_t rva) {

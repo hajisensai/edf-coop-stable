@@ -6,7 +6,7 @@
 #
 # Without -Upload it stops after staging release\upload-<version>\. With -Upload it creates a DRAFT Release
 # for the tag with those files (gh, tag already pushed); players' updaters never see a draft. Then run
-#   gh workflow run release.yml -f tag=v<version>
+#   gh workflow run release.yml --repo <owner>/<repo> -f tag=v<version>
 # which checks the draft, signs each EDF6Coop-<N>p.dll, uploads the .sig files and publishes it as latest.
 # Keep this script ASCII: PowerShell 5.1 reads it as ANSI.
 param(
@@ -23,6 +23,12 @@ $version = $Matches[1]
 $tag = "v$version"
 $notes = Join-Path $root "release-notes\$version.md"
 if (-not (Test-Path -LiteralPath $notes)) { throw "missing release-notes\$version.md: write the release text first" }
+
+# gh picks its repository from the current directory, not from $root: name it explicitly, from $root's origin.
+$origin = git -C $root remote get-url origin
+if ($LASTEXITCODE) { throw 'git remote get-url origin failed' }
+if ($origin -notmatch 'github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$') { throw "origin is not a GitHub repository: $origin" }
+$repo = $Matches[1]
 
 # What is built must be exactly the tagged commit.
 $dirty = git -C $root status --porcelain --untracked-files=no
@@ -54,6 +60,6 @@ if (-not $Upload) {
     return
 }
 
-gh release create $tag @($files.FullName) --draft --verify-tag --title "EDF6Coop $version" --notes-file $notes
+gh release create $tag @($files.FullName) --repo $repo --draft --verify-tag --title "EDF6Coop $version" --notes-file $notes
 if ($LASTEXITCODE) { throw 'gh release create failed' }
-"Draft Release $tag created. Sign and publish it with: gh workflow run release.yml -f tag=$tag"
+"Draft Release $tag created in $repo. Sign and publish it with: gh workflow run release.yml --repo $repo -f tag=$tag"

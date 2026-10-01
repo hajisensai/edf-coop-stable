@@ -258,6 +258,10 @@ std::vector<std::string> LobbyStatusHold::poll(uint64_t nowMs,
             it = held_.erase(it);
         }
     }
+    // Members' statuses first, then the owner, the room last: delivering the room's close leaves it, and
+    // nothing of that room may reach the game after it.
+    auto rank = [](const Held& h) { return h.remote.rfind('#', 0) != 0 ? 0 : h.remote == "#room" ? 2 : 1; };
+    std::stable_sort(due.begin(), due.end(), [&](const Held& a, const Held& b) { return rank(a) < rank(b); });
     std::vector<std::string> delivered;
     for (auto& h : due) {
         delivered.push_back(h.remote);

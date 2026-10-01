@@ -1592,6 +1592,23 @@ void testLobbyStatusHoldKeys() {
     CHECK(h.discard("#owner") && !h.discard("#owner") && h.heldCount() == 0);
     up.erase(host);
     CHECK(h.poll(2, reachable).empty() && delivered == 1);
+
+    // Delivered together: members first, then the owner, the room last (closing it leaves it).
+    up = {host, member};
+    std::string order;
+    CHECK(h.offer("#room", host, true, 0, false, 0, [&] { order += "R"; }));
+    CHECK(h.offer("#owner", host, true, 0, true, 0, [&] { order += "O"; }));
+    CHECK(h.offer(member, host, true, 0, false, 0, [&] { order += "M"; }));
+    up.clear();
+    CHECK(h.poll(3, reachable).size() == 3 && order == "MOR");
+
+    // A member's LEFT replaces its hidden disconnect: no grace, and the game is told the LEFT.
+    int left = 0;
+    up = {member};
+    CHECK(h.offer(member, true, 0, deliver));                                       // disconnected, 30 s grace
+    CHECK(h.offer(member, member, true, 0, true, 0, [&] { ++left; }) && h.heldCount() == 1);
+    up.clear();
+    CHECK(h.poll(4, reachable).size() == 1 && left == 1 && delivered == 1);
 }
 
 void testLobbyOwnerPin() {

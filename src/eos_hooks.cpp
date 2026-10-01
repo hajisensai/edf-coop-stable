@@ -423,6 +423,11 @@ bool holdLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
         return !probe.empty() &&
                g.lobbyHold->offer(key, probe, reachableDirectly(probe), graceMs, replace, now, std::move(fn));
     };
+    // A member's own LEFT or KICKED while its link is up replaces a disconnect hidden for it: the game is
+    // told the newer status, without the disconnect's grace. With the link down both reach the game now.
+    auto offerFinal = [&]() {
+        return reachableDirectly(e->target) && offer(e->target, e->target, 0, true, deliver);
+    };
     const char* who = e->self ? "we" : nullptr;
     const std::string label = who ? who : shortId(e->target);
     switch (s) {
@@ -431,16 +436,19 @@ bool holdLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
         logf("RESILIENCE %s lost Epic's lobby service but the direct link is up: hidden from the game", label.c_str());
         return true;
     case kLeft:
-        if (e->self || !offer(e->target, e->target, 0, false, deliver)) return false;
+        if (e->self || !offerFinal()) return false;
         logf("RESILIENCE %s left Epic's lobby but still plays over the direct link: hidden from the game",
              label.c_str());
         return true;
-    case kKicked:
-        if (g.ownerPin.kickAuthorized() || !offer(e->target, e->target, 0, false, deliver)) return false;
+    case kKicked: {
+        // The pinned owner gone from the direct link too: whoever Epic made owner rules the room now.
+        const std::string pinned = g.ownerPin.pinned();
+        if (g.ownerPin.kickAuthorized() || pinned.empty() || !reachableDirectly(pinned) || !offerFinal()) return false;
         logf("RESILIENCE %s kicked by %s, whom Epic made the room owner, while the direct link is up: hidden "
              "from the game",
              label.c_str(), shortId(g.ownerPin.usurper()).c_str());
         return true;
+    }
     case kClosed: {
         if (!g.marker.inLobby()) return false;
         const std::string pinned = g.ownerPin.pinned();
@@ -453,7 +461,10 @@ bool holdLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
         const std::string pinned = g.ownerPin.pinned();
         const LobbyOwnerPin::Promotion p =
             g.ownerPin.onPromoted(e->target, self, !pinned.empty() && reachableDirectly(pinned));
-        if (!p.hide) return false;
+        if (!p.hide) {
+            g.lobbyHold->discard("#owner");  // superseded: delivering it later would roll the owner back
+            return false;
+        }
         g.lobbyHold->onStatus(e->target, s);  // a promotion ends a hidden disconnect, as before
         if (e->target == pinned) {
             g.lobbyHold->discard("#owner");  // Epic gave it back; the game never saw it go
@@ -467,6 +478,7 @@ bool holdLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
                 deliverLobbyStatus(e);
             })) {
             g.ownerPin.follow(target);
+            g.lobbyHold->discard("#owner");
             return false;
         }
         logf("RESILIENCE Epic made %s the room owner while %s still hosts over the direct link: hidden from the game",

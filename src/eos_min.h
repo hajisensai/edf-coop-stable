@@ -252,6 +252,13 @@ struct EOS_Lobby_LobbyMemberUpdateReceivedCallbackInfo {
     EOS_ProductUserId TargetUserId;
 };
 
+struct EOS_Lobby_PromoteMemberOptions {  // ApiVersion 1
+    int32_t ApiVersion;
+    const char* LobbyId;
+    EOS_ProductUserId LocalUserId;
+    EOS_ProductUserId TargetUserId;
+};
+
 #pragma pack(pop)
 
 using EOS_Lobby_OnLobbyIdCallback = void (*)(const EOS_Lobby_LobbyIdCallbackInfo*);
@@ -273,6 +280,9 @@ using PFN_EOS_Lobby_CopyLobbyDetailsHandle = EOS_EResult (*)(EOS_HLobby, const E
                                                              EOS_HLobbyDetails*);
 using PFN_EOS_LobbyDetails_CopyMemberAttributeByKey = EOS_EResult (*)(
     EOS_HLobbyDetails, const EOS_LobbyDetails_CopyMemberAttributeByKeyOptions*, EOS_Lobby_Attribute**);
+// Its callback info (EOS_Lobby_PromoteMemberCallbackInfo) has the EOS_Lobby_LobbyIdCallbackInfo layout.
+using PFN_EOS_Lobby_PromoteMember = void (*)(EOS_HLobby, const EOS_Lobby_PromoteMemberOptions*, void*,
+                                             EOS_Lobby_OnLobbyIdCallback);
 using PFN_EOS_LobbyDetails_GetLobbyOwner = EOS_ProductUserId (*)(EOS_HLobbyDetails,
                                                                  const EOS_LobbyDetails_GetLobbyOwnerOptions*);
 struct EOS_LobbyDetails_GetMemberAttributeCountOptions {  // ApiVersion 1

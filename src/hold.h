@@ -95,6 +95,14 @@ public:
     // A "disconnected" status for `remote`. Held (true) when `reachable` over the direct link, or when
     // one is already held (the first one stays); `deliver` then runs later only if it does not return.
     bool offer(const std::string& remote, bool reachable, uint64_t nowMs, std::function<void()> deliver);
+    // The general form. `key` names the held status (a member, or a room-wide slot such as "#room");
+    // `probe` is whose direct link poll() checks. The status is delivered once that link has been down
+    // for `graceMs` (0: on the first poll that finds it down). A held key keeps its first status unless
+    // `replace`, which swaps in the newer one (a newer owner supersedes the older).
+    bool offer(const std::string& key, const std::string& probe, bool reachable, uint32_t graceMs, bool replace,
+               uint64_t nowMs, std::function<void()> deliver);
+    // Forgets the status held under `key` without delivering it (it no longer applies). False if none.
+    bool discard(const std::string& key);
     // Any other status for `remote`. Returns true when that status must be swallowed: the member joined
     // again while its disconnect was hidden. A promotion ends the hold and still reaches the game.
     // Anything else (left, kicked) delivers the hidden disconnect first, in the order EOS reported.
@@ -117,7 +125,9 @@ public:
 
 private:
     struct Held {
-        std::string remote;
+        std::string remote;          // the key
+        std::string probe;           // whose direct link keeps it held
+        uint32_t graceMs = 0;
         uint64_t reachableAtMs = 0;  // last time the direct link showed the member alive
         bool abandoned = false;
         std::function<void()> deliver;
@@ -126,6 +136,42 @@ private:
     uint32_t graceMs_;
     mutable std::mutex mu_;
     std::vector<Held> held_;
+};
+
+// Who owns the room, as far as the game is concerned.
+//
+// Epic hands the lobby to another member when the owner loses Epic's lobby service, although the
+// owner still hosts the game over the direct link. The game would follow Epic: a new host, and that
+// host's game removing players (it kicked the real host itself). The room keeps the owner it was
+// created with (the pin) for as long as the pinned owner's direct link is alive; Epic's ownership is
+// tracked separately so a legitimate kick (by the pinned owner) is still told from a usurper's.
+// Pure bookkeeping, no EOS calls. Thread-safe.
+class LobbyOwnerPin {
+public:
+    // Entered a room owned by `owner` ("" when not known yet: pinned by the first promotion seen).
+    void entered(const std::string& owner);
+    void left();
+
+    struct Promotion {
+        bool hide = false;         // the game must not see this promotion
+        bool promoteBack = false;  // we were made owner over the pinned owner: hand the lobby back
+    };
+    // Epic made `target` the owner. `pinnedReachable`: the pinned owner's direct link is alive.
+    Promotion onPromoted(const std::string& target, const std::string& self, bool pinnedReachable);
+    // The pinned owner is back in the lobby. True when Epic's owner is `self`: hand the lobby back now.
+    bool onPinnedJoined(const std::string& self) const;
+    // A hidden promotion reached the game after all (the pinned owner's link died): the room follows it.
+    void follow(const std::string& owner);
+    // A kick reaches the game only when Epic's owner, who issued it, is the pinned owner.
+    bool kickAuthorized() const;
+
+    std::string pinned() const;
+    // Epic's owner when it is not the pinned one ("" otherwise).
+    std::string usurper() const;
+
+private:
+    mutable std::mutex mu_;
+    std::string pinned_, epic_;
 };
 
 }  // namespace dn

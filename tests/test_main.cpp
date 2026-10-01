@@ -14,6 +14,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "../src/auth.h"
@@ -1556,6 +1557,79 @@ void testLobbyStatusHold() {
     CHECK(h.poll(1, reachable).size() == 1 && delivered == 8 && !h.isHeld(kA));
 }
 
+void testLobbyStatusHoldKeys() {
+    printf("hold: statuses held by key, checked against another member's link, without grace\n");
+    const std::string host = kA, member = kB;
+    int delivered = 0, newer = 0;
+    auto deliver = [&] { ++delivered; };
+    std::unordered_set<std::string> up{host, member};
+    auto reachable = [&](const std::string& r) { return up.count(r) != 0; };
+    dn::LobbyStatusHold h(30000);
+
+    // Room closed by Epic: held while the host's link is up, delivered on the first poll it is down.
+    CHECK(!h.offer("#room", host, false, 0, false, 0, deliver) && !h.isHeld("#room"));
+    CHECK(h.offer("#room", host, true, 0, false, 0, deliver) && h.isHeld("#room"));
+    CHECK(h.poll(60000, reachable).empty() && delivered == 0);  // never expires while the link lives
+    up.erase(host);
+    auto gone = h.poll(60001, reachable);
+    CHECK(gone.size() == 1 && gone[0] == "#room" && delivered == 1);
+    up.insert(host);
+
+    // A member that left Epic's lobby: no grace, and a join swallows the pair.
+    CHECK(h.offer(member, member, true, 0, false, 0, deliver));
+    CHECK(h.poll(10, reachable).empty() && h.isHeld(member));  // up on the very poll after: still held
+    CHECK(h.onStatus(member, 0) && !h.isHeld(member) && delivered == 1);
+
+    // A newer owner replaces the held one; the older is never delivered.
+    CHECK(h.offer("#owner", host, true, 0, true, 0, deliver));
+    CHECK(h.offer("#owner", host, false, 0, true, 0, [&] { ++newer; }) && h.heldCount() == 1);
+    up.erase(host);
+    CHECK(h.poll(1, reachable).size() == 1 && newer == 1 && delivered == 1);
+    up.insert(host);
+
+    // Discarded: Epic gave the room back, nothing to tell.
+    CHECK(h.offer("#owner", host, true, 0, true, 0, deliver));
+    CHECK(h.discard("#owner") && !h.discard("#owner") && h.heldCount() == 0);
+    up.erase(host);
+    CHECK(h.poll(2, reachable).empty() && delivered == 1);
+}
+
+void testLobbyOwnerPin() {
+    printf("owner pin: Epic's owner changes do not move the room while the pinned owner's link is up\n");
+    const std::string host = kA, me = kB, other = "0002dddddddddddddddddddddddddddd";
+    dn::LobbyOwnerPin pin;
+
+    pin.entered(host);
+    CHECK(pin.pinned() == host && pin.usurper().empty() && pin.kickAuthorized());
+
+    // Epic makes us owner while the host still plays: hidden, and handed back.
+    auto p = pin.onPromoted(me, me, true);
+    CHECK(p.hide && p.promoteBack && pin.pinned() == host && pin.usurper() == me && !pin.kickAuthorized());
+    CHECK(pin.onPinnedJoined(me));  // the host back in the lobby: hand it back (again) now
+    p = pin.onPromoted(host, me, true);  // handed back
+    CHECK(p.hide && !p.promoteBack && pin.usurper().empty() && pin.kickAuthorized() && !pin.onPinnedJoined(me));
+
+    // Someone else made owner: hidden, not ours to hand back.
+    p = pin.onPromoted(other, me, true);
+    CHECK(p.hide && !p.promoteBack && pin.usurper() == other && !pin.onPinnedJoined(me));
+    pin.follow(other);  // the host's link died: the hidden promotion reached the game
+    CHECK(pin.pinned() == other && pin.usurper().empty() && pin.kickAuthorized());
+
+    // The pinned owner unreachable at the promotion: the room follows Epic at once.
+    pin.entered(host);
+    p = pin.onPromoted(me, me, false);
+    CHECK(!p.hide && !p.promoteBack && pin.pinned() == me && pin.kickAuthorized());
+
+    // Owner unknown on entering: the first promotion pins, and reaches the game.
+    pin.entered("");
+    CHECK(pin.kickAuthorized() && pin.usurper().empty());
+    p = pin.onPromoted(other, me, true);
+    CHECK(!p.hide && pin.pinned() == other);
+
+    pin.left();
+    CHECK(pin.pinned().empty() && pin.usurper().empty() && pin.kickAuthorized() && !pin.onPinnedJoined(me));
+}
+
 void testTrafficMeter() {
     printf("traffic: the game's own send rate, busiest second, peers and copies\n");
     dn::TrafficMeter m;
@@ -2413,6 +2487,8 @@ int wmain(int argc, wchar_t** argv) {
     testDirectUpgradesUnreliable();
     testDisconnectHold();
     testLobbyStatusHold();
+    testLobbyStatusHoldKeys();
+    testLobbyOwnerPin();
     testTrafficMeter();
     testUpdater();
     testUpdateSigning();

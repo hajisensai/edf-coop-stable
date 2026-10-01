@@ -22,6 +22,7 @@
 #include "joinlog.h"
 #include "log.h"
 #include "loaderproxy.h"
+#include "lobbystate.h"
 #include "menulayout.h"
 #include "midhook.h"
 #include "mission.h"
@@ -324,7 +325,9 @@ void KeepMenuLayout(bool active) {
     wchar_t path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(self, plugin, MAX_PATH);
     if (!length || length >= MAX_PATH || !MenuLayoutPath(plugin, path, MAX_PATH)) {
-        if (active) Log("Menu: the plugin is not in Mods\\Plugins, so the 8Player MOD label is not shown (F2 still works)");
+        if (active)
+            Log("Menu: the plugin is not in Mods\\Plugins, so the %dPlayer MOD label is not shown (F2 still works)",
+                kModRoomCapacity);
         return;
     }
     if (!active) {
@@ -342,17 +345,17 @@ void KeepMenuLayout(bool active) {
 #else
     switch (InstallMenuLayout(path)) {
         case LayoutInstall::Written:
-            Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the 8Player MOD label)");
+            Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the %dPlayer MOD label)", kModRoomCapacity);
             break;
         case LayoutInstall::Updated: Log("Menu: updated Mods\\UI\\LYT_MAINFRAME.SGO"); break;
         case LayoutInstall::Current: break;
         case LayoutInstall::Foreign:
-            Log("Menu: Mods\\UI\\LYT_MAINFRAME.SGO belongs to another mod and was left alone; the 8Player MOD label is "
-                "not shown (F2 still works)");
+            Log("Menu: Mods\\UI\\LYT_MAINFRAME.SGO belongs to another mod and was left alone; the %dPlayer MOD label "
+                "is not shown (F2 still works)", kModRoomCapacity);
             break;
         case LayoutInstall::Failed:
-            Log("Menu: could not write Mods\\UI\\LYT_MAINFRAME.SGO (error %lu); the 8Player MOD label is not shown (F2 "
-                "still works)", GetLastError());
+            Log("Menu: could not write Mods\\UI\\LYT_MAINFRAME.SGO (error %lu); the %dPlayer MOD label is not shown "
+                "(F2 still works)", GetLastError(), kModRoomCapacity);
             break;
     }
 #endif
@@ -592,6 +595,13 @@ bool LoadPlugin(PluginInfo* info) {
         Log("Mission: Extend=0, mission code untouched (only rooms of up to four players can start safely)");
     if (ghosts > 0)
         Log("Test: GhostPlayers=%d - a mission started alone online gets %d idle copies of you as extra players", ghosts, ghosts);
+    // First, so its wrappers sit next to EOS: what a room update publishes is read from the lobby, and a
+    // machine never stays behind in a lobby it closed or left (lobbystate.h).
+    if (InstallLobbyState(game, &RedirectGameImport))
+        Log("Lobby state: room updates keep the lobby's own kind and size; a close of a lobby someone else owns, "
+            "or one that fails, leaves it");
+    else
+        Log("Lobby state: UNAVAILABLE - room updates publish the game's own values (%d players)", kVanillaPlayers);
     // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
     if (mission) {
         const int imports = InstallPacketFit(game, &RedirectGameImport);

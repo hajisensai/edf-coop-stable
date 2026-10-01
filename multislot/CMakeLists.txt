@@ -75,7 +75,7 @@ add_library(EDF6MultiSlot SHARED
     src/plugin.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp)
 target_link_libraries(EDF6MultiSlot PRIVATE winhttp)
 target_include_directories(EDF6MultiSlot PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(EDF6MultiSlot PRIVATE ${WARNINGS})
@@ -107,7 +107,7 @@ target_compile_options(PeerTimeoutTests PRIVATE ${WARNINGS})
 add_test(NAME PeerTimeoutKeepsRoom COMMAND PeerTimeoutTests "${CMAKE_BINARY_DIR}/peer-timeout-test.log")
 add_executable(NetLogForwardTests tests/netlog_forward_test.cpp src/joinlog.cpp src/identity.cpp src/log.cpp src/packetfit.cpp)
 target_compile_options(NetLogForwardTests PRIVATE ${WARNINGS})
-add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests)
+add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests "${CMAKE_BINARY_DIR}/netlog-forward-test.log")
 add_executable(PacketFitTests tests/packetfit_test.cpp src/packetfit.cpp src/log.cpp)
 target_compile_options(PacketFitTests PRIVATE ${WARNINGS})
 add_test(NAME MissionStartMessageFits COMMAND PacketFitTests "${CMAKE_BINARY_DIR}/packetfit-test.log")
@@ -118,6 +118,14 @@ add_executable(SyncMarkerTests tests/syncmarker_test.cpp src/syncmarker.cpp src/
 target_compile_options(SyncMarkerTests PRIVATE ${WARNINGS})
 add_dependencies(SyncMarkerTests FakeEosSdk)
 add_test(NAME SplitSyncLobbyMarker COMMAND SyncMarkerTests "${CMAKE_BINARY_DIR}/syncmarker-test.log"
+    "$<TARGET_FILE:FakeEosSdk>")
+add_executable(LobbyStateTests tests/lobbystate_test.cpp src/lobbystate.cpp src/hostmode.cpp src/roomview.cpp
+    src/mission.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp
+    src/joinlog.cpp src/updatecheck.cpp)
+target_link_libraries(LobbyStateTests PRIVATE winhttp)
+target_compile_options(LobbyStateTests PRIVATE ${WARNINGS})
+add_dependencies(LobbyStateTests FakeEosSdk)
+add_test(NAME LobbyStateAndGhostMembers COMMAND LobbyStateTests "${CMAKE_BINARY_DIR}/lobbystate-test.log"
     "$<TARGET_FILE:FakeEosSdk>")
 set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 # The tests against the game's code are registered either way. Without EDF.dll they report themselves skipped
@@ -147,7 +155,8 @@ target_compile_options(MissionTests PRIVATE ${WARNINGS})
 add_test(NAME MissionSlots COMMAND MissionTests)
 
 add_executable(HostModeTests tests/hostmode_test.cpp src/hostmode.cpp src/roomview.cpp src/mission.cpp src/armor.cpp
-    src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp src/updatecheck.cpp)
+    src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp src/updatecheck.cpp
+    src/lobbystate.cpp)
 target_link_libraries(HostModeTests PRIVATE winhttp)
 target_compile_options(HostModeTests PRIVATE ${WARNINGS})
 add_test(NAME HostModeAndMenuLabel COMMAND HostModeTests)

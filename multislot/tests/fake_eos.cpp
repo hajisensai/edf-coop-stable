@@ -1,5 +1,5 @@
-// A stand-in EOSSDK-Win64-Shipping.dll for SyncMarkerTests: the lobby and id functions syncmarker.cpp and
-// identity.cpp use, over one in-memory lobby. Completions run on EOS_Platform_Tick, as EOS runs them. The test
+// A stand-in EOSSDK-Win64-Shipping.dll for SyncMarkerTests and LobbyStateTests: the lobby and id functions
+// syncmarker.cpp, lobbystate.cpp and identity.cpp use, over one in-memory lobby. Completions run on EOS_Platform_Tick, as EOS runs them. The test
 // drives it through the FakeEos_* exports.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -62,8 +62,49 @@ struct GetMemberByIndexOptions {
     std::int32_t ApiVersion;
     std::uint32_t MemberIndex;
 };
+struct CopyDetailsOptions {
+    std::int32_t ApiVersion;
+    const char* LobbyId;
+    const void* LocalUserId;
+};
+struct CopyAttributeOptions {
+    std::int32_t ApiVersion;
+    const char* AttrKey;
+};
+struct CreateLobbyOptionsHead {
+    std::int32_t ApiVersion;
+    const void* LocalUserId;
+    std::uint32_t MaxLobbyMembers;
+};
+struct JoinLobbyOptionsHead {
+    std::int32_t ApiVersion;
+    void* LobbyDetailsHandle;
+};
+struct LeaveOptions {  // Leave and Destroy
+    std::int32_t ApiVersion;
+    const void* LocalUserId;
+    const char* LobbyId;
+};
+struct LobbyDetailsInfo {
+    std::int32_t ApiVersion;
+    const char* LobbyId;
+    const void* LobbyOwnerUserId;
+    std::int32_t PermissionLevel;
+    std::uint32_t AvailableSlots;
+    std::uint32_t MaxMembers;
+};
+
+// A copy of the lobby, as EOS hands one out; or, from FakeEos_Details, the handle of a lobby to join.
+struct Details {
+    std::string lobbyId;
+    std::vector<std::string> members;
+    std::string owner;
+    std::uint32_t maxMembers = 0;
+    std::map<std::string, std::int64_t> attributes;
+};
 
 constexpr std::int32_t kWillRetry = 0x99;  // this fake's not-final result
+constexpr std::int32_t kNotFound = 18, kNotOwner = 9000, kAlreadyMember = 9002;
 
 std::map<std::string, std::unique_ptr<User>> users;
 std::vector<std::string> members;                                  // in the lobby, in order
@@ -76,6 +117,13 @@ std::int32_t modificationResult = 0;
 int updates = 0;
 int modifications = 0;
 int leaves = 0;
+int destroys = 0;
+int joins = 0;
+std::string owner;
+std::uint32_t maxMembers = 0;
+std::map<std::string, std::int64_t> lobbyAttributes;
+std::int32_t leaveResult = 0;
+std::int32_t destroyResult = 0;
 std::deque<std::function<void()>> completions;
 
 struct Modification {
@@ -91,7 +139,14 @@ const User* Handle(const std::string& id) {
     return user.get();
 }
 
+bool IsMember(const std::string& id) {
+    for (const auto& member : members)
+        if (member == id) return true;
+    return false;
+}
+
 void Complete(LobbyIdCallback callback, void* clientData, std::int32_t result, const std::string& lobby) {
+    if (!callback) return;
     completions.push_back([=]() {
         LobbyIdCallbackInfo info{result, clientData, lobby.c_str()};
         callback(&info);
@@ -113,6 +168,13 @@ EXPORT void FakeEos_Reset(const char* selfId) {
     updates = 0;
     modifications = 0;
     leaves = 0;
+    destroys = 0;
+    joins = 0;
+    owner.clear();
+    maxMembers = 0;
+    lobbyAttributes.clear();
+    leaveResult = 0;
+    destroyResult = 0;
 }
 EXPORT const void* FakeEos_User(const char* id) { return Handle(id); }
 EXPORT void FakeEos_AddMember(const char* id) { members.push_back(id); }
@@ -138,6 +200,29 @@ EXPORT void FakeEos_SetModificationResult(std::int32_t result) { modificationRes
 EXPORT int FakeEos_Modifications() { return modifications; }
 EXPORT int FakeEos_Leaves() { return leaves; }
 EXPORT std::int32_t FakeEos_WillRetry() { return kWillRetry; }
+EXPORT int FakeEos_Destroys() { return destroys; }
+EXPORT int FakeEos_Joins() { return joins; }
+EXPORT const char* FakeEos_LobbyId() { return lobbyId.c_str(); }
+EXPORT int FakeEos_IsMember(const char* id) { return IsMember(id); }
+EXPORT void FakeEos_SetOwner(const char* id) { owner = id; }
+EXPORT void FakeEos_SetMaxMembers(std::uint32_t count) { maxMembers = count; }
+EXPORT void FakeEos_SetLobbyAttribute(const char* key, std::int64_t value) { lobbyAttributes[key] = value; }
+EXPORT void FakeEos_SetLeaveResult(std::int32_t result) { leaveResult = result; }
+EXPORT void FakeEos_SetDestroyResult(std::int32_t result) { destroyResult = result; }
+// This machine is in `id`, owned by `ownerId`, as EOS sees it, whatever the game thinks.
+EXPORT void FakeEos_EnterLobby(const char* id, const char* ownerId) {
+    lobbyId = id;
+    owner = ownerId;
+    members = {ownerId};
+    if (self != ownerId) members.push_back(self);
+    lobbyAttributes.clear();
+}
+// The handle of `id` as a search result hands it to the game for joining.
+EXPORT void* FakeEos_Details(const char* id) {
+    auto* details = new Details;
+    details->lobbyId = id;
+    return details;
+}
 
 // --- EOS ---
 EXPORT std::int32_t EOS_ProductUserId_IsValid(const void* id) { return id != nullptr; }
@@ -157,24 +242,59 @@ EXPORT void EOS_Platform_Tick(void*) {
     for (auto& completion : now) completion();
 }
 
-EXPORT void EOS_Lobby_CreateLobby(void*, const void*, void* clientData, LobbyIdCallback callback) {
+EXPORT const char* EOS_EResult_ToString(std::int32_t result) {
+    switch (result) {
+    case 0: return "EOS_Success";
+    case kNotFound: return "EOS_NotFound";
+    case kNotOwner: return "EOS_Lobby_NotOwner";
+    case kAlreadyMember: return "EOS_Lobby_LobbyAlreadyExists";
+    default: return "EOS_Unknown";
+    }
+}
+
+EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, void* clientData, LobbyIdCallback callback) {
     lobbyId = "lobby-created";
     members = {self};
+    owner = self;
+    maxMembers = options ? options->MaxLobbyMembers : 0;
+    lobbyAttributes.clear();
     // A not-final run first: the plugin's wrapper must survive it.
     Complete(callback, clientData, kWillRetry, lobbyId);
     Complete(callback, clientData, 0, lobbyId);
 }
-EXPORT void EOS_Lobby_JoinLobby(void*, const void*, void* clientData, LobbyIdCallback callback) {
-    lobbyId = "lobby-joined";
+// EOS refuses a join into a lobby this user is still a member of; otherwise this machine is in the target now.
+EXPORT void EOS_Lobby_JoinLobby(void*, const JoinLobbyOptionsHead* options, void* clientData, LobbyIdCallback callback) {
+    ++joins;
+    const auto* target = options ? static_cast<const Details*>(options->LobbyDetailsHandle) : nullptr;
+    const std::string id = target ? target->lobbyId : "lobby-joined";
+    if (id == lobbyId && IsMember(self)) {
+        Complete(callback, clientData, kAlreadyMember, id);
+        return;
+    }
+    lobbyId = id;
     members.push_back(self);
     Complete(callback, clientData, 0, lobbyId);
 }
-EXPORT void EOS_Lobby_LeaveLobby(void*, const void*, void*, void*) {
+EXPORT void EOS_Lobby_LeaveLobby(void*, const LeaveOptions* options, void* clientData, LobbyIdCallback callback) {
     ++leaves;
-    FakeEos_RemoveMember(self.c_str());
-    attributes.erase(self);
+    const std::string id = options && options->LobbyId ? options->LobbyId : lobbyId;
+    if (leaveResult == 0) {
+        FakeEos_RemoveMember(self.c_str());
+        attributes.erase(self);
+    }
+    Complete(callback, clientData, leaveResult, id);
 }
-EXPORT void EOS_Lobby_DestroyLobby(void*, const void*, void*, void*) { EOS_Lobby_LeaveLobby(nullptr, nullptr, nullptr, nullptr); }
+// Only the owner may destroy a lobby.
+EXPORT void EOS_Lobby_DestroyLobby(void*, const LeaveOptions* options, void* clientData, LobbyIdCallback callback) {
+    ++destroys;
+    const std::string id = options && options->LobbyId ? options->LobbyId : lobbyId;
+    const std::int32_t result = !owner.empty() && owner != self ? kNotOwner : destroyResult;
+    if (result == 0) {
+        FakeEos_RemoveMember(self.c_str());
+        attributes.erase(self);
+    }
+    Complete(callback, clientData, result, id);
+}
 
 EXPORT std::int32_t EOS_Lobby_UpdateLobbyModification(void*, const void*, void** modification) {
     ++modifications;
@@ -201,28 +321,51 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
     });
 }
 
-EXPORT std::int32_t EOS_Lobby_CopyLobbyDetailsHandle(void*, const void*, void** details) {
-    if (copyFails || lobbyId.empty()) return 18;  // EOS_NotFound
-    *details = new std::vector<std::string>(members);
+// A copy exists only of the lobby this user is in.
+EXPORT std::int32_t EOS_Lobby_CopyLobbyDetailsHandle(void*, const CopyDetailsOptions* options, void** details) {
+    if (copyFails || lobbyId.empty() || !IsMember(self)) return kNotFound;
+    if (options && options->LobbyId && lobbyId != options->LobbyId) return kNotFound;
+    *details = new Details{lobbyId, members, owner, maxMembers, lobbyAttributes};
     return 0;
 }
 EXPORT std::uint32_t EOS_LobbyDetails_GetMemberCount(void* details, const void*) {
-    return static_cast<std::uint32_t>(static_cast<std::vector<std::string>*>(details)->size());
+    return static_cast<std::uint32_t>(static_cast<Details*>(details)->members.size());
 }
 EXPORT const void* EOS_LobbyDetails_GetMemberByIndex(void* details, const GetMemberByIndexOptions* options) {
-    const auto& list = *static_cast<std::vector<std::string>*>(details);
+    const auto& list = static_cast<Details*>(details)->members;
     return options->MemberIndex < list.size() ? Handle(list[options->MemberIndex]) : nullptr;
 }
 EXPORT std::int32_t EOS_LobbyDetails_CopyMemberAttributeByKey(void*, const CopyMemberAttributeOptions* options,
                                                               Attribute** out) {
     const std::int64_t value = FakeEos_Attribute(static_cast<const User*>(options->TargetUserId)->text, options->AttrKey);
-    if (value < 0) return 18;
+    if (value < 0) return kNotFound;
     auto* data = new AttributeData{1, options->AttrKey, {}, 1};
     data->Value.AsInt64 = value;
     *out = new Attribute{1, data, 0};
     return 0;
 }
-EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<std::vector<std::string>*>(details); }
+EXPORT std::int32_t EOS_LobbyDetails_CopyAttributeByKey(void* details, const CopyAttributeOptions* options, Attribute** out) {
+    const auto& found = static_cast<Details*>(details)->attributes;
+    const auto it = found.find(options->AttrKey);
+    if (it == found.end()) return kNotFound;
+    auto* data = new AttributeData{1, options->AttrKey, {}, 1};
+    data->Value.AsInt64 = it->second;
+    *out = new Attribute{1, data, 0};
+    return 0;
+}
+EXPORT std::int32_t EOS_LobbyDetails_CopyInfo(void* details, const void*, LobbyDetailsInfo** out) {
+    const auto* lobby = static_cast<Details*>(details);
+    const auto taken = static_cast<std::uint32_t>(lobby->members.size());
+    *out = new LobbyDetailsInfo{1, lobby->lobbyId.c_str(), lobby->owner.empty() ? nullptr : Handle(lobby->owner), 0,
+                                lobby->maxMembers > taken ? lobby->maxMembers - taken : 0, lobby->maxMembers};
+    return 0;
+}
+EXPORT void EOS_LobbyDetails_Info_Release(LobbyDetailsInfo* info) { delete info; }
+EXPORT const void* EOS_LobbyDetails_GetLobbyOwner(void* details, const void*) {
+    const auto* lobby = static_cast<Details*>(details);
+    return lobby->owner.empty() ? nullptr : Handle(lobby->owner);
+}
+EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<Details*>(details); }
 EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {
     delete attribute->Data;
     delete attribute;

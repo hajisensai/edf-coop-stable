@@ -61,6 +61,7 @@ struct MenuContext {
     const wchar_t* hostModeHint;   // "F2/LS", what switches the setting outside a room
     int copyArmorTo;               // the armor copy armor is giving this player, 0 when it is giving none
     bool copyArmorAtMax;           // and that armor is this class's ceiling, not what was found in the room
+    int roomMode = -1;             // the room's kind as its lobby says (LobbyKind: 1 MultiSlot, 0 normal), -1 unknown
 };
 // Long enough for the fullest line a room can show: the room's setting, the page guide and copy armor.
 constexpr std::size_t kLabelChars = 96;
@@ -69,6 +70,7 @@ constexpr std::size_t kLabelChars = 96;
 // own setting ("8Player MOD :ON"), which nothing can change now but nothing else reports; then the page guide
 // "F3/Tab/RS: Members 5-8" (the page those inputs switch to) while more than four members are shown, and always
 // in a MultiSlot room this player hosts; then "F4/LS copy armor :ON" / ":OFF". Nothing to show is a single space.
+// roomEightPlayers: the setting this machine created its last room with, shown while context.roomMode is -1.
 std::size_t ComposeLabel(const MenuContext& context, bool eightPlayers, bool roomEightPlayers, wchar_t* out,
                          std::size_t outChars);
 // One menu frame update: the 8Player MOD input edge (down), then the label.

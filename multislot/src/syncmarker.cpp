@@ -132,9 +132,10 @@ struct Local {
     std::string lobbyId;
     bool dirty = false;  // our marker is not (known to be) published in this lobby
     std::int64_t seq = 0;
-    ULONGLONG nextObserve = 0;
-    ULONGLONG nextPublish = 0;  // after a failed publish: not before the next observation
-    bool failureLogged = false;
+    // Everything we do in the lobby - observing, publishing, publishing again after a failure - happens on one beat,
+    // once a second and never on the frame we enter: EDF6DirectNet publishes its own marker on that frame.
+    ULONGLONG nextBeat = 0;
+    bool failureLogged = false;  // in this lobby
 } local;
 
 // A pending CreateLobby / JoinLobby of the game; EOS runs its completion until the result is final.
@@ -145,6 +146,15 @@ struct LobbyCall {
     const void* user;
 };
 
+// The marker did not get in: it is still owed, and goes out again on the next beat. Caller holds local.lock.
+void PublishFailedLocked(EosResult result) {
+    local.dirty = true;
+    if (local.failureLogged) return;
+    local.failureLogged = true;
+    Log("MISSION sync: publishing our split marker failed (EOS result %d); trying again every second while we are "
+        "in this room", result);
+}
+
 void Published(const LobbyIdCallbackInfo* info) {
     if (info->ResultCode == kEosSuccess) {
         Log("MISSION sync: published that this machine reads a split start message (lobby member attribute %s)",
@@ -152,19 +162,9 @@ void Published(const LobbyIdCallbackInfo* info) {
         return;
     }
     if (api.isComplete && !api.isComplete(info->ResultCode)) return;  // EOS retries by itself
-    // Not published: the marker is still owed, published again with the next observation (about a second away).
     AcquireSRWLockExclusive(&local.lock);
-    const bool ours = info->LobbyId && local.lobbyId == info->LobbyId;
-    const bool log = ours && !local.failureLogged;
-    if (ours) {
-        local.dirty = true;
-        local.nextPublish = GetTickCount64() + kObserveIntervalMs;
-        local.failureLogged = true;
-    }
+    if (info->LobbyId && local.lobbyId == info->LobbyId) PublishFailedLocked(info->ResultCode);
     ReleaseSRWLockExclusive(&local.lock);
-    if (log)
-        Log("MISSION sync: publishing our split marker failed (EOS result %d); published again every second until "
-            "it is in", info->ResultCode);
 }
 
 // Caller holds local.lock.
@@ -173,8 +173,7 @@ void PublishLocked() {
     void* modification = nullptr;
     EosResult result = api.updateModification(local.lobby, &options, &modification);
     if (result != kEosSuccess || !modification) {
-        Log("MISSION sync: cannot edit our lobby member (EOS result %d); hosts will not send us a split start message",
-            result);
+        PublishFailedLocked(result != kEosSuccess ? result : -1);
         return;
     }
     AttributeData marker{};
@@ -196,7 +195,7 @@ void PublishLocked() {
         api.updateLobby(local.lobby, &update, nullptr, &Published);  // EOS copies the modification
         local.dirty = false;
     } else {
-        Log("MISSION sync: cannot set our split marker (EOS result %d)", result);
+        PublishFailedLocked(result);
     }
     api.releaseModification(modification);
 }
@@ -229,21 +228,20 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members) {
     return true;
 }
 
-void ObserveLocked(ULONGLONG now) {
-    if (now < local.nextObserve) return;
-    local.nextObserve = now + kObserveIntervalMs;
+// One beat: read who is in the lobby, then publish our marker if it is owed. Caller holds local.lock.
+void BeatLocked() {
     std::vector<LobbyMember> members;
-    if (!ReadMembersLocked(members)) return;
-    if (SplitSync().Observe(members)) local.dirty = true;  // a newcomer gets our marker sent again
+    if (ReadMembersLocked(members) && SplitSync().Observe(members)) local.dirty = true;  // a newcomer needs it again
+    if (local.dirty) PublishLocked();
 }
 
 void TickHook(void* platform) {
     api.tick(platform);
     AcquireSRWLockExclusive(&local.lock);
     const ULONGLONG now = GetTickCount64();
-    if (!local.lobbyId.empty()) {
-        ObserveLocked(now);
-        if (local.dirty && now >= local.nextPublish) PublishLocked();
+    if (!local.lobbyId.empty() && now >= local.nextBeat) {
+        local.nextBeat = now + kObserveIntervalMs;
+        BeatLocked();
     }
     ReleaseSRWLockExclusive(&local.lock);
 }
@@ -254,8 +252,7 @@ void Entered(const LobbyCall& call, const char* lobbyId) {
     local.user = call.user;
     local.lobbyId = lobbyId;
     local.dirty = true;
-    local.nextObserve = 0;
-    local.nextPublish = 0;
+    local.nextBeat = GetTickCount64() + kObserveIntervalMs;
     local.failureLogged = false;
     ReleaseSRWLockExclusive(&local.lock);
     SplitSync().Entered(lobbyId);
@@ -332,14 +329,20 @@ void SplitSyncRoom::Left() { Entered(std::string()); }
 bool SplitSyncRoom::Observe(const std::vector<LobbyMember>& members) {
     AcquireSRWLockExclusive(&lock_);
     bool newcomer = false;
+    std::vector<std::string> late;  // refused a split message before their marker showed up
     for (const LobbyMember& member : lobby_.empty() ? std::vector<LobbyMember>() : members) {
         if (!Contains(members_, member.id)) {
             members_.push_back(member.id);
             newcomer = true;
         }
-        if (member.marked && !Contains(marked_, member.id)) marked_.push_back(member.id);
+        if (!member.marked || Contains(marked_, member.id)) continue;
+        marked_.push_back(member.id);
+        if (Contains(refused_, member.id)) late.push_back(member.id);
     }
     ReleaseSRWLockExclusive(&lock_);
+    for (const std::string& id : late)
+        Log("MISSION sync: EOS %s now shows that it reads a split start message; the game's next resend reaches it",
+            id.c_str());
     return newcomer;
 }
 
@@ -388,8 +391,9 @@ bool PeerReadsSplitSync(const void* remote) {
     if (first) room.refused_.push_back(id);
     ReleaseSRWLockExclusive(&room.lock_);
     if (first)
-        Log("MISSION sync: EOS %s has not published that it reads a split start message (it runs no MultiSlot 1.5.15 "
-            "or later); the start message is not sent to it, as before the split, so it cannot start this mission",
+        Log("MISSION sync: no marker seen yet from EOS %s that it reads a split start message, so it is not sent one. "
+            "If it joined in the last few seconds its marker may still be on its way (a line follows when it shows "
+            "up); otherwise it runs no MultiSlot 1.5.15 or later and cannot start this mission",
             id);
     return marked;
 }

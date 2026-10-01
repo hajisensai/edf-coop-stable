@@ -494,7 +494,7 @@ EosResult PacketFitSend(void* handle, const EosSendOptions* options) {
             if (!splitSyncReaders && !logged.exchange(true))
                 Log("MISSION sync: nobody is known to read a split start message (the lobby marker is unavailable); "
                     "a start message too large for one packet is not sent");
-            return kEosInvalidParameters;
+            return kEosLimitExceeded;
         }
         for (std::size_t i = 0; i < found; ++i) {
             std::uint8_t record[kMaxRecordBytes];
@@ -530,7 +530,11 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
         }
         StubInfo missing;
         const std::size_t count = MissingRecords(bytes, *size, missing);
-        if (!count || *size > kEosMaxPacket) return result;  // EOS never delivers more than it can send
+        if (!count) return result;
+        if (*size > kEosMaxPacket) {  // cannot happen (EOS sends nothing larger); never hand the game half a sync
+            Log("MISSION sync: a %u-byte start message without its loadout records was dropped", *size);
+            continue;
+        }
         Hold(peer, socket, channel, bytes, *size);
         Log("MISSION sync: start message (%u bytes) held until %zu loadout record(s) arrive, the first for player "
             "index %d", *size, count, missing.index);

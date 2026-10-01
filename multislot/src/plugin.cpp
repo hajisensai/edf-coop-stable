@@ -594,9 +594,10 @@ bool LoadPlugin(PluginInfo* info) {
         Log("Test: GhostPlayers=%d - a mission started alone online gets %d idle copies of you as extra players", ghosts, ghosts);
     // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
     if (mission) {
-        const bool marker = InstallSyncMarker(game, &RedirectGameImport);
-        if (marker) SetSplitSyncReaders(&PeerReadsSplitSync);
         const int imports = InstallPacketFit(game, &RedirectGameImport);
+        // The marker says this machine reads a split message: only true once both P2P imports are ours.
+        const bool marker = imports == 2 && InstallSyncMarker(game, &RedirectGameImport);
+        if (marker) SetSplitSyncReaders(&PeerReadsSplitSync);
         if (imports == 2)
             Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "
                 "what fits and sends the other loadout records beside it; smaller ones are unchanged. It only goes to "

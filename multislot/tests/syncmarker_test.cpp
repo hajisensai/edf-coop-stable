@@ -143,7 +143,9 @@ void TestLobby(const wchar_t* fakePath) {
     Check(gameResults.size() == 2 && gameResults[1] == 0 && gameLobby == "lobby-created" && gameClientDataOk,
           "the game gets both runs of its completion with its own ClientData");
     Check(SplitSync().LobbyId() == "lobby-created", "the room entered is known");
-    Check(Updates() == 1 && Published(kSplitSyncKey) == -1, "our marker is sent on the tick that enters");
+    Check(Updates() == 0, "nothing is published on the frame we enter (EDF6DirectNet publishes its own then)");
+    NextObservation();
+    Check(Updates() == 1 && Published(kSplitSyncKey) == -1, "our marker is sent a beat later");
     Tick();
     Check(Published(kSplitSyncKey) == kSplitSyncFormat && Published(kSplitSyncSeqKey) == 1, "and is in the lobby");
     Check(PeerReadsSplitSync(User("self")) == false, "we are not observed yet");
@@ -183,10 +185,29 @@ void TestLobby(const wchar_t* fakePath) {
     Tick();
     Check(Published(kSplitSyncSeqKey) == 4, "and is in the lobby then");
 
+    // A publish EOS refuses outright is owed the same way: again on the next beat, not on every tick.
+    Fake<void (*)(std::int32_t)>("FakeEos_SetModificationResult")(18);
+    AddMember("fourth", false);
+    const int modifications = Fake<int (*)()>("FakeEos_Modifications")();
+    NextObservation();
+    Tick();
+    Tick();
+    Check(Fake<int (*)()>("FakeEos_Modifications")() == modifications + 1 && Updates() == 4,
+          "a refused publish is tried once per beat");
+    Fake<void (*)(std::int32_t)>("FakeEos_SetModificationResult")(0);
+    NextObservation();
+    Check(Updates() == 5, "and goes out once EOS takes it");
+    Tick();
+
+    // A member refused before its marker showed up: the marker counts once it is seen, and the log says so.
+    Fake<void (*)(const char*, const char*, std::int64_t)>("FakeEos_SetAttribute")("older", kSplitSyncKey, 1);
+    NextObservation();
+    Check(PeerReadsSplitSync(User("older")), "a marker that shows up late counts");
+
     // No local copy of the lobby: nothing is learnt and nothing is forgotten.
     Fake<void (*)(int)>("FakeEos_SetCopyFails")(1);
     NextObservation();
-    Check(PeerReadsSplitSync(User("third")) && Updates() == 4, "without a lobby copy what we know stays");
+    Check(PeerReadsSplitSync(User("third")) && Updates() == 5, "without a lobby copy what we know stays");
     Fake<void (*)(int)>("FakeEos_SetCopyFails")(0);
 
     // Leaving: everything about the room is forgotten, records and held packets included.
@@ -207,8 +228,10 @@ void TestLobby(const wchar_t* fakePath) {
     reinterpret_cast<LobbyCallFn>(replacements["EOS_Lobby_JoinLobby"])(
         const_cast<int*>(&lobbyHandle), &join, &gameMarker, &GameLobbyCallback);
     Tick();
-    Check(gameLobby == "lobby-joined" && SplitSync().LobbyId() == "lobby-joined" && Updates() == updates + 1,
-          "joining publishes our marker in the new room");
+    Check(gameLobby == "lobby-joined" && SplitSync().LobbyId() == "lobby-joined" && Updates() == updates,
+          "the room joined is known");
+    NextObservation();
+    Check(Updates() == updates + 1, "joining publishes our marker in the new room");
     Check(PeerReadsSplitSync(User("third")) && !PeerReadsSplitSync(User("newer")),
           "members are read on entering (newer lost its marker in our copy, and this is a new room)");
     Fake<void (*)(const char*)>("FakeEos_RemoveMember")("older");
@@ -218,9 +241,12 @@ void TestLobby(const wchar_t* fakePath) {
 
 void TestLog(const std::wstring& path) {
     const std::string log = ReadLog(path);
-    Check(Count(log, "EOS older has not published that it reads a split start message") == 1,
-          "a member without the marker is logged once per room");
-    Check(Count(log, "publishing our split marker failed (EOS result 10)") == 1, "a failed publish is logged once");
+    Check(Count(log, "no marker seen yet from EOS older") == 1, "a member without the marker is logged once per room");
+    Check(Count(log, "EOS older now shows that it reads a split start message") == 1,
+          "and a line follows when its marker shows up");
+    Check(Count(log, "publishing our split marker failed (EOS result 10)") == 1 &&
+              Count(log, "publishing our split marker failed") == 1,
+          "a failed publish is logged once per room, however it failed");
     Check(Count(log, "MISSION sync: published that this machine reads a split start message") >= 3,
           "every publish that got in is logged");
 }

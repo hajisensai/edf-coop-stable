@@ -97,12 +97,14 @@ MidHandler PacketFitHookHandler(std::uint32_t rva);
 // them too) and are taken out of what the game receives. A packet whose stubs are not all known yet is held
 // until their records arrive and then handed to the game: the sync goes out reliably (EDF6DirectNet), so it is
 // acknowledged on arrival and dropping it would cost the game a resend about three seconds later. Held packets
-// are bounded (kHeldPackets, oldest dropped) and given up after kHeldPacketMs, by when the game has given up on
-// that sync too.
+// are bounded (kHeldPackets, oldest dropped) and given up after kHeldPacketMs, longer than the ~26 s over which
+// the game resends a sync (see the top of this file). A held packet reaches the game after packets that arrived
+// behind it; dropping it, as before, reordered the same way.
 //
 // A packet with a stub only goes to a member that reads it (SetSplitSyncReaders). Anyone else gets neither it nor
-// its side packets and the game is told EOS_InvalidParameters - what EOS answered before the split, when the
-// whole sync was too large - since a machine without the split reads a stub as garbage (syncmarker.h).
+// its side packets and the game is told EOS_LimitExceeded - what EOS answers for a packet above its limit (the
+// 2026-09-30 DirectNet logs: "EOS SendPacket ... failed: EOS_LimitExceeded"), i.e. what that member got before the
+// split - since a machine without the split reads a stub as garbage (syncmarker.h).
 using EosResult = std::int32_t;
 struct EosSendOptions {
     std::int32_t ApiVersion;
@@ -126,7 +128,7 @@ EosResult PacketFitSend(void* handle, const EosSendOptions* options);
 EosResult PacketFitReceive(void* handle, const void* options, void** peer, void* socket, std::uint8_t* channel, void* data,
                            std::uint32_t* size);
 void SetEosFunctions(EosSendFn send, EosReceiveFn receive);
-constexpr EosResult kEosInvalidParameters = 10;  // EOS_InvalidParameters
+constexpr EosResult kEosLimitExceeded = 22;  // EOS_LimitExceeded
 constexpr std::size_t kHeldPackets = 8;
 constexpr unsigned long long kHeldPacketMs = 30000;
 // Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.

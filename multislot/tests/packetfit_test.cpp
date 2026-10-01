@@ -427,7 +427,7 @@ void TestSendGate() {
     readers = {&marked};
     sent.clear();
     auto options = SendTo(&unmarked, packet);
-    Check(PacketFitSend(nullptr, &options) == kEosInvalidParameters && sent.empty(),
+    Check(PacketFitSend(nullptr, &options) == kEosLimitExceeded && sent.empty(),
           "a member without the split gets neither the sync nor its side packets, and the game hears what EOS said "
           "before the split");
     options = SendTo(&marked, packet);
@@ -441,7 +441,7 @@ void TestSendGate() {
     sent.clear();
     SetSplitSyncReaders(nullptr);
     options = SendTo(&marked, packet);
-    Check(PacketFitSend(nullptr, &options) == kEosInvalidParameters && sent.empty(),
+    Check(PacketFitSend(nullptr, &options) == kEosLimitExceeded && sent.empty(),
           "without the lobby marker nobody gets a split sync");
     SetSplitSyncReaders(&FakeReaders);
     ClearRecords();

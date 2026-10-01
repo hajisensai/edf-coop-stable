@@ -72,7 +72,9 @@ std::string self;
 std::string lobbyId;
 bool copyFails = false;
 std::int32_t updateResult = 0;
+std::int32_t modificationResult = 0;
 int updates = 0;
+int modifications = 0;
 int leaves = 0;
 std::deque<std::function<void()>> completions;
 
@@ -107,7 +109,9 @@ EXPORT void FakeEos_Reset(const char* selfId) {
     lobbyId.clear();
     copyFails = false;
     updateResult = 0;
+    modificationResult = 0;
     updates = 0;
+    modifications = 0;
     leaves = 0;
 }
 EXPORT const void* FakeEos_User(const char* id) { return Handle(id); }
@@ -130,6 +134,8 @@ EXPORT std::int64_t FakeEos_Attribute(const char* member, const char* key) {
 EXPORT void FakeEos_SetCopyFails(int fails) { copyFails = fails != 0; }
 EXPORT void FakeEos_SetUpdateResult(std::int32_t result) { updateResult = result; }
 EXPORT int FakeEos_Updates() { return updates; }
+EXPORT void FakeEos_SetModificationResult(std::int32_t result) { modificationResult = result; }
+EXPORT int FakeEos_Modifications() { return modifications; }
 EXPORT int FakeEos_Leaves() { return leaves; }
 EXPORT std::int32_t FakeEos_WillRetry() { return kWillRetry; }
 
@@ -171,6 +177,8 @@ EXPORT void EOS_Lobby_LeaveLobby(void*, const void*, void*, void*) {
 EXPORT void EOS_Lobby_DestroyLobby(void*, const void*, void*, void*) { EOS_Lobby_LeaveLobby(nullptr, nullptr, nullptr, nullptr); }
 
 EXPORT std::int32_t EOS_Lobby_UpdateLobbyModification(void*, const void*, void** modification) {
+    ++modifications;
+    if (modificationResult != 0) return modificationResult;
     *modification = new Modification;
     return 0;
 }

@@ -1328,16 +1328,84 @@ void testHelloFloodIsBounded() {
     dn::DirectNet host;
     CHECK(host.start(hostOptions(0, 0)));
     host.setLocalUser(kHost);
-    std::vector<RawPeer> attackers(40);  // one source port each: a single address only replaces itself
+    std::vector<RawPeer> attackers(80);  // one source port each: a single address only replaces itself
     char id[40];
-    for (int i = 0; i < 40; ++i) {
+    for (int i = 0; i < 80; ++i) {
         snprintf(id, sizeof(id), "0002ffffffffffffffffffffffff%04d", i);
         attackers[i].hello(host.boundPort(), id, 100 + i);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     size_t members = host.directMembers().size();
     printf("  members after the flood: %zu\n", members);
-    CHECK(members <= 1 + 16);
+    CHECK(members <= 1 + 64);
+}
+
+// A full room of 32 players: 31 clients on one host. Every client learns every other member from the
+// host's member list (exactly as long as the wire allows) and reaches it through the host.
+void testFullRoom() {
+    printf("direct: a room of 32 players, 31 clients on one host\n");
+    dn::DirectOptions ho = hostOptions(0, 0);
+    std::vector<std::string> ids;
+    char id[40];
+    for (int i = 0; i < 31; ++i) {
+        snprintf(id, sizeof(id), "0002eeeeeeeeeeeeeeeeeeeeeeee%04d", i);
+        ids.push_back(id);
+        ho.memberIds[id] = dn::processIdentity()->commitment();
+    }
+    // The largest handshake and link messages of a full room fit the receive buffer (2048 bytes).
+    dn::Message w;
+    w.type = dn::MsgType::Welcome;
+    w.welcome.hostPuid = kHost;
+    w.welcome.roster = ids;
+    w.welcome.roster.insert(w.welcome.roster.begin(), kHost);
+    size_t welcomeSize = dn::encode(w, "key").size();
+    dn::Message r;
+    r.type = dn::MsgType::Roster;
+    r.roster.roster = w.welcome.roster;
+    size_t rosterSize = dn::encode(r, "").size();
+    printf("  32 members: Welcome %zu bytes (with a Key), Roster %zu bytes\n", welcomeSize, rosterSize);
+    CHECK(welcomeSize < 2048 && rosterSize < 2048);
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    std::string addr = "127.0.0.1:" + std::to_string(host.boundPort());
+    std::vector<std::unique_ptr<dn::DirectNet>> clients;
+    for (const std::string& client : ids) {
+        clients.push_back(std::make_unique<dn::DirectNet>());
+        CHECK(clients.back()->start(joinOptions(addr, 0)));
+        clients.back()->setLocalUser(client);
+    }
+    auto everyoneRoutes = [&] {
+        if (host.directMembers().size() != 32) return false;
+        for (size_t i = 0; i < clients.size(); ++i) {
+            if (!clients[i]->canRoute(kHost)) return false;
+            for (const std::string& other : ids)
+                if (other != ids[i] && !clients[i]->canRoute(other)) return false;
+        }
+        return true;
+    };
+    bool full = waitFor(everyoneRoutes, 20000);
+    printf("  host members: %zu\n", host.directMembers().size());
+    CHECK(full);
+    // Each client sends a few packets to the next one, relayed by the host.
+    const uint32_t kPackets = 5;
+    for (size_t i = 0; i < clients.size(); ++i)
+        for (uint32_t k = 0; k < kPackets; ++k) {
+            auto p = payloadFor(k);
+            CHECK(clients[i]->send(ids[(i + 1) % ids.size()], "EDF6", 1, 2, p.data(), p.size()));
+        }
+    std::vector<uint32_t> got(clients.size());
+    auto allArrived = [&] {
+        for (size_t i = 0; i < clients.size(); ++i) {
+            dn::Delivered d;
+            while (clients[i]->pop(nullptr, 1170, d))
+                if (d.src == ids[(i + clients.size() - 1) % clients.size()] && d.data == payloadFor(got[i])) ++got[i];
+        }
+        for (uint32_t n : got)
+            if (n != kPackets) return false;
+        return true;
+    };
+    CHECK(waitFor(allArrived, 10000));
 }
 
 void testThreeNodesOverLoopback() {
@@ -2764,6 +2832,7 @@ int wmain(int argc, wchar_t** argv) {
     testHelloCannotHijackLiveLink();
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
+    testFullRoom();
     testReliableBacklogLimit();
     testRetransmitTimeout();
     testUnacknowledgedLinkIsDropped();

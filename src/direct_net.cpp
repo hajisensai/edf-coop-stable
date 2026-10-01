@@ -34,8 +34,10 @@ constexpr uint64_t kResetQuietMs = 3000;
 // client to answer, short enough that a captured proven hello soon stops being accepted at all.
 constexpr uint64_t kCookieBucketMs = 20000;
 constexpr uint16_t kDefaultPort = 27015;
-// EDF6 has at most 4 players; the cap only bounds what a hello flood with made-up ids can allocate.
-constexpr size_t kMaxClients = 16;
+// Rooms hold up to 32 players (31 clients). Twice that leaves room for links of players who left and
+// have not timed out yet, which are no longer in the member list (see rosterLocked); the cap also bounds
+// what a hello flood with made-up ids can allocate. The member list itself holds at most 32 (wire.cpp).
+constexpr size_t kMaxClients = 64;
 static_assert(kMaxPayload + 3 * kMaxString + 64 < kMaxDatagram, "a full Data datagram must fit the receive buffer");
 
 // Millisecond resolution: GetTickCount64 moves in ~15.6 ms steps, which made every RTT sample on a

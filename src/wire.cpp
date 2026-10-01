@@ -8,6 +8,8 @@
 namespace dn {
 namespace {
 
+// Members a Welcome or Roster names, the host included: a room of 32 players. A Welcome of 32 EOS ids
+// is 1306 bytes with a Key tag (each more adds 33); 64 would not fit the 2048-byte receive buffer.
 constexpr size_t kMaxRoster = 32;
 constexpr size_t kHeaderBytes = 8;
 constexpr size_t kCounterOffset = kHeaderBytes + 4;  // after the epoch

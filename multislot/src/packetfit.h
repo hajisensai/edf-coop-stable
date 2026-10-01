@@ -79,6 +79,7 @@ bool ParseSidePacket(const std::uint8_t* data, std::size_t size, StubInfo& stub,
 // Records sent beside a sync, on the host and on every member (a few syncs' worth, oldest replaced first).
 bool StoreRecord(const StubInfo& stub, const std::uint8_t* record);  // false when it was there already
 bool FindRecord(const StubInfo& stub, std::uint8_t* out);           // copies stub.size bytes
+// Forgets the records and the packets held for them (leaving a room).
 void ClearRecords();
 
 // Game glue. The record writer/reader of the game (773840 / 773740), or stand-ins in the tests.
@@ -93,8 +94,15 @@ void* PacketFitCallHandler(std::uint32_t rva);
 MidHandler PacketFitHookHandler(std::uint32_t rva);
 
 // EOS P2P transport: side packets go out ahead of every packet that carries a stub (so a resent sync resends
-// them too), are taken out of what the game receives, and a packet whose stubs are not all known yet is held
-// back (dropped unacknowledged, so the game resends it).
+// them too) and are taken out of what the game receives. A packet whose stubs are not all known yet is held
+// until their records arrive and then handed to the game: the sync goes out reliably (EDF6DirectNet), so it is
+// acknowledged on arrival and dropping it would cost the game a resend about three seconds later. Held packets
+// are bounded (kHeldPackets, oldest dropped) and given up after kHeldPacketMs, by when the game has given up on
+// that sync too.
+//
+// A packet with a stub only goes to a member that reads it (SetSplitSyncReaders). Anyone else gets neither it nor
+// its side packets and the game is told EOS_InvalidParameters - what EOS answered before the split, when the
+// whole sync was too large - since a machine without the split reads a stub as garbage (syncmarker.h).
 using EosResult = std::int32_t;
 struct EosSendOptions {
     std::int32_t ApiVersion;
@@ -118,6 +126,16 @@ EosResult PacketFitSend(void* handle, const EosSendOptions* options);
 EosResult PacketFitReceive(void* handle, const void* options, void** peer, void* socket, std::uint8_t* channel, void* data,
                            std::uint32_t* size);
 void SetEosFunctions(EosSendFn send, EosReceiveFn receive);
+constexpr EosResult kEosInvalidParameters = 10;  // EOS_InvalidParameters
+constexpr std::size_t kHeldPackets = 8;
+constexpr unsigned long long kHeldPacketMs = 30000;
+// Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.
+using SplitSyncReaders = bool (*)(const void* remote);
+void SetSplitSyncReaders(SplitSyncReaders readers);
+// The clock held packets age by (GetTickCount64 unless a test sets its own).
+using PacketFitClock = unsigned long long (*)();
+void SetPacketFitClock(PacketFitClock clock);
+std::size_t HeldPacketCount();
 using ImportRedirect = bool (*)(HMODULE game, const char* dll, const char* function, void* replacement, void** original);
 // Redirects EOS_P2P_SendPacket and EOS_P2P_ReceivePacket; returns how many. Install it before the net log so the
 // net log's wrappers (which need the game as their caller) sit in front.

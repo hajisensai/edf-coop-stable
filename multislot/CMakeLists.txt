@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(EDF6MultiSlot VERSION 1.5.14 LANGUAGES CXX)
+project(EDF6MultiSlot VERSION 1.5.15 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -74,7 +74,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_D
 add_library(EDF6MultiSlot SHARED
     src/plugin.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
-    src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp)
+    src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
+    src/syncmarker.cpp)
 target_link_libraries(EDF6MultiSlot PRIVATE winhttp)
 target_include_directories(EDF6MultiSlot PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(EDF6MultiSlot PRIVATE ${WARNINGS})
@@ -110,6 +111,14 @@ add_test(NAME NetworkImportForwarding COMMAND NetLogForwardTests)
 add_executable(PacketFitTests tests/packetfit_test.cpp src/packetfit.cpp src/log.cpp)
 target_compile_options(PacketFitTests PRIVATE ${WARNINGS})
 add_test(NAME MissionStartMessageFits COMMAND PacketFitTests "${CMAKE_BINARY_DIR}/packetfit-test.log")
+# A stand-in EOS SDK under the real DLL's name, for the lobby glue (fake_eos.cpp).
+add_library(FakeEosSdk SHARED tests/fake_eos.cpp)
+set_target_properties(FakeEosSdk PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping)
+add_executable(SyncMarkerTests tests/syncmarker_test.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
+target_compile_options(SyncMarkerTests PRIVATE ${WARNINGS})
+add_dependencies(SyncMarkerTests FakeEosSdk)
+add_test(NAME SplitSyncLobbyMarker COMMAND SyncMarkerTests "${CMAKE_BINARY_DIR}/syncmarker-test.log"
+    "$<TARGET_FILE:FakeEosSdk>")
 set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 # The tests against the game's code are registered either way. Without EDF.dll they report themselves skipped
 # (exit code 77), so ctest names them in its summary instead of a configure warning nobody reads in CI.

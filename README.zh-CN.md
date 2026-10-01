@@ -142,7 +142,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `STATS last 60s: ...`：游戏有收发时每分钟一行。内容有游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据、有多少包在 5 秒内把同一份数据又发给了同一个人（即游戏自己的重发，如果有的话）、直连在线路上实际占用的上传 / 下载（`wire up`/`down`，含重发和房主替别人转发的部分）、包数，以及每条直连的 `retx`（我方重发）、`dup`（对方重发了我们已收到的包）、`gaveup`（游戏以不可靠方式发的包，2 秒后放弃重发）、`skipped`（对方放弃、我们没收到的包）、`held`（链路送达太少、重发被压住的时长）、`credit`（此刻允许的重发数）。`send-failures` 或 `send-refused` 不为 0 时请附日志。
 - `DIRECT ... timed out: nothing received for ...` 表示对方没声了；`DIRECT ... stalled: a packet the game sent reliably is unacknowledged ...` 表示对方还在应答，但游戏需要的某个包一直送不到。
 - `DIRECT refused hello for ...`：有人想以某个玩家的身份直连，但证明不了。玩家刚进房的一两秒内出现 `published no direct-link identity` 是正常的（他的房间信息还没到房主这里，对方每秒重试）；对没装插件或 0.3.6 及更早版本的玩家，意思是他继续走 EOS。`not signed by the identity that player published` 说明有人冒充该玩家，已被拒绝，影响不到那个玩家。
-- `DIRECT ... speaks direct-link protocol 4, we speak 5`：对方的 EDF6DirectNet 版本不同（协议 4 是 0.4.1，3 是 0.4.0，2 是 0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
+- `DIRECT ... speaks direct-link protocol 4, we speak 5`：对方的版本不同（协议 5 是 EDF6Coop 2.0.0，4 是 EDF6DirectNet 0.4.1，3 是 0.4.0，2 是 0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
 
 ## 构建
 

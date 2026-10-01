@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include "patches.h"  // kMaxPlayers
 
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,10 @@ namespace multislot {
 // first, from the highest index down) are replaced by a 21-byte stub and sent beside the sync as packets of their
 // own. Everyone's MissionSync_Update (790600) reads a stub back as the record it stands for. A message that fits
 // is written byte for byte as before, so rooms of four (and larger rooms whose sync fits) are unchanged.
+
+// Records kept for the side packets: four syncs of a full room, and never fewer than the 64 the rooms of up to
+// 16 were sized for. The oldest makes room for a new one.
+constexpr std::size_t kRecordStoreEntries = 4 * kMaxPlayers > 64 ? 4 * kMaxPlayers : 64;
 
 constexpr std::size_t kEosMaxPacket = 1170;      // EOS_P2P_MAX_PACKET_SIZE
 constexpr std::size_t kSessionHeader = 8;        // 12CFFD0: header of each datagram to a peer

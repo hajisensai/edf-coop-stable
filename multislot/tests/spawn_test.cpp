@@ -83,11 +83,12 @@ int main() {
     }
     // Every count the mod supports, against the factors the README and the INI promise (tenths, half up).
     // Past eight players the factor stays at eight's x1.8 (kEnemyScalePlayers).
-    const int factorTenths[] = {10, 10, 10, 10, 10, 12, 14, 16, 18, 18, 18, 18, 18, 18, 18, 18, 18};
-    bool factors = kMaxPlayers < static_cast<int>(sizeof(factorTenths) / sizeof(*factorTenths));
+    // x1.0 up to four, +0.2 per player to x1.8 at eight, x1.8 from there on.
+    const auto factorTenths = [](int players) { return 10 + 2 * (std::min(std::max(players, 4), 8) - 4); };
+    bool factors = true;
     for (int players = 1; players <= kMaxPlayers; ++players)
         for (const int count : {1, 2, 3, 5, 10, 150}) {
-            const int expected = (count * factorTenths[players] + 5) / 10;
+            const int expected = (count * factorTenths(players) + 5) / 10;
             factors = factors && ScaledEnemyCount(count, players) == expected;
         }
     Check(factors, "every supported player count follows the documented factor");

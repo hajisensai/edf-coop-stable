@@ -38,10 +38,10 @@ std::uint8_t* At(std::uint64_t address) { return reinterpret_cast<std::uint8_t*>
 // One line per kind of event, so a mission with ten players does not flood the log.
 // Bits 0-15 are one event each; a loadout record gets one per player index above that.
 constexpr unsigned kLoadoutLogBit = 16;
-static_assert(kLoadoutLogBit + kMaxPlayers <= 32, "one log bit per player index must fit");
-std::atomic<unsigned> logged{0};
+static_assert(kLoadoutLogBit + kMaxPlayers <= 64, "one log bit per player index must fit");
+std::atomic<std::uint64_t> logged{0};
 void LogOnce(unsigned bit, const char* text, long long value) {
-    const unsigned mask = 1u << bit;
+    const std::uint64_t mask = std::uint64_t{1} << bit;
     if (logged.fetch_or(mask) & mask) return;
     Log(text, value);
 }

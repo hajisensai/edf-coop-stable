@@ -50,8 +50,7 @@ struct Entry {
     StubInfo stub;
     std::uint8_t bytes[kMaxRecordBytes];
 };
-constexpr std::size_t kStoreEntries = 64;  // four syncs of a 16-player room
-Entry entries[kStoreEntries];
+Entry entries[kRecordStoreEntries];
 std::size_t nextEntry = 0;
 SRWLOCK storeLock = SRWLOCK_INIT;
 
@@ -71,7 +70,8 @@ struct Pending {
     std::size_t size;
     std::uint8_t bytes[kMaxRecordBytes];
 };
-constexpr std::size_t kBatchRecords = 32;
+// One record per player of a sync: the whole record loop runs within one MissionSync_Res call.
+constexpr std::size_t kBatchRecords = std::max<std::size_t>(32, kMaxPlayers);
 // MissionSync_Res runs on the game thread, and the whole record loop runs within one call of it.
 struct Batch {
     void* stream = nullptr;
@@ -117,7 +117,9 @@ void FlushHandler(CpuContext* context) {
 EosSendFn eosSend = nullptr;
 EosReceiveFn eosReceive = nullptr;
 constexpr std::int32_t kReliableOrdered = 2;  // EOS_PR_ReliableOrdered
-constexpr std::size_t kMaxStubsPerPacket = 16;
+// Every record of a sync can be a stub: in a room of 32 only about three of them fit the budget inline, and
+// a stub past this count would be neither sent beside the sync nor waited for by the receiver.
+constexpr std::size_t kMaxStubsPerPacket = kMaxPlayers;
 
 SplitSyncReaders splitSyncReaders = nullptr;
 
@@ -339,7 +341,7 @@ bool StoreRecord(const StubInfo& stub, const std::uint8_t* record) {
     AcquireSRWLockExclusive(&storeLock);
     const bool fresh = Lookup(stub) == nullptr;
     if (fresh) {
-        Entry& entry = entries[nextEntry++ % kStoreEntries];
+        Entry& entry = entries[nextEntry++ % kRecordStoreEntries];
         entry.used = true;
         entry.stub = stub;
         std::memcpy(entry.bytes, record, stub.size);

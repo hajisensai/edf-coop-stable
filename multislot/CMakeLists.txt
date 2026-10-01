@@ -4,10 +4,10 @@ project(EDF6Coop VERSION 2.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Room size of this build (patches.h): 8 is the distributed build; 10 and 12 are families of their own whose
+# Room size of this build (patches.h): 8 is the distributed build; 10, 12, 16, 24 and 32 are families of their own whose
 # rooms only the same build can join. Every target compiles with the same value, the tests included.
-set(MULTISLOT_MAX_PLAYERS 8 CACHE STRING "Largest room this build supports (8, 10 or 12)")
-set_property(CACHE MULTISLOT_MAX_PLAYERS PROPERTY STRINGS 8 10 12)
+set(MULTISLOT_MAX_PLAYERS 8 CACHE STRING "Largest room this build supports (8, 10, 12, 16, 24 or 32)")
+set_property(CACHE MULTISLOT_MAX_PLAYERS PROPERTY STRINGS 8 10 12 16 24 32)
 add_compile_definitions(MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
 # The version EDFModLoader is told (PluginInfo) and the one kVersion must start with (plugin.cpp) come from here.
 add_compile_definitions(MULTISLOT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MULTISLOT_VERSION_MINOR=${PROJECT_VERSION_MINOR}

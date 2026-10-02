@@ -1,14 +1,14 @@
-EDF6Coop 2.2.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.3.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
 
 EDF6Coop is one EDFModLoader plugin (Mods\Plugins\EDF6Coop.dll). It does what EDF6DirectNet and
 EDF6MultiSlot did, in one DLL with one log and one settings file:
-- rooms for more than four players (8Player MOD), and missions for them;
+- rooms for more than four players (Player MOD, 8 to 32 as the host picks), and missions for them;
 - a direct link between players that keeps a room together when Epic's service hiccups;
 - resending of lost game packets, and survival of short connection drops.
-Left switched off (8Player MOD OFF, no direct link configured) you play exactly like the original game,
+Left switched off (Player MOD OFF, no direct link configured) you play exactly like the original game,
 also with players who do not have the mod.
 
 [Coming from EDF6DirectNet / EDF6MultiSlot]
@@ -18,11 +18,15 @@ where they are; on its first start EDF6Coop writes Mods\Plugins\EDF6Coop.ini wit
 carried over. A setting that no longer exists is named in the log ("is no longer a setting").
 Going back is a rename: delete EDF6Coop.dll and remove ".disabled" from the old DLL.
 
-[Room sizes: 8p, 10p, 12p, 16p, 24p, 32p]
-There is one package per room size (EDF6Coop-2.2.0-8p.zip and so on). A room of one size can only be
-joined with the same size build: everyone in a room must use the same package. When unsure, use 8p.
-8p is the size played the most. 10p and 12p are played less. 16p, 24p and 32p are new in 2.0.0 and have
-only been checked offline with ghost players, not yet in real online play with that many people.
+[Room sizes: the host picks]
+Since 2.3.0 there is one package (EDF6Coop-2.3.0.zip) and everyone installs it. Whoever creates a room
+picks its size in the menu (8, 10, 12, 16, 24 or 32, see "Bigger rooms" below); joiners have nothing to
+choose: with 2.3.0 you can join a room of any size.
+2.3.0 and 2.2.x (any size package) neither see nor join each other's bigger rooms, so everyone should
+update to 2.3.0 (with automatic updates on, starting the game once does it). Normal 4-player rooms work
+with everyone, as before.
+8 players is the size played the most. 10 and 12 are played less. 16, 24 and 32 have only been checked
+offline with ghost players, not yet in real online play with that many people.
 The bigger the room, the more upload bandwidth the host needs: with the direct link every player's data
 goes through the host.
 
@@ -39,11 +43,14 @@ double-click UNINSTALL.bat
 leftovers and its UPnP mapping. EDFModLoader, other mods and your old EDF6DirectNet / EDF6MultiSlot
 settings files are left alone.
 
-[Bigger rooms (8Player MOD)]
-- Outside a room, F2 or pressing the left stick switches "8Player MOD" (shown bottom left of the menu).
-  OFF (default): you create normal 4-player rooms anyone can join; the room search shows both kinds.
-  ON: you create rooms for up to the build's size that only players with the same EDF6Coop build see;
-  the room search shows only those rooms.
+[Bigger rooms (Player MOD)]
+- Outside a room, F2 or pressing the left stick steps the room size OFF -> 8 -> 10 -> 12 -> 16 -> 24 -> 32
+  -> OFF, shown bottom left of the menu (e.g. "F2/LS 12Player MOD :ON") and saved as [MultiSlot] RoomSize
+  in EDF6Coop.ini.
+  OFF (default): you create normal 4-player rooms anyone can join; the room search shows normal rooms.
+  ON: you create a room of the size you picked that only players with EDF6Coop 2.3.0 or later see; the
+  room search shows those rooms, of every size.
+  A room keeps the size it was created with; inside a room the menu shows that room's size.
 - In a room, F3 / Tab / right stick switches the member page (four members per page).
 - In a room, F4 / left stick turns "copy armor" on: your armor is raised, for the mission only, to the
   lowest armor of the others in the room (same class first). For new players; nothing is saved.
@@ -55,7 +62,7 @@ settings files are left alone.
   and so on up to 32. For this the mod writes Mods\HUD\ONLINEHUDTEXTURE.RAB (the game's HUD textures
   plus the new lamps and balloons). If another mod already has a file there, it is left alone and
   players 5 and up share the colours of players 1-4.
-- Keys and buttons are in [RoomScreen] / [CopyArmor] of the ini. F2 is reserved for 8Player MOD.
+- Keys and buttons are in [RoomScreen] / [CopyArmor] of the ini. F2 is reserved for Player MOD.
 
 [Direct link (optional, host only)]
 Players joining your room connect straight to you. The ini comments (Chinese / Japanese / English, after
@@ -77,7 +84,8 @@ no longer shown once the host kicked you, the room closed or you entered another
 both need 2.2.0 or later.
 
 [Automatic updates]
-At game start EDF6Coop fetches a newer release of the same room size from GitHub; it runs from the next start.
+At game start EDF6Coop fetches a newer release from GitHub; it runs from the next start. (2.2.x of every
+room size updates to the same 2.3.0.)
 Releases are signed (ECDSA P-256) and a file without a valid signature is never installed. A new version
 that crashes before it has run for 20 seconds past the title screen is rolled back by itself.
 To turn downloading off: [Update] AutoUpdate=0 in EDF6Coop.ini.

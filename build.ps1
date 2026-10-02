@@ -1,17 +1,16 @@
 # Builds EDF6Coop.dll (the direct link and the room part in one plugin) with CMake + Ninja + MSVC x64.
-#   build.ps1 [-Players 8|10|12|16|24|32] [-Test] [-CI]
-# The 8-player build lands in multislot\dist\, the others in multislot\dist-<N>p\ (each with the race-fixed
-# EDFModLoader winmm.dll next to it). Rooms of one size are a family of their own: only the same build joins.
+#   build.ps1 [-Test] [-CI]
+# Lands in multislot\dist\ with the race-fixed EDFModLoader winmm.dll next to it. One build for every room
+# size: the host picks the size in the game (F2, patches.h / hostmode.h).
 # Set EDF6_GAME_DIR to the game folder (holds EDF.dll and Root.cpk; only read) for the menu and HUD assets and the
 # tests against the game's code. -CI builds without the game's assets (placeholders; cannot be packaged).
 param(
-    [ValidateSet(8, 10, 12, 16, 24, 32)] [int]$Players = 8,
     [switch]$Test,
     [switch]$CI
 )
 $ErrorActionPreference = 'Stop'
 $multislot = Join-Path $PSScriptRoot 'multislot'
-$buildDir = if ($Players -eq 8) { Join-Path $multislot 'build' } else { Join-Path $multislot "build-${Players}p" }
+$buildDir = Join-Path $multislot 'build'
 
 if (-not (Test-Path -LiteralPath (Join-Path $multislot 'third_party\EDFModLoader\winmm.dll'))) {
     & (Join-Path $multislot 'tools\fetch_modloader.ps1')
@@ -26,7 +25,7 @@ if (-not $CI -and -not (Test-Path -LiteralPath (Join-Path $multislot 'assets\ONL
     if ($LASTEXITCODE) { throw "make_hud_colours.py failed ($LASTEXITCODE); set EDF6_GAME_DIR to the game folder" }
 }
 
-$configure = "cmake -S `"$multislot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMULTISLOT_MAX_PLAYERS=$Players"
+$configure = "cmake -S `"$multislot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo"
 # Always explicit: CMake keeps a cached ON, and a later build without -CI would stay a placeholder build.
 $configure += if ($CI) { ' -DMULTISLOT_CI=ON' } else { ' -DMULTISLOT_CI=OFF' }
 if ($env:LOADER_PYTHON) { $configure += " `"-DPython3_EXECUTABLE=$env:LOADER_PYTHON`"" }

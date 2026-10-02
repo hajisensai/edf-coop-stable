@@ -36,9 +36,9 @@ static_assert(kSearchTypeCenter <= 0x80 && Mirror(0x91) < 0x90, "the mirror must
 // Sign-extended imm8/disp8 operands above: each must stay below 0x80 or the rewritten code means something else.
 static_assert(Mirror(0x94) <= 0x80 && 0x90 - Mirror(0x94) < 0x80 && 0x91 - kSearchTypeCenter < 0x80,
               "the centre's operands must fit the rewritten SEARCH_TYPE code");
-// A larger room is a family of its own: it must not publish the 8-player family's values (0x54..0x57).
-static_assert(kMaxPlayers == 8 || Mirror(0x91) < 0x54 || Mirror(0x94) > 0x57,
-              "a larger room must not share the 8-player family");
+// A family of its own: below every earlier one (the lowest, EDF6Coop 32p up to 2.2.x, is 0x20..0x23), so no
+// build with fewer slots ever lists or accepts these rooms.
+static_assert(Mirror(0x91) < 0x20, "the 32-slot family must not share a value with an earlier one");
 
 }  // namespace
 

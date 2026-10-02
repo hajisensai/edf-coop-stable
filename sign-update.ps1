@@ -6,8 +6,6 @@
 param(
     [Parameter(Mandatory)] [string]$Dll,
     [Parameter(Mandatory)] [string]$Version,
-    # The room size the DLL was built for: its marker says EDF6COOP_<n>P_VERSION=.
-    [ValidateSet(8, 10, 12, 16, 24, 32)] [int]$Players = 8,
     [string]$Updater = (Join-Path $PSScriptRoot 'src\updater.cpp'),
     # Test hook only: base64 CNG ECCPUBLIC blob used instead of the kReleaseKey in $Updater. The release
     # workflow never passes it, so releases are always checked against the key clients have compiled in.
@@ -30,9 +28,11 @@ if ($TestPublicKeyBase64) {
 if ($public.Length -ne 72) { throw "public key has $($public.Length) bytes, not 72" }
 
 $dllBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Dll).Path)
-$marker = "EDF6COOP_${Players}P_VERSION=$Version"
-if ([Text.Encoding]::ASCII.GetString($dllBytes).IndexOf("$marker`0") -lt 0) {
-    throw "$Dll does not carry the version marker $marker (is it the $Players-player build of ${Version}?)"
+# Its own marker, and the 2.2 room-size builds' ones: their updaters download this DLL as EDF6Coop-<n>p.dll and
+# accept it only with EDF6COOP_<n>P_VERSION= of the version they were told.
+$dllText = [Text.Encoding]::ASCII.GetString($dllBytes)
+foreach ($marker in @("EDF6COOP_VERSION=$Version") + (8, 10, 12, 16, 24, 32 | ForEach-Object { "EDF6COOP_${_}P_VERSION=$Version" })) {
+    if ($dllText.IndexOf("$marker`0") -lt 0) { throw "$Dll does not carry the version marker $marker (is it EDF6Coop ${Version}?)" }
 }
 $hash = (Get-FileHash -LiteralPath $Dll -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [Text.Encoding]::ASCII.GetBytes("EDF6Coop $Version`n$hash`n")

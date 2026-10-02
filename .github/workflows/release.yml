@@ -2,11 +2,11 @@ name: Release
 
 # Signs and publishes a draft Release made by release.ps1 (run it with the game installed: release packages
 # need the game's menu asset, which cannot be on a build server).
-#   1. release.ps1 -Upload       builds, tests and packages every room size, creates the DRAFT Release vX.Y.Z
+#   1. release.ps1 -Upload       builds, tests and packages, creates the DRAFT Release vX.Y.Z
 #   2. gh workflow run release.yml -f tag=vX.Y.Z
-# This workflow checks the draft (every room size present, the zips match their .sha256, each zip carries
-# exactly the EDF6Coop-<N>p.dll asset, no CI placeholder build), signs each DLL's update manifest and
-# publishes the Release as latest. The tagged commit must be on main; the release text is
+# This workflow checks the draft (EDF6Coop.dll and the six EDF6Coop-<N>p.dll copies the 2.2 room-size builds'
+# updaters download are one and the same file, the zip matches its .sha256 and carries exactly that DLL, no CI
+# placeholder build), signs each DLL asset's update manifest and publishes the Release as latest. The tagged commit must be on main; the release text is
 # release-notes/X.Y.Z.md. The signing key is only in the sign job, which has a read-only token.
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag }}
-  PLAYERS: '8 10 12 16 24 32'
+  DLLS: 'EDF6Coop.dll EDF6Coop-8p.dll EDF6Coop-10p.dll EDF6Coop-12p.dll EDF6Coop-16p.dll EDF6Coop-24p.dll EDF6Coop-32p.dll'
 
 jobs:
   fetch:
@@ -92,29 +92,31 @@ jobs:
           VERSION: ${{ needs.fetch.outputs.version }}
         run: |
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          foreach ($n in $env:PLAYERS -split ' ') {
-            $dll = "draft/EDF6Coop-${n}p.dll"
-            $zip = "draft/EDF6Coop-$env:VERSION-${n}p.zip"
-            foreach ($f in $dll, $zip, "$zip.sha256") { if (-not (Test-Path $f)) { throw "the draft has no $(Split-Path -Leaf $f)" } }
-            $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash
-            if ((Get-Content "$zip.sha256" -Raw).Split(' ')[0] -ne $zipHash) { throw "$zip does not match its .sha256" }
-            $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
-            try {
-              $entry = $archive.GetEntry('Mods/Plugins/EDF6Coop.dll')
-              if (-not $entry) { throw "$zip has no Mods/Plugins/EDF6Coop.dll" }
-              $stream = $entry.Open()
-              try { $inZip = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)).Replace('-', '') }
-              finally { $stream.Dispose() }
-            } finally { $archive.Dispose() }
-            if ($inZip -ne (Get-FileHash $dll -Algorithm SHA256).Hash) { throw "$zip carries another EDF6Coop.dll than $dll" }
-            if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll).Path)).Contains('MULTISLOT CI PLACEHOLDER')) {
-              throw "$dll is a CI placeholder build"
-            }
+          $zip = "draft/EDF6Coop-$env:VERSION.zip"
+          foreach ($f in @($zip, "$zip.sha256") + ($env:DLLS -split ' ' | ForEach-Object { "draft/$_" })) {
+            if (-not (Test-Path $f)) { throw "the draft has no $(Split-Path -Leaf $f)" }
+          }
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ((Get-Content "$zip.sha256" -Raw).Split(' ')[0] -ne $zipHash) { throw "$zip does not match its .sha256" }
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
+          try {
+            $entry = $archive.GetEntry('Mods/Plugins/EDF6Coop.dll')
+            if (-not $entry) { throw "$zip has no Mods/Plugins/EDF6Coop.dll" }
+            $stream = $entry.Open()
+            try { $inZip = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)).Replace('-', '') }
+            finally { $stream.Dispose() }
+          } finally { $archive.Dispose() }
+          # Every asset name is the same DLL: the one in the zip.
+          foreach ($name in $env:DLLS -split ' ') {
+            if ((Get-FileHash "draft/$name" -Algorithm SHA256).Hash -ne $inZip) { throw "$name is not the EDF6Coop.dll in $zip" }
+          }
+          if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path draft/EDF6Coop.dll).Path)).Contains('MULTISLOT CI PLACEHOLDER')) {
+            throw 'EDF6Coop.dll is a CI placeholder build'
           }
 
       # The signing key reaches this step only; it fails (and so does the job) when the key is missing, does
-      # not match the updater's public key, a DLL is not the right room size and version, or a signature
-      # does not verify.
+      # not match the updater's public key, a DLL does not carry this version's markers, or a signature does
+      # not verify.
       - name: Sign the update manifests
         shell: pwsh
         env:
@@ -122,13 +124,13 @@ jobs:
           EDF6DN_UPDATE_SIGNING_KEY: ${{ secrets.EDF6DN_UPDATE_SIGNING_KEY }}
         run: |
           New-Item -ItemType Directory -Force signed | Out-Null
-          foreach ($n in $env:PLAYERS -split ' ') {
-            $dll = "draft/EDF6Coop-${n}p.dll"
-            ./sign-update.ps1 -Dll $dll -Version $env:VERSION -Players $n -Updater src/updater.cpp
+          foreach ($name in $env:DLLS -split ' ') {
+            $dll = "draft/$name"
+            ./sign-update.ps1 -Dll $dll -Version $env:VERSION -Updater src/updater.cpp
             Copy-Item "$dll.sig" signed/
             # The auto-updater checks the download against the signed digest; this copy is for people.
             $hash = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant()
-            Set-Content -Path "signed/EDF6Coop-${n}p.dll.sha256" -Value "$hash  EDF6Coop-${n}p.dll" -NoNewline -Encoding ascii
+            Set-Content -Path "signed/$name.sha256" -Value "$hash  $name" -NoNewline -Encoding ascii
           }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -160,15 +162,15 @@ jobs:
           VERSION: ${{ needs.fetch.outputs.version }}
         run: |
           $upload = @()
-          foreach ($n in $env:PLAYERS -split ' ') {
+          foreach ($name in $env:DLLS -split ' ') {
             # Each signature covers the hash of exactly the DLL in the draft.
-            $hash = (Get-FileHash "draft/EDF6Coop-${n}p.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
-            $sig = (Get-Content "signed/EDF6Coop-${n}p.dll.sig" -Raw).Split("`n")
-            if ($sig[0] -ne "EDF6Coop $env:VERSION" -or $sig[1] -ne $hash) { throw "EDF6Coop-${n}p.dll.sig does not belong to this DLL and version" }
-            $upload += "signed/EDF6Coop-${n}p.dll.sig", "signed/EDF6Coop-${n}p.dll.sha256"
+            $hash = (Get-FileHash "draft/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            $sig = (Get-Content "signed/$name.sig" -Raw).Split("`n")
+            if ($sig[0] -ne "EDF6Coop $env:VERSION" -or $sig[1] -ne $hash) { throw "$name.sig does not belong to this DLL and version" }
+            $upload += "signed/$name.sig", "signed/$name.sha256"
           }
           gh release upload $env:TAG @upload --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed' }
-          # Only now, with every room size signed, may installed copies see it.
+          # Only now, with every asset name signed, may installed copies see it.
           gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'gh release edit failed' }

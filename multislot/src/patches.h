@@ -10,12 +10,10 @@ constexpr std::uint32_t kImageTimeDateStamp = 0x678CCB46;
 constexpr std::uint32_t kImageSize = 0x22CE000;
 
 constexpr int kVanillaPlayers = 4;
-// The room size is a build setting (CMake MULTISLOT_MAX_PLAYERS): 8 is the distributed build; 10, 12, 16, 24
-// and 32 are separate builds whose rooms only the same build can join (see kSearchTypeCenter below).
-#ifndef MULTISLOT_MAX_PLAYERS
-#define MULTISLOT_MAX_PLAYERS 8
-#endif
-constexpr int kMaxPlayers = MULTISLOT_MAX_PLAYERS;
+// What every machine is built for: user slots, packet sessions, HUD records and mission arrays for 32 players.
+// The size of a room is the host's choice when creating it (hostmode.h, 5..32) and lives in its lobby's
+// MaxMembers, so every room any of us hosts can be joined by any of us (2.3.0; before, each size was a build).
+constexpr int kMaxPlayers = 32;
 // Past eight players enemy counts stop growing (spawn.h): every extra player already costs the host frame time,
 // and a room that asked for ten did not ask for more enemies than eight get.
 constexpr int kEnemyScalePlayers = kMaxPlayers < 8 ? kMaxPlayers : 8;
@@ -26,10 +24,10 @@ static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
 
 // Lobby SEARCH_TYPE. Vanilla rooms publish 0x90+k (k = 1..4) and a search asks for the range
 // [0x91, 0x90+m]; joining checks (v & ~0xF) == 0x90. MultiSlot rooms publish the mirror of the vanilla
-// value around kSearchTypeCenter: 0xE8 - v = 0x58-k (0x54..0x57, MultiSlot 1.2.6+). A modded search asks
-// for [0x58-m, 0x90+m], which holds vanilla and MultiSlot rooms of the same kinds, or with 8Player MOD ON
-// for [0x58-m, 0x57], MultiSlot rooms only (1.5.6). Vanilla searches never
-// reach below 0x91 and vanilla's join check refuses 0x54..0x57. Earlier MultiSlot versions cannot share a
+// value around kSearchTypeCenter: 2*centre - v (0x18..0x1B). With the Player MOD ON a modded search asks for
+// [2*centre-0x90-m, 2*centre-0x91], MultiSlot rooms of the kinds asked for only; OFF it asks for what the game
+// asks, normal rooms only (hostmode.h). Vanilla searches never reach below 0x91 and vanilla's join check
+// refuses every mirrored value. Earlier MultiSlot versions cannot share a
 // room of five or more with this one (0.2-0.4.1: mirror 0x8C..0x8F, enemy counts and strength not adjusted;
 // 0.4.2-0.4.3: 0x7C..0x7F; 0.5.0-1.0.0: 0x74..0x77, the fifth player also raised enemy durability;
 // 1.1.0-1.1.1: 0x6C..0x6F, four user slots and packet sessions, so a fifth member never got a P2P link;
@@ -39,33 +37,19 @@ static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
 // to join them: everyone in a room has to link to everyone and simulate missions the same way. Everything
 // derived from the centre is computed in patches.cpp, so a new family is this constant plus new tests.
 // Raising kMaxPlayers means a new family too: a room of nine needs nine user slots on every machine in it.
-// Ten was built and tested offline on 2026-09-19 (centre 0x70, see research/NOTES.md); the distributed
-// build stays at the eight that five machines have played.
 //
-// Centres per build, one family each (published values 2*centre-0x94 .. 2*centre-0x91):
-//   8 players  0x74 -> 0x54..0x57  (upstream, 1.2.6+)
-//   10 players 0x6E -> 0x48..0x4B
-//   12 players 0x6A -> 0x40..0x43
-//   16 players 0x66 -> 0x38..0x3B
-//   24 players 0x5E -> 0x28..0x2B
-//   32 players 0x5A -> 0x20..0x23
-// The larger rooms sit off upstream's grid of fours (0x70, 0x6C, ... are its next families, 0x70 its own
-// offline ten), so a later upstream family can never share a value with them.
-#if MULTISLOT_MAX_PLAYERS == 8
-constexpr std::uint32_t kSearchTypeCenter = 0x74;
-#elif MULTISLOT_MAX_PLAYERS == 10
-constexpr std::uint32_t kSearchTypeCenter = 0x6E;
-#elif MULTISLOT_MAX_PLAYERS == 12
-constexpr std::uint32_t kSearchTypeCenter = 0x6A;
-#elif MULTISLOT_MAX_PLAYERS == 16
-constexpr std::uint32_t kSearchTypeCenter = 0x66;
-#elif MULTISLOT_MAX_PLAYERS == 24
-constexpr std::uint32_t kSearchTypeCenter = 0x5E;
-#elif MULTISLOT_MAX_PLAYERS == 32
-constexpr std::uint32_t kSearchTypeCenter = 0x5A;
-#else
-#error "MULTISLOT_MAX_PLAYERS needs a SEARCH_TYPE centre of its own in patches.h (8, 10, 12, 16, 24 or 32)"
-#endif
+// Families so far (published values 2*centre-0x94 .. 2*centre-0x91):
+//   0x74 -> 0x54..0x57  upstream 1.2.6+ and EDF6Coop 8p up to 2.2.x (eight slots)
+//   0x6E -> 0x48..0x4B  EDF6Coop 10p up to 2.2.x
+//   0x6A -> 0x40..0x43  EDF6Coop 12p up to 2.2.x
+//   0x66 -> 0x38..0x3B  EDF6Coop 16p up to 2.2.x
+//   0x5E -> 0x28..0x2B  EDF6Coop 24p up to 2.2.x
+//   0x5A -> 0x20..0x23  EDF6Coop 32p up to 2.2.x
+//   0x56 -> 0x18..0x1B  EDF6Coop 2.3.0+: one build with 32 slots, rooms of any size
+// Each build's join check accepts its own family only, so a 2.2.x machine with eight slots is never let into
+// a room of nine, and no family shares a value with another. The EDF6Coop families sit off upstream's grid of
+// fours (0x70, 0x6C, ... are its next ones), so a later upstream family can never share a value with them.
+constexpr std::uint32_t kSearchTypeCenter = 0x56;
 
 // Bytes replaced at a fixed RVA. `original` is verified before anything is written.
 struct Patch {

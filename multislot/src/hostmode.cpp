@@ -38,8 +38,8 @@ constexpr int kRefreshUpdates = 120;                    // re-apply the label ev
 
 unsigned char* game = nullptr;
 wchar_t iniFile[MAX_PATH]{};
-std::atomic<bool> eightPlayers{false};
-std::atomic<bool> roomEightPlayers{false};
+std::atomic<int> roomSize{0};     // the setting: rooms created now are for this many, 0 = normal rooms
+std::atomic<int> createdSize{0};  // what this machine created its last room as, 0 = a normal room
 std::atomic<bool> steamLobbyCaptured{false};  // the Steam lobby step took the setting for the room being created
 
 // Everything below the hooks runs on the game's UI thread (HUiMainFrame::OnUpdate).
@@ -148,32 +148,40 @@ FrameState& StateFor(void* frame) {
     return state;
 }
 
-void Save(bool on) {
-    if (iniFile[0]) WritePrivateProfileStringW(L"MultiSlot", L"EightPlayerRooms", on ? L"1" : L"0", iniFile);
+// RoomSize replaces 2.2's EightPlayerRooms, which goes so that one setting is left to read (plugin.cpp).
+void Save(int size) {
+    if (!iniFile[0]) return;
+    wchar_t text[8]{};
+    _snwprintf_s(text, _TRUNCATE, L"%d", size);
+    WritePrivateProfileStringW(L"MultiSlot", L"RoomSize", text, iniFile);
+    WritePrivateProfileStringW(L"MultiSlot", L"EightPlayerRooms", nullptr, iniFile);
 }
+
+// The lobby's MaxMembers for a room created at `size`.
+std::uint64_t Capacity(int size) { return static_cast<std::uint64_t>(size ? size : kVanillaPlayers); }
 
 // Room creation first makes the Steam lobby that joiners enter before the EOS lobby (7435F7 `mov r8d, 4`,
 // cMaxMembers of ISteamMatchmaking::CreateLobby): the room takes the setting here, and the EOS lobby created
 // next uses the same value even if F2 is pressed in between.
 void SteamCreateCapacityHandler(CpuContext* context) {
-    const bool on = eightPlayers.load();
-    roomEightPlayers.store(on);
+    const int size = roomSize.load();
+    createdSize.store(size);
     steamLobbyCaptured.store(true);
-    context->r8 = on ? kModRoomCapacity : kVanillaPlayers;
+    context->r8 = Capacity(size);
 }
 
 // Lobby create options (742A9D `mov qword [rbp-0x60], 4`, MaxLobbyMembers). Without a Steam lobby step before
 // it (not seen on Steam, but kept safe), the room takes the setting now.
 void CreateCapacityHandler(CpuContext* context) {
-    const bool on = steamLobbyCaptured.exchange(false) ? roomEightPlayers.load() : eightPlayers.load();
-    roomEightPlayers.store(on);
-    const std::uint64_t capacity = on ? kModRoomCapacity : kVanillaPlayers;
+    const int size = steamLobbyCaptured.exchange(false) ? createdSize.load() : roomSize.load();
+    createdSize.store(size);
+    const std::uint64_t capacity = Capacity(size);
     std::memcpy(reinterpret_cast<void*>(static_cast<std::uintptr_t>(context->rbp - 0x60)), &capacity, sizeof(capacity));
-    if (on)
-        Log("HOST creating a MultiSlot room for %d players (%dPlayer MOD ON; Steam and EOS lobbies for %d)",
-            kModRoomCapacity, kModRoomCapacity, kModRoomCapacity);
+    if (size)
+        Log("HOST creating a MultiSlot room for %d players (%dPlayer MOD ON; Steam and EOS lobbies for %d)", size,
+            size, size);
     else
-        Log("HOST creating a normal %d-player room (%dPlayer MOD OFF)", kVanillaPlayers, kModRoomCapacity);
+        Log("HOST creating a normal %d-player room (Player MOD OFF)", kVanillaPlayers);
 }
 
 // Room update (749C91 `mov edx, 4` before SetMaxMembers; the room object in r13). Whoever updates the lobby -
@@ -192,10 +200,9 @@ void SearchTypeHandler(CpuContext* context) {
 }
 
 // Room search (74AC50 `movabs rax, (high << 32) | 0x91`): the SEARCH_TYPE range asked for per room kind, from
-// the setting as it is now. OFF lists normal and MultiSlot rooms of the kind, [mirror(high), high]; ON lists
-// MultiSlot rooms only, [mirror(high), mirror(0x91)]: someone set to play with eight is shown only rooms that
-// take eight (the user's request, 2026-09-25). Invitations and joins by id do not search, so they still
-// reach any room the join check accepts.
+// the setting as it is now (hostmode.h SearchTypeRange). ON lists MultiSlot rooms of every size only: someone set
+// to play in a big room is shown only big rooms (the user's request, 2026-09-25). OFF lists normal rooms only.
+// Invitations and joins by id do not search, so they still reach any room the join check accepts.
 std::atomic<int> searchLogged{-1};
 
 // F2 on the room list (the user's request, 2026-09-25): the list shown was searched with the old setting, so it
@@ -220,19 +227,17 @@ int LobbyMaySearch(const unsigned char* lobby) {
 }
 template <std::uint32_t High>
 void SearchRangeHandler(CpuContext* context) {
-    const bool on = eightPlayers.load();
+    const bool on = roomSize.load() != 0;
     context->rax = SearchTypeRange(High, on);
     const int mode = on ? 1 : 0;
     if (searchLogged.exchange(mode) != mode)
-        Log(on ? "SEARCH %dPlayer MOD ON: the room list shows MultiSlot rooms only"
-               : (kModOffListsModRooms ? "SEARCH %dPlayer MOD OFF: the room list shows normal and MultiSlot rooms"
-                                       : "SEARCH %dPlayer MOD OFF: the room list shows normal rooms (ON shows this build's rooms)"),
-            kModRoomCapacity);
+        Log(on ? "SEARCH Player MOD ON: the room list shows MultiSlot rooms of every size only"
+               : "SEARCH Player MOD OFF: the room list shows normal rooms only");
 }
 
 }  // namespace
 
-void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, bool on, int key, std::uint32_t padButton,
+void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, int size, int key, std::uint32_t padButton,
                   const wchar_t* hint) {
     hostModeKey = key;
     hostModePad = padButton;
@@ -244,8 +249,8 @@ void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, bool on, int 
     game = gameBase;
     iniFile[0] = 0;
     if (iniPath && wcslen(iniPath) < MAX_PATH) wmemcpy(iniFile, iniPath, wcslen(iniPath) + 1);
-    eightPlayers.store(on);
-    roomEightPlayers.store(false);
+    roomSize.store(ValidRoomSize(size) ? size : 0);
+    createdSize.store(0);
     steamLobbyCaptured.store(false);
     searchLogged.store(-1);
     lobbySeenAt.store(0);
@@ -254,7 +259,7 @@ void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, bool on, int 
     for (auto& state : frames) state = FrameState{};
 }
 
-bool EightPlayerRooms() { return eightPlayers.load(); }
+int HostRoomSize() { return roomSize.load(); }
 
 bool LobbyMaySearchAgain(std::uint8_t searchActive, std::uint8_t resultsIn, bool dialogOpen) {
     return !dialogOpen && (!searchActive || resultsIn);
@@ -282,22 +287,34 @@ std::uint64_t LobbyOnUpdateHook(void* lobby, void* context) {
     searchAgainAt.store(0);
     using RefreshFn = void(__fastcall*)(void*);
     reinterpret_cast<RefreshFn>(game + kLobbyRefresh)(lobby);
-    Log("SEARCH the room list searched again after F2 (%dPlayer MOD %s)", kModRoomCapacity, eightPlayers.load() ? "ON" : "OFF");
+    if (const int size = roomSize.load())
+        Log("SEARCH the room list searched again after F2 (%dPlayer MOD ON)", size);
+    else
+        Log("SEARCH the room list searched again after F2 (Player MOD OFF)");
     return result;
 }
-bool RoomCreatedWithEightPlayers() { return roomEightPlayers.load(); }
+int CreatedRoomSize() { return createdSize.load(); }
 
-std::size_t ComposeLabel(const MenuContext& context, bool on, bool createdOn, wchar_t* out, std::size_t outChars) {
+// "12Player MOD :ON" for a size, "Player MOD :OFF" for none.
+void SizeText(int size, wchar_t (&out)[24]) {
+    if (size)
+        _snwprintf_s(out, _TRUNCATE, L"%dPlayer MOD :ON", size);
+    else
+        _snwprintf_s(out, _TRUNCATE, L"Player MOD :OFF");
+}
+
+std::size_t ComposeLabel(const MenuContext& context, int setting, int created, wchar_t* out, std::size_t outChars) {
     if (!out || !outChars) return 0;
     out[0] = 0;
-    // The room's kind as its lobby says, once read; until then what this machine created its room as.
-    const bool roomOn = context.roomMode >= 0 ? context.roomMode != 0 : createdOn;
+    // The room's size as its lobby says, once read; until then what this machine created its room as.
+    const int room = context.roomMode >= 0 ? (context.roomMode != 0 ? context.roomCapacity : 0) : created;
+    const bool roomOn = room != 0;
+    wchar_t size[24]{};
     // _TRUNCATE: a text that does not fit is cut off (and still terminated).
     if (!context.inRoom) {
-        _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%dPlayer MOD :%s",
-                     context.hostModeHint ? context.hostModeHint : L"",
-                     context.hostModeHint && context.hostModeHint[0] ? L" " : L"", kModRoomCapacity,
-                     on ? L"ON" : L"OFF");
+        SizeText(setting, size);
+        _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%s", context.hostModeHint ? context.hostModeHint : L"",
+                     context.hostModeHint && context.hostModeHint[0] ? L" " : L"", size);
     } else {
         // The page guide: while the room screen shows more than four members, and always in a MultiSlot room
         // this player hosts (there it names the second page before anyone fills it).
@@ -318,9 +335,9 @@ std::size_t ComposeLabel(const MenuContext& context, bool on, bool createdOn, wc
         }
         // The host sees the room's own setting, which nothing here can change but is worth knowing. A guest
         // sees only what the inputs do here: the pages, and copy armor after them.
+        SizeText(room, size);
         if (context.roomHost)
-            _snwprintf_s(out, outChars, _TRUNCATE, L"%dPlayer MOD :%s%s%s", kModRoomCapacity, roomOn ? L"ON" : L"OFF",
-                         pages[0] ? L"   " : L"", pages);
+            _snwprintf_s(out, outChars, _TRUNCATE, L"%s%s%s", size, pages[0] ? L"   " : L"", pages);
         else
             _snwprintf_s(out, outChars, _TRUNCATE, L"%s", pages);
     }
@@ -359,20 +376,24 @@ void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
     const bool pressed = keyDown && !keyWasDown;
     keyWasDown = keyDown;
     if (pressed && !context.inRoom) {
-        const bool on = !eightPlayers.load();
-        eightPlayers.store(on);
-        Save(on);
-        Log("MENU F2: %dPlayer MOD %s - rooms you create are %s (%s)", kModRoomCapacity, on ? "ON" : "OFF",
-            on ? "MultiSlot rooms for that many players" : "normal 4-player rooms", iniFile[0] ? "saved" : "not saved");
+        const int previous = roomSize.load(), size = NextRoomSize(previous);
+        roomSize.store(size);
+        Save(size);
+        if (size)
+            Log("MENU F2: %dPlayer MOD ON - rooms you create are MultiSlot rooms for %d players (%s)", size, size,
+                iniFile[0] ? "saved" : "not saved");
+        else
+            Log("MENU F2: Player MOD OFF - rooms you create are normal 4-player rooms (%s)", iniFile[0] ? "saved" : "not saved");
+        // The list changes only between OFF and ON: every MultiSlot size is listed while ON.
         const std::uint64_t now = GetTickCount64();
-        if (now - lobbySeenAt.load() < kLobbyVisibleMs) {
+        if ((previous != 0) != (size != 0) && now - lobbySeenAt.load() < kLobbyVisibleMs) {
             searchAgainAt.store(now);
-            Log("MENU F2 on the room list: it searches again for %s", on ? "MultiSlot rooms only" : "normal and MultiSlot rooms");
+            Log("MENU F2 on the room list: it searches again for %s", size ? "MultiSlot rooms only" : "normal rooms only");
         }
     }
     if (!frame) return;
     wchar_t label[kLabelChars]{};
-    ComposeLabel(context, eightPlayers.load(), roomEightPlayers.load(), label, kLabelChars);
+    ComposeLabel(context, roomSize.load(), createdSize.load(), label, kLabelChars);
     FrameState& state = StateFor(frame);
     if (state.written && std::wcscmp(state.label, label) == 0 && ++state.updates < kRefreshUpdates) return;
     state.updates = 0;
@@ -429,6 +450,7 @@ std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
     // someone else): the creator still sees the room's kind, which is read from the lobby.
     menu.roomHost = menu.inRoom && (RoomHost() || CreatedCurrentLobby());
     menu.roomMode = menu.inRoom ? static_cast<int>(CurrentLobbyKind()) : -1;
+    menu.roomCapacity = menu.inRoom ? CurrentLobbyCapacity() : 0;
     menu.pages = CurrentRoomPage();
     menu.pageHint = PageHint();
     menu.ghosts = GhostHarness() ? GhostPlayers() : 0;

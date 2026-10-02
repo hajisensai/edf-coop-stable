@@ -4,6 +4,8 @@
 
 #include "coop.h"
 
+#include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,16 @@ namespace multislot {
 namespace {
 
 bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+// EDF6MultiSlot's EightPlayerRooms is RoomSize since 2.3.0 (hostmode.h); its ON was eight-player rooms.
+void RenameOldSettings(std::vector<dn::IniValue>& values) {
+    for (dn::IniValue& value : values) {
+        if (_wcsicmp(value.section.c_str(), L"MultiSlot") != 0 || _wcsicmp(value.key.c_str(), L"EightPlayerRooms") != 0)
+            continue;
+        value.key = L"RoomSize";
+        value.value = _wtoi(value.value.c_str()) ? L"8" : L"0";
+    }
+}
 
 }  // namespace
 
@@ -62,6 +74,7 @@ void PrepareSettings(const std::wstring& dir, const std::wstring& iniPath, const
         if (!values.empty()) Log("Settings: carrying %zu values over from %ls", values.size(), name);
         carried.insert(carried.end(), values.begin(), values.end());
     }
+    RenameOldSettings(carried);
     std::vector<std::string> dropped;
     text = dn::applyIniValues(text, carried, &dropped);
     for (const std::string& line : dropped) Log("Settings: %s is no longer a setting; not carried over", line.c_str());

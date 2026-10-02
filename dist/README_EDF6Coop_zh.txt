@@ -1,4 +1,4 @@
-EDF6Coop 2.0.0 - 地球防卫军6 联机扩容 + 稳定插件
+EDF6Coop 2.1.0 - 地球防卫军6 联机扩容 + 稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 日本語: README_EDF6Coop_ja.txt
 遇到问题请提 Issue，并附上 Mods\Plugins\EDF6Coop.log。
@@ -18,7 +18,7 @@ EDF6MultiSlot.dll 改名为 .disabled，加载器就不再加载它们。旧的�
 想退回旧版：删掉 EDF6Coop.dll，再把旧 DLL 名字末尾的 ".disabled" 去掉即可。
 
 [房间人数：8p、10p、12p、16p、24p、32p]
-每种人数一个安装包（EDF6Coop-2.0.0-8p.zip 等）。某个人数的房间只有同人数版本才能加入：同一个房间里
+每种人数一个安装包（EDF6Coop-2.1.0-8p.zip 等）。某个人数的房间只有同人数版本才能加入：同一个房间里
 所有人必须用同一个包。拿不准就用 8p。
 8p 实际玩得最多；10p、12p 玩得少一些；16p、24p、32p 是 2.0.0 新增的，目前只用离线幽灵队员验证过，
 还没有真的那么多人联机测试过。
@@ -30,8 +30,8 @@ EDF6MultiSlot.dll 改名为 .disabled，加载器就不再加载它们。旧的�
 没有 EDFModLoader（winmm.dll）时会装上自带的：官方 v1.0.10 加多线程问题的修复（见 LOADER_FIX_JA.md）。
 已有的 winmm.dll 一律不覆盖，唯一例外是与官方 v1.0.10 字节完全相同的那个：会换成修复版，原文件保存为
 winmm.dll.bak-official。
-卸载：先在 EDF6Coop.ini 的 [MultiSlot] 段设 Enabled=0 并启动一次游戏（这样会删掉 MOD 写出的菜单布局
-文件 Mods\UI\LYT_MAINFRAME.SGO），再双击 UNINSTALL.bat（用管理员身份运行可同时删除防火墙规则）。
+卸载：先在 EDF6Coop.ini 的 [MultiSlot] 段设 Enabled=0 并启动一次游戏（这样会删掉 MOD 写出的文件
+Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINSTALL.bat（用管理员身份运行可同时删除防火墙规则）。
 它会删除 EDF6Coop 的文件、设置、日志、自动更新的残留和它建立的 UPnP 映射；EDFModLoader、其他 MOD、
 以及你旧的 EDF6DirectNet / EDF6MultiSlot 设置文件都不会动。
 
@@ -45,6 +45,9 @@ winmm.dll.bak-official。
 - 超过 4 人的任务：多出来的玩家有装备、出生点和道具。敌人数量随人数增加：5 人 ×1.2、6 人 ×1.4、
   7 人 ×1.6、8 人及以上 ×1.8（固定物体和大型 BOSS 不增加）。[Mission] ExtraEnemies=0 保持原版数量
   （房间里所有人要设成一样）。
+- 任务里每个玩家在 HUD 上都有自己的颜色：状态灯、聊天气泡、雷达标记。1-4 号保持游戏原来的黄、绿、蓝、红，
+  5-8 号是橙、粉、紫、青，以此类推直到 32 人。为此 MOD 会写出 Mods\HUD\ONLINEHUDTEXTURE.RAB（游戏自己的
+  HUD 贴图加上新的灯和气泡）。如果那里已经有别的 MOD 的文件，则不动它，5 号以后的玩家沿用 1-4 号的颜色。
 - 按键在 ini 的 [RoomScreen] / [CopyArmor] 里改。F2 专用于 8Player MOD。
 
 [直连（可选，只有房主需要设置）]
@@ -74,5 +77,6 @@ Mods\Plugins\EDF6Coop.log：所有内容一份日志（直连相关的行以 [DN
 
 [附带内容]
 - EDF6Coop：Mods\Plugins\EDF6Coop.dll（MIT，LICENSE.txt；房间部分为公有领域）。它写出的菜单布局是游戏
-  自己的 UI/LYT_MAINFRAME.SGO 加一个显示栏，数据在 DLL 里。
+  自己的 UI/LYT_MAINFRAME.SGO 加一个显示栏；HUD 贴图是游戏的 HUD/ONLINEHUDTEXTURE.RAB 加上更多的灯和
+  聊天气泡，数据都在 DLL 里。5-8 号的颜色沿用 FevGrave 做的 8 人 HUD 贴图，要改的 HUD 代码也是 FevGrave 找到的。
 - EDFModLoader（BlueAmulet 作，MIT，EDFModLoader_LICENSE.txt）：winmm.dll，含 LOADER_FIX_JA.md 里的修复。

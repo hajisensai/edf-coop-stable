@@ -26,7 +26,7 @@
 #include "../src/midhook.h"
 #include "../src/patches.h"
 #include "../src/smoothing.h"
-#include "menu_layout.h"
+#include "mod_assets.h"
 
 using namespace multislot;
 
@@ -244,6 +244,8 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring plugins = mods + L"\\Plugins";
     const std::wstring uiFolder = mods + L"\\UI";
     const std::wstring layoutPath = uiFolder + L"\\LYT_MAINFRAME.SGO";
+    const std::wstring hudFolder = mods + L"\\HUD";
+    const std::wstring hudPath = hudFolder + L"\\ONLINEHUDTEXTURE.RAB";
     for (const auto& path : {std::wstring(argv[3]), folder, mods, plugins}) CreateDirectoryW(path.c_str(), nullptr);
     const std::wstring dll = plugins + L"\\EDF6Coop.dll";
     const std::wstring logPath = plugins + L"\\EDF6Coop.log";
@@ -289,6 +291,16 @@ int wmain(int argc, wchar_t** argv) {
         CreateDirectoryW(uiFolder.c_str(), nullptr);
         WriteBytes(layoutPath, mode == L"nomission" ? foreign : ours);
     }
+    // Mods\HUD\ONLINEHUDTEXTURE.RAB: ours (off, host8, nomission), another mod's (quiet), none (the rest).
+    const std::vector<unsigned char> ourHud(kHudArchiveBytes, kHudArchiveBytes + sizeof(kHudArchiveBytes));
+    auto foreignHud = ourHud;
+    foreignHud[foreignHud.size() / 2] ^= 0x5A;
+    DeleteFileW(hudPath.c_str());
+    RemoveDirectoryW(hudFolder.c_str());
+    if (mode == L"off" || mode == L"host8" || mode == L"nomission" || mode == L"quiet") {
+        CreateDirectoryW(hudFolder.c_str(), nullptr);
+        WriteBytes(hudPath, mode == L"quiet" ? foreignHud : ourHud);
+    }
 
     const HMODULE plugin = LoadLibraryW(dll.c_str());
     const auto load = plugin ? reinterpret_cast<Load>(GetProcAddress(plugin, "EML6_Load")) : nullptr;
@@ -305,8 +317,14 @@ int wmain(int argc, wchar_t** argv) {
     const auto missionPatches = MissionPatches();
     const auto missionHooks = MissionHooks();
     const auto missionCalls = MissionCalls();
+    const auto hudPatches = HudColourPatches();
+    const auto hudHooks = HudColourHooks();
+    const auto hudWrap = HudIndexWrapHooks();
     const auto missionUntouched = [&] {
-        bool untouched = Untouched(base, missionPatches) == static_cast<int>(missionPatches.size());
+        bool untouched = Untouched(base, missionPatches) == static_cast<int>(missionPatches.size()) &&
+                         Untouched(base, hudPatches) == static_cast<int>(hudPatches.size());
+        for (const auto& hook : hudHooks) untouched = untouched && SiteUntouched(base, hook);
+        for (const auto& hook : hudWrap) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& hook : missionHooks) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& call : missionCalls) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
         for (const auto& hook : SpawnHooks()) untouched = untouched && SiteUntouched(base, hook);
@@ -336,6 +354,9 @@ int wmain(int argc, wchar_t** argv) {
         Check(GetFileAttributesW(layoutPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
               "Enabled=0 removes our menu layout (and the UI folder it was alone in)");
         Check(Contains(log, "Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO"), "the removal is logged");
+        Check(GetFileAttributesW(hudPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(hudFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
+              "Enabled=0 removes our HUD archive (and the HUD folder it was alone in)");
+        Check(Contains(log, "HUD: removed Mods\\HUD\\ONLINEHUDTEXTURE.RAB"), "the HUD archive removal is logged");
         // What EDFModLoader does next with a plugin that says no (its dllmain.cpp): FreeLibrary. 1.5.13's log
         // writer thread was running by then and faulted in the unmapped DLL within one 200 ms interval.
         FreeLibrary(plugin);
@@ -515,10 +536,25 @@ int wmain(int argc, wchar_t** argv) {
         }
 
         if (mode == L"nomission") {
-            Check(missionUntouched(), "Extend=0 leaves every mission site untouched");
+            Check(missionUntouched(), "Extend=0 leaves every mission site untouched, the HUD's included");
             Check(Contains(log, "Mission: Extend=0"), "Extend=0 is logged");
             Check(!Contains(log, "Mission sync:"), "Extend=0 leaves the mission start message alone");
+            Check(GetFileAttributesW(hudPath.c_str()) == INVALID_FILE_ATTRIBUTES && Contains(log, "HUD: removed Mods\\HUD\\ONLINEHUDTEXTURE.RAB"),
+                  "Extend=0 removes our HUD archive: the HUD is the game's");
         } else {
+            // The HUD: one colour per player with our archive in place; another mod's archive leaves the game's
+            // tables and wraps the index instead.
+            const bool colours = mode != L"quiet";
+            Check(Applied(base, hudPatches) == (colours ? static_cast<int>(hudPatches.size()) : 0) &&
+                      Untouched(base, hudPatches) == (colours ? 0 : static_cast<int>(hudPatches.size())),
+                  colours ? "every HUD table patch is written" : "a foreign HUD archive leaves the HUD tables at four");
+            for (const auto& hook : hudHooks) Check(colours ? HookedInto(base, hook, plugin) : SiteUntouched(base, hook), hook.name);
+            for (const auto& hook : hudWrap) Check(colours ? SiteUntouched(base, hook) : HookedInto(base, hook, plugin), hook.name);
+            Check(ReadBytes(hudPath) == (colours ? ourHud : foreignHud), colours ? "our HUD archive is in Mods\\HUD" : "another mod's HUD archive is left alone");
+            Check(Contains(log, "HUD: wrote Mods\\HUD\\ONLINEHUDTEXTURE.RAB") == (colours && mode != L"host8"),
+                  "writing the HUD archive is logged only when it was written");
+            Check(Contains(log, colours ? "HUD: one colour per player for all" : "HUD: players 5-"), "the HUD colours are logged");
+            if (!colours) Check(Contains(log, "HUD: Mods\\HUD\\ONLINEHUDTEXTURE.RAB belongs to another mod"), "the foreign HUD archive is logged");
             Check(Applied(base, missionPatches) == static_cast<int>(missionPatches.size()), "every mission patch is written");
             for (const auto& hook : missionHooks) Check(HookedInto(base, hook, plugin), hook.name);
             for (const auto& call : missionCalls) Check(RedirectedInto(base + call.rva, plugin), call.name);

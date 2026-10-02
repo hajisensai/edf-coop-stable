@@ -156,9 +156,9 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 ```
 
 - `-Players` picks the room size (8, 10, 12, 16, 24, 32); each size is its own build. `-Test` runs the tests (unit tests, loopback multi-node direct-link tests, and the checks of every patch site against the game's `EDF.dll`, which are skipped without the game).
-- The game folder is only read: `Root.cpk` for the menu frame with the "8Player MOD" label (`multislot/tools/make_menu_label.py` writes `multislot/assets/LYT_MAINFRAME.SGO`, which is derived from the game and therefore never committed) and `EDF.dll` for the tests.
+- The game folder is only read: `Root.cpk` for the menu frame with the "8Player MOD" label (`multislot/tools/make_menu_label.py` writes `multislot/assets/LYT_MAINFRAME.SGO`, which is derived from the game and therefore never committed) , `HUD/ONLINEHUDTEXTURE.RAB` for the per-player HUD colours (`multislot/tools/make_hud_colours.py` writes `multislot/assets/ONLINEHUDTEXTURE.RAB`, also derived and never committed) and `EDF.dll` for the tests.
 - `build.ps1` fetches the official EDFModLoader v1.0.10 `winmm.dll` (checked by SHA-256) and builds the race-fixed loader the package ships (`multislot/tools/fix_winmm_proxy.py`).
-- `package.ps1` refuses a build that is not this room size and version, a DLL older than its sources, and a CI build (`build.ps1 -CI` builds without the game's menu asset and embeds a placeholder).
+- `package.ps1` refuses a build that is not this room size and version, a DLL older than its sources, and a CI build (`build.ps1 -CI` builds without the game's menu and HUD assets and embeds placeholders).
 
 ## Release
 
@@ -177,7 +177,7 @@ The auto-updater of every installed copy downloads `EDF6Coop-<N>p.dll` / `.dll.s
 | Path | Contents |
 |---|---|
 | `multislot/src/plugin.cpp` | EDFModLoader entry point: reads `EDF6Coop.ini` (carrying over the old settings files), starts the room part and the direct link |
-| `multislot/src/` | The room part (8Player MOD): patches, room screen, missions, armor copy, menu layout, log |
+| `multislot/src/` | The room part (8Player MOD): patches, room screen, missions, armor copy, menu layout, HUD colours, log |
 | `src/config.*` | The direct link's settings and their comments (Chinese / Japanese / English after the Windows display language) |
 | `src/eos_min.h` | The EOS SDK structs in use (from the official 1.15.5 headers; the game uses 1.16.1) |
 | `src/eos_hooks.cpp`, `src/iat.*` | Patches the `EDF.dll` import table to take over EOS P2P / lobby calls |

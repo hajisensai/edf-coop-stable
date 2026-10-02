@@ -4,9 +4,11 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
@@ -15,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include "../src/hud.h"
+#include "../src/hudcolours.h"
 #include "../src/mission.h"
 #include "../src/patches.h"
 #include "../src/smoothing.h"
@@ -335,7 +339,7 @@ int main(int argc, char** argv) {
         Check(hook.original.size() >= 5 && hook.displacedOffset + hook.displacedSize <= hook.original.size(), "hook covers a jump", hook.rva);
     }
     for (const auto& call : missionCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
-    Check(missionPatches.size() == 27 && missionHooks.size() == 25 && missionCalls.size() == 5, "mission table sizes");
+    Check(missionPatches.size() == 27 && missionHooks.size() == 24 && missionCalls.size() == 5, "mission table sizes");
     // The ninth remote flag would land on the user vector CreatePlayers keeps at rsp+0x30 and re-reads
     // every pass of the loop that writes the flags (mission.cpp, RemoteFlagHandler).
     const std::uint8_t vectorBegin[] = {0x48, 0x8B, 0x7C, 0x24, 0x30};  // 1D98E9 mov rdi, [rsp+0x30]
@@ -358,9 +362,10 @@ int main(int argc, char** argv) {
     Check(RipTarget(0x790899, 7) == kGameStatusPointer, "MissionSync_Update loads the GameStatus pointer", 0x790899);
     const std::uint8_t recordsLea[] = {0x48, 0x8D, 0x88, 0x78, 0x4C, 0x01, 0x00};  // lea rcx, [rax+0x14C78]
     Check(std::memcmp(image.At(0x7908A5, 7), recordsLea, 7) == 0, "loadout records start at GameStatus+0x14C78", 0x7908A5);
-    // The online HUD's colour tables (mission.cpp, PlayerTagIndexHandler): 7FFBD0 writes the player's
-    // index to the local each caller indexes its table with, and every one of those tables is built for
-    // four entries. If an update to the game widens them, these fail and the wrapping can go.
+    // The online HUD's colour tables (patches.h, HudColourPatches / HudIndexWrapHooks): 7FFBD0 writes the
+    // player's index to the local each caller indexes its table with, and every one of those tables is built
+    // for four entries. These three readers are the only callers of 7FFBD0, so widening the three tables (or
+    // wrapping the index) covers every use.
     const std::uint8_t statusIndexOut[] = {0x48, 0x8D, 0x54, 0x24, 0x64};  // 804EB6 lea rdx, [rsp+0x64]
     const std::uint8_t chatIndexOut[] = {0x48, 0x8D, 0x55, 0xB0};          // 801820 lea rdx, [rbp-0x50]
     const std::uint8_t radarIndexOut[] = {0x48, 0x8D, 0x54, 0x24, 0x44};   // 82A1FC lea rdx, [rsp+0x44]
@@ -387,6 +392,50 @@ int main(int argc, char** argv) {
     Check(std::memcmp(image.At(0x8071F7, 5), fourBy30, 5) == 0 && std::memcmp(image.At(0x807400, 5), fourBy30, 5) == 0,
           "HudPlayer_MultiPlayStatus builds its class and lamp tables for four", 0x807400);
     Check(std::memcmp(image.At(0x802A95, 5), fourBy20, 5) == 0, "HudPlayer_Chat builds its balloon table for four", 0x802A95);
+    {
+        // Every E8/E9 rel32 in the code section that lands on 7FFBD0.
+        const auto* code = IMAGE_FIRST_SECTION(image.nt);
+        const std::uint8_t* text = image.At(code->VirtualAddress, code->SizeOfRawData);
+        int callers = 0;
+        for (std::uint32_t i = 0; text && i + 5 <= code->SizeOfRawData; ++i)
+            if ((text[i] == 0xE8 || text[i] == 0xE9) && CallTargets(text + i, code->VirtualAddress + i, 0x7FFBD0)) ++callers;
+        Check(callers == 3, "7FFBD0 has exactly the three HUD callers", 0x7FFBD0);
+    }
+    const auto hudPatches = HudColourPatches();
+    const auto hudHooks = HudColourHooks();
+    const auto hudWrap = HudIndexWrapHooks();
+    for (const auto& patch : hudPatches) {
+        Check(Matches(image.At(patch.rva, patch.original.size()), patch), patch.name, patch.rva);
+        Check(patch.original.size() == patch.replacement.size() && patch.original != patch.replacement, "HUD patch changes bytes in place", patch.rva);
+    }
+    for (const auto* list : {&hudHooks, &hudWrap})
+        for (const auto& hook : *list) {
+            const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+            Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+            Check(hook.original.size() >= 5 && hook.displacedOffset + hook.displacedSize <= hook.original.size(), "hook covers a jump", hook.rva);
+            Check(list == &hudWrap ? MissionHookHandler(hook.rva) != nullptr : HudColourHookHandler(hook.rva) != nullptr,
+                  "every HUD site has a handler", hook.rva);
+        }
+    Check(hudPatches.size() == 15 && hudHooks.size() == 4 && hudWrap.size() == 1, "HUD table sizes");
+    // What the hooks replace: the lamp texture name, the chat balloon names (in the order of the colours) and
+    // the radar's four colours - the game's own are the first four entries of hudcolours.h.
+    const auto wideAt = [&](std::uint32_t rva) { return reinterpret_cast<const wchar_t*>(image.At(rva, 2)); };
+    Check(RipTarget(0x8074E7, 7) == 0x17F6CF0 && std::wcscmp(wideAt(0x17F6CF0), L"player_lamp.dds") == 0,
+          "the lamp loop loads player_lamp.dds", 0x8074E7);
+    for (int i = 0; i < 4; ++i) {
+        const std::uint32_t lea = 0x802B5E + 7 * static_cast<std::uint32_t>(i);
+        Check(std::wcscmp(wideAt(RipTarget(lea, 7)), kHudColours[i].chatTexture) == 0, "chat balloon i of the game is colour i", lea);
+        const std::uint32_t load = 0x82A0EB + 14 * static_cast<std::uint32_t>(i);  // movaps xmm, [rip+x]; movaps [rbp+0x150+16i], xmm
+        const std::uint8_t store = static_cast<std::uint8_t>(0x50 + 16 * i);
+        Check(std::memcmp(image.At(RipTarget(load, 7), 16), RadarColour(i), 16) == 0 && image.At(load + 10, 1)[0] == store,
+              "radar colour i of the game is colour i", load);
+    }
+    for (int i = 0; i < kHudColourCount; ++i)
+        for (int j = 0; j < i; ++j)
+            Check(_wcsicmp(kHudColours[i].chatTexture, kHudColours[j].chatTexture) != 0 && kHudColours[i].rgb != kHudColours[j].rgb,
+                  "every HUD colour is its own", static_cast<std::uint32_t>(i));
+    Check(std::bit_cast<std::uint32_t>(1.0f / kHudColourCount) == 0x3D000000 && kHudColourCount == 32,
+          "32 lamps, 1/32 of the texture each (the stride written into the lamp loop)");
     const std::uint8_t contextSize[] = {0xBA, 0xF8, 0x02, 0x00, 0x00};  // mov edx, 0x2F8 (sized delete)
     Check(std::memcmp(image.At(0x1D6F31, 5), contextSize, 5) == 0 && kMovedPlayerArray >= 0x2F8, "moved array starts after MissionContext", 0x1D6F31);
     const std::uint8_t vanillaArray[] = {0x48, 0x8D, 0x8B, 0xE8, 0x00, 0x00, 0x00};  // lea rcx, [rbx+0xE8], rbx = this+0x18
@@ -655,7 +704,11 @@ int main(int argc, char** argv) {
     auto all = guest;
     all.insert(all.end(), sessions.begin(), sessions.end());
     all.insert(all.end(), missionPatches.begin(), missionPatches.end());
+    all.insert(all.end(), hudPatches.begin(), hudPatches.end());
     allHooks.insert(allHooks.end(), hostHooks.begin(), hostHooks.end());
+    // The colour hooks and the wrap are never installed together, but both have to keep clear of everything else.
+    allHooks.insert(allHooks.end(), hudHooks.begin(), hudHooks.end());
+    allHooks.insert(allHooks.end(), hudWrap.begin(), hudWrap.end());
     auto spans = WriteSpans(all, allCalls, allHooks);
     // The remote-player correction factor is built at load (its operand depends on where the constant
     // lands), so it is not in the tables above - but it is still a write into EDF.dll and has to keep

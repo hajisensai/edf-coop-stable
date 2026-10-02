@@ -1,10 +1,15 @@
 #include "patches.h"
 
+#include <bit>
 #include <cstring>
 
+#include "hudcolours.h"
 #include "mission.h"  // kMovedPlayerArray, kPlayerEntrySize
 
 namespace multislot {
+
+static_assert(kMaxPlayers <= kHudColourCount, "every player of a room needs a HUD colour (hudcolours.h)");
+
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
@@ -248,8 +253,6 @@ std::vector<MidSite> MissionHooks() {
         {"loadout record soldier type UI", 0x7FFDA3, {0x48, 0x69, 0xC9, 0xD4, 0x00, 0x00, 0x00}, 0, 0},
         {"loadout record color", 0x0DFD27, {0x48, 0x69, 0xD8, 0xD4, 0x00, 0x00, 0x00}, 0, 0},
         {"loadout record color index", 0x591914, {0x49, 0x69, 0xC7, 0xD4, 0x00, 0x00, 0x00}, 0, 0},
-        // The player index 7FFBD0 reports for the online HUD's four-entry colour tables, wrapped.
-        {"HUD colour index of players 5+", 0x7FFD95, {0x48, 0x63, 0x4E, 0x48, 0x41, 0x89, 0x0E}, 0, 0},
         // CreatePlayers (1D9520).
         {"CreatePlayers spawn table count", 0x1D968E, {0x41, 0x8B, 0xF4, 0x44, 0x0F, 0x28, 0x4D, 0x90}, 3, 5},
         // The remote flag of each player: `mov [rsp+r15+0x28], al` fills eight bytes on the stack and
@@ -274,6 +277,56 @@ std::vector<MidSite> MissionHooks() {
         {"result items cleared for players 5+", 0x78E693, {0x48, 0x89, 0x81, 0xD4, 0x4F, 0x01, 0x00}, 0, 7},
         {"result item totals include players 5+", 0x2C865F, {0x41, 0x89, 0x8B, 0x0C, 0x0E, 0x00, 0x00}, 0, 7},
         {"result item totals include players 5+ (recount)", 0x2C9402, {0x03, 0x96, 0x10, 0x0E, 0x00, 0x00}, 0, 6},
+    };
+}
+
+std::vector<MidSite> HudIndexWrapHooks() {
+    // 7FFBD0's `movsxd rcx, [rsi+0x48]; mov [r14], ecx`: the index the online HUD's tables are read with.
+    return {{"HUD colour index of players 5+", 0x7FFD95, {0x48, 0x63, 0x4E, 0x48, 0x41, 0x89, 0x0E}, 0, 0}};
+}
+
+std::vector<Patch> HudColourPatches() {
+    const std::uint32_t stride = std::bit_cast<std::uint32_t>(1.0f / static_cast<float>(kHudColourCount));
+    Bytes lampStride = {0xB8, 0, 0, 0, 0, 0x66, 0x0F, 0x6E, 0xF0, 0x90};  // mov eax, stride; movd xmm6, eax; nop
+    std::memcpy(lampStride.data() + 1, &stride, sizeof(stride));
+    return {
+        // HudPlayer_MultiPlayStatus (806FE0): the lamp vector at this+0x20 (data +0x28, capacity +0x30, size
+        // +0x38, 0x30 bytes an entry) is reserved, resized and filled for four.
+        Immediate("status lamps capacity check", 0x8073F5, {0x48, 0x83, 0x7F, 0x30, 0x04}, 4, 1, kMaxPlayers),
+        Immediate("status lamps allocation", 0x807400, {0xB9, 0xC0, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers * 0x30),
+        Immediate("status lamps moved entries", 0x80741A, {0x48, 0x83, 0xFE, 0x04}, 3, 1, kMaxPlayers),
+        Immediate("status lamps moved entries cap", 0x807427, {0xBE, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+        Immediate("status lamps capacity", 0x8074AC, {0x48, 0xC7, 0x47, 0x30, 0x04, 0x00, 0x00, 0x00}, 4, 4, kMaxPlayers),
+        Immediate("status lamps resize", 0x8074B8, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+        Immediate("status lamps fill loop", 0x80753D, {0x83, 0xFE, 0x04}, 2, 1, kMaxPlayers),
+        // Lamp i is u = i * xmm6 .. + width of the lamp texture: player_lamps.dds holds kHudColourCount of them, so
+        // both are 1/kHudColourCount instead of 0.25. `movss xmm6, [0.25]` is a shared constant, so the value is
+        // loaded through eax (free here: the loop sets it before reading it).
+        {"status lamp spacing", 0x8074D6, {0xF3, 0x0F, 0x10, 0x35, 0x36, 0xE5, 0xF5, 0x00, 0x66, 0x90}, lampStride},
+        Immediate("status lamp width", 0x807529, {0xC7, 0x43, 0x28, 0x00, 0x00, 0x80, 0x3E}, 3, 4, stride),
+        // HudPlayer_Chat (802970): the balloon vector at this (data +8, capacity +0x10, size +0x18, 0x20 bytes an
+        // entry), the same way.
+        Immediate("chat balloons capacity check", 0x802A8A, {0x48, 0x83, 0x7F, 0x10, 0x04}, 4, 1, kMaxPlayers),
+        Immediate("chat balloons allocation", 0x802A95, {0xB9, 0x80, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers * 0x20),
+        Immediate("chat balloons moved entries", 0x802AAF, {0x48, 0x83, 0xFB, 0x04}, 3, 1, kMaxPlayers),
+        Immediate("chat balloons moved entries cap", 0x802ABC, {0xBB, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+        Immediate("chat balloons capacity", 0x802B31, {0x48, 0xC7, 0x47, 0x10, 0x04, 0x00, 0x00, 0x00}, 4, 4, kMaxPlayers),
+        Immediate("chat balloons resize", 0x802B3D, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+    };
+}
+
+std::vector<MidSite> HudColourHooks() {
+    const Bytes radar = {0x48, 0x63, 0x44, 0x24, 0x44, 0x48, 0xC1, 0xE0, 0x04, 0x4C,
+                         0x8D, 0x8D, 0x50, 0x01, 0x00, 0x00, 0x4C, 0x03, 0xC8};
+    return {
+        // `lea r8, [player_lamp.dds]`: the texture the status lamps are cut from.
+        {"status lamp texture", 0x8074E7, {0x4C, 0x8D, 0x05, 0x02, 0xF8, 0xFE, 0x00}, 0, 0},
+        // `mov r8, [rbp+rax*8+7]`: balloon i's texture name from a table of four on the stack.
+        {"chat balloon texture", 0x802B9B, {0x4C, 0x8B, 0x44, 0xC5, 0x07}, 0, 0},
+        // `movsxd rax, [rsp+0x44]; shl rax, 4; lea r9, [rbp+0x150]; add r9, rax`: the marker colour from a
+        // table of four float4 on the stack (rax and the flags are written again before they are read).
+        {"radar marker colour", 0x82A6CD, radar, 0, 0},
+        {"radar marker colour (second)", 0x82A743, radar, 0, 0},
     };
 }
 

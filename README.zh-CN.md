@@ -156,9 +156,9 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 ```
 
 - `-Players` 选房间人数（8、10、12、16、24、32），每种人数单独构建。`-Test` 跑测试（单元测试、本机回环多节点直连测试，以及逐个核对补丁位置与游戏 `EDF.dll` 代码的测试，没装游戏时跳过）。
-- 游戏目录只读不写：`Root.cpk` 用来生成带「8Player MOD」标签的菜单框（`multislot/tools/make_menu_label.py` 写出 `multislot/assets/LYT_MAINFRAME.SGO`，它来自游戏文件，所以从不提交），`EDF.dll` 给测试用。
+- 游戏目录只读不写：`Root.cpk` 用来生成带「8Player MOD」标签的菜单框（`multislot/tools/make_menu_label.py` 写出 `multislot/assets/LYT_MAINFRAME.SGO`，它来自游戏文件，所以从不提交），`HUD/ONLINEHUDTEXTURE.RAB` 用来生成每个玩家一种颜色的 HUD 贴图（`multislot/tools/make_hud_colours.py` 写出 `multislot/assets/ONLINEHUDTEXTURE.RAB`，同样来自游戏文件、从不提交），`EDF.dll` 给测试用。
 - `build.ps1` 会获取官方 EDFModLoader v1.0.10 的 `winmm.dll`（校验 SHA-256），并生成随包的修复版加载器（`multislot/tools/fix_winmm_proxy.py`）。
-- `package.ps1` 拒绝打包人数或版本不符的构建、比源码旧的 DLL，以及 CI 构建（`build.ps1 -CI` 不带游戏菜单资源，内嵌占位数据）。
+- `package.ps1` 拒绝打包人数或版本不符的构建、比源码旧的 DLL，以及 CI 构建（`build.ps1 -CI` 不带游戏的菜单和 HUD 资源，内嵌占位数据）。
 
 ## 发布
 
@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 | 路径 | 内容 |
 |---|---|
 | `multislot/src/plugin.cpp` | EDFModLoader 入口：读 `EDF6Coop.ini`（搬入旧设置文件的值），启动房间部分和直连 |
-| `multislot/src/` | 房间部分（8Player MOD）：补丁、房间画面、任务、护甲复制、菜单布局、日志 |
+| `multislot/src/` | 房间部分（8Player MOD）：补丁、房间画面、任务、护甲复制、菜单布局、HUD 颜色、日志 |
 | `src/config.*` | 直连的设置项和注释（按 Windows 显示语言写中文 / 日文 / 英文） |
 | `src/eos_min.h` | 用到的 EOS SDK 结构体（取自官方 1.15.5 头文件；游戏用的是 1.16.1） |
 | `src/eos_hooks.cpp`、`src/iat.*` | 改 `EDF.dll` 导入表，接管 EOS P2P / 大厅调用 |

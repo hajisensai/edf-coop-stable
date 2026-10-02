@@ -5,10 +5,10 @@ the layout is read from Root.cpk and written into this project only.
   python -B tools/make_menu_label.py [out-path]
 
 The build embeds the file in the plugin, which writes it to Mods/UI/LYT_MAINFRAME.SGO while it is active
-and removes it otherwise (src/menulayout.cpp). EDFModLoader's Mods folder redirector (ModLoader.ini
+and removes it otherwise (src/modfile.cpp). EDFModLoader's Mods folder redirector (ModLoader.ini
 Redirect=True) makes the game load it instead of the archived file. Without the plugin the field stays
 a single space, so the layout looks exactly like the game's.
-When the output changes, add its size and FNV-1a 64 to kKnownLayouts in src/menulayout.cpp.
+When the output changes, add its size and FNV-1a 64 to kKnownLayouts in src/modfile.cpp.
 """
 import hashlib, os, pathlib, sys
 

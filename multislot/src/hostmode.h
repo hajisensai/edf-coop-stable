@@ -14,7 +14,7 @@ namespace multislot {
 //                   and the room search lists MultiSlot rooms only (invitations still reach any room).
 // F2 switches it on menu screens outside a room (saved to the INI). A room keeps the setting it was
 // created with for as long as it exists. The menu frame (UI/LYT_MAINFRAME.SGO, which the plugin writes to
-// Mods\UI with an extra text field MSLabel, menulayout.h) shows the label in its lower left corner. The
+// Mods\UI with an extra text field MSLabel, modfile.h) shows the label in its lower left corner. The
 // main script plays that frame on the HQ, lobby and room screens but not in missions, so the label is gone
 // once a mission starts. In a room it shows the room's setting to its host and, as a control guide, which
 // keys switch the member page (see ComposeLabel).

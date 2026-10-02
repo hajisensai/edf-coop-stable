@@ -2,8 +2,8 @@
 #   build.ps1 [-Players 8|10|12|16|24|32] [-Test] [-CI]
 # The 8-player build lands in multislot\dist\, the others in multislot\dist-<N>p\ (each with the race-fixed
 # EDFModLoader winmm.dll next to it). Rooms of one size are a family of their own: only the same build joins.
-# Set EDF6_GAME_DIR to the game folder (holds EDF.dll and Root.cpk; only read) for the menu asset and the
-# tests against the game's code. -CI builds without the game's menu asset (placeholder; cannot be packaged).
+# Set EDF6_GAME_DIR to the game folder (holds EDF.dll and Root.cpk; only read) for the menu and HUD assets and the
+# tests against the game's code. -CI builds without the game's assets (placeholders; cannot be packaged).
 param(
     [ValidateSet(8, 10, 12, 16, 24, 32)] [int]$Players = 8,
     [switch]$Test,
@@ -20,6 +20,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $multislot 'third_party\EDFModLoader
 if (-not $CI -and -not (Test-Path -LiteralPath (Join-Path $multislot 'assets\LYT_MAINFRAME.SGO'))) {
     python -B (Join-Path $multislot 'tools\make_menu_label.py')
     if ($LASTEXITCODE) { throw "make_menu_label.py failed ($LASTEXITCODE); set EDF6_GAME_DIR to the game folder" }
+}
+if (-not $CI -and -not (Test-Path -LiteralPath (Join-Path $multislot 'assets\ONLINEHUDTEXTURE.RAB'))) {
+    python -B (Join-Path $multislot 'tools\make_hud_colours.py')
+    if ($LASTEXITCODE) { throw "make_hud_colours.py failed ($LASTEXITCODE); set EDF6_GAME_DIR to the game folder" }
 }
 
 $configure = "cmake -S `"$multislot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMULTISLOT_MAX_PLAYERS=$Players"

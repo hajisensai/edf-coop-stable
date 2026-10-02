@@ -130,6 +130,13 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 每个装插件的玩家还会写 `EDF6DN_ID`：本局游戏生成的 ECDSA P-256 密钥的指纹（SHA-256）。建立连接先走一次 cookie 往返：房主对 hello 回一个绑定发送方地址的 cookie，cookie 回来之前什么都不保存（所以伪造源地址、hello 洪泛都没有用）；加入者带上 cookie、用这把密钥签名后再发一次 hello。房主只有在 EOS ID X 在房间里、且公布的指纹与这把密钥一致时才接受；更早会话的签名 hello 当作重放拒绝。反过来，加入者只接受由房间所有者公布指纹的那把密钥签名的 welcome。hello 和 welcome 在签名下各带一把新的 ECDH 密钥，于是每条链路有自己的密钥（设了 `Key=` 时一并混入），链路上的每个包都带用它算的标签和计数器：被篡改、注入或重放的包一律丢弃。所以只有证明了身份的房间成员才能发数据。不加密。协议版本不同的 EDF6DirectNet（0.3.6 及更早是协议 2，0.4.0 是协议 3）互相忽略对方的包，彼此照常走 EOS。
 
+### 房主说了算，不经 Epic 重进
+
+游戏从大厅得知房间成员：进房时的成员列表，之后每次变化一个状态事件。Epic 房间服务是这些事件的一个来源，房主是另一个：协议 6 起，房主把自己游戏里的成员列表（`Room` 消息）随名单发给每个直连成员，每个成员的游戏都跟着它走。两个来源会说同一件事（某人离开，Epic 和房主都会报），所以每个事件先过一遍本地视图：已经进来的不再进一次，已经走了的不再走一次（日志 `ROOM ... not told again`）。
+
+- 房主：有直连、但游戏里没有的玩家会被放进房间（他的插件只有在游戏在房间里时才会连房主）；Epic 列表里没有、直连又断了 `GraceSeconds` 秒的玩家算离开。房主踢掉的人在这个房间里不会再被直连放进来，除非他重新经 Epic 进房。踢一个只在直连上、Epic 不知道的人，由插件直接完成。
+- 成员：在别人房间里时每 2 秒记一次这个房间（房主、房主公布的身份指纹和地址、房间属性）。离开后 30 分钟内，搜房结果里会多一项这个房间（Epic 已经列出它时不重复）；选它就按记下的地址直连房主（每个地址 5 秒，总共 30 秒），房主的成员列表里出现自己就算进房。房间关闭、被踢、进了别的房间时忘掉它。这时的房间是房主那边的真房间，Epic 不知道你在里面：游戏里的离开 / 解散在本地完成。
+
 ## 排障
 
 - **先看日志**：`Mods\Plugins\EDF6Coop.log`（自动保持在 2MB 左右以内；直连相关的行以 `[DN]` 开头）。出现 `==== EDF6Coop x.y.z-<N>p ====` 这一行说明插件已加载；没有这一行说明 EDFModLoader 没装好。
@@ -138,11 +145,12 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 - `EOS incoming packet queue FULL`：EOS 队列满开始丢包，请附日志提 Issue。
 - `RESILIENCE ... RECOVERED` 表示一次断线被成功隐藏；`did not come back within` 表示超时后交给了游戏。
 - `RESILIENCE ... lost Epic's lobby service but the direct link is up` / `back in Epic's lobby service`：Epic 房间服务把某人踢掉又放了回来，游戏没察觉。`direct link silent for ...` 表示他真的掉了，已交给游戏。
+- `REJOIN ...`：不经 Epic 重进的过程。`remembering room` 记下了房间；`the room list gets room` 搜房列表里加了它；`dialling the room's host` / `in room ... again` 正在连 / 已经回到房间；`its host did not let us in within` 房主 30 秒内没放你进来（房主不在、或已把你踢出）。
 - `GAME kicks ... from the room (direct link up/down, ...)`：游戏自己把某人移出了房间（或者是你手动踢的），并记下当时直连是否还显示他在玩。
 - `STATS last 60s: ...`：游戏有收发时每分钟一行。内容有游戏自己发了多少数据（平均值和最忙那一秒，单位 kbps；游戏会把常规同步压在约 320 kbps 以内，接近上限时跳过次要更新）、其中有多少是发给多个人的同一份数据、有多少包在 5 秒内把同一份数据又发给了同一个人（即游戏自己的重发，如果有的话）、直连在线路上实际占用的上传 / 下载（`wire up`/`down`，含重发和房主替别人转发的部分）、包数，以及每条直连的 `retx`（我方重发）、`dup`（对方重发了我们已收到的包）、`gaveup`（游戏以不可靠方式发的包，2 秒后放弃重发）、`skipped`（对方放弃、我们没收到的包）、`held`（链路送达太少、重发被压住的时长）、`credit`（此刻允许的重发数）。`send-failures` 或 `send-refused` 不为 0 时请附日志。
 - `DIRECT ... timed out: nothing received for ...` 表示对方没声了；`DIRECT ... stalled: a packet the game sent reliably is unacknowledged ...` 表示对方还在应答，但游戏需要的某个包一直送不到。
 - `DIRECT refused hello for ...`：有人想以某个玩家的身份直连，但证明不了。玩家刚进房的一两秒内出现 `published no direct-link identity` 是正常的（他的房间信息还没到房主这里，对方每秒重试）；对没装插件或 0.3.6 及更早版本的玩家，意思是他继续走 EOS。`not signed by the identity that player published` 说明有人冒充该玩家，已被拒绝，影响不到那个玩家。
-- `DIRECT ... speaks direct-link protocol 4, we speak 5`：对方的版本不同（协议 5 是 EDF6Coop 2.0.0，4 是 EDF6DirectNet 0.4.1，3 是 0.4.0，2 是 0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
+- `DIRECT ... speaks direct-link protocol 5, we speak 6`：对方的版本不同（协议 6 是 EDF6Coop 2.2.0，5 是 2.0.0-2.1.0，4 是 EDF6DirectNet 0.4.1，3 是 0.4.0，2 是 0.3.6 或更早）。你们之间不走直连，游戏照常通过 EOS 进行；把双方更新到同一版本即可。
 
 ## 构建
 

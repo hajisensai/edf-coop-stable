@@ -370,6 +370,12 @@ ThunkPage thunks;
 }  // namespace multislot
 
 namespace {
+// A member we play with over a direct link runs a build of the same direct-link protocol, which reads a split
+// start message whether or not Epic's lobby still shows its marker; the others are asked the lobby.
+bool ReadsSplitSync(const void* remote) {
+    return dn::readsSplitSyncDirectly(remote) || multislot::PeerReadsSplitSync(remote);
+}
+
 // The room part: rooms of up to MULTISLOT_MAX_PLAYERS, the missions and room screen for them, and the crash log.
 // Returns whether it runs; when it does not, it has changed nothing and started nothing.
 bool LoadRooms(const wchar_t* iniPath) {
@@ -601,7 +607,7 @@ bool LoadRooms(const wchar_t* iniPath) {
         const int imports = InstallPacketFit(game, &RedirectGameImport);
         // The marker says this machine reads a split message: only true once both P2P imports are ours.
         const bool marker = imports == 2 && InstallSyncMarker(game, &RedirectGameImport);
-        if (marker) SetSplitSyncReaders(&PeerReadsSplitSync);
+        if (marker) SetSplitSyncReaders(&ReadsSplitSync);
         if (imports == 2)
             Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "
                 "what fits and sends the other loadout records beside it; smaller ones are unchanged. It only goes to "
@@ -723,6 +729,12 @@ bool LoadCoop(PluginInfo* info) {
 
     const dn::PartState direct = dn::startPart(settings, dir, game, GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll"));
     const bool rooms = LoadRooms(iniPath);
+    // Last, so its wrappers sit in front of both parts': it answers a room Epic knows nothing of. The room
+    // part reads room-list entries through the direct-link part before any entry of its own can be there.
+    if (direct.eosHooked) {
+        multislot::RouteLobbyInfo(&dn::lobbyInfoCopy, &dn::lobbyInfoRelease);
+        dn::startRejoin(game);
+    }
     if (!direct.running && !rooms) {
         Log("Neither part runs (see above why): the game goes on without EDF6Coop");
         // Not a failed run of this version: the next start goes on with its trial instead of rolling it back.

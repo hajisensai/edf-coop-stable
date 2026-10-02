@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # EDF6Coop: the room part (src/ here) and the direct-link part (../src) as one plugin, EDF6Coop.dll.
-project(EDF6Coop VERSION 2.1.0 LANGUAGES CXX)
+project(EDF6Coop VERSION 2.2.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -84,7 +84,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_D
 # The direct-link part, compiled with its own flags (it is not built for /permissive- and defines what the room
 # part's sources define themselves).
 set(DIRECTNET_DIR "${CMAKE_SOURCE_DIR}/../src")
-set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traffic updater upnp)
+set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traffic updater upnp room_view
+    fake_lobby)
 list(TRANSFORM DIRECTNET_CORE PREPEND "${DIRECTNET_DIR}/")
 list(TRANSFORM DIRECTNET_CORE APPEND ".cpp")
 set(DIRECTNET_DEFINES WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS

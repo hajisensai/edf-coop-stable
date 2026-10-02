@@ -133,4 +133,16 @@ PartState startPart(const Config& settings, const std::wstring& dir, HMODULE gam
 
 void detachPart() { eosHooksShutdown(); }
 
+bool startRejoin(HMODULE game) { return installVirtualRoomHooks(game); }
+
+int32_t lobbyInfoCopy(void* details, const void* options, void** info) {
+    return lobbyDetailsCopyInfo(static_cast<EOS_HLobbyDetails>(details),
+                                static_cast<const EOS_LobbyDetails_CopyInfoOptions*>(options),
+                                reinterpret_cast<EOS_LobbyDetails_Info**>(info));
+}
+
+void lobbyInfoRelease(void* info) { lobbyDetailsInfoRelease(static_cast<EOS_LobbyDetails_Info*>(info)); }
+
+bool readsSplitSyncDirectly(const void* remote) { return directMemberReadsSplitSync(remote); }
+
 }  // namespace dn

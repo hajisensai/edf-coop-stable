@@ -1,4 +1,4 @@
-EDF6Coop 2.1.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.2.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
@@ -19,7 +19,7 @@ carried over. A setting that no longer exists is named in the log ("is no longer
 Going back is a rename: delete EDF6Coop.dll and remove ".disabled" from the old DLL.
 
 [Room sizes: 8p, 10p, 12p, 16p, 24p, 32p]
-There is one package per room size (EDF6Coop-2.1.0-8p.zip and so on). A room of one size can only be
+There is one package per room size (EDF6Coop-2.2.0-8p.zip and so on). A room of one size can only be
 joined with the same size build: everyone in a room must use the same package. When unsure, use 8p.
 8p is the size played the most. 10p and 12p are played less. 16p, 24p and 32p are new in 2.0.0 and have
 only been checked offline with ghost players, not yet in real online play with that many people.
@@ -69,6 +69,12 @@ the Windows display language) explain every setting.
 Joiners need nothing: they find the host's address in the room. If the link cannot be made, play goes on
 through Epic as usual. Key= is an optional shared secret: every joiner must enter the same Key.
 While the direct link works, Epic's own room-service hiccups cannot drop anyone.
+Who is in the room is the host's game's say: its member list goes to everyone over the direct link and
+every game follows it. For 30 minutes after you drop out of a room, a room search Epic cannot run (its
+lobby service down) shows that room; choosing it connects you straight to the host, without Epic. While
+Epic works, nothing changes. It is
+no longer shown once the host kicked you, the room closed or you entered another room. You and the host
+both need 2.2.0 or later.
 
 [Automatic updates]
 At game start EDF6Coop fetches a newer release of the same room size from GitHub; it runs from the next start.

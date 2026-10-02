@@ -20,10 +20,12 @@
 #include "../src/auth.h"
 #include "../src/config.h"
 #include "../src/direct_net.h"
+#include "../src/fake_lobby.h"
 #include "../src/hold.h"
 #include "../src/iat.h"
 #include "../src/netif.h"
 #include "../src/reliable.h"
+#include "../src/room_view.h"
 #include "../src/traffic.h"
 #include "../src/updater.h"
 #include "../src/upnp.h"
@@ -2880,6 +2882,162 @@ void testConfigParsing() {
     DeleteFileW(path.c_str());
 }
 
+std::vector<std::string> sorted(std::vector<std::string> v) {
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+void testRoomView() {
+    printf("room view: two sources of the same status reach the game once\n");
+    const std::string kC = "0002dddddddddddddddddddddddddddd";
+    dn::RoomView v;
+    CHECK(v.admit(kA, dn::kJoined));  // no room: nothing is filtered
+    v.reset(kA, {kHost, kA});
+    CHECK(v.active() && v.has(kA) && v.has(kHost));
+    CHECK(v.admit(kB, dn::kJoined) && !v.admit(kB, dn::kJoined));  // Epic and the host both say B joined
+    CHECK(v.admit(kB, dn::kLeft) && !v.admit(kB, dn::kDisconnected));
+    CHECK(v.admit(kA, dn::kKicked) && v.admit(kHost, dn::kPromoted) && v.admit(kHost, dn::kClosed));
+
+    printf("room view: Epic speaks first; the plugin's say waits, and starts over when it changes\n");
+    v.reset(kHost, {kHost});
+    CHECK((v.settle({{kA, dn::kJoined}}, 1000, 5000).empty()));
+    CHECK((v.settle({{kA, dn::kJoined}}, 5999, 5000).empty()));
+    CHECK((v.settle({{kA, dn::kJoined}}, 6000, 5000) == std::vector<dn::StatusChange>{{kA, dn::kJoined}}));
+    CHECK((v.settle({{kB, dn::kJoined}}, 7000, 5000).empty()));
+    CHECK((v.settle({}, 8000, 5000).empty()));  // Epic reported it meanwhile: no longer wanted...
+    CHECK((v.settle({{kB, dn::kJoined}}, 9000, 5000).empty()));  // ...and wanted again waits all over
+    CHECK((v.settle({{kB, dn::kLeft}}, 14500, 5000).empty()));  // another status starts over too
+    CHECK((v.settle({{kC, dn::kJoined}}, 1, 0).size() == 1));  // no delay: at once
+
+    printf("room view: a member follows the host's list, keeping members only Epic told it of\n");
+    v.reset(kA, {kHost, kA, kC});  // Epic listed C before the host's game had it
+    CHECK(v.followHost().empty());  // nothing heard from the host yet
+    v.heardHost({kHost, kA, kB});
+    auto first = v.followHost();
+    CHECK((first == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
+    for (const auto& c : first) v.admit(c.target, c.status);
+    v.heardHost({kHost, kA, kC});
+    auto second = v.followHost();  // C is not joined again: our game has it already
+    CHECK((second == std::vector<dn::StatusChange>{{kB, dn::kLeft}}));
+    for (const auto& c : second) v.admit(c.target, c.status);
+    CHECK(!v.has(kB) && v.has(kC));
+    v.heardHost({kHost, kC});
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kA, dn::kKicked}}));
+
+    printf("room view: the host lets linked players in while there is room, and Epic's are Epic's\n");
+    v.reset(kHost, {kHost, kA});
+    auto joins = v.hostJoins({{kA, 1}, {kB, 2}, {kC, 3, true}, {kHost, 4}, {"", 5}}, 8);
+    CHECK((joins == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
+    CHECK((v.hostJoins({{kB, 2}, {kC, 3}}, 3).size() == 1));  // one place left
+    CHECK((v.hostJoins({{kB, 2}}, 2).empty()));  // full
+    CHECK((v.hostJoins({{kB, 2}}, 0).empty()));  // size never read: nobody gets in this way
+
+    printf("room view: one that left is not brought back by the link it left with, only by a new one\n");
+    v.admit(kB, dn::kJoined);
+    v.hostJoins({{kA, 1}, {kB, 2}}, 8);  // B's link is noted while it is in the room
+    v.admit(kB, dn::kLeft);
+    CHECK((v.hostJoins({{kB, 2}}, 8).empty()));
+    CHECK((v.hostJoins({{kB, 6}}, 8) == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
+
+    printf("room view: a member in by its link only leaves by its link; kicked ones stay out\n");
+    v.admit(kB, dn::kJoined);
+    v.markDirect(kB);
+    v.markDirect(kC);  // not in the room: nothing to mark
+    CHECK(v.direct(kB) && !v.direct(kA) && !v.direct(kC));
+    auto inEpic = [&](const std::string& m) { return !v.direct(m); };  // no copy of Epic's lobby
+    auto down = [](const std::string&) { return false; };
+    CHECK((v.hostLeaves(inEpic, down) == std::vector<dn::StatusChange>{{kB, dn::kLeft}}));
+    CHECK((v.hostLeaves(inEpic, [](const std::string&) { return true; }).empty()));
+    CHECK(v.kick(kB) && v.banned(kB));
+    CHECK(!v.kick(kB));  // the game's repeats of the same kick
+    CHECK(!v.kick(kHost) && !v.kick(kC));
+    v.admit(kB, dn::kKicked);
+    CHECK(!v.direct(kB));
+    CHECK((v.hostJoins({{kB, 7}}, 8).empty()));  // a new link does not let a kicked player back in
+    CHECK(v.admit(kB, dn::kJoined) && !v.banned(kB));  // back in through Epic's lobby: the ban is lifted
+    v.reset(kHost, {kHost});
+    CHECK(!v.banned(kB));  // a ban is for one room
+    v.clear();
+    CHECK((!v.active() && v.followHost().empty() && v.hostJoins({{kA, 1}}, 8).empty()));
+}
+
+void testRoomWire() {
+    printf("wire: Room carries the host's member list\n");
+    dn::Message m;
+    m.type = dn::MsgType::Room;
+    m.room.hostNonce = 41;
+    m.room.members = {kHost, kA, kB};
+    auto dg = dn::encode(m, "");
+    dn::DecodeError err;
+    auto back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->type == dn::MsgType::Room && back->room.hostNonce == 41 && back->room.members == m.room.members);
+    m.room.members.clear();  // a host whose game has left its room
+    dg = dn::encode(m, "");
+    back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->type == dn::MsgType::Room && back->room.members.empty());
+}
+
+void testFakeLobbies() {
+    printf("fake lobby: our details handles and copies are told from EOS's and freed exactly once\n");
+    dn::FakeLobbies fakes;
+    dn::FakeDetails d;
+    d.roomId = "room1";
+    d.owner = kHost;
+    d.members = {kHost, kA};
+    d.maxMembers = 8;
+    d.attributes = {{"NAME", 3, 0, 0.0, "my room", 1}, {"LEVEL", 1, 12, 0.0, "", 1}, {"OPEN", 0, 1, 0.0, "", 1}};
+    EOS_HLobbyDetails h = fakes.make(d);
+    dn::FakeDetails got;
+    CHECK(fakes.owns(h) && fakes.lookup(h, &got) && got.roomId == "room1" && got.members == d.members);
+    int notOurs = 0;
+    CHECK(!fakes.owns(reinterpret_cast<EOS_HLobbyDetails>(&notOurs)));
+    CHECK(!fakes.release(reinterpret_cast<EOS_HLobbyDetails>(&notOurs)));
+
+    EOS_Lobby_Attribute* name = fakes.copyAttribute(d.attributes[0]);
+    EOS_Lobby_Attribute* level = fakes.copyAttribute(d.attributes[1]);
+    EOS_Lobby_Attribute* open = fakes.copyAttribute(d.attributes[2]);
+    CHECK(name->Data && std::string(name->Data->Key) == "NAME" && std::string(name->Data->Value.AsUtf8) == "my room");
+    CHECK(level->Data->ValueType == 1 && level->Data->Value.AsInt64 == 12 && open->Data->Value.AsBool == 1);
+    int owner = 0;
+    EOS_LobbyDetails_Info* info = fakes.copyInfo(d, reinterpret_cast<EOS_ProductUserId>(&owner));
+    CHECK(std::string(info->LobbyId) == "room1" && info->MaxMembers == 8 && info->AvailableSlots == 6 &&
+          info->LobbyOwnerUserId == reinterpret_cast<EOS_ProductUserId>(&owner));
+    d.members.assign(9, kA);  // more than fit: no slot left, never a wrapped count
+    EOS_LobbyDetails_Info* full = fakes.copyInfo(d, nullptr);
+    CHECK(full->AvailableSlots == 0);
+    CHECK(fakes.liveCopies() == 5);
+    CHECK(fakes.releaseAttribute(name) && !fakes.releaseAttribute(name) && fakes.releaseAttribute(level) &&
+          fakes.releaseAttribute(open));
+    CHECK(fakes.releaseInfo(info) && !fakes.releaseInfo(info) && fakes.releaseInfo(full));
+    CHECK(fakes.release(h) && !fakes.release(h) && !fakes.owns(h));
+    CHECK(fakes.liveHandles() == 0 && fakes.liveCopies() == 0);
+}
+
+void testRoomFollowsHost() {
+    printf("direct: the host's room list reaches its joiners, and changes reach them too\n");
+    dn::DirectNet host;
+    CHECK(host.start(hostOptions(0, 0)));
+    host.setLocalUser(kHost);
+    host.setRoomMembers({kHost, kA});
+    dn::DirectNet a;
+    CHECK(a.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+    a.setLocalUser(kA);
+    uint64_t version = 0;
+    CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kA}); }, 5000));
+    const uint64_t before = version;
+    host.setRoomMembers({kHost, kA, kB});
+    CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kA, kB}); }, 5000));
+    CHECK(version > before);
+    const uint64_t same = version;
+    host.setRoomMembers({kB, kA, kHost});  // the same room in another order: not a change
+    host.setRoomMembers({kHost, kB});
+    CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kB}); }, 5000));
+    CHECK(version == same + 1);
+    CHECK(host.linkId(kA) != 0 && host.linkId(kB) == 0 && a.linkId(kHost) != 0);
+    a.setActive(false);  // our game left the room: what the host said no longer applies
+    CHECK(a.hostRoom(&version).empty());
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2942,6 +3100,10 @@ int wmain(int argc, wchar_t** argv) {
     testLinkTagSpeed();
     testWelcomeProvesTheRoomOwner();
     testLinkPacketsAuthenticated();
+    testRoomView();
+    testRoomWire();
+    testFakeLobbies();
+    testRoomFollowsHost();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

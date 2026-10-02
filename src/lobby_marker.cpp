@@ -260,6 +260,23 @@ std::map<std::string, std::string> LobbyMarker::memberIdentities() {
     return identities_;
 }
 
+std::vector<std::string> LobbyMarker::members(bool* known) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> out;
+    EOS_HLobbyDetails details = getMemberCount_ && getMemberByIndex_ ? copyDetailsLocked() : nullptr;
+    if (known) *known = details != nullptr;
+    if (!details) return out;
+    EOS_LobbyDetails_GetMemberCountOptions mc{1};
+    uint32_t count = getMemberCount_(details, &mc);
+    for (uint32_t i = 0; i < count && i < kMaxMembersRead; ++i) {
+        EOS_LobbyDetails_GetMemberByIndexOptions mo{1, i};
+        std::string id = idString(getMemberByIndex_(details, &mo));
+        if (!id.empty()) out.push_back(id);
+    }
+    releaseDetails_(details);
+    return out;
+}
+
 std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) {
     std::lock_guard<std::mutex> lock(mu_);
     EOS_HLobbyDetails details = copyDetailsLocked();

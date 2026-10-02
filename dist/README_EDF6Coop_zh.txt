@@ -1,4 +1,4 @@
-EDF6Coop 2.1.0 - 地球防卫军6 联机扩容 + 稳定插件
+EDF6Coop 2.2.0 - 地球防卫军6 联机扩容 + 稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 日本語: README_EDF6Coop_ja.txt
 遇到问题请提 Issue，并附上 Mods\Plugins\EDF6Coop.log。
@@ -18,7 +18,7 @@ EDF6MultiSlot.dll 改名为 .disabled，加载器就不再加载它们。旧的�
 想退回旧版：删掉 EDF6Coop.dll，再把旧 DLL 名字末尾的 ".disabled" 去掉即可。
 
 [房间人数：8p、10p、12p、16p、24p、32p]
-每种人数一个安装包（EDF6Coop-2.1.0-8p.zip 等）。某个人数的房间只有同人数版本才能加入：同一个房间里
+每种人数一个安装包（EDF6Coop-2.2.0-8p.zip 等）。某个人数的房间只有同人数版本才能加入：同一个房间里
 所有人必须用同一个包。拿不准就用 8p。
 8p 实际玩得最多；10p、12p 玩得少一些；16p、24p、32p 是 2.0.0 新增的，目前只用离线幽灵队员验证过，
 还没有真的那么多人联机测试过。
@@ -60,6 +60,9 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 加入的人什么都不用设：房间信息里带着房主地址。连不上也不影响，照常走 Epic 继续玩。
 Key= 是可选的共享密钥：房主设了，所有加入者必须填一样的 Key。
 直连正常时，Epic 自己房间服务的抽风不会让任何人掉线。
+谁在房间里由房主的游戏说了算：房主的成员列表经直连发给每个人，大家的游戏都跟着它走。
+掉出房间后 30 分钟内，如果 Epic 搜房失败（房间服务挂了），搜房列表里会出现你刚才那个房间，选它就直接连
+房主重进，不经过 Epic。Epic 正常时一切照旧。被房主踢出、房间关闭或进了别的房间后就不再显示。房主和你都要是 2.2.0 及以上。
 
 [自动更新]
 游戏启动时 EDF6Coop 会从 GitHub 获取同人数的新版本，下次启动生效。

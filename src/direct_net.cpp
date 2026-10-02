@@ -396,6 +396,16 @@ bool DirectNet::linkAlive(const std::string& remote, uint64_t windowMs) {
            (remote == hostLink_->puid || contains(roster_, remote));
 }
 
+uint64_t DirectNet::linkId(const std::string& remote) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (localPuid_.empty() || remote.empty() || remote == localPuid_) return 0;
+    if (opt_.mode == Mode::Host) {
+        auto it = clients_.find(remote);
+        return it != clients_.end() && it->second.up ? it->second.id : 0;
+    }
+    return hostLink_ && hostLink_->up && (remote == hostLink_->puid || contains(roster_, remote)) ? hostLink_->id : 0;
+}
+
 bool DirectNet::anyLinkAlive(uint64_t windowMs) {
     std::lock_guard<std::mutex> lock(mu_);
     uint64_t now = nowMs();
@@ -421,6 +431,13 @@ void DirectNet::setActive(bool active) {
     hostLink_.reset();
     roster_.clear();
     lastRoster_.clear();
+    // The room's member lists belong to the room: the next one starts with nothing said.
+    roomMembers_.clear();
+    roomSet_ = false;
+    if (!hostRoom_.empty()) {
+        hostRoom_.clear();
+        ++hostRoomVersion_;
+    }
     newLocalSession();  // a later room starts fresh sessions
     logf("DIRECT closed %zu direct link(s): not in a room", closed);
 }
@@ -428,6 +445,21 @@ void DirectNet::setActive(bool active) {
 std::vector<std::string> DirectNet::directMembers() {
     std::lock_guard<std::mutex> lock(mu_);
     return rosterLocked();
+}
+
+void DirectNet::setRoomMembers(std::vector<std::string> members) {
+    std::sort(members.begin(), members.end());  // a set: another order is the same room
+    std::lock_guard<std::mutex> lock(mu_);
+    if (roomSet_ && members == roomMembers_) return;
+    roomMembers_ = std::move(members);
+    roomSet_ = true;
+    rosterChanged();  // the room list goes out with the roster
+}
+
+std::vector<std::string> DirectNet::hostRoom(uint64_t* version) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (version) *version = hostRoomVersion_;
+    return hostRoom_;
 }
 
 std::vector<std::string> DirectNet::rosterLocked() const {
@@ -839,6 +871,7 @@ void DirectNet::onHostDatagram(const Received& r, const sockaddr_storage& from, 
     if (!link->up && m.type != MsgType::Bye) {
         // The client holds the link keys: it verified our welcome. Game data may flow now.
         link->up = true;
+        link->id = ++linkIds_;
         logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(link->puid).c_str(),
              addrToString(from, fromLen).c_str(), clients_.size());
         rosterChanged();
@@ -903,6 +936,14 @@ void DirectNet::onClientDatagram(const Received& r, const sockaddr_storage& from
         if (roster_ != m.roster.roster) logf("DIRECT roster now has %zu direct members", m.roster.roster.size());
         roster_ = m.roster.roster;
     }
+    if (m.type == MsgType::Room) {
+        if (m.counter < hostLink_->roomCounter || m.room.hostNonce != hostLink_->peerNonce) return;
+        hostLink_->roomCounter = m.counter;
+        if (hostRoom_ != m.room.members) {
+            hostRoom_ = m.room.members;
+            ++hostRoomVersion_;
+        }
+    }
     onLinkCommon(*hostLink_, m, now);
 }
 
@@ -952,6 +993,7 @@ void DirectNet::onClientWelcome(const WelcomeMsg& w, const sockaddr_storage& fro
     link.peerNonce = w.hostNonce;
     link.epoch = linkEpoch(localNonce_, w.hostNonce);
     link.up = true;
+    link.id = ++linkIds_;
     link.lastRecvMs = now;
     hostLink_ = std::move(link);
     hostReplyAddr_ = from;
@@ -1009,8 +1051,20 @@ void DirectNet::broadcastRoster() {
     r.roster.hostNonce = localNonce_;
     r.roster.roster = rosterLocked();
     lastRoster_ = r.roster.roster;
-    for (auto& [id, link] : clients_) sendLink(link, r);
+    for (auto& [id, link] : clients_) {
+        sendLink(link, r);
+        sendRoom(link);
+    }
     lastRosterMs_ = nowMs();
+}
+
+void DirectNet::sendRoom(Link& link) {
+    if (!roomSet_) return;
+    Message m;
+    m.type = MsgType::Room;
+    m.room.hostNonce = localNonce_;
+    m.room.members = roomMembers_;
+    sendLink(link, m);
 }
 
 bool DirectNet::resolveHost() {

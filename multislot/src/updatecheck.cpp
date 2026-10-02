@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <mutex>
+#include <string>
 #include <cstring>
 #include <cwchar>
 
@@ -199,6 +201,40 @@ Version InstalledVrVersion(const wchar_t* gameFolder) {
 }
 
 const wchar_t* UpdateNotice() { return noticeReady.load() ? notice : L""; }
+
+namespace {
+// Written by the update thread, read by the menu frame: copied under the lock, never shown half written.
+struct PluginStatusSlot {
+    std::mutex lock;
+    std::wstring text;
+};
+PluginStatusSlot& StatusSlot() {
+    static PluginStatusSlot slot;
+    return slot;
+}
+
+std::wstring Widen(const char* text) {
+    const int chars = text && text[0] ? MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0) : 0;
+    if (chars <= 1) return {};
+    std::wstring wide(static_cast<std::size_t>(chars), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wide.data(), chars);
+    wide.resize(static_cast<std::size_t>(chars - 1));  // without the terminator
+    return wide;
+}
+}  // namespace
+
+void SetPluginStatus(const char* text) {
+    std::wstring wide = Widen(text);
+    PluginStatusSlot& slot = StatusSlot();
+    std::scoped_lock lock(slot.lock);
+    slot.text = std::move(wide);
+}
+
+std::wstring PluginStatus() {
+    PluginStatusSlot& slot = StatusSlot();
+    std::scoped_lock lock(slot.lock);
+    return slot.text;
+}
 
 void SetUpdateNoticeForTest(const wchar_t* text) {
     if (!text || !text[0]) {

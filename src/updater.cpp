@@ -44,6 +44,32 @@ constexpr uint8_t kReleaseKey[72] = {
 // installOver, beginRun and confirmHealthy all move the same files; one at a time within a game.
 std::mutex g_files;
 
+// The menu status: set at load (beginRun) and by the update thread, passed on to the sink.
+struct StatusState {
+    std::mutex lock;
+    MenuStatus status;
+    StatusSink sink;
+};
+StatusState& statusState() {
+    static StatusState state;
+    return state;
+}
+
+// Applies `change` and passes the new text on, outside the lock (the sink takes its own).
+template <typename Change>
+void changeStatus(const Change& change) {
+    StatusState& state = statusState();
+    std::string text;
+    StatusSink sink;
+    {
+        std::scoped_lock lock(state.lock);
+        change(state.status);
+        text = menuStatusText(state.status);
+        sink = state.sink;
+    }
+    if (sink) sink(text.c_str());
+}
+
 // Set by the first EOS tick (noteGameRunning): a trial's health clock starts there, not at load, so a
 // game quit at its title screen is not taken for a version that failed.
 HANDLE g_gameRunning = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -266,10 +292,12 @@ std::string fileVersionImpl(const std::wstring& path) {
     return "?";
 }
 
-std::string updateOnceImpl(const std::wstring& installed, const std::string& currentText) {
+std::string updateOnceImpl(const std::wstring& installed, const std::string& currentText, UpdateStage& stage,
+                           std::string& downloaded) {
     Version current = parseVersion(currentText);
     std::string why;
     std::vector<uint8_t> body;
+    stage = UpdateStage::CheckFailed;
     if (!httpGet(kLatestRelease, true, kMaxJson, body, &why)) {
         return format("UPDATE check skipped: %s", why.c_str());
     }
@@ -279,9 +307,11 @@ std::string updateOnceImpl(const std::wstring& installed, const std::string& cur
         return format("UPDATE check skipped: the latest release has no version");
     }
     if (!latest.newerThan(current)) {
+        stage = UpdateStage::Latest;
         return format("UPDATE %s is the latest version", currentText.c_str());
     }
     std::string latestText = versionText(latest);
+    stage = UpdateStage::Failed;  // from here on a newer release exists and every early return is a failure
     if (badVersion(installed) == latest) {
         return format("UPDATE %s is out, but it was rolled back here after it failed to run; waiting for a newer "
                       "release (delete %ls.bad to try it again)",
@@ -307,11 +337,42 @@ std::string updateOnceImpl(const std::wstring& installed, const std::string& cur
     if (!installOver(installed, dll, &why)) {
         return format("UPDATE %s could not be installed: %s", latestText.c_str(), why.c_str());
     }
+    stage = UpdateStage::Installed;
+    downloaded = latestText;
     return format("UPDATE installed %s (was %s); it runs the next time you start the game", latestText.c_str(),
                   currentText.c_str());
 }
 
 }  // namespace
+
+std::string menuStatusText(const MenuStatus& s) {
+    using enum UpdateStage;
+    const std::string name = std::string(coop::kVariant) + " " + s.version;
+    // Something the player has to act on first: restart, or read the log.
+    if (s.stage == Installed) return name + " -> " + s.downloaded + " downloaded, restart the game";
+    if (s.stage == Failed) return name + " (update failed, see " + coop::kVariant + ".log)";
+    // A finished update is what the player wants to see confirmed; it outranks the result of this start's check.
+    if (!s.updatedFrom.empty()) return name + " (updated from " + s.updatedFrom + ")";
+    switch (s.stage) {
+        case Off: return name + " (auto update off)";
+        case Checking: return name + " (checking for updates)";
+        case Latest: return name + " (latest)";
+        case CheckFailed: return name + " (update check failed)";
+        default: return name;
+    }
+}
+
+void statusToSink(StatusSink sink) {
+    StatusState& state = statusState();
+    std::string text;
+    {
+        std::scoped_lock lock(state.lock);
+        state.sink = sink;
+        if (state.status.version.empty()) return;
+        text = menuStatusText(state.status);
+    }
+    if (sink) sink(text.c_str());
+}
 
 bool Version::newerThan(const Version& o) const {
     if (major != o.major) return major > o.major;
@@ -556,7 +617,20 @@ void removeUpdateLeftovers(const std::wstring& installed) {
 
 Version badVersion(const std::wstring& installed) { return parseVersion(readFile(sibling(installed, L".bad"), 64)); }
 
+// beginRun's file work; `updatedFrom` gets the version kept as .old when there is one.
+RunState beginRunFiles(const std::wstring& installed, const std::string& versionString, std::string* updatedFrom);
+
 RunState beginRun(const std::wstring& installed, const std::string& versionString) {
+    std::string updatedFrom;
+    const RunState state = beginRunFiles(installed, versionString, &updatedFrom);
+    changeStatus([&versionString, &updatedFrom, state](MenuStatus& s) {
+        s.version = versionString;
+        s.updatedFrom = state == RunState::Trial ? updatedFrom : "";
+    });
+    return state;
+}
+
+RunState beginRunFiles(const std::wstring& installed, const std::string& versionString, std::string* updatedFrom) {
     std::lock_guard<std::mutex> lock(g_files);
     removeUpdateLeftovers(installed);
     Version me = parseVersion(versionString);
@@ -566,6 +640,8 @@ RunState beginRun(const std::wstring& installed, const std::string& versionStrin
         DeleteFileW(trialPath.c_str());
         return RunState::Normal;
     }
+    // While on trial this start is the first one(s) of an update from the version kept as .old.
+    *updatedFrom = fileVersionImpl(old);
     bool rolledBackBefore = badVersion(installed) == me;  // an older updater installed it again
     if (!rolledBackBefore && !(trial.version == me)) {
         writeText(trialPath, versionText(me) + " " + std::to_string(GetCurrentProcessId()) + "\n");
@@ -628,15 +704,34 @@ bool noteCleanExit(const std::wstring& installed, const std::string& versionStri
     return writeText(sibling(installed, L".trial"), versionText(trial.version) + " 0\n");
 }
 
-std::string updateOnce(const std::wstring& installed, const std::string& current) {
-    return updateOnceImpl(installed, current);
+std::string updateOnce(const std::wstring& installed, const std::string& current, UpdateStage* stage,
+                       std::string* downloaded) {
+    UpdateStage s = UpdateStage::CheckFailed;
+    std::string newer;
+    std::string line = updateOnceImpl(installed, current, s, newer);
+    if (stage) *stage = s;
+    if (downloaded) *downloaded = newer;
+    return line;
 }
 
 std::string fileVersion(const std::wstring& path) { return fileVersionImpl(path); }
 
-void startAutoUpdate(const std::wstring& installed, const char* current) {
-    std::thread([installed, version = std::string(current)] { logf("%s", updateOnce(installed, version).c_str()); })
-        .detach();
+void startAutoUpdate(const std::wstring& installed, const char* current, bool enabled) {
+    changeStatus([current, enabled](MenuStatus& s) {
+        s.version = current;
+        s.stage = enabled ? UpdateStage::Checking : UpdateStage::Off;
+    });
+    if (!enabled) return;
+    // Detached: the game must never wait for the network, also not when it quits mid-request.
+    std::jthread([installed, version = std::string(current)] {
+        UpdateStage stage = UpdateStage::CheckFailed;
+        std::string downloaded;
+        logf("%s", updateOnce(installed, version, &stage, &downloaded).c_str());
+        changeStatus([stage, &downloaded](MenuStatus& s) {
+            s.stage = stage;
+            s.downloaded = downloaded;
+        });
+    }).detach();
 }
 
 }  // namespace dn

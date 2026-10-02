@@ -2675,11 +2675,45 @@ std::wstring freshDir(const wchar_t* name) {
     return dir;
 }
 
+// What the updater last told the menu (dn::statusToSink).
+std::string& menuStatus() {
+    static std::string text;
+    return text;
+}
+void recordMenuStatus(const char* text) { menuStatus() = text; }
+
+void testMenuStatus() {
+    using dn::UpdateStage;
+    const auto text = [](UpdateStage stage, const char* from = "", const char* downloaded = "") {
+        return dn::menuStatusText({"2.3.2", from, downloaded, stage});
+    };
+    CHECK(text(UpdateStage::Checking) == "EDF6Coop 2.3.2 (checking for updates)");
+    CHECK(text(UpdateStage::Latest) == "EDF6Coop 2.3.2 (latest)");
+    CHECK(text(UpdateStage::Off) == "EDF6Coop 2.3.2 (auto update off)");
+    CHECK(text(UpdateStage::CheckFailed) == "EDF6Coop 2.3.2 (update check failed)");
+    CHECK(text(UpdateStage::Failed) == "EDF6Coop 2.3.2 (update failed, see EDF6Coop.log)");
+    CHECK(text(UpdateStage::Installed, "", "2.3.3") == "EDF6Coop 2.3.2 -> 2.3.3 downloaded, restart the game");
+    // A finished update outranks this start's check, but not a newer download or a failure the player must act on.
+    CHECK(text(UpdateStage::Latest, "2.3.1") == "EDF6Coop 2.3.2 (updated from 2.3.1)");
+    CHECK(text(UpdateStage::CheckFailed, "2.3.1") == "EDF6Coop 2.3.2 (updated from 2.3.1)");
+    CHECK(text(UpdateStage::Installed, "2.3.1", "2.3.3") == "EDF6Coop 2.3.2 -> 2.3.3 downloaded, restart the game");
+    CHECK(text(UpdateStage::Failed, "2.3.1") == "EDF6Coop 2.3.2 (update failed, see EDF6Coop.log)");
+    // Every one fits the menu's field (multislot updatecheck.cpp: 64 characters) with long version numbers.
+    for (UpdateStage stage : {UpdateStage::Off, UpdateStage::Checking, UpdateStage::Latest, UpdateStage::Installed,
+                              UpdateStage::CheckFailed, UpdateStage::Failed})
+        CHECK(dn::menuStatusText({"12.34.56", "12.34.55", "12.34.57", stage}).size() < 64);
+
+    // AutoUpdate=0 says so at once, without a thread or a request.
+    dn::startAutoUpdate(L"", "2.3.2", false);
+    CHECK(menuStatus() == "EDF6Coop 2.3.2 (auto update off)");
+}
+
 void testUpdateRollback() {
     printf("update: rollback state machine (trial, healthy, rolled back, bad version)\n");
     std::wstring dir = freshDir(L"edf6dn_rollback_test");
     std::wstring dll = dir + L"EDF6DirectNet.dll", old = dll + L".old", trial = dll + L".trial", bad = dll + L".bad";
-    auto install = [&](const char* version) { putFile(dll, "MZ EDF6COOP_VERSION=" + std::string(version)); };
+    // NUL-terminated like the marker in a real build, so fileVersion reads it back.
+    auto install = [&](const char* version) { putFile(dll, "MZ EDF6COOP_VERSION=" + std::string(version) + '\0'); };
     std::string why;
 
     // The version a DLL says it is, past the marker prefix its own updater code also contains.
@@ -2698,6 +2732,7 @@ void testUpdateRollback() {
     install("0.3.7");
     putFile(trial, "0.3.7 0\n");
     CHECK(dn::beginRun(dll, "0.3.7") == dn::RunState::Normal && !fileExists(trial));
+    CHECK(menuStatus().rfind("EDF6Coop 0.3.7 (", 0) == 0 && menuStatus().find("updated") == std::string::npos);  // no update behind this start
 
     // 0.3.7 updates itself to 0.3.8: 0.3.7 is kept as .old.
     std::vector<uint8_t> v038 = testDll("0.3.8");
@@ -2705,6 +2740,7 @@ void testUpdateRollback() {
     CHECK(fileText(old).find("EDF6COOP_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
     // The first start of 0.3.8 is a trial; healthy after a while: the trial and .old go.
     CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Trial);
+    CHECK(menuStatus() == "EDF6Coop 0.3.8 (updated from 0.3.7)");  // the menu confirms the update
     CHECK(fileText(trial) == "0.3.8 " + std::to_string(GetCurrentProcessId()) + "\n");
     dn::confirmHealthy(dll, "0.3.7");  // someone else's trial: nothing happens
     CHECK(fileExists(trial) && fileExists(old));
@@ -3075,6 +3111,8 @@ int wmain(int argc, wchar_t** argv) {
     testTrafficMeter();
     testUpdater();
     testUpdateSigning();
+    dn::statusToSink(&recordMenuStatus);
+    testMenuStatus();
     testUpdateRollback();
     testSwapKeepsDllLoadable();
     testUpnpAddresses();

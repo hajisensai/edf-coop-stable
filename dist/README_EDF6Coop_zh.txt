@@ -1,4 +1,4 @@
-EDF6Coop 2.3.1 - 地球防卫军6 联机扩容 + 稳定插件
+EDF6Coop 2.3.2 - 地球防卫军6 联机扩容 + 稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 日本語: README_EDF6Coop_ja.txt
 遇到问题请提 Issue，并附上 Mods\Plugins\EDF6Coop.log。
@@ -47,8 +47,9 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 - 在房间里按 F3 / Tab / 右摇杆按下 切换队员页（每页 4 人）。
 - 在房间里按 F4 / 左摇杆按下 开关「copy armor」：仅在任务中把你的护甲提到房间里其他人中最低的那位
   （优先同兵种）。给新手用，不写存档。
-- 超过 4 人的任务：多出来的玩家有装备、出生点和道具。敌人数量随人数增加：5 人 ×1.2、6 人 ×1.4、
-  7 人 ×1.6、8 人及以上 ×1.8（固定物体和大型 BOSS 不增加）。[Mission] ExtraEnemies=0 保持原版数量
+- 超过 4 人的任务：多出来的玩家有装备、出生点和道具。敌人数量超过 4 人后每多一人 +0.2 倍：
+  5 人 ×1.2、8 人 ×1.8、12 人 ×2.6、16 人 ×3.4、24 人 ×5.0、32 人 ×6.6
+  （固定物体和大型 BOSS 不增加）。[Mission] ExtraEnemies=0 保持原版数量
   （房间里所有人要设成一样）。
 - 任务里每个玩家在 HUD 上都有自己的颜色：状态灯、聊天气泡、雷达标记。1-4 号保持游戏原来的黄、绿、蓝、红，
   5-8 号是橙、粉、紫、青，以此类推直到 32 人。为此 MOD 会写出 Mods\HUD\ONLINEHUDTEXTURE.RAB（游戏自己的
@@ -71,6 +72,9 @@ Key= 是可选的共享密钥：房主设了，所有加入者必须填一样的
 
 [自动更新]
 游戏启动时 EDF6Coop 会从 GitHub 获取新版本，下次启动生效（2.2.x 的各人数版本也会更新到同一个 2.3.0）。
+结果显示在菜单左下角（房间外）：「EDF6Coop 2.3.2 (latest)」是已最新；
+「EDF6Coop 2.3.1 -> 2.3.2 downloaded, restart the game」是已下载、重启生效；重启后显示
+「EDF6Coop 2.3.2 (updated from 2.3.1)」。失败时显示「update failed, see EDF6Coop.log」。
 发布文件有签名（ECDSA P-256），签名不对的文件绝不安装。新版本如果在进入标题画面后 20 秒内崩溃，会自动回滚。
 关闭下载：在 EDF6Coop.ini 设 [Update] AutoUpdate=0。
 

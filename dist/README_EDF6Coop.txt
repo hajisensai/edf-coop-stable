@@ -1,4 +1,4 @@
-EDF6Coop 2.3.1 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.3.2 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
@@ -57,8 +57,8 @@ settings files are left alone.
 - In a room, F4 / left stick turns "copy armor" on: your armor is raised, for the mission only, to the
   lowest armor of the others in the room (same class first). For new players; nothing is saved.
 - Missions with more than four players: extra players get their gear, spawn points and items. Enemy
-  counts grow with the room: 5p x1.2, 6p x1.4, 7p x1.6, 8p and more x1.8 (fixed objects and big bosses
-  do not). [Mission] ExtraEnemies=0 keeps the original counts (everyone in the room should set the same).
+  counts grow by x0.2 per player above four: 5p x1.2, 8p x1.8, 12p x2.6, 16p x3.4, 24p x5.0, 32p x6.6
+  (fixed objects and big bosses do not). [Mission] ExtraEnemies=0 keeps the original counts (everyone in the room should set the same).
 - Every player of a mission has a colour of their own on the HUD: status lamp, chat balloon and radar
   marker. Players 1-4 keep the game's yellow, green, blue and red; 5-8 are orange, pink, purple and cyan,
   and so on up to 32. For this the mod writes Mods\HUD\ONLINEHUDTEXTURE.RAB (the game's HUD textures
@@ -88,6 +88,9 @@ both need 2.2.0 or later.
 [Automatic updates]
 At game start EDF6Coop fetches a newer release from GitHub; it runs from the next start. (2.2.x of every
 room size updates to the same 2.3.0.)
+The lower left of the menu (outside a room) says what happened: "EDF6Coop 2.3.2 (latest)",
+"EDF6Coop 2.3.1 -> 2.3.2 downloaded, restart the game", then after the restart
+"EDF6Coop 2.3.2 (updated from 2.3.1)". A failure says "update failed, see EDF6Coop.log".
 Releases are signed (ECDSA P-256) and a file without a valid signature is never installed. A new version
 that crashes before it has run for 20 seconds past the title screen is rolled back by itself.
 To turn downloading off: [Update] AutoUpdate=0 in EDF6Coop.ini.

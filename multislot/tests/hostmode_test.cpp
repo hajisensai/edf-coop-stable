@@ -5,6 +5,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -419,6 +420,27 @@ int main() {
     SetUpdateNoticeForTest(L"");
     Check(Compose(Menu(false, false, 0, 0), kSize, 0).find(L"NEW EDF6VR") == std::wstring::npos,
           "with nothing to say the label is exactly as before");
+
+    // EDF6Coop's own version and update (dn::menuStatusText): outside rooms, after everything else.
+    const std::wstring controls = L"F2/LS " + Size(kSize);
+    const std::wstring vrNotice = L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat";
+    const std::wstring inRoomHost = Compose(Menu(true, true, 8, 0), 0, kSize);
+    const std::wstring inRoomGuest = Compose(Menu(true, false, 8, 0), 0, kSize);
+    SetPluginStatus("EDF6Coop 2.3.2 (updated from 2.3.1)");
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == controls + L"   EDF6Coop 2.3.2 (updated from 2.3.1)",
+          "outside a room the label says which version runs and that it was updated");
+    // The VR notice asks the player to run something, so it keeps its place and the status is what gives way.
+    SetUpdateNoticeForTest(vrNotice.c_str());
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0).starts_with(controls + L"   " + vrNotice),
+          "the EDF6VR notice comes before the status, whole");
+    SetUpdateNoticeForTest(L"");
+    Check(Compose(Menu(true, true, 8, 0), 0, kSize) == inRoomHost && Compose(Menu(true, false, 8, 0), 0, kSize) == inRoomGuest,
+          "in a room the field belongs to the page and copy armor guides");
+    std::array<wchar_t, 32> narrow{};
+    ComposeLabel(Menu(false, false, 0, 0), kSize, 0, narrow.data(), narrow.size());
+    Check(std::wstring(narrow.data()).starts_with(controls), "a full field keeps the size before the version");
+    SetPluginStatus("");
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == L"F2/LS " + Size(kSize), "no status, no text");
 
     // Menu frame updates write the label through the game's functions, once per change.
     wchar_t iniPath[MAX_PATH]{};

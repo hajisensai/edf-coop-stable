@@ -729,8 +729,12 @@ bool LoadCoop(PluginInfo* info) {
 
     const dn::PartState direct = dn::startPart(settings, dir, game, GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll"));
     const bool rooms = LoadRooms(iniPath);
-    // Last, so its wrappers sit in front of both parts': it answers a room Epic knows nothing of.
-    if (direct.eosHooked && dn::startRejoin(game)) multislot::RouteLobbyInfo(&dn::lobbyInfoCopy, &dn::lobbyInfoRelease);
+    // Last, so its wrappers sit in front of both parts': it answers a room Epic knows nothing of. The room
+    // part reads room-list entries through the direct-link part before any entry of its own can be there.
+    if (direct.eosHooked) {
+        multislot::RouteLobbyInfo(&dn::lobbyInfoCopy, &dn::lobbyInfoRelease);
+        dn::startRejoin(game);
+    }
     if (!direct.running && !rooms) {
         Log("Neither part runs (see above why): the game goes on without EDF6Coop");
         // Not a failed run of this version: the next start goes on with its trial instead of rolling it back.

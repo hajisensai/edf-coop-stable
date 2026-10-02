@@ -70,8 +70,9 @@ Joiners need nothing: they find the host's address in the room. If the link cann
 through Epic as usual. Key= is an optional shared secret: every joiner must enter the same Key.
 While the direct link works, Epic's own room-service hiccups cannot drop anyone.
 Who is in the room is the host's game's say: its member list goes to everyone over the direct link and
-every game follows it. For 30 minutes after you drop out of a room, the room list shows that room once
-more (also when Epic cannot list it); choosing it connects you straight to the host, without Epic. It is
+every game follows it. For 30 minutes after you drop out of a room, a room search Epic cannot run (its
+lobby service down) shows that room; choosing it connects you straight to the host, without Epic. While
+Epic works, nothing changes. It is
 no longer shown once the host kicked you, the room closed or you entered another room. You and the host
 both need 2.2.0 or later.
 

@@ -82,7 +82,6 @@ struct Api {
     PFN_EOS_LobbyDetails_Info_Release releaseInfo = nullptr;
     PFN_EOS_Lobby_Attribute_Release releaseAttribute = nullptr;
     PFN_EOS_LobbyDetails_Release releaseDetails = nullptr;
-    PFN_EOS_LobbySearch_CopySearchResultByIndex copySearchResult = nullptr;
 };
 
 // The game's imports the virtual room sits in front of (installVirtualRoomHooks): outermost, after every
@@ -158,7 +157,11 @@ struct AutoJoin {
 // The room the game is in without Epic's lobby: the one it was last in, entered again over the direct link
 // to its host (startVirtualJoin). Under State::virtualMutex.
 struct VirtualRoom {
-    std::string roomId;  // kept once it ended: the game's LeaveLobby / DestroyLobby for it completes here
+    std::string roomId;
+    // The game holds this room through us: from its JoinLobby until it left the room (LeaveLobby /
+    // DestroyLobby, completed here), its join failed, or it entered a room through Epic. Its leave is ours
+    // to complete only while this is set: the same room joined through Epic later is Epic's again.
+    bool owned = false;
     bool joining = false;
     bool in = false;
     LastRoom room;
@@ -199,6 +202,7 @@ struct State {
     LobbyMarker marker;
     std::atomic<bool> markerReady{false};
     std::atomic<bool> lobbyTracked{false};  // we see entering and leaving rooms: direct links follow the room
+    std::atomic<bool> ticking{false};  // EOS_Platform_Tick is ours: what we answer for the game completes there
     std::mutex markedMutex;
     std::unordered_set<std::string> markedPeers;  // logged once as plugin users
     std::string loggedHostAddress;
@@ -222,6 +226,8 @@ struct State {
     std::mutex viewMutex;
     RoomView view;
     std::string viewRoom;  // the lobby the view is of
+    std::string endedRoom;  // the last room the game was told it is out of (removed, or the room closed)
+    uint32_t viewCapacity = 0;  // the room's size, as last read from Epic's copy of it (0: not read yet)
     std::weak_ptr<DirectNet> followedNet;  // a member: the link whose host list was followed last...
     uint64_t followedVersion = 0;          // ...and that list's version
     std::map<std::string, std::string> roomIds;  // a host: every member identity seen in this room
@@ -461,22 +467,33 @@ const char* statusName(int32_t s) {
     return s >= 0 && s < 6 ? names[s] : "?";
 }
 
+// A status that takes the room away from us: we were removed from it, or it closed.
+bool endsRoomForUs(bool self, int32_t s) {
+    return s == kClosed || (self && (s == kLeft || s == kDisconnected || s == kKicked));
+}
+
 // Whether a status reaches the game: one it already has that way is not repeated, as Epic and the room's
-// host may both report it (room_view.h). EDF.dll registers one member-status handler (its lobby manager,
-// 012B3380), so this is decided once per status.
-bool admitStatus(const std::string& lobbyId, const std::string& target, int32_t status) {
+// host may both report it (room_view.h). That the room ended for us, too, is told once: the host's say
+// may come before Epic's, and by then the view is gone. EDF.dll registers one member-status handler (its
+// lobby manager, 012B3380), so this is decided once per status.
+bool admitStatus(const std::string& lobbyId, const std::string& target, bool self, int32_t status) {
     std::lock_guard<std::mutex> lock(g.viewMutex);
-    return lobbyId != g.viewRoom || g.view.admit(target, status);
+    const bool ends = endsRoomForUs(self, status);
+    if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
+    if (lobbyId != g.viewRoom) return true;
+    if (!g.view.admit(target, status)) return false;
+    if (ends) g.endedRoom = lobbyId;
+    return true;
 }
 
 void deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
-    const bool admitted = admitStatus(e->lobbyId, e->target, e->info.CurrentStatus);
-    applyLobbyStatus(e->target, e->self, e->info.CurrentStatus);
-    if (!admitted) {
-        logf("ROOM %s %s: the game has it that way already, not told again", shortId(e->target).c_str(),
-             statusName(e->info.CurrentStatus));
+    // A repeat changes nothing: what it means for us was applied with the first.
+    if (!admitStatus(e->lobbyId, e->target, e->self, e->info.CurrentStatus)) {
+        logRateLimited("room-repeat", 10000, "ROOM %s %s: the game has it that way already, not told again",
+                       shortId(e->target).c_str(), statusName(e->info.CurrentStatus));
         return;
     }
+    applyLobbyStatus(e->target, e->self, e->info.CurrentStatus);
     if (e->handler->removed) return;  // the game unregistered; its clientData may be freed
     e->info.LobbyId = e->lobbyId.c_str();
     e->handler->callback(&e->info);
@@ -533,6 +550,8 @@ void enterView(const std::string& lobbyId, const std::string& self, const std::v
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.reset(self, members);
     g.viewRoom = lobbyId;
+    g.endedRoom.clear();
+    g.viewCapacity = 0;
     g.followedNet.reset();
     g.followedVersion = 0;
     g.roomIds.clear();
@@ -744,6 +763,9 @@ EOS_NotificationId hookAddNotifyMemberUpdate(EOS_HLobby h, const EOS_Lobby_AddNo
     return g.api.gameAddMemberUpdate(h, o, handler, memberUpdateWrapper);
 }
 
+void endVirtualRoom(const char* why);
+void releaseVirtualRoom();
+
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
 void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     auto* call = static_cast<LobbyCall*>(i->ClientData);
@@ -763,6 +785,8 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
         const std::string room = i->LobbyId ? i->LobbyId : "";
         bool known = false;
         std::vector<std::string> members = g.marker.members(&known);
+        endVirtualRoom("we entered a room through Epic");
+        releaseVirtualRoom();
         enterView(room, idString(call->localUser), members);
         {
             std::lock_guard<std::mutex> lock(g.lastMutex);
@@ -815,8 +839,6 @@ void stopAutoJoinLocked(const char* why) {
     retire(std::move(net));
     logf("DIRECT auto-connect stopped (%s)", why);
 }
-
-void endVirtualRoom(const char* why);
 
 void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
@@ -909,21 +931,26 @@ enum class Kick { Pass, Eos, Answered };
 
 // The room host's game removes a member that is in its room: kicked for this room, it is not let back in by
 // its direct link (RoomView::kick). A member that plays in the room only over its direct link is not in
-// Epic's lobby, so EOS cannot kick it: answered here (Answered). One Epic has goes to EOS, watched for a
-// failure (Eos). Pass: not in the room any more, the game tidies up after a member that left (it kicks those
-// too), and EOS gets the call as it is.
+// Epic's lobby, so EOS cannot kick it: answered here (Answered), the game told once that it is gone. The
+// first kick of one Epic has goes to EOS, watched for a failure (Eos). Pass: the game's repeats of a kick
+// of an Epic member (it kicks over and over until KICKED comes), a member no longer in the room (the game
+// tidies up after members that left, too), and everything without our tick to complete answers on: EOS gets
+// the call as it is.
 Kick hostKick(const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) {
+    if (!g.ticking) return Kick::Pass;
     const std::string target = idString(o->TargetUserId);
     const std::string lobbyId = o->LobbyId ? o->LobbyId : "";
+    bool first = false;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
-        if (lobbyId.empty() || lobbyId != g.viewRoom || !g.view.kick(target)) return Kick::Pass;
+        if (lobbyId.empty() || lobbyId != g.viewRoom || !g.view.has(target)) return Kick::Pass;
+        first = g.view.kick(target);
     }
     bool known = false;
     const std::vector<std::string> epic = g.marker.members(&known);
-    if (!known || std::find(epic.begin(), epic.end(), target) != epic.end()) return Kick::Eos;
-    defer([lobbyId, target, clientData, cb] {
-        tellGame(lobbyId, target, kKicked, "our game kicked it; it was in the room over its direct link only");
+    if (!known || std::find(epic.begin(), epic.end(), target) != epic.end()) return first ? Kick::Eos : Kick::Pass;
+    defer([lobbyId, target, clientData, cb, first] {
+        if (first) tellGame(lobbyId, target, kKicked, "our game kicked it; it was in the room over its direct link only");
         completeLobbyCall(cb, clientData, EOS_Success, lobbyId);
     });
     return Kick::Answered;
@@ -1236,35 +1263,75 @@ void refreshMemberIdentities(uint64_t now) {
 // --- The host's say over who is in the room (P2) ---
 
 constexpr uint64_t kRoomTickMs = 250;
+// How long a status the plugin would tell the game waits for Epic to report it first (RoomView::settle):
+// Epic's events come within a second or two of the change while its lobby service works.
+constexpr uint64_t kEpicFirstMs = 5000;
+
+// The room's size as Epic's copy of our lobby says; the size last read while there is no copy. 0: never
+// read. EOS calls: on the EOS tick.
+uint32_t roomCapacity() {
+    const Api& a = g.api;
+    EOS_HLobby lobby = nullptr;
+    std::string roomId;
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        lobby = g.roomLobby;
+        roomId = g.roomId;
+    }
+    uint32_t capacity = 0;
+    EOS_HLobbyDetails details = nullptr;
+    EOS_Lobby_CopyLobbyDetailsHandleOptions o{1, roomId.c_str(), g.lobbyUser.load()};
+    if (lobby && a.copyDetails && a.copyInfo && a.releaseInfo && a.releaseDetails &&
+        a.copyDetails(lobby, &o, &details) == EOS_Success && details) {
+        EOS_LobbyDetails_CopyInfoOptions io{1};
+        EOS_LobbyDetails_Info* info = nullptr;
+        if (a.copyInfo(details, &io, &info) == EOS_Success && info) {
+            capacity = info->MaxMembers;
+            a.releaseInfo(info);
+        }
+        a.releaseDetails(details);
+    }
+    std::lock_guard<std::mutex> lock(g.viewMutex);
+    if (capacity) g.viewCapacity = capacity;
+    return g.viewCapacity;
+}
 
 // A host: its game is told who plays in the room by the direct links, and every member is told who the
-// game has (DirectNet::setRoomMembers). A member whose direct link is up joins (it dials us only while its
-// game is in this room); one that Epic's lobby does not list leaves once its link stayed down for the grace
-// a disconnect gets. Members Epic lists are Epic's to report, as without the plugin.
-void hostRoomTick(const std::shared_ptr<DirectNet>& base) {
+// game has (DirectNet::setRoomMembers). A member Epic does not list whose direct link is up joins (it dials
+// us only while its game is in this room); one with only its link to be in the room by leaves once the
+// link stayed down for the grace a disconnect gets. Members Epic lists are Epic's to report, as without the
+// plugin, and nothing is told before Epic had its chance (kEpicFirstMs).
+void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
     bool known = false;
     const std::vector<std::string> epic = g.marker.members(&known);
     const std::set<std::string> inEpic(epic.begin(), epic.end());
-    std::vector<std::string> linked;
+    std::vector<Linked> linked;
     for (const std::string& m : base->directMembers())
-        if (base->linkAlive(m, kLinkAliveMs)) linked.push_back(m);
+        if (base->linkAlive(m, kLinkAliveMs)) linked.push_back({m, base->linkId(m), inEpic.count(m) != 0});
+    const size_t capacity = roomCapacity();
     std::string room;
-    std::vector<StatusChange> changes;
+    std::vector<StatusChange> due;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
         room = g.viewRoom;
-        changes = g.view.hostJoins(linked);
-        // Without a copy of the lobby nobody can be told apart from a vanilla member (no direct link at all).
+        std::vector<StatusChange> wanted = g.view.hostJoins(linked, capacity);
+        // Without Epic's copy of the lobby, only a member that came in by its direct link is known to have
+        // nothing else to be in the room by.
         std::vector<StatusChange> leaves = g.view.hostLeaves(
-            [&](const std::string& m) { return !known || inEpic.count(m) != 0; },
+            [&](const std::string& m) { return known ? inEpic.count(m) != 0 : !g.view.direct(m); },
             [&](const std::string& m) { return base->linkAlive(m, g.config.graceMs); });
-        changes.insert(changes.end(), leaves.begin(), leaves.end());
+        wanted.insert(wanted.end(), leaves.begin(), leaves.end());
+        due = g.view.settle(wanted, now, kEpicFirstMs);
     }
-    for (const StatusChange& c : changes)
+    for (const StatusChange& c : due) {
         tellGame(room, c.target, c.status,
                  c.status == kJoined ? "its direct link to us is up, so it plays in this room"
-                                     : "not in Epic's lobby, and its direct link stayed down");
+                                     : "it was in the room by its direct link only, and that stayed down");
+        if (c.status != kJoined) continue;
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (g.viewRoom == room) g.view.markDirect(c.target);
+    }
     std::vector<std::string> members;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
@@ -1274,22 +1341,30 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base) {
     base->setRoomMembers(std::move(members));
 }
 
-// A member: its game follows who the host's game has in the room (RoomView::followHost).
-void followHostTick(const std::shared_ptr<DirectNet>& net) {
+bool inVirtualRoom();
+
+// A member: its game follows who the host's game has in the room (RoomView::followHost), once Epic had its
+// chance to say the same. In a room Epic does not know we are in, the host is all there is to hear.
+void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
     uint64_t version = 0;
     const std::vector<std::string> host = net->hostRoom(&version);
+    const uint64_t delay = inVirtualRoom() ? 0 : kEpicFirstMs;
     std::string room;
-    std::vector<StatusChange> changes;
+    std::vector<StatusChange> due;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
-        if (!g.view.active() || host.empty()) return;  // a host of protocol 5 never says
-        if (g.followedNet.lock() == net && g.followedVersion == version) return;
-        g.followedNet = net;
-        g.followedVersion = version;
+        if (!g.view.active()) return;
+        // An empty list: a host of protocol 5 (it never says), or one whose game is out of the room (its
+        // room ends for us the way it would without the plugin).
+        if (!host.empty() && (g.followedNet.lock() != net || g.followedVersion != version)) {
+            g.followedNet = net;
+            g.followedVersion = version;
+            g.view.heardHost(host);
+        }
         room = g.viewRoom;
-        changes = g.view.followHost(host);
+        due = g.view.settle(g.view.followHost(), now, delay);
     }
-    for (const StatusChange& c : changes)
+    for (const StatusChange& c : due)
         tellGame(room, c.target, c.status,
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");
 }
@@ -1301,10 +1376,10 @@ void roomTick(uint64_t now) {
     std::shared_ptr<DirectNet> base = g.baseNet.load();
     const bool hosting = g.marker.inLobby() && g.marker.isOwner();
     if (hosting) {
-        if (base && g.config.direct.mode == Mode::Host) hostRoomTick(base);
+        if (base && g.config.direct.mode == Mode::Host) hostRoomTick(base, now);
         return;
     }
-    if (std::shared_ptr<DirectNet> net = g.net.load()) followHostTick(net);
+    if (std::shared_ptr<DirectNet> net = g.net.load()) followHostTick(net, now);
 }
 
 // --- Coming back into the room we were last in, without Epic (P2) ---
@@ -1364,22 +1439,43 @@ bool snapshotRoom(LastRoom* r) {
     return r->maxMembers != 0 && !r->attributes.empty();
 }
 
+void forgetLastRoomIf(const std::string& roomId, const char* why) {
+    std::lock_guard<std::mutex> lock(g.lastMutex);
+    if (roomId.empty() || g.lastRoom.roomId != roomId) return;
+    logf("REJOIN forgetting room %s: %s", roomId.c_str(), why);
+    g.lastRoom = {};
+}
+
 // A member of someone's room keeps what coming back into it takes (LastRoom).
 void rememberRoomTick(uint64_t now) {
     static uint64_t lastMs = 0;
     if (now - lastMs < kRememberMs || !g.markerReady) return;
     lastMs = now;
-    if (!g.marker.inLobby() || g.marker.isOwner()) return;
-    EOS_ProductUserId owner = nullptr;
+    if (!g.marker.inLobby()) return;
     LastRoom r;
-    r.hostAddress = g.marker.ownerAddress(&owner);
-    std::tie(r.host, r.hostIdentity) = roomOwnerIdentity();
     {
         std::lock_guard<std::mutex> lock(g.roomMutex);
         r.roomId = g.roomId;
     }
+    if (g.marker.isOwner()) {
+        forgetLastRoomIf(r.roomId, "we host it now");
+        return;
+    }
+    EOS_ProductUserId owner = nullptr;
+    r.hostAddress = g.marker.ownerAddress(&owner);
+    std::tie(r.host, r.hostIdentity) = roomOwnerIdentity();
     const std::string self = idString(g.lobbyUser.load());
-    if (!r.usable() || r.host == self || !snapshotRoom(&r)) return;
+    if (!r.usable() || r.host == self || !snapshotRoom(&r)) {
+        // The noted host is no longer the room's: coming back to it would reach nobody who can let us in.
+        std::string noted;
+        {
+            std::lock_guard<std::mutex> lock(g.lastMutex);
+            if (g.lastRoom.roomId == r.roomId) noted = g.lastRoom.host;
+        }
+        if (!noted.empty() && !r.host.empty() && r.host != noted)
+            forgetLastRoomIf(r.roomId, "its host changed to one that cannot be reached directly");
+        return;
+    }
     bool known = false;
     for (const std::string& m : g.marker.members(&known))
         if (m != self) r.members.push_back(m);
@@ -1407,7 +1503,18 @@ LastRoom rememberedRoom() {
 
 bool isVirtualRoom(const std::string& lobbyId) {
     std::lock_guard<std::mutex> lock(g.virtualMutex);
-    return !lobbyId.empty() && lobbyId == g.virtualRoom.roomId;
+    return !lobbyId.empty() && g.virtualRoom.owned && lobbyId == g.virtualRoom.roomId;
+}
+
+bool inVirtualRoom() {
+    std::lock_guard<std::mutex> lock(g.virtualMutex);
+    return g.virtualRoom.in;
+}
+
+// The game is done with the virtual room: it left it, or it is in a room through Epic now.
+void releaseVirtualRoom() {
+    std::lock_guard<std::mutex> lock(g.virtualMutex);
+    g.virtualRoom.owned = false;
 }
 
 // Takes the virtual room's link out of service (the base transport takes over again). Caller holds
@@ -1435,6 +1542,7 @@ void endVirtualRoom(const char* why) {
             callback = reinterpret_cast<void*>(v.callback);
             clientData = v.clientData;
             roomId = v.roomId;
+            v.owned = false;  // its join fails: the game never was in it
         }
         v.joining = v.in = false;
         v.callback = nullptr;
@@ -1487,6 +1595,7 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
     }
     v = {};
     v.roomId = roomId;
+    v.owned = true;
     v.joining = true;
     v.room = room;
     v.candidates = orderHostCandidates(room.hostAddress);
@@ -1535,6 +1644,7 @@ void virtualRoomTick(uint64_t now) {
                 clientData = v.clientData;
                 result = EOS_NoConnection;
                 v.joining = false;
+                v.owned = false;
                 v.callback = nullptr;
                 dropVirtualNetLocked();
             } else if (net && !net->canRoute(v.room.host) && now - v.attemptMs >= kVirtualAttemptMs) {
@@ -1543,7 +1653,10 @@ void virtualRoomTick(uint64_t now) {
         } else if (net && net->linkAlive(v.room.host, kLinkAliveMs)) {
             v.hostSeenMs = now;
         } else if (now - v.hostSeenMs >= g.config.graceMs) {
+            // Over whatever the game makes of the CLOSED below (it may have no handler to hear it).
             closed = true;
+            v.in = false;
+            dropVirtualNetLocked();
         }
     }
     if (callback && result == EOS_Success) {
@@ -1552,7 +1665,7 @@ void virtualRoomTick(uint64_t now) {
         enterView(roomId, self, list);
         {
             std::lock_guard<std::mutex> lock(g.viewMutex);
-            g.view.followHost(list);  // the list we entered with: later ones are followed change by change
+            g.view.heardHost(list);  // the list we entered with
             g.followedNet = net;
             g.followedVersion = version;
         }
@@ -1563,7 +1676,13 @@ void virtualRoomTick(uint64_t now) {
         defer([callback, clientData, result, roomId] { completeLobbyCall(callback, clientData, result, roomId); });
         return;
     }
-    if (closed) tellGame(roomId, self, kClosed, "the room's host stayed out of reach over the direct link");
+    if (!closed) return;
+    const char* why = "the room's host stayed out of reach over the direct link";
+    logf("REJOIN room %s closed: %s", roomId.c_str(), why);
+    tellGame(roomId, self, kClosed, why);
+    // What the CLOSED means for us, also when no handler of the game's was there to deliver it to.
+    forgetLastRoom(why);
+    leftLobby(why);
 }
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
@@ -1695,28 +1814,11 @@ EOS_HLobbyDetails rememberedRoomDetails(const LastRoom& r) {
     return g.fakes.make(std::move(d));
 }
 
-// The lobby id of search result `index`, through EOS (a real result).
-std::string searchResultId(EOS_HLobbySearch search, uint32_t index) {
-    const Api& a = g.api;
-    if (!a.copySearchResult || !a.copyInfo || !a.releaseInfo || !a.releaseDetails) return {};
-    EOS_LobbySearch_CopySearchResultByIndexOptions o{1, index};
-    EOS_HLobbyDetails details = nullptr;
-    if (a.copySearchResult(search, &o, &details) != EOS_Success || !details) return {};
-    std::string id;
-    EOS_LobbyDetails_CopyInfoOptions io{1};
-    EOS_LobbyDetails_Info* info = nullptr;
-    if (a.copyInfo(details, &io, &info) == EOS_Success && info) {
-        id = info->LobbyId ? info->LobbyId : "";
-        a.releaseInfo(info);
-    }
-    a.releaseDetails(details);
-    return id;
-}
-
-// A finished room search: the remembered room is added to its results when Epic does not list it (Epic's
-// lobby service down, or the room gone from it while its host still plays). A failed search then succeeds
-// with that one result. Not while we are in a room, and not for a search after another room (invites).
+// A finished room search: when Epic could not search (its lobby service down), it succeeds with the
+// remembered room as its one result. A search Epic answered is the game's as it is: a room it leaves out is
+// full, filtered out or gone. Not while we are in a room, and not for a search after another room (invites).
 bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
+    if (result == EOS_Success) return false;
     const LastRoom r = rememberedRoom();
     if (r.roomId.empty() || g.marker.inLobby()) return false;
     {
@@ -1728,14 +1830,10 @@ bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
         const std::string& wanted = g.searches[search].lobbyId;
         if (!wanted.empty() && wanted != r.roomId) return false;
     }
-    EOS_LobbySearch_GetSearchResultCountOptions co{1};
-    const uint32_t count = result == EOS_Success ? g.outer.resultCount(search, &co) : 0;
-    for (uint32_t i = 0; i < count; ++i)
-        if (searchResultId(search, i) == r.roomId) return false;
     std::lock_guard<std::mutex> lock(g.searchMutex);
     g.searches[search].added = true;
-    logf("REJOIN the room list gets room %s of %s, which Epic %s", r.roomId.c_str(), shortId(r.host).c_str(),
-         result == EOS_Success ? "does not list" : "could not search for");
+    logf("REJOIN the room list gets room %s of %s: Epic could not search (%s)", r.roomId.c_str(),
+         shortId(r.host).c_str(), resultName(result));
     return true;
 }
 
@@ -1823,6 +1921,7 @@ bool leaveVirtualRoom(const void* options, void* clientData, void* cb) {
     const std::string lobbyId = o && o->LobbyId ? o->LobbyId : "";
     if (g_shutdown || !isVirtualRoom(lobbyId)) return false;
     leftLobby("left the room we were in over the direct link");
+    releaseVirtualRoom();
     defer([cb, clientData, lobbyId] { completeLobbyCall(cb, clientData, EOS_Success, lobbyId); });
     return true;
 }
@@ -1871,15 +1970,54 @@ EOS_EResult hookDetailsCopyAttribute(EOS_HLobbyDetails h, const EOS_LobbyDetails
     return EOS_Success;
 }
 
+// Whom the game has in our room that Epic's copy `h` of it does not list (it lists `epicCount`): members
+// in the room by their direct link only. The game reads the room's members from such a copy when it is told
+// that one joined, so they follow Epic's. Empty for every other lobby, and while Epic lists everyone.
+std::vector<std::string> extraMembers(EOS_HLobbyDetails h, uint32_t epicCount) {
+    std::string room;
+    std::vector<std::string> members;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (!g.view.active()) return {};
+        room = g.viewRoom;
+        members = g.view.members();
+    }
+    const Api& a = g.api;
+    EOS_LobbyDetails_CopyInfoOptions io{1};
+    EOS_LobbyDetails_Info* info = nullptr;
+    if (!a.copyInfo || !a.releaseInfo || a.copyInfo(h, &io, &info) != EOS_Success || !info) return {};
+    const bool ours = info->LobbyId && room == info->LobbyId;
+    a.releaseInfo(info);
+    if (!ours) return {};
+    std::set<std::string> listed;
+    for (uint32_t i = 0; i < epicCount; ++i) {
+        EOS_LobbyDetails_GetMemberByIndexOptions mo{1, i};
+        listed.insert(idString(g.outer.memberByIndex(h, &mo)));
+    }
+    std::vector<std::string> extra;
+    for (const std::string& m : members)
+        if (!listed.count(m)) extra.push_back(m);
+    return extra;
+}
+
 uint32_t hookDetailsMemberCount(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetMemberCountOptions* o) {
     FakeDetails d;
-    return g.fakes.lookup(h, &d) ? static_cast<uint32_t>(d.members.size()) : g.outer.memberCount(h, o);
+    if (g.fakes.lookup(h, &d)) return static_cast<uint32_t>(d.members.size());
+    const uint32_t count = g.outer.memberCount(h, o);
+    return g_shutdown ? count : count + static_cast<uint32_t>(extraMembers(h, count).size());
 }
 
 EOS_ProductUserId hookDetailsMemberByIndex(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetMemberByIndexOptions* o) {
     FakeDetails d;
-    if (!g.fakes.lookup(h, &d)) return g.outer.memberByIndex(h, o);
-    return o && o->MemberIndex < d.members.size() ? idHandle(d.members[o->MemberIndex]) : nullptr;
+    if (g.fakes.lookup(h, &d))
+        return o && o->MemberIndex < d.members.size() ? idHandle(d.members[o->MemberIndex]) : nullptr;
+    if (g_shutdown || !o) return g.outer.memberByIndex(h, o);
+    EOS_LobbyDetails_GetMemberCountOptions co{1};
+    const uint32_t count = g.outer.memberCount(h, &co);
+    if (o->MemberIndex < count) return g.outer.memberByIndex(h, o);
+    const std::vector<std::string> extra = extraMembers(h, count);
+    const uint32_t i = o->MemberIndex - count;
+    return i < extra.size() ? idHandle(extra[i]) : g.outer.memberByIndex(h, o);
 }
 
 EOS_ProductUserId hookDetailsOwner(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetLobbyOwnerOptions* o) {
@@ -1932,10 +2070,11 @@ void eosHooksShutdown() { g_shutdown = true; }
 
 bool installVirtualRoomHooks(HMODULE game) {
     const Api& a = g.api;
-    // Needs the direct transport and the lobby tracking (installEosHooks), and what a room snapshot reads.
-    if (!g.baseNet.load() || !g.lobbyTracked || !a.copyDetails || !a.attributeCount || !a.copyAttribute ||
-        !a.copyInfo || !a.releaseInfo || !a.releaseAttribute || !a.releaseDetails || !a.copySearchResult) {
-        logf("REJOIN unavailable: needs the direct link and EOS's lobby functions");
+    // Needs the direct transport, the lobby tracking and the tick that completes our answers (installEosHooks),
+    // and what a room snapshot reads.
+    if (!g.baseNet.load() || !g.lobbyTracked || !g.ticking || !a.copyDetails || !a.attributeCount ||
+        !a.copyAttribute || !a.copyInfo || !a.releaseInfo || !a.releaseAttribute || !a.releaseDetails) {
+        logf("REJOIN unavailable: needs the direct link, the EOS tick and EOS's lobby functions");
         return false;
     }
     Outer& o = g.outer;
@@ -2009,7 +2148,6 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     resolve(eos, "EOS_LobbyDetails_Info_Release", g.api.releaseInfo);
     resolve(eos, "EOS_Lobby_Attribute_Release", g.api.releaseAttribute);
     resolve(eos, "EOS_LobbyDetails_Release", g.api.releaseDetails);
-    resolve(eos, "EOS_LobbySearch_CopySearchResultByIndex", g.api.copySearchResult);
     g.eos = eos;
 
     // Every player publishes its direct-link identity with its plugin marker; hosts check hellos against it.
@@ -2033,6 +2171,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     bool lobby = hook(game, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived", hookAddNotifyMemberStatus,
                       g.api.gameAddMemberStatus);
     bool tick = hook(game, "EOS_Platform_Tick", hookPlatformTick, g.api.tick);
+    g.ticking = tick;
     if (!tick) noteGameRunning();  // an update on trial cannot wait for a tick it will never see
     // Plugin detection: publish our marker on entering a lobby, read the other members' markers.
     g.markerReady = g.marker.init(eos) && hook(game, "EOS_Lobby_CreateLobby", hookCreateLobby, g.api.gameCreateLobby) &&

@@ -2888,7 +2888,8 @@ std::vector<std::string> sorted(std::vector<std::string> v) {
 }
 
 void testRoomView() {
-    printf("room view: two sources of the same status reach the game once; the host's list is followed\n");
+    printf("room view: two sources of the same status reach the game once\n");
+    const std::string kC = "0002dddddddddddddddddddddddddddd";
     dn::RoomView v;
     CHECK(v.admit(kA, dn::kJoined));  // no room: nothing is filtered
     v.reset(kA, {kHost, kA});
@@ -2897,37 +2898,67 @@ void testRoomView() {
     CHECK(v.admit(kB, dn::kLeft) && !v.admit(kB, dn::kDisconnected));
     CHECK(v.admit(kA, dn::kKicked) && v.admit(kHost, dn::kPromoted) && v.admit(kHost, dn::kClosed));
 
-    printf("room view: the first host list only adds, later ones are followed change by change\n");
-    const std::string kC = "0002dddddddddddddddddddddddddddd";
+    printf("room view: Epic speaks first; the plugin's say waits, and starts over when it changes\n");
+    v.reset(kHost, {kHost});
+    CHECK((v.settle({{kA, dn::kJoined}}, 1000, 5000).empty()));
+    CHECK((v.settle({{kA, dn::kJoined}}, 5999, 5000).empty()));
+    CHECK((v.settle({{kA, dn::kJoined}}, 6000, 5000) == std::vector<dn::StatusChange>{{kA, dn::kJoined}}));
+    CHECK((v.settle({{kB, dn::kJoined}}, 7000, 5000).empty()));
+    CHECK((v.settle({}, 8000, 5000).empty()));  // Epic reported it meanwhile: no longer wanted...
+    CHECK((v.settle({{kB, dn::kJoined}}, 9000, 5000).empty()));  // ...and wanted again waits all over
+    CHECK((v.settle({{kB, dn::kLeft}}, 14500, 5000).empty()));  // another status starts over too
+    CHECK((v.settle({{kC, dn::kJoined}}, 1, 0).size() == 1));  // no delay: at once
+
+    printf("room view: a member follows the host's list, keeping members only Epic told it of\n");
     v.reset(kA, {kHost, kA, kC});  // Epic listed C before the host's game had it
-    auto first = v.followHost({kHost, kA, kB});
-    CHECK(first.size() == 1 && first[0] == (dn::StatusChange{kB, dn::kJoined}));
+    CHECK(v.followHost().empty());  // nothing heard from the host yet
+    v.heardHost({kHost, kA, kB});
+    auto first = v.followHost();
+    CHECK((first == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
     for (const auto& c : first) v.admit(c.target, c.status);
-    CHECK(v.has(kC));  // not dropped by a list that may simply be behind
-    auto second = v.followHost({kHost, kA, kC});
-    // C is not joined again: our game has it already.
-    CHECK(second.size() == 1 && second[0] == (dn::StatusChange{kB, dn::kLeft}));
+    v.heardHost({kHost, kA, kC});
+    auto second = v.followHost();  // C is not joined again: our game has it already
+    CHECK((second == std::vector<dn::StatusChange>{{kB, dn::kLeft}}));
     for (const auto& c : second) v.admit(c.target, c.status);
     CHECK(!v.has(kB) && v.has(kC));
-    auto removed = v.followHost({kHost, kC});
-    CHECK(removed.size() == 1 && removed[0] == (dn::StatusChange{kA, dn::kKicked}));
+    v.heardHost({kHost, kC});
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kA, dn::kKicked}}));
 
-    printf("room view: the host lets linked players in, drops unlinked ones, and keeps kicked ones out\n");
+    printf("room view: the host lets linked players in while there is room, and Epic's are Epic's\n");
     v.reset(kHost, {kHost, kA});
-    auto joins = v.hostJoins({kA, kB, kHost, ""});
-    CHECK(joins.size() == 1 && joins[0] == (dn::StatusChange{kB, dn::kJoined}));
+    auto joins = v.hostJoins({{kA, 1}, {kB, 2}, {kC, 3, true}, {kHost, 4}, {"", 5}}, 8);
+    CHECK((joins == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
+    CHECK((v.hostJoins({{kB, 2}, {kC, 3}}, 3).size() == 1));  // one place left
+    CHECK((v.hostJoins({{kB, 2}}, 2).empty()));  // full
+    CHECK((v.hostJoins({{kB, 2}}, 0).empty()));  // size never read: nobody gets in this way
+
+    printf("room view: one that left is not brought back by the link it left with, only by a new one\n");
     v.admit(kB, dn::kJoined);
-    auto leaves = v.hostLeaves([&](const std::string& m) { return m == kA; }, [](const std::string&) { return false; });
-    CHECK(leaves.size() == 1 && leaves[0] == (dn::StatusChange{kB, dn::kLeft}));
-    CHECK(v.hostLeaves([](const std::string&) { return false; }, [](const std::string&) { return true; }).empty());
-    CHECK(v.kick(kB) && v.banned(kB) && !v.kick(kHost) && !v.kick(kC));
+    v.hostJoins({{kA, 1}, {kB, 2}}, 8);  // B's link is noted while it is in the room
+    v.admit(kB, dn::kLeft);
+    CHECK((v.hostJoins({{kB, 2}}, 8).empty()));
+    CHECK((v.hostJoins({{kB, 6}}, 8) == std::vector<dn::StatusChange>{{kB, dn::kJoined}}));
+
+    printf("room view: a member in by its link only leaves by its link; kicked ones stay out\n");
+    v.admit(kB, dn::kJoined);
+    v.markDirect(kB);
+    v.markDirect(kC);  // not in the room: nothing to mark
+    CHECK(v.direct(kB) && !v.direct(kA) && !v.direct(kC));
+    auto inEpic = [&](const std::string& m) { return !v.direct(m); };  // no copy of Epic's lobby
+    auto down = [](const std::string&) { return false; };
+    CHECK((v.hostLeaves(inEpic, down) == std::vector<dn::StatusChange>{{kB, dn::kLeft}}));
+    CHECK((v.hostLeaves(inEpic, [](const std::string&) { return true; }).empty()));
+    CHECK(v.kick(kB) && v.banned(kB));
+    CHECK(!v.kick(kB));  // the game's repeats of the same kick
+    CHECK(!v.kick(kHost) && !v.kick(kC));
     v.admit(kB, dn::kKicked);
-    CHECK(v.hostJoins({kB}).empty());  // its link is still up: not let back in
+    CHECK(!v.direct(kB));
+    CHECK((v.hostJoins({{kB, 7}}, 8).empty()));  // a new link does not let a kicked player back in
     CHECK(v.admit(kB, dn::kJoined) && !v.banned(kB));  // back in through Epic's lobby: the ban is lifted
     v.reset(kHost, {kHost});
     CHECK(!v.banned(kB));  // a ban is for one room
     v.clear();
-    CHECK(!v.active() && v.followHost({kHost}).empty() && v.hostJoins({kA}).empty());
+    CHECK((!v.active() && v.followHost().empty() && v.hostJoins({{kA, 1}}, 8).empty()));
 }
 
 void testRoomWire() {
@@ -3002,6 +3033,7 @@ void testRoomFollowsHost() {
     host.setRoomMembers({kHost, kB});
     CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kB}); }, 5000));
     CHECK(version == same + 1);
+    CHECK(host.linkId(kA) != 0 && host.linkId(kB) == 0 && a.linkId(kHost) != 0);
     a.setActive(false);  // our game left the room: what the host said no longer applies
     CHECK(a.hostRoom(&version).empty());
 }

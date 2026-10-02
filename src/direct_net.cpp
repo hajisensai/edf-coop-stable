@@ -396,6 +396,16 @@ bool DirectNet::linkAlive(const std::string& remote, uint64_t windowMs) {
            (remote == hostLink_->puid || contains(roster_, remote));
 }
 
+uint64_t DirectNet::linkId(const std::string& remote) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (localPuid_.empty() || remote.empty() || remote == localPuid_) return 0;
+    if (opt_.mode == Mode::Host) {
+        auto it = clients_.find(remote);
+        return it != clients_.end() && it->second.up ? it->second.id : 0;
+    }
+    return hostLink_ && hostLink_->up && (remote == hostLink_->puid || contains(roster_, remote)) ? hostLink_->id : 0;
+}
+
 bool DirectNet::anyLinkAlive(uint64_t windowMs) {
     std::lock_guard<std::mutex> lock(mu_);
     uint64_t now = nowMs();
@@ -861,6 +871,7 @@ void DirectNet::onHostDatagram(const Received& r, const sockaddr_storage& from, 
     if (!link->up && m.type != MsgType::Bye) {
         // The client holds the link keys: it verified our welcome. Game data may flow now.
         link->up = true;
+        link->id = ++linkIds_;
         logf("DIRECT client %s connected from %s (%zu direct clients)", shortId(link->puid).c_str(),
              addrToString(from, fromLen).c_str(), clients_.size());
         rosterChanged();
@@ -982,6 +993,7 @@ void DirectNet::onClientWelcome(const WelcomeMsg& w, const sockaddr_storage& fro
     link.peerNonce = w.hostNonce;
     link.epoch = linkEpoch(localNonce_, w.hostNonce);
     link.up = true;
+    link.id = ++linkIds_;
     link.lastRecvMs = now;
     hostLink_ = std::move(link);
     hostReplyAddr_ = from;

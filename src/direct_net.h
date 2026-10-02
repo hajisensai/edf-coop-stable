@@ -122,6 +122,9 @@ public:
     // ping every second, in menus too). A joiner reaches other members through the host, which drops
     // them from its roster once their own link to it times out.
     bool linkAlive(const std::string& remote, uint64_t windowMs);
+    // Which link carries `remote`'s traffic: a new number for every link that comes up (a player that
+    // reconnects gets a new one), 0 while none is up.
+    uint64_t linkId(const std::string& remote);
     // True when any of our direct links answered within `windowMs`.
     bool anyLinkAlive(uint64_t windowMs);
     // Direct links belong to the room we are in. Inactive (not in a room): every link is closed with a
@@ -158,6 +161,7 @@ private:
         // sent a datagram with the link keys (proof it got the welcome): until then data sent to it
         // would be dropped unread.
         bool up = false;
+        uint64_t id = 0;  // linkId(): set when it comes up
         uint64_t lastRecvMs = 0;
         uint64_t lastPingMs = 0;
         uint32_t rttMs = 0;
@@ -260,6 +264,7 @@ private:
     std::vector<std::string> roster_;
     std::vector<std::string> hostRoom_;  // see hostRoom
     uint64_t hostRoomVersion_ = 0;
+    uint64_t linkIds_ = 0;  // the last Link::id handed out
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;
     sockaddr_storage hostReplyAddr_{};  // where the host's Welcome came from (may differ, see onClientDatagram)

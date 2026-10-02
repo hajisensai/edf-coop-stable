@@ -26,7 +26,7 @@ void detachPart();
 // part installed its wrappers, so these sit in front of them. False: unavailable (the part does not run).
 bool startRejoin(HMODULE game);
 // EOS_LobbyDetails_CopyInfo / EOS_LobbyDetails_Info_Release that also answer the room list entries of
-// startRejoin, for code that reads the game's LobbyDetails handles itself. Only once startRejoin succeeded.
+// startRejoin, for code that reads the game's LobbyDetails handles itself. Any time after startPart hooked EOS (before startRejoin they are EOS's own).
 int32_t lobbyInfoCopy(void* details, const void* options, void** info);
 void lobbyInfoRelease(void* info);
 // Whether `remote` (an EOS_ProductUserId) plays with us over a direct link now: a build of the same direct-link

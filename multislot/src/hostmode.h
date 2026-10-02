@@ -23,7 +23,10 @@ namespace multislot {
 // the room's size to its host and, as a control guide, which keys switch the member page (see ComposeLabel).
 constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32};
 static_assert(kRoomSizes[std::size(kRoomSizes) - 1] == kMaxPlayers, "F2 must reach the largest room");
-// A size the INI may hold: 0 (OFF) or kVanillaPlayers+1..kMaxPlayers.
+// Epic refuses a lobby with a voice chat room (bEnableRTCRoom) for more than this many members ("Lobbies that
+// generate conference rooms must have <= 16 max players"): a larger room is created without one.
+constexpr int kVoiceRoomMaxPlayers = 16;
+// A size the INI may hold: 0 (OFF) or one of kRoomSizes.
 constexpr bool ValidRoomSize(int size) {
     for (int step : kRoomSizes)
         if (step == size) return true;

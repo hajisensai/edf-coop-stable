@@ -19,6 +19,7 @@ powershell -ExecutionPolicy Bypass -File ..\package.ps1        # -> ..\release\E
 Changes up to EDF6MultiSlot 1.5.x: [release-notes/](release-notes/); from 2.0.0: [../release-notes/](../release-notes/).
 
 Rooms of 16, 24 and 32 players are new in 2.0.0 and have only been checked offline with ghost players.
+Rooms of 24 and 32 players have no in-game voice chat: Epic allows a voice chat room only up to 16 players (from 2.3.1; before it, such a room could not be created at all).
 
 ## License
 

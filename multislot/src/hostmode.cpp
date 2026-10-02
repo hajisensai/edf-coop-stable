@@ -184,6 +184,25 @@ void CreateCapacityHandler(CpuContext* context) {
         Log("HOST creating a normal %d-player room (Player MOD OFF)", kVanillaPlayers);
 }
 
+// Lobby create options complete (742AF3, after the voice chat setting chose bEnableRTCRoom [rbp-0x44] and
+// LocalRTCOptions [rbp-0x40]). Epic refuses a voice chat room for more than kVoiceRoomMaxPlayers, and the room
+// would not be created at all ("cannot join the room"): a larger one is created without it. The game's
+// GetRTCRoomName then gives an empty name (12BD007) and its voice chat stays silent in that room.
+void CreateVoiceRoomHandler(CpuContext* context) {
+    const int size = createdSize.load();
+    if (size <= kVoiceRoomMaxPlayers) return;
+    auto* options = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(context->rbp - 0x70));
+    std::int32_t rtc = 0;
+    std::memcpy(&rtc, options + 0x2C, sizeof(rtc));
+    if (!rtc) return;
+    const std::int32_t off = 0;
+    const std::uint64_t noOptions = 0;
+    std::memcpy(options + 0x2C, &off, sizeof(off));
+    std::memcpy(options + 0x30, &noOptions, sizeof(noOptions));
+    Log("HOST the %d-player room is created without Epic's voice chat room (Epic allows one only up to %d players): "
+        "no in-game voice chat in it", size, kVoiceRoomMaxPlayers);
+}
+
 // Room update (749C91 `mov edx, 4` before SetMaxMembers; the room object in r13). Whoever updates the lobby -
 // its creator, or a member EOS made its owner - keeps the lobby's own kind and capacity (lobbystate.h). The
 // setting this machine created its last room with says nothing about a room it joined.
@@ -410,6 +429,7 @@ MidHandler HostModeHookHandler(std::uint32_t rva) {
     switch (rva) {
         case 0x7435F7: return &SteamCreateCapacityHandler;
         case 0x742A9D: return &CreateCapacityHandler;
+        case 0x742AF3: return &CreateVoiceRoomHandler;
         case 0x749C91: return &UpdateCapacityHandler;
         case 0x749CBF: return &SearchTypeHandler<0x93>;
         case 0x749CC6: return &SearchTypeHandler<0x92>;

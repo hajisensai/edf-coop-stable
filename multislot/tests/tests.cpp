@@ -643,11 +643,14 @@ int main(int argc, char** argv) {
     allHooks.insert(allHooks.end(), peerTimeoutHooks.begin(), peerTimeoutHooks.end());
     // 8Player MOD (hostmode.cpp): the sites it replaces, and the game functions it calls from the menu frame.
     const auto hostHooks = HostModeHooks();
-    Check(hostHooks.size() == 11, "host mode hook table size");
+    Check(hostHooks.size() == 12, "host mode hook table size");
     for (const auto& hook : hostHooks) {
         const Patch verify{hook.name, hook.rva, hook.original, hook.original};
         Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
-        Check(hook.displacedSize == 0 && hook.original.size() >= 5, "host mode handlers replace the whole instruction", hook.rva);
+        // Either the handler replaces the whole site, or the site's instructions all run unchanged after it.
+        Check(hook.original.size() >= 5 && hook.displacedOffset == 0 &&
+                  (hook.displacedSize == 0 || hook.displacedSize == hook.original.size()),
+              "host mode handlers replace the whole site or run all of it", hook.rva);
         // 74AC69/74/7F/8A: movabs rax, (high << 32) | 0x91, the vanilla range of one room kind.
         if (hook.original.size() == 10 && hook.original[0] == 0x48 && hook.original[1] == 0xB8) {
             const std::uint64_t range = Operand(hook.original, 2, 8);

@@ -187,6 +187,12 @@ int main() {
     std::memcpy(frameMemory + 0x20, &four, 8);
     HostModeHookHandler(0x742A9D)(&create);
     Check(Stack64(frameMemory + 0x20) == 4 && CreatedRoomSize() == 0, "OFF: lobby created for 4");
+    const std::int32_t voiceOn = 1;
+    std::memcpy(frameMemory + 0x3C, &voiceOn, sizeof(voiceOn));
+    HostModeHookHandler(0x742AF3)(&create);
+    std::int32_t voice = 0;
+    std::memcpy(&voice, frameMemory + 0x3C, sizeof(voice));
+    Check(voice == 1, "OFF: the game's voice chat room is left alone");
     CpuContext update{};
     update.rdx = 0xDEAD;
     HostModeHookHandler(0x749C91)(&update);
@@ -213,6 +219,18 @@ int main() {
         HostModeHookHandler(0x742A9D)(&create);
         Check(Stack64(frameMemory + 0x20) == static_cast<std::uint64_t>(size) && CreatedRoomSize() == size,
               "ON: EOS lobby created for the room size");
+        // The voice chat setting on: bEnableRTCRoom [rbp-0x44] = 1, LocalRTCOptions [rbp-0x40] set.
+        const std::int32_t rtcOn = 1;
+        const std::uint64_t rtcOptions = 0xABCD;
+        std::memcpy(frameMemory + 0x3C, &rtcOn, sizeof(rtcOn));
+        std::memcpy(frameMemory + 0x40, &rtcOptions, sizeof(rtcOptions));
+        HostModeHookHandler(0x742AF3)(&create);
+        std::int32_t rtc = 0;
+        std::memcpy(&rtc, frameMemory + 0x3C, sizeof(rtc));
+        if (size > kVoiceRoomMaxPlayers)
+            Check(rtc == 0 && Stack64(frameMemory + 0x40) == 0, "ON: a room above Epic's voice room limit is created without one");
+        else
+            Check(rtc == 1 && Stack64(frameMemory + 0x40) == rtcOptions, "ON: a room up to 16 keeps the game's voice chat room");
         for (const auto& range : ranges) {
             CpuContext search{};
             HostModeHookHandler(range.first)(&search);

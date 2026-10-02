@@ -327,7 +327,8 @@ bool KeepModFile(const ModFile& file, bool active, const char* area, const char*
 #ifdef MULTISLOT_PLACEHOLDER_ASSETS
     // A CI build (CMake MULTISLOT_CI) has no files of the game's to embed, only placeholders that would break the
     // game; they are never written to a game folder.
-    Log("%s: this is a CI test build with placeholder files; Mods\\%ls is not written, so %s", area, file.path, without);
+    Log("%s: this is a CI test build with placeholder files; Mods\\%ls (%s) is not written, so %s", area, file.path,
+        contents, without);
     return false;
 #else
     switch (InstallModFile(file, path)) {

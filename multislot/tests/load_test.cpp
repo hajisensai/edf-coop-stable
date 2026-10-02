@@ -95,11 +95,13 @@ Behaviour Observe(const unsigned char* base) {
 // This version's MultiSlot rooms: the vanilla kinds mirrored around the centre.
 bool IsMirror(int v) { return v >= 2 * static_cast<int>(kSearchTypeCenter) - 0x94 && v <= 2 * static_cast<int>(kSearchTypeCenter) - 0x91; }
 // Rooms of MultiSlot 0.2-0.4.1 (0x8C..0x8F), 0.4.2-0.4.3 (0x7C..0x7F), 0.5.0-1.0.0 (0x74..0x77), 1.1.0-1.1.1 (0x6C..0x6F)
-// 1.2.0 (0x64..0x67), 1.2.1-1.2.5 (0x5C..0x5F) and, for a 10- or 12-player build, the 8-player rooms (0x54..0x57).
+// 1.2.0 (0x64..0x67), 1.2.1-1.2.5 (0x5C..0x5F), and the room-size builds up to EDF6Coop 2.2.x, whose machines have
+// fewer slots: 8 (0x54..0x57), 10 (0x48..0x4B), 12 (0x40..0x43), 16 (0x38..0x3B), 24 (0x28..0x2B), 32 (0x20..0x23).
 bool IsOldMirror(int v) {
     return !IsMirror(v) && ((v >= 0x8C && v <= 0x8F) || (v >= 0x7C && v <= 0x7F) || (v >= 0x74 && v <= 0x77) ||
                             (v >= 0x6C && v <= 0x6F) || (v >= 0x64 && v <= 0x67) || (v >= 0x5C && v <= 0x5F) ||
-                            (v >= 0x54 && v <= 0x57));
+                            (v >= 0x54 && v <= 0x57) || (v >= 0x48 && v <= 0x4B) || (v >= 0x40 && v <= 0x43) ||
+                            (v >= 0x38 && v <= 0x3B) || (v >= 0x28 && v <= 0x2B) || (v >= 0x20 && v <= 0x23));
 }
 
 bool InModule(std::uintptr_t address, HMODULE module) {
@@ -366,7 +368,8 @@ int wmain(int argc, wchar_t** argv) {
         Check(Contains(unloaded, "] UNLOADED the plugin was unloaded") && !Contains(unloaded, "SHUTDOWN"),
               "the process goes on, and the log calls it an unload, not the game exiting");
     } else {
-        const bool eightPlayers = mode == L"host8" || upgrade;  // upgrade carries EightPlayerRooms=1 over
+        // host8's INI is a 2.2 one with EightPlayerRooms=1, and upgrade carries EDF6MultiSlot's over: both are 8.
+        const bool eightPlayers = mode == L"host8" || upgrade;
         // NetLog defaults to on: only host4's INI turns it off.
         const bool netLog = mode != L"host4" && mode != L"quiet";
         const bool recovery = mode != L"recoveryoff" && mode != L"quiet";
@@ -409,11 +412,13 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& hook : hostHooks) Check(HookedInto(base, hook, plugin), hook.name);
         Check(SlotInto(base, MainFrameSlot(), plugin), "HUiMainFrame OnUpdate vtable slot points into the plugin");
         Check(SlotInto(base, LobbySlot(), plugin), "HUiLobby OnUpdate vtable slot points into the plugin");
-        Check(Contains(log, ("Hosting: " + std::to_string(kModRoomCapacity) + "Player MOD " + (eightPlayers ? "ON" : "OFF")).c_str()),
-              "the host mode setting is logged");
+        Check(Contains(log, eightPlayers ? "Hosting: 8Player MOD ON" : "Hosting: Player MOD OFF"), "the host mode setting is logged");
+        Check(Contains(log, "EightPlayerRooms=1 from an earlier version") == (mode == L"host8"),
+              "a 2.2 INI's EightPlayerRooms=1 is read as eight-player rooms, and the log says so");
         if (upgrade) {
             const std::string written = ReadIniText(iniPath);
-            Check(Contains(written, "EightPlayerRooms=1\r\n") && Contains(written, "PageKeys=F2,Tab\r\n") &&
+            Check(Contains(written, "RoomSize=8\r\n") && !Contains(written, "EightPlayerRooms") &&
+                      Contains(written, "PageKeys=F2,Tab\r\n") &&
                       Contains(written, "Key=secret\r\n") && Contains(written, "AutoUpdate=0\r\n"),
                   "the replaced plugins' settings are carried into EDF6Coop.ini");
             Check(!Contains(written, "MaxPlayers="), "a setting that no longer exists is not carried over");
@@ -428,7 +433,7 @@ int wmain(int argc, wchar_t** argv) {
         if (fresh && !upgrade) {
             const std::string written = ReadIniText(iniPath);
             Check(ReadText(iniPath).rfind("\xFF\xFE", 0) == 0, "the INI is written as UTF-16LE with a BOM");
-            Check(Contains(written, "[RoomScreen]") && Contains(written, "EightPlayerRooms=0\r\n") && Contains(written, "NetLog=1\r\n") &&
+            Check(Contains(written, "[RoomScreen]") && Contains(written, "RoomSize=0\r\n") && Contains(written, "NetLog=1\r\n") &&
                       Contains(written, "[DirectNet]") && Contains(written, "[Update]") &&
                       Contains(written, "DummyMembers=0") && Contains(written, "PageKeys=F3,Tab\r\n") &&
                       Contains(written, "[CopyArmor]") && Contains(written, "PadButton=LeftStick\r\n") &&
@@ -512,22 +517,17 @@ int wmain(int argc, wchar_t** argv) {
             const std::uint64_t old = before.range[kind];
             const auto low = static_cast<std::uint32_t>(old), high = static_cast<std::uint32_t>(old >> 32);
             if (low == 0x91 && high >= 0x91 && high <= 0x94) {
-                // A 10- or 12-player build with the setting OFF asks exactly what the game asks: its own rooms lie
-                // below the 8-player family, so a range reaching them would list 8-player rooms it cannot join.
-                const bool largerRoom = kMaxPlayers != 8;
-                const std::uint64_t bottom = !eightPlayers && largerRoom ? 0x91 : 2 * kSearchTypeCenter - high;
+                // OFF asks exactly what the game asks; ON asks for the 32-slot family's rooms of the kind only.
+                const std::uint64_t bottom = eightPlayers ? 2 * kSearchTypeCenter - high : 0x91;
                 const std::uint64_t top = eightPlayers ? 2 * kSearchTypeCenter - 0x91 : high;
                 Check(after.range[kind] == ((top << 32) | bottom),
-                      eightPlayers ? "Player MOD ON: the search lists this build's MultiSlot rooms only"
-                                   : "Player MOD OFF: the search lists vanilla rooms, and MultiSlot rooms in the 8-player build");
+                      eightPlayers ? "Player MOD ON: the search lists MultiSlot rooms of every size only"
+                                   : "Player MOD OFF: the search lists vanilla rooms only");
                 const auto searchedLow = static_cast<std::uint32_t>(after.range[kind]);
                 const auto searchedHigh = static_cast<std::uint32_t>(after.range[kind] >> 32);
-                bool listsEightPlayerRooms = false;
-                for (std::uint32_t v = 0x54; v <= 0x57; ++v) listsEightPlayerRooms = listsEightPlayerRooms || (v >= searchedLow && v <= searchedHigh);
-                Check(!largerRoom || !listsEightPlayerRooms, "a 10- or 12-player build never lists 8-player rooms it cannot join");
-                if (eightPlayers)
-                    Check(searchedLow == 2 * kSearchTypeCenter - high && searchedHigh == 2 * kSearchTypeCenter - 0x91,
-                          "Player MOD ON lists this build's own rooms");
+                bool listsEarlierRooms = false;
+                for (std::uint32_t v = 0x20; v <= 0x8F; ++v) listsEarlierRooms = listsEarlierRooms || (v >= searchedLow && v <= searchedHigh);
+                Check(!listsEarlierRooms, "no search lists the rooms of a 2.2 build, which the join check refuses");
             } else {
                 Check(after.range[kind] == old, "unknown search kinds are unchanged");
             }

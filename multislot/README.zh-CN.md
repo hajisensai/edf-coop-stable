@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-地球防卫军 6（PC / Steam）超过 4 人的联机：8、10、12、16、24 或 32 人房间、房间画面、任务和护甲复制（「8Player MOD」）。
+地球防卫军 6（PC / Steam）超过 4 人的联机：8、10、12、16、24 或 32 人房间（人数由房主在游戏里按 F2 / 左摇杆选）、房间画面、任务和护甲复制（「Player MOD」）。
 
 原作者 **momotori01**，最初随 [EARTH-DEFENSE-FORCE-6-VR-MOD](https://github.com/momotori01/EARTH-DEFENSE-FORCE-6-VR-MOD) 发布（公有领域，见 [LICENSE](LICENSE)），这个目录保留了它的提交历史。这一份从 EDF6MultiSlot 1.5.12 继续，从 2.0.0 起和直连部分（`../src/`）一起编进同一个插件 **EDF6Coop.dll**。
 
@@ -10,11 +10,11 @@
 
 ```powershell
 $env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
-powershell -ExecutionPolicy Bypass -File ..\build.ps1 -Players 8 -Test    # -> dist\EDF6Coop.dll
-powershell -ExecutionPolicy Bypass -File ..\package.ps1 -Players 8        # -> ..\release\EDF6Coop-<版本>-8p.zip
+powershell -ExecutionPolicy Bypass -File ..\build.ps1 -Test    # -> dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File ..\package.ps1        # -> ..\release\EDF6Coop-<版本>.zip
 ```
 
-这个目录里的 `build.cmd [8|10|12|16|24|32]` 等同于 `build.ps1 -Players <N> -Test`。
+这个目录里的 `build.cmd` 等同于 `build.ps1 -Test`。
 
 EDF6MultiSlot 1.5.x 及以前的改动见 [release-notes/](release-notes/)；2.0.0 起见 [../release-notes/](../release-notes/)。
 

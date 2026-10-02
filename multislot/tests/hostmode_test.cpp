@@ -134,12 +134,12 @@ struct FakeRoom {
     std::uint64_t Address() const { return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(bytes)); }
 };
 
-// The label names the room size, so every expected text follows kModRoomCapacity.
-std::wstring Label(const wchar_t* tail) { return std::to_wstring(kModRoomCapacity) + L"Player MOD" + tail; }
+// "12Player MOD :ON" for a room size, "Player MOD :OFF" for none.
+std::wstring Size(int size) { return size ? std::to_wstring(size) + L"Player MOD :ON" : L"Player MOD :OFF"; }
 
-std::wstring Compose(const MenuContext& context, bool eightPlayers, bool roomEightPlayers) {
+std::wstring Compose(const MenuContext& context, int setting, int created) {
     wchar_t text[kLabelChars]{};
-    ComposeLabel(context, eightPlayers, roomEightPlayers, text, kLabelChars);
+    ComposeLabel(context, setting, created, text, kLabelChars);
     return text;
 }
 
@@ -164,8 +164,18 @@ int main() {
     for (const auto& hook : HostModeHooks()) Check(HostModeHookHandler(hook.rva) != nullptr, hook.name);
     Check(HostModeHookHandler(0x1234) == nullptr, "unknown site has no handler");
 
+    // F2 steps through the sizes and back to OFF; a size from the INI between two steps goes on to the next one.
+    Check(NextRoomSize(0) == 8 && NextRoomSize(8) == 10 && NextRoomSize(10) == 12 && NextRoomSize(12) == 16 &&
+              NextRoomSize(16) == 24 && NextRoomSize(24) == 32 && NextRoomSize(32) == 0 && NextRoomSize(20) == 24,
+          "F2 steps OFF/8/10/12/16/24/32");
+    Check(ValidRoomSize(0) && ValidRoomSize(8) && ValidRoomSize(12) && ValidRoomSize(kMaxPlayers) && !ValidRoomSize(4) &&
+              !ValidRoomSize(5) && !ValidRoomSize(9) && !ValidRoomSize(kMaxPlayers + 1) && !ValidRoomSize(-1),
+          "the INI may hold OFF or one of F2's sizes");
+    InitHostMode(image, nullptr, kMaxPlayers + 1, VK_F2, 0xB0, L"F2/LS");
+    Check(HostRoomSize() == 0, "a size no room can have hosts normal rooms");
+
     // OFF: normal rooms, byte for byte what the game stores (Steam lobby first, then the EOS lobby).
-    InitHostMode(image, nullptr, false, VK_F2, 0xB0, L"F2/LS");
+    InitHostMode(image, nullptr, 0, VK_F2, 0xB0, L"F2/LS");
     std::uint8_t frameMemory[0x100]{};
     CpuContext steam{};
     steam.r8 = 0xDEAD;
@@ -176,7 +186,7 @@ int main() {
     std::uint64_t four = 4;
     std::memcpy(frameMemory + 0x20, &four, 8);
     HostModeHookHandler(0x742A9D)(&create);
-    Check(Stack64(frameMemory + 0x20) == 4 && !RoomCreatedWithEightPlayers(), "OFF: lobby created for 4");
+    Check(Stack64(frameMemory + 0x20) == 4 && CreatedRoomSize() == 0, "OFF: lobby created for 4");
     CpuContext update{};
     update.rdx = 0xDEAD;
     HostModeHookHandler(0x749C91)(&update);
@@ -191,32 +201,37 @@ int main() {
     for (const auto& range : ranges) {
         CpuContext search{};
         HostModeHookHandler(range.first)(&search);
-        // The 8-player build lists normal and MultiSlot rooms of the kind; a 10- or 12-player build asks what
-        // the game asks, because a range down to its own family would take in every 8-player room.
-        const std::uint64_t offLow = kMaxPlayers == 8 ? 2 * kSearchTypeCenter - range.second : 0x91;
-        Check(search.rax == ((range.second << 32) | offLow),
-              "OFF: the room search lists normal rooms, and MultiSlot rooms in the 8-player build");
-        Check(kMaxPlayers == 8 || offLow > 0x57, "OFF: a larger-room build does not list 8-player rooms");
+        Check(search.rax == ((range.second << 32) | 0x91), "OFF: the room search lists normal rooms only, as the game asks");
     }
 
-    // ON: every slot in both lobbies and the mirrored family; the room keeps its setting after F2.
-    InitHostMode(image, nullptr, true, VK_F2, 0xB0, L"F2/LS");
-    for (const auto& range : ranges) {
-        CpuContext search{};
-        HostModeHookHandler(range.first)(&search);
-        const std::uint64_t low = search.rax & 0xFFFFFFFFull, high = search.rax >> 32;
-        Check(low == 2 * kSearchTypeCenter - range.second && high == 2 * kSearchTypeCenter - 0x91 && high < 0x91 && low <= high,
-              "ON: the room search lists MultiSlot rooms of the kind only");
+    // ON at every size: that many slots in both lobbies, and the one search range of the 32-slot family.
+    for (const int size : kRoomSizes) {
+        InitHostMode(image, nullptr, size, VK_F2, 0xB0, L"F2/LS");
+        steam.r8 = 0xDEAD;
+        HostModeHookHandler(0x7435F7)(&steam);
+        Check(steam.r8 == static_cast<std::uint64_t>(size) && CreatedRoomSize() == size, "ON: Steam lobby created for the room size");
+        HostModeHookHandler(0x742A9D)(&create);
+        Check(Stack64(frameMemory + 0x20) == static_cast<std::uint64_t>(size) && CreatedRoomSize() == size,
+              "ON: EOS lobby created for the room size");
+        for (const auto& range : ranges) {
+            CpuContext search{};
+            HostModeHookHandler(range.first)(&search);
+            const std::uint64_t low = search.rax & 0xFFFFFFFFull, high = search.rax >> 32;
+            Check(low == 2 * kSearchTypeCenter - range.second && high == 2 * kSearchTypeCenter - 0x91 && high < 0x20 &&
+                      low <= high,
+                  "ON: the room search lists MultiSlot rooms of every size only, below every earlier family");
+        }
     }
-    steam.r8 = 0xDEAD;
+
+    // A room of twelve keeps its size after F2.
+    constexpr int kSize = 12;
+    InitHostMode(image, nullptr, kSize, VK_F2, 0xB0, L"F2/LS");
     HostModeHookHandler(0x7435F7)(&steam);
-    Check(steam.r8 == kModRoomCapacity && RoomCreatedWithEightPlayers(), "ON: Steam lobby created for the mod capacity");
     HostModeHookHandler(0x742A9D)(&create);
-    Check(Stack64(frameMemory + 0x20) == kModRoomCapacity && RoomCreatedWithEightPlayers(), "ON: EOS lobby created for the mod capacity");
     // EOS created it (lobbystate.cpp sees the completion); its updates keep what it was created as.
     const FakeRoom created("lobby-on");
     NoteLobbyEntered(reinterpret_cast<void*>(0x10), reinterpret_cast<const void*>(0x20), "lobby-on",
-                     static_cast<std::uint32_t>(kModRoomCapacity));
+                     static_cast<std::uint32_t>(kSize));
     update.r13 = created.Address();
     for (const auto& kind : kinds) {
         CpuContext publish{};
@@ -228,20 +243,24 @@ int main() {
     }
     const MenuContext outside = Menu(false, false);
     UpdateMenuFrame(nullptr, false, outside);
-    UpdateMenuFrame(nullptr, true, outside);  // F2 outside a room: OFF
-    Check(!EightPlayerRooms() && RoomCreatedWithEightPlayers(), "F2 changes the setting, not the room that exists");
-    CpuContext searchAfterF2{};
-    HostModeHookHandler(0x74AC8A)(&searchAfterF2);
-    Check(searchAfterF2.rax == ((0x91ull << 32) | (kMaxPlayers == 8 ? 2 * kSearchTypeCenter - 0x91 : 0x91)),
-          "the room search follows F2 at once");
+    UpdateMenuFrame(nullptr, true, outside);  // F2 outside a room: 12 -> 16
+    Check(HostRoomSize() == 16 && CreatedRoomSize() == kSize, "F2 changes the setting, not the room that exists");
     HostModeHookHandler(0x749C91)(&update);
-    Check(update.rdx == kModRoomCapacity, "an existing MultiSlot room keeps its slots after F2");
+    Check(update.rdx == kSize, "an existing MultiSlot room keeps its size after F2");
     UpdateMenuFrame(nullptr, false, outside);
     HostModeHookHandler(0x742A9D)(&create);
-    Check(Stack64(frameMemory + 0x20) == 4 && !RoomCreatedWithEightPlayers(), "the next room follows the new setting");
+    Check(Stack64(frameMemory + 0x20) == 16 && CreatedRoomSize() == 16, "the next room follows the new setting");
+    // From the largest size F2 turns it OFF, and the room search follows at once.
+    InitHostMode(image, nullptr, kMaxPlayers, VK_F2, 0xB0, L"F2/LS");
+    UpdateMenuFrame(nullptr, false, outside);
+    UpdateMenuFrame(nullptr, true, outside);
+    UpdateMenuFrame(nullptr, false, outside);
+    CpuContext searchAfterF2{};
+    HostModeHookHandler(0x74AC8A)(&searchAfterF2);
+    Check(HostRoomSize() == 0 && searchAfterF2.rax == ((0x91ull << 32) | 0x91), "after 32 comes OFF, and the search follows");
     // The room update reads the lobby it updates, never the setting: a room this machine did not create (or one
     // that is not the lobby it created) gets the game's own values while nothing says what it is.
-    InitHostMode(image, nullptr, true, VK_F2, 0xB0, L"F2/LS");
+    InitHostMode(image, nullptr, kSize, VK_F2, 0xB0, L"F2/LS");
     CpuContext other{};
     other.r13 = FakeRoom("lobby-other").Address();
     HostModeHookHandler(0x749C91)(&other);
@@ -253,26 +272,26 @@ int main() {
     HostModeHookHandler(0x749CBF)(&joined);
     Check(joined.rdx == kVanillaPlayers && joined.rbx == 0x93,
           "ON: a joined lobby EOS has no copy of keeps the game's values (lobbystate_test reads real ones)");
-    InitHostMode(image, nullptr, false, VK_F2, 0xB0, L"F2/LS");
+    InitHostMode(image, nullptr, 0, VK_F2, 0xB0, L"F2/LS");
     NoteLobbyEntered(reinterpret_cast<void*>(0x10), reinterpret_cast<const void*>(0x20), "lobby-on",
-                     static_cast<std::uint32_t>(kModRoomCapacity));
+                     static_cast<std::uint32_t>(kSize));
     HostModeHookHandler(0x749C91)(&joined);
-    Check(joined.rdx == static_cast<std::uint64_t>(kModRoomCapacity),
+    Check(joined.rdx == static_cast<std::uint64_t>(kSize),
           "OFF: the MultiSlot lobby this machine created stays one after F2 (its creation, not the setting)");
     NoteLobbyLeft();
 
     // One room creation: the Steam lobby step decides, and the EOS lobby made right after it agrees even if F2
     // was pressed in between; an EOS creation with no Steam step before it reads the setting itself.
-    UpdateMenuFrame(nullptr, true, outside);  // ON
+    UpdateMenuFrame(nullptr, true, outside);  // OFF -> 8
     UpdateMenuFrame(nullptr, false, outside);
     HostModeHookHandler(0x7435F7)(&steam);
-    UpdateMenuFrame(nullptr, true, outside);  // OFF between the two lobbies
+    UpdateMenuFrame(nullptr, true, outside);  // 8 -> 10 between the two lobbies
     UpdateMenuFrame(nullptr, false, outside);
     HostModeHookHandler(0x742A9D)(&create);
-    Check(steam.r8 == kModRoomCapacity && Stack64(frameMemory + 0x20) == kModRoomCapacity && RoomCreatedWithEightPlayers(),
+    Check(steam.r8 == 8 && Stack64(frameMemory + 0x20) == 8 && CreatedRoomSize() == 8,
           "Steam and EOS lobbies of one room get the same capacity");
     HostModeHookHandler(0x742A9D)(&create);
-    Check(Stack64(frameMemory + 0x20) == 4 && !RoomCreatedWithEightPlayers(), "a lobby without a Steam step uses the current setting");
+    Check(Stack64(frameMemory + 0x20) == 10 && CreatedRoomSize() == 10, "a lobby without a Steam step uses the current setting");
 
     // F2 on the room list searches again: only while the list is on screen, only when no search is running and no
     // dialog is open, and once.
@@ -280,15 +299,15 @@ int main() {
               !LobbyMaySearchAgain(0, 0, true),
           "the list searches again only when idle and without a dialog");
     {
-        InitHostMode(image, nullptr, false, VK_F2, 0xB0, L"F2/LS");
+        InitHostMode(image, nullptr, kMaxPlayers, VK_F2, 0xB0, L"F2/LS");
         std::vector<std::uint8_t> lobby(0x1000, 0);
         lobbyUpdates = lobbyRefreshes = 0;
         UpdateMenuFrame(nullptr, false, outside);
-        UpdateMenuFrame(nullptr, true, outside);  // F2 with no room list on screen
+        UpdateMenuFrame(nullptr, true, outside);  // F2 with no room list on screen: 32 -> OFF
         UpdateMenuFrame(nullptr, false, outside);
         Check(LobbyOnUpdateHook(lobby.data(), nullptr) == 0x1234 && lobbyUpdates == 1 && lobbyRefreshes == 0,
               "F2 away from the room list asks for no search; the list's own update still runs");
-        UpdateMenuFrame(nullptr, true, outside);  // F2 while the list is shown
+        UpdateMenuFrame(nullptr, true, outside);  // F2 while the list is shown: OFF -> 8
         UpdateMenuFrame(nullptr, false, outside);
         lobby[0x7E0 + 0x43] = 1;                  // a search is running
         LobbyOnUpdateHook(lobby.data(), nullptr);
@@ -303,78 +322,84 @@ int main() {
         Check(lobbyRefreshes == 1 && refreshedLobby == lobby.data(), "F2 on the list searches again once it may");
         LobbyOnUpdateHook(lobby.data(), nullptr);
         Check(lobbyRefreshes == 1, "and only once");
+        UpdateMenuFrame(nullptr, true, outside);  // 8 -> 10 while the list is shown: it lists the same rooms
+        UpdateMenuFrame(nullptr, false, outside);
+        LobbyOnUpdateHook(lobby.data(), nullptr);
+        Check(lobbyRefreshes == 1 && HostRoomSize() == 10, "F2 from one size to another does not search again");
     }
-    InitHostMode(image, nullptr, false, VK_F2, 0xB0, L"F2/LS");
+    InitHostMode(image, nullptr, 0, VK_F2, 0xB0, L"F2/LS");
 
     // Label texts.
-    Check(Compose(outside, false, true) == L"F2/LS " + Label(L" :OFF") && Compose(outside, true, false) == L"F2/LS " + Label(L" :ON"),
+    Check(Compose(outside, 0, kSize) == L"F2/LS Player MOD :OFF" && Compose(outside, kSize, 0) == L"F2/LS 12Player MOD :ON",
           "outside a room: the F2 setting");
-    Check(Compose(Menu(true, true, 3), false, true) == Label(L" :ON   F3/Tab/RS: Members 5-8"),
-          "hosting a MultiSlot room: its setting and the page guide, before anyone is on page 2");
-    Check(Compose(Menu(true, true, 3), true, false) == Label(L" :OFF"), "hosting a normal room: no page guide");
-    // The room's own kind, read from its lobby, wins over what this machine created its last room as.
+    Check(Compose(Menu(true, true, 3), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-8",
+          "hosting a MultiSlot room: its size and the page guide, before anyone is on page 2");
+    Check(Compose(Menu(true, true, 3), kSize, 0) == Size(0), "hosting a normal room: no page guide");
+    // The room's own kind and size, read from its lobby, win over what this machine created its last room as.
     MenuContext readOn = Menu(true, true, 3);
     readOn.roomMode = static_cast<int>(LobbyKind::MultiSlot);
-    Check(Compose(readOn, false, false) == Label(L" :ON   F3/Tab/RS: Members 5-8"), "a MultiSlot lobby shows ON");
+    readOn.roomCapacity = 16;
+    Check(Compose(readOn, 0, kSize) == Size(16) + L"   F3/Tab/RS: Members 5-8", "a MultiSlot lobby shows its own size");
     readOn.roomMode = static_cast<int>(LobbyKind::Normal);
-    Check(Compose(readOn, true, true) == Label(L" :OFF"), "a normal lobby shows OFF");
-    Check(Compose(Menu(true, true, 3, 0, false), false, true) == Label(L" :ON"), "no page guide off the room screen");
-    Check(Compose(Menu(true, false, 3), true, true) == L" ",
+    readOn.roomCapacity = 0;
+    Check(Compose(readOn, kSize, kSize) == Size(0), "a normal lobby shows OFF");
+    Check(Compose(Menu(true, true, 3, 0, false), 0, kSize) == Size(kSize), "no page guide off the room screen");
+    Check(Compose(Menu(true, false, 3), kSize, kSize) == L" ",
           "a guest with nothing to do here sees nothing");
-    Check(Compose(Menu(true, true, 6, 0), false, true) == Label(L" :ON   F3/Tab/RS: Members 5-6"), "host, page 1 of 6 members");
-    Check(Compose(Menu(true, true, 8, 1), false, true) == Label(L" :ON   F3/Tab/RS: Members 1-4"), "host, page 2 of eight members");
-    Check(Compose(Menu(true, false, 5, 0), false, true) == L"F3/Tab/RS: Member 5", "guest, page 1 of 5 members");
-    Check(Compose(Menu(true, false, 8, 0, false), false, true) == L" ",
+    Check(Compose(Menu(true, true, 6, 0), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-6", "host, page 1 of 6 members");
+    Check(Compose(Menu(true, true, 8, 1), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 1-4", "host, page 2 of eight members");
+    Check(Compose(Menu(true, false, 5, 0), 0, kSize) == L"F3/Tab/RS: Member 5", "guest, page 1 of 5 members");
+    Check(Compose(Menu(true, false, 8, 0, false), 0, kSize) == L" ",
           "no page hint while the room screen is not updating");
     MenuContext noInputs = Menu(true, false, 8, 0);
     noInputs.pageHint = L"";
-    Check(Compose(noInputs, false, true) == L" ", "no page hint without page inputs");
+    Check(Compose(noInputs, 0, kSize) == L" ", "no page hint without page inputs");
     // The copy armor guide follows whatever else the label carries, and is absent while it is not installed.
     MenuContext copyingGuest = Menu(true, false, 5, 0);
     copyingGuest.copyArmorHint = L"F4/LS";
-    Check(Compose(copyingGuest, false, true) == L"F3/Tab/RS: Member 5   F4/LS copy armor :OFF",
+    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :OFF",
           "in a room, the pages and copy armor");
     // The room panel keeps the real armor, so the number being given is shown here, with (Max) when it is
     // this class's ceiling rather than what was found in the room.
     copyingGuest.copyArmorTo = 2000;
-    Check(Compose(copyingGuest, false, true) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000",
+    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000",
           "the armor being given is shown");
     copyingGuest.copyArmorAtMax = true;
-    Check(Compose(copyingGuest, false, true) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000(Max)",
+    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000(Max)",
           "and says so when it is the ceiling");
     copyingGuest.copyArmorTo = 0;
     copyingGuest.copyArmorAtMax = false;
     copyingGuest.copyArmorHint = L"LS";
-    Check(Compose(copyingGuest, false, true) == L"F3/Tab/RS: Member 5   LS copy armor :OFF",
+    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   LS copy armor :OFF",
           "a pad button alone still names itself");
     copyingGuest.copyArmorHint = L"";
-    Check(Compose(copyingGuest, false, true) == L"F3/Tab/RS: Member 5", "nothing installed, nothing shown");
+    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5", "nothing installed, nothing shown");
     MenuContext copyingHost = Menu(true, true, 3);
     copyingHost.copyArmorHint = L"F4/LS";
-    Check(Compose(copyingHost, false, true) == Label(L" :ON   F3/Tab/RS: Members 5-8") + L"   F4/LS copy armor :OFF",
-          "the host also sees the room's own setting");
+    Check(Compose(copyingHost, 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-8   F4/LS copy armor :OFF",
+          "the host also sees the room's own size");
     MenuContext copyingOutside = Menu(false, false);
     copyingOutside.copyArmorHint = L"F4/LS";
-    Check(Compose(copyingOutside, true, false) == L"F2/LS " + Label(L" :ON"),
+    Check(Compose(copyingOutside, kSize, 0) == L"F2/LS " + Size(kSize),
           "outside a room there is nothing to copy from, so the guide stays away");
     wchar_t tiny[8]{};
-    Check(ComposeLabel(Menu(true, true, 8, 0), false, true, tiny, 8) == 7 && tiny[7] == 0, "a short buffer is truncated, not overrun");
+    Check(ComposeLabel(Menu(true, true, 8, 0), 0, kSize, tiny, 8) == 7 && tiny[7] == 0, "a short buffer is truncated, not overrun");
 
     // The "a newer EDF6VR exists" line (updatecheck.h) goes on the end, and is the part that gives way
     // when the field is full: the guides above it say what the buttons do right now, the notice does not.
     SetUpdateNoticeForTest(L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat");
-    const std::wstring withNotice = Compose(Menu(false, false, 0, 0), true, false);
-    const std::wstring modOn = std::to_wstring(kModRoomCapacity) + L"Player MOD :ON";
+    const std::wstring withNotice = Compose(Menu(false, false, 0, 0), kSize, 0);
+    const std::wstring modOn = Size(kSize);
     Check(withNotice.find(modOn) != std::wstring::npos, "the controls still come first");
     Check(withNotice.find(L"NEW EDF6VR") > withNotice.find(modOn), "the notice comes after them");
     Check(withNotice.find(L"Update_EDF6VR.bat") != std::wstring::npos, "and says what to run");
     wchar_t squeezed[32]{};
-    ComposeLabel(Menu(false, false, 0, 0), true, false, squeezed, 32);
+    ComposeLabel(Menu(false, false, 0, 0), kSize, 0, squeezed, 32);
     const std::wstring cut = squeezed;
     Check(cut.find(modOn) != std::wstring::npos, "a full field keeps the controls");
     Check(cut.find(L"Update_EDF6VR.bat") == std::wstring::npos, "and drops the notice, not the other way round");
     SetUpdateNoticeForTest(L"");
-    Check(Compose(Menu(false, false, 0, 0), true, false).find(L"NEW EDF6VR") == std::wstring::npos,
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0).find(L"NEW EDF6VR") == std::wstring::npos,
           "with nothing to say the label is exactly as before");
 
     // Menu frame updates write the label through the game's functions, once per change.
@@ -382,35 +407,39 @@ int main() {
     GetTempPathW(MAX_PATH, iniPath);
     wcscat_s(iniPath, L"multislot_hostmode_test.ini");
     DeleteFileW(iniPath);
-    InitHostMode(image, iniPath, false, VK_F2, 0xB0, L"F2/LS");
+    // An INI from 2.2: its EightPlayerRooms goes once RoomSize is saved (plugin.cpp reads RoomSize first).
+    WritePrivateProfileStringW(L"MultiSlot", L"EightPlayerRooms", L"1", iniPath);
+    InitHostMode(image, iniPath, 0, VK_F2, 0xB0, L"F2/LS");
     int frameA = 0, frameB = 0;
     UpdateMenuFrame(&frameA, false, outside);
     Check(indexCalls == 1 && lookedUp == L"MSLabel" && lookupFrame == &frameA && requestedIndex == 3, "label field looked up by name");
-    Check(setTextCalls == 1 && shown == L"F2/LS " + Label(L" :OFF"), "OFF label shown");
+    Check(setTextCalls == 1 && shown == L"F2/LS " + Size(0), "OFF label shown");
     Check(fieldControl.uses == 1 && destroyed == 0, "the component reference is returned");
     UpdateMenuFrame(&frameA, false, outside);
     Check(setTextCalls == 1, "unchanged label is not rewritten every frame");
     UpdateMenuFrame(&frameA, true, outside);
-    Check(EightPlayerRooms() && setTextCalls == 2 && shown == L"F2/LS " + Label(L" :ON"), "F2 turns it on and the label follows");
-    Check(GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", -1, iniPath) == 1, "the setting is saved");
+    Check(HostRoomSize() == 8 && setTextCalls == 2 && shown == L"F2/LS " + Size(8), "F2 turns it on and the label follows");
+    Check(GetPrivateProfileIntW(L"MultiSlot", L"RoomSize", 0, iniPath) == 8 &&
+              static_cast<int>(GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", static_cast<UINT>(-1), iniPath)) == -1,
+          "the size is saved, and the old setting is gone");
     UpdateMenuFrame(&frameA, true, outside);
-    Check(EightPlayerRooms(), "holding F2 switches once");
+    Check(HostRoomSize() == 8, "holding F2 switches once");
     UpdateMenuFrame(&frameA, false, Menu(true, true, 2));
     UpdateMenuFrame(&frameA, true, Menu(true, true, 2));
-    Check(EightPlayerRooms() && shown == Label(L" :OFF"), "in a room F2 does nothing; the host sees the room's setting");
+    Check(HostRoomSize() == 8 && shown == Size(0), "in a room F2 does nothing; the host sees the room's setting");
     UpdateMenuFrame(&frameA, false, Menu(true, true, 5, 0));
-    Check(shown == Label(L" :OFF   F3/Tab/RS: Member 5"), "the page hint appears with the fifth member");
+    Check(shown == Size(0) + L"   F3/Tab/RS: Member 5", "the page hint appears with the fifth member");
     UpdateMenuFrame(&frameA, false, Menu(true, true, 5, 1));
-    Check(shown == Label(L" :OFF   F3/Tab/RS: Members 1-4"), "and follows the page");
+    Check(shown == Size(0) + L"   F3/Tab/RS: Members 1-4", "and follows the page");
     UpdateMenuFrame(&frameA, false, Menu(true, false, 2));
     Check(shown == L" ", "a guest with four or fewer members has nothing to do here");
     UpdateMenuFrame(&frameB, false, outside);
-    Check(lookupFrame == &frameB && shown == L"F2/LS " + Label(L" :ON"), "another frame gets its own label");
+    Check(lookupFrame == &frameB && shown == L"F2/LS " + Size(8), "another frame gets its own label");
     const int before = setTextCalls;
     for (int i = 0; i < 130; ++i) UpdateMenuFrame(&frameB, false, outside);
     Check(setTextCalls == before + 1, "the label is re-applied every 120 updates (frames can be rebuilt at the same address)");
     UpdateMenuFrame(&frameB, true, outside);
-    Check(!EightPlayerRooms() && GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", -1, iniPath) == 0, "F2 again: OFF, saved");
+    Check(HostRoomSize() == 10 && GetPrivateProfileIntW(L"MultiSlot", L"RoomSize", 0, iniPath) == 10, "F2 again: the next size, saved");
     indexResult = -1;
     const int calls = setTextCalls;
     int frameC = 0;

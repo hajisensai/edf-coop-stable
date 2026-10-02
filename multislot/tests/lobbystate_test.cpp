@@ -23,6 +23,8 @@ using namespace multislot;
 namespace {
 
 int failures = 0;
+// A room size the host picked at run time (F2): capacity follows the lobby, not the build.
+constexpr int kRoomSize = 12;
 
 void Check(bool condition, const char* what) {
     if (!condition) {
@@ -153,11 +155,11 @@ bool Logged(const std::wstring& path, const char* needle) { return ReadLog(path)
 void TestKinds() {
     Check(KindOf({}) == LobbyKind::Unknown, "a lobby nothing is known of has no kind");
     Check(KindOf({4, false, 0}) == LobbyKind::Normal, "four members, no SEARCH_TYPE yet: normal");
-    Check(KindOf({static_cast<std::uint32_t>(kModRoomCapacity), false, 0}) == LobbyKind::MultiSlot,
+    Check(KindOf({static_cast<std::uint32_t>(kRoomSize), false, 0}) == LobbyKind::MultiSlot,
           "more than four members: MultiSlot");
     Check(KindOf({4, true, static_cast<std::int64_t>(kMirrored)}) == LobbyKind::MultiSlot,
           "this build's SEARCH_TYPE decides over a MaxMembers EOS refused to raise");
-    Check(KindOf({static_cast<std::uint32_t>(kModRoomCapacity), true, 0x93}) == LobbyKind::Normal,
+    Check(KindOf({static_cast<std::uint32_t>(kRoomSize), true, 0x93}) == LobbyKind::Normal,
           "a vanilla SEARCH_TYPE is a normal room");
     Check(CapacityToKeep({10, false, 0}) == (kMaxPlayers >= 10 ? 10 : kMaxPlayers) &&
               CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored)}) == kMaxPlayers,
@@ -179,7 +181,7 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
     InitHostMode(nullptr, nullptr, false, VK_F2, 0, L"F2");
 
     // Hosting a MultiSlot room: the creation decides until the lobby is read, then the lobby does.
-    const CreateOptions create{1, User("self"), static_cast<std::uint32_t>(kModRoomCapacity)};
+    const CreateOptions create{1, User("self"), static_cast<std::uint32_t>(kRoomSize)};
     Call("EOS_Lobby_CreateLobby", &create);
     Tick();
     Check(gameResults.size() == 2 && gameResults[1] == 0 && gameClientDataOk, "the game gets both runs of its completion");
@@ -187,14 +189,14 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
     NextBeat();
     Check(Logged(log, "LOBBY lobby-created owner: EOS self (this machine)"), "the owner is logged");
     const FakeRoom hosted(Lobby(), User("self"), "lobby-created");
-    Check(Published(hosted) == std::make_pair(static_cast<std::uint64_t>(kModRoomCapacity), kMirrored),
+    Check(Published(hosted) == std::make_pair(static_cast<std::uint64_t>(kRoomSize), kMirrored),
           "the creator's update keeps the MultiSlot room with the setting OFF since");
     Check(Logged(log, "ROOM UPDATE of lobby lobby-created keeps it a MultiSlot room"), "and says why");
 
     // 2026-10-01: a member that EOS made the owner updated a 12-player room as a normal one. Joined, setting OFF.
     gameResults.clear();
     EnterLobby("lobby-12p", "host");
-    SetMaxMembers(static_cast<std::uint32_t>(kModRoomCapacity));
+    SetMaxMembers(static_cast<std::uint32_t>(kRoomSize));
     SetSearchType(static_cast<std::int64_t>(kMirrored));
     NoteLobbyEntered(Lobby(), User("self"), "lobby-12p", 0);
     Check(!CreatedCurrentLobby() && CurrentLobbyKind() == LobbyKind::Unknown, "a joined lobby is unknown until read");
@@ -206,7 +208,7 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
     NextBeat();
     Check(Logged(log, "LOBBY lobby-12p owner changed: EOS host -> EOS self (this machine is the owner now)"),
           "the owner change is logged");
-    Check(Published(joined) == std::make_pair(static_cast<std::uint64_t>(kModRoomCapacity), kMirrored),
+    Check(Published(joined) == std::make_pair(static_cast<std::uint64_t>(kRoomSize), kMirrored),
           "a member that became the owner keeps the room MultiSlot, whatever its own setting");
     // A normal room stays normal for a member set to ON.
     InitHostMode(nullptr, nullptr, true, VK_F2, 0, L"F2");
@@ -220,9 +222,9 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
     NextBeat();
     Check(Logged(log, "LOBBY lobby-12p: EOS has no copy of this lobby for this machine any more"), "a lost copy is logged");
     // ... but one this machine created keeps what it was created as.
-    NoteLobbyEntered(Lobby(), User("self"), "lobby-12p", static_cast<std::uint32_t>(kModRoomCapacity));
+    NoteLobbyEntered(Lobby(), User("self"), "lobby-12p", static_cast<std::uint32_t>(kRoomSize));
     InitHostMode(nullptr, nullptr, false, VK_F2, 0, L"F2");
-    Check(Published(joined) == std::make_pair(static_cast<std::uint64_t>(kModRoomCapacity), kMirrored),
+    Check(Published(joined) == std::make_pair(static_cast<std::uint64_t>(kRoomSize), kMirrored),
           "an unreadable lobby this machine created keeps its creation");
     Check(Published(FakeRoom(Lobby(), User("self"), "lobby-x")) == std::make_pair(std::uint64_t{4}, std::uint64_t{0x93}),
           "another lobby id is not taken for the one created here");
@@ -297,7 +299,7 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
 
     // Updates and leaves report their results.
     EnterLobby("lobby-last", "self");
-    NoteLobbyEntered(Lobby(), User("self"), "lobby-last", static_cast<std::uint32_t>(kModRoomCapacity));
+    NoteLobbyEntered(Lobby(), User("self"), "lobby-last", static_cast<std::uint32_t>(kRoomSize));
     using ModificationFn = std::int32_t (*)(void*, const UpdateModificationOptions*, void**);
     void* modification = nullptr;
     const UpdateModificationOptions modify{1, User("self"), "lobby-last"};

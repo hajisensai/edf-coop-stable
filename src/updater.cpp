@@ -24,7 +24,7 @@ constexpr const char* kLatestRelease = "https://api.github.com/repos/hajisensai/
 // Every asset must come from here (followed by "<tag>/<name>").
 constexpr const char* kDownloadPrefix = "https://github.com/hajisensai/edf-coop-stable/releases/download/";
 constexpr const char* kReleasePage = "https://github.com/hajisensai/edf-coop-stable/releases";
-// This room size's assets (product.h): an 8-player build never downloads a 12-player one.
+// This build's assets (product.h).
 const std::string kDllAsset = std::string(coop::kVariant) + ".dll";
 const std::string kSigAsset = kDllAsset + ".sig";
 constexpr size_t kMaxJson = 1024 * 1024;
@@ -245,17 +245,23 @@ bool sameGameRunning(DWORD pid) {
     return running;
 }
 
+// The markers a DLL can carry: this build's, then those of the room-size builds up to 2.2.x (product.h), so the
+// version kept for rollback after an update from one of them is named too.
+#define EDF6COOP_LEGACY_PREFIX(n) "EDF6COOP_" #n "P_VERSION=",
+constexpr const char* kMarkerPrefixes[] = {coop::kVersionMarkerPrefix, EDF6COOP_LEGACY_SIZES(EDF6COOP_LEGACY_PREFIX)};
+
 // The version a DLL file says it is ("?" when it does not say).
 std::string fileVersionImpl(const std::wstring& path) {
     std::string data = readFile(path, kMaxDll);
-    // The marker is "EDF6COOP_<n>P_VERSION=x.y.z" and a NUL; the prefix alone also appears in the updater's own code.
-    const std::string prefix = coop::kVersionMarkerPrefix;
-    for (size_t at = data.find(prefix); at != std::string::npos; at = data.find(prefix, at + 1)) {
-        size_t from = at + prefix.size(), end = data.find('\0', from);
-        if (end == std::string::npos || end - from > 20) continue;
-        std::string text = data.substr(from, end - from);
-        Version v = parseVersion(text);
-        if (v.valid() && versionText(v) == text) return text;
+    // A marker is the prefix, x.y.z and a NUL; the prefix alone also appears in the updater's own code.
+    for (const std::string prefix : kMarkerPrefixes) {
+        for (size_t at = data.find(prefix); at != std::string::npos; at = data.find(prefix, at + 1)) {
+            size_t from = at + prefix.size(), end = data.find('\0', from);
+            if (end == std::string::npos || end - from > 20) continue;
+            std::string text = data.substr(from, end - from);
+            Version v = parseVersion(text);
+            if (v.valid() && versionText(v) == text) return text;
+        }
     }
     return "?";
 }

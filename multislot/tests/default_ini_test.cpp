@@ -62,7 +62,8 @@ int main(int argc, char** argv) {
     const auto keys = KeysRead(argv[1]);
     Check(keys.size() >= 10, "the plugin's INI reads are found in its sources");
     // Keys the plugin reads but deliberately leaves out of the default file (documented elsewhere).
-    const std::set<std::pair<std::string, std::string>> optional = {};
+    // [MultiSlot] EightPlayerRooms: a 2.2 INI's setting, read only when RoomSize is absent (plugin.cpp).
+    const std::set<std::pair<std::string, std::string>> optional = {{"MultiSlot", "EightPlayerRooms"}};
     for (const auto& [section, key] : keys) {
         if (optional.count({section, key})) continue;
         const std::wstring wsection(section.begin(), section.end()), wkey(key.begin(), key.end());

@@ -668,9 +668,9 @@ int main(int argc, char** argv) {
             Check(mirrored < 0x6C || mirrored > 0x6F, "MultiSlot 1.1.0-1.1.1 (join check 0x6C..0x6F) refuses it", hook.rva);
             Check(mirrored < 0x64 || mirrored > 0x67, "MultiSlot 1.2.0 (join check 0x64..0x67) refuses it", hook.rva);
             Check(mirrored < 0x5C || mirrored > 0x5F, "MultiSlot 1.2.1-1.2.5 (join check 0x5C..0x5F) refuses it", hook.rva);
-            // A larger room (10 or 12) is a family of its own: the 8-player build (1.2.6+, join check 0x54..0x57,
-            // searches from 0x54 up) neither accepts nor lists it.
-            Check(kMaxPlayers == 8 || mirrored < 0x54, "the 8-player family neither lists nor accepts a larger room", hook.rva);
+            // 2.3.0's family lies below every 2.2 room-size family (8p 0x54.., 10p 0x48.., 12p 0x40.., 16p 0x38..,
+            // 24p 0x28.., 32p 0x20..0x23): none of those builds lists or accepts it, nor it theirs.
+            Check(mirrored < 0x20, "no 2.2 room-size build lists or accepts a 2.3.0 room", hook.rva);
             Check((mirrored < 0x5D || mirrored > 0x93) && (mirrored < 0x5E || mirrored > 0x92) && (mirrored < 0x5C || mirrored > 0x94) &&
                       (mirrored < 0x5F || mirrored > 0x91),
                   "MultiSlot 1.2.1-1.2.5 searches (and earlier ones) do not list it", hook.rva);

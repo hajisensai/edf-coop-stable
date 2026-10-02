@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-**EDF6Coop** makes online co-op in EARTH DEFENSE FORCE 6 (PC / Steam) bigger and steadier: rooms for up to 8, 10, 12, 16, 24 or 32 players (8Player MOD), a direct link between players that survives Epic hiccups, and lost-packet resending. It is one [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) plugin, `EDF6Coop.dll`; it replaces the two earlier plugins EDF6DirectNet and EDF6MultiSlot.
+**EDF6Coop** makes online co-op in EARTH DEFENSE FORCE 6 (PC / Steam) bigger and steadier: rooms for up to 8, 10, 12, 16, 24 or 32 players, picked by the host in the game (Player MOD), a direct link between players that survives Epic hiccups, and lost-packet resending. It is one [EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) plugin, `EDF6Coop.dll`; it replaces the two earlier plugins EDF6DirectNet and EDF6MultiSlot.
 
 Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: **EDF6**. Support for EDF5 and other titles is planned once EDF6 is stable.
 
@@ -12,7 +12,7 @@ Online stability mods for the EARTH DEFENSE FORCE series. Currently supported: *
 
 ## Room sizes and the old plugins
 
-There is one package per room size: **8p, 10p, 12p, 16p, 24p, 32p** (`EDF6Coop-<version>-<N>p.zip`). A room of one size can only be joined with the same size build, so everyone in a room uses the same package; when unsure, use 8p. 8p is played the most, 10p and 12p less. **16p, 24p and 32p are new in 2.0.0 and have only been checked offline with ghost players**, not yet in real online play with that many people. The bigger the room, the more upload bandwidth the host needs: with the direct link every player's data goes through the host.
+There is one package for everyone: `EDF6Coop-<version>.zip`. Every install has memory for 32 players; the **host** picks the room size in the game. On a menu screen outside a room press **F2** (or click the left stick) to cycle OFF -> 8 -> 10 -> 12 -> 16 -> 24 -> 32 -> OFF; the lower left of the menu shows e.g. `F2/LS 12Player MOD :ON` or `F2/LS Player MOD :OFF`. The choice is saved as `RoomSize=` under `[MultiSlot]` in `EDF6Coop.ini` (`0` = normal 4-player room, `5`..`32` = MultiSlot room of that size; an old `EightPlayerRooms=1` is read as `RoomSize=8` and replaced on the next save). OFF creates a normal 4-player room that anyone can join, with or without the mod, and the room list shows normal rooms only. ON creates a MultiSlot room of the chosen size, visible only to EDF6Coop 2.3.0 or newer, and the room list then shows MultiSlot rooms of every size; a guest can join any size, and a room keeps the size it was created with. **16, 24 and 32 players have only been checked offline with ghost players**, not yet in real online play with that many people. The bigger the room, the more upload bandwidth the host needs: with the direct link every player's data goes through the host.
 
 The room part (8Player MOD: more than four players, the room screen, missions, armor copy) was written by **momotori01** as EDF6MultiSlot (public domain, [multislot/LICENSE](multislot/LICENSE)); its history and tests live in [multislot/](multislot/README.md). From 2.0.0 it and EDF6DirectNet are one DLL with one log (`EDF6Coop.log`) and one settings file (`EDF6Coop.ini`). Installing renames an old `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` to `.disabled`; their settings files are kept and their values carried into `EDF6Coop.ini` at the first start.
 
@@ -29,7 +29,7 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 ## Install
 
-1. Download the `EDF6Coop-<version>-<N>p.zip` of your room size (see above) from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
+1. Download `EDF6Coop-<version>.zip` from [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) and **extract the whole archive** to any folder.
 2. Double-click **`INSTALL.bat`**: it finds EDF6 in your Steam library automatically and installs.
    - If EDFModLoader is not present, the bundled loader is installed: [BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10 (MIT) **with a fix for a multithread bug in the official build** (its call forwarders shared one target variable, so a call from several threads at once could jump to the wrong function; details in [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)). An existing `winmm.dll` is never overwritten, with one exception: if it is byte-for-byte the official v1.0.10 file, it is replaced by the fixed build and the original is kept as `winmm.dll.bak-official`. Any other (newer or patched) loader is left alone.
    - If the game cannot be found, you will be asked to paste the game folder (in your Steam library, right-click EDF6 → Manage → Browse local files).
@@ -37,7 +37,7 @@ Everything is on by default (public direct connect has to be enabled manually by
 
 The zip contains README_EDF6Coop.txt (English), README_EDF6Coop_zh.txt (中文) and README_EDF6Coop_ja.txt (日本語); the default settings file is commented in your Windows display language (Chinese / Japanese / otherwise English).
 
-Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6Coop-<N>p.dll` of its own room size and the signed manifest `EDF6Coop-<N>p.dll.sig` and puts the DLL in place as `EDF6Coop.dll`, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
+Upgrade: the plugin updates itself. At game start it asks GitHub for the latest release in the background; when there is a newer one it downloads `EDF6Coop.dll` and the signed manifest `EDF6Coop.dll.sig` and puts the DLL in place as `EDF6Coop.dll`, and it runs from the next game start (the log says `UPDATE installed ...`). Everything else keeps working if GitHub cannot be reached (the request uses the system proxy). Running a newer `INSTALL.bat` still works as before and keeps your settings. What you can rely on:
 
 - **Signed releases.** The manifest (version and SHA-256 of the DLL) is signed with ECDSA P-256 by a key that only the release pipeline holds; the matching public key is built into the plugin. A download is rejected unless the signature verifies, the signed version is the release being installed and newer than the running one, and the DLL has the signed SHA-256 and says it is that version. Files without a valid signature are never installed, and downloads only come from this repository's release URLs. Someone who can alter the release assets or your connection but cannot sign gets nothing installed.
 - **Automatic rollback.** The replaced DLL stays next to the new one as `EDF6Coop.dll.old` until the new version has run for 20 seconds after the game reaches its title screen. If the game crashes or is killed before that, the next start puts the old version back by itself, remembers the failed version (`EDF6Coop.dll.bad`, it is not installed again) and runs that session without the plugin. Quitting the game normally before then is no failure: the new version simply stays on trial at the next start.
@@ -158,34 +158,33 @@ Requires Windows x64, Visual Studio 2022 with *Desktop development with C++* (it
 
 ```powershell
 $env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
-powershell -ExecutionPolicy Bypass -File build.ps1 -Players 8 -Test    # -> multislot\dist\EDF6Coop.dll
-powershell -ExecutionPolicy Bypass -File build.ps1 -Players 12 -Test   # -> multislot\dist-12p\EDF6Coop.dll
-powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> release\EDF6Coop-<version>-8p.zip (+ .sha256)
+powershell -ExecutionPolicy Bypass -File build.ps1 -Test    # -> multislot\dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File package.ps1        # -> release\EDF6Coop-<version>.zip (+ .sha256)
 ```
 
-- `-Players` picks the room size (8, 10, 12, 16, 24, 32); each size is its own build. `-Test` runs the tests (unit tests, loopback multi-node direct-link tests, and the checks of every patch site against the game's `EDF.dll`, which are skipped without the game).
-- The game folder is only read: `Root.cpk` for the menu frame with the "8Player MOD" label (`multislot/tools/make_menu_label.py` writes `multislot/assets/LYT_MAINFRAME.SGO`, which is derived from the game and therefore never committed) , `HUD/ONLINEHUDTEXTURE.RAB` for the per-player HUD colours (`multislot/tools/make_hud_colours.py` writes `multislot/assets/ONLINEHUDTEXTURE.RAB`, also derived and never committed) and `EDF.dll` for the tests.
+- There is one build for all room sizes (the room size is chosen in the game, see above). `-Test` runs the tests (unit tests, loopback multi-node direct-link tests, and the checks of every patch site against the game's `EDF.dll`, which are skipped without the game).
+- The game folder is only read: `Root.cpk` for the menu frame with the "Player MOD" label (`multislot/tools/make_menu_label.py` writes `multislot/assets/LYT_MAINFRAME.SGO`, which is derived from the game and therefore never committed) , `HUD/ONLINEHUDTEXTURE.RAB` for the per-player HUD colours (`multislot/tools/make_hud_colours.py` writes `multislot/assets/ONLINEHUDTEXTURE.RAB`, also derived and never committed) and `EDF.dll` for the tests.
 - `build.ps1` fetches the official EDFModLoader v1.0.10 `winmm.dll` (checked by SHA-256) and builds the race-fixed loader the package ships (`multislot/tools/fix_winmm_proxy.py`).
-- `package.ps1` refuses a build that is not this room size and version, a DLL older than its sources, and a CI build (`build.ps1 -CI` builds without the game's menu and HUD assets and embeds placeholders).
+- `package.ps1` refuses a build that is not this version, a DLL older than its sources, and a CI build (`build.ps1 -CI` builds without the game's menu and HUD assets and embeds placeholders).
 
 ## Release
 
-Release packages need the game's menu asset, which cannot be on a build server, so they are built on a machine with the game; GitHub Actions runs the CI builds and tests (`.github/workflows/ci.yml`, every room size).
+Release packages need the game's menu asset, which cannot be on a build server, so they are built on a machine with the game; GitHub Actions runs the CI builds and tests (`.github/workflows/ci.yml`).
 
 1. Bump the version: `project(EDF6Coop VERSION x.y.z)` in `multislot/CMakeLists.txt` and the first line of the three bundled readmes `dist/README_EDF6Coop*.txt`.
 2. Write the release notes `release-notes/<version>.md` (the body of the Release page and `RELEASE_NOTES_EDF6Coop.md` in the package).
 3. Commit to `main`, tag it and push the tag: `git tag v2.0.0 && git push origin v2.0.0`.
-4. On the machine with the game, at that commit: `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`. For every room size it runs `build.ps1 -Players <N> -Test` and `package.ps1 -Players <N>`, then creates a **draft** Release with `EDF6Coop-<N>p.dll`, `EDF6Coop-<version>-<N>p.zip` and its `.sha256` (without `-Upload` it only stages them in `release\upload-<version>\`). It never signs.
-5. `gh workflow run release.yml -f tag=v2.0.0` (`.github/workflows/release.yml`): checks that the tag is on `main` and matches the version, that every room size is in the draft, that each zip matches its `.sha256` and carries exactly that DLL, and that none is a CI build; signs each DLL with `sign-update.ps1 -Players <N>` (the key is the repository secret `EDF6DN_UPDATE_SIGNING_KEY`, only in a job with a read-only token); uploads `EDF6Coop-<N>p.dll.sig` and `.dll.sha256`; and publishes the Release as latest.
+4. On the machine with the game, at that commit: `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`. It runs `build.ps1 -Test` and `package.ps1`, then creates a **draft** Release with `EDF6Coop.dll`, `EDF6Coop-<version>.zip` and its `.sha256`, plus the same DLL under the six old names `EDF6Coop-<N>p.dll` (8, 10, 12, 16, 24, 32) so that 2.2.x installs of every size can update (without `-Upload` it only stages them in `release\upload-<version>\`). It never signs.
+5. `gh workflow run release.yml -f tag=v2.0.0` (`.github/workflows/release.yml`): checks that the tag is on `main` and matches the version, that the DLL and the zip are in the draft, that each zip matches its `.sha256` and carries exactly that DLL, and that none is a CI build; signs the DLL with `sign-update.ps1` (the key is the repository secret `EDF6DN_UPDATE_SIGNING_KEY`, only in a job with a read-only token); uploads the `.dll.sig` and `.dll.sha256` (also for the old names); and publishes the Release as latest.
 
-The auto-updater of every installed copy downloads `EDF6Coop-<N>p.dll` / `.dll.sig` of its own size from the latest Release, so a Release must carry all six sizes before it is marked latest.
+The auto-updater of every installed copy downloads `EDF6Coop.dll` / `.dll.sig` from the latest Release; 2.2.x copies still ask for `EDF6Coop-<N>p.dll` of their own size, which is why the Release also carries the same DLL under all six old names.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `multislot/src/plugin.cpp` | EDFModLoader entry point: reads `EDF6Coop.ini` (carrying over the old settings files), starts the room part and the direct link |
-| `multislot/src/` | The room part (8Player MOD): patches, room screen, missions, armor copy, menu layout, HUD colours, log |
+| `multislot/src/` | The room part (Player MOD): patches, room screen, missions, armor copy, menu layout, HUD colours, log |
 | `src/config.*` | The direct link's settings and their comments (Chinese / Japanese / English after the Windows display language) |
 | `src/eos_min.h` | The EOS SDK structs in use (from the official 1.15.5 headers; the game uses 1.16.1) |
 | `src/eos_hooks.cpp`, `src/iat.*` | Patches the `EDF.dll` import table to take over EOS P2P / lobby calls |
@@ -193,7 +192,7 @@ The auto-updater of every installed copy downloads `EDF6Coop-<N>p.dll` / `.dll.s
 | `src/lobby_marker.*` | Lobby member attributes: detecting who has the plugin, distributing the host address |
 | `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | Direct-connect transport |
 | `src/netif.*`, `src/upnp.*` | Physical adapter detection, UPnP |
-| `src/updater.*`, `src/product.h` | Signed automatic updates; the room size and version every release carries |
+| `src/updater.*`, `src/product.h` | Signed automatic updates; the version every release carries |
 | `multislot/CMakeLists.txt` | The build and the one version number (`project(EDF6Coop VERSION x.y.z)`) |
 | `multislot/packaging/` | Loader fix and handshake recovery notes shipped in the package |
 | `dist/` | Install scripts and bundled readmes (English / Chinese / Japanese) |

@@ -1,22 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
 # EDF6Coop: the room part (src/ here) and the direct-link part (../src) as one plugin, EDF6Coop.dll.
-project(EDF6Coop VERSION 2.2.0 LANGUAGES CXX)
+project(EDF6Coop VERSION 2.3.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Room size of this build (patches.h): 8 is the distributed build; 10, 12, 16, 24 and 32 are families of their own whose
-# rooms only the same build can join. Every target compiles with the same value, the tests included.
-set(MULTISLOT_MAX_PLAYERS 8 CACHE STRING "Largest room this build supports (8, 10, 12, 16, 24 or 32)")
-set_property(CACHE MULTISLOT_MAX_PLAYERS PROPERTY STRINGS 8 10 12 16 24 32)
-add_compile_definitions(MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
+# One build for every room size since 2.3.0: slots for kMaxPlayers (src/patches.h), the size of a room chosen by its
+# host. The INI template names that number; it is read from patches.h so the two cannot disagree.
+file(READ "${CMAKE_SOURCE_DIR}/src/patches.h" PATCHES_H)
+if(NOT PATCHES_H MATCHES "constexpr int kMaxPlayers = ([0-9]+);")
+    message(FATAL_ERROR "src/patches.h has no `constexpr int kMaxPlayers = N;`")
+endif()
+set(MULTISLOT_MAX_PLAYERS ${CMAKE_MATCH_1})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/patches.h")
 # The version EDFModLoader is told (PluginInfo) and the one kVersion must start with (plugin.cpp) come from here.
 add_compile_definitions(MULTISLOT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MULTISLOT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
                         MULTISLOT_VERSION_PATCH=${PROJECT_VERSION_PATCH})
-if(MULTISLOT_MAX_PLAYERS EQUAL 8)
-    set(MULTISLOT_DIST "${CMAKE_SOURCE_DIR}/dist")
-else()
-    set(MULTISLOT_DIST "${CMAKE_SOURCE_DIR}/dist-${MULTISLOT_MAX_PLAYERS}p")
-endif()
+set(MULTISLOT_DIST "${CMAKE_SOURCE_DIR}/dist")
 # Words the INI template fills in (EDF6MultiSlot.ini): the last player number, and the last ghost count.
 math(EXPR MULTISLOT_MAX_GHOSTS "${MULTISLOT_MAX_PLAYERS} - 1")
 
@@ -35,7 +34,7 @@ set(WARNINGS /W4 /WX /utf-8 /permissive-)
 
 # The default settings the plugin writes when no INI exists come from EDF6MultiSlot.ini itself.
 file(READ "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini" MULTISLOT_DEFAULT_INI)
-# The INI is a template for the room size (@MULTISLOT_MAX_PLAYERS@, @MULTISLOT_MAX_GHOSTS@).
+# The INI is a template for the slot count (@MULTISLOT_MAX_PLAYERS@, @MULTISLOT_MAX_GHOSTS@).
 string(CONFIGURE "${MULTISLOT_DEFAULT_INI}" MULTISLOT_DEFAULT_INI @ONLY)
 configure_file(src/default_ini.h.in "${CMAKE_BINARY_DIR}/generated/default_ini.h" @ONLY)
 # Files the plugin writes under Mods while it is active (src/modfile.h), made from the game's own files and so not
@@ -88,8 +87,7 @@ set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traff
     fake_lobby)
 list(TRANSFORM DIRECTNET_CORE PREPEND "${DIRECTNET_DIR}/")
 list(TRANSFORM DIRECTNET_CORE APPEND ".cpp")
-set(DIRECTNET_DEFINES WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS
-    MULTISLOT_MAX_PLAYERS=${MULTISLOT_MAX_PLAYERS})
+set(DIRECTNET_DEFINES WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS)
 add_library(DirectNetCore STATIC ${DIRECTNET_CORE})
 target_compile_definitions(DirectNetCore PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetCore PRIVATE /W4 /WX /utf-8 /EHsc)
@@ -242,16 +240,12 @@ foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff qui
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 endforeach()
 
-# The direct-link part's own tests (they need no game) and its join probe. The direct-link code is the
-# same in every room size apart from the room size in its version marker, and the suite's signed update
-# fixtures are made over 8-player markers, so it runs in the 8-player build (which CI always builds).
-if(MULTISLOT_MAX_PLAYERS EQUAL 8)
-    add_executable(DirectNetTests "${CMAKE_SOURCE_DIR}/../tests/test_main.cpp")
-    target_compile_definitions(DirectNetTests PRIVATE ${DIRECTNET_DEFINES})
-    target_compile_options(DirectNetTests PRIVATE /W4 /WX /utf-8 /EHsc)
-    target_link_libraries(DirectNetTests PRIVATE DirectNetCore)
-    add_test(NAME DirectNet COMMAND DirectNetTests)
-endif()
+# The direct-link part's own tests (they need no game) and its join probe.
+add_executable(DirectNetTests "${CMAKE_SOURCE_DIR}/../tests/test_main.cpp")
+target_compile_definitions(DirectNetTests PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(DirectNetTests PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(DirectNetTests PRIVATE DirectNetCore)
+add_test(NAME DirectNet COMMAND DirectNetTests)
 add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
 target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)

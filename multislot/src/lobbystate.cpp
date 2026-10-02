@@ -233,6 +233,7 @@ struct Current {
     int capacity = 0;
 } current;
 std::atomic<int> currentKind{static_cast<int>(LobbyKind::Unknown)};
+std::atomic<int> currentCapacity{0};  // current.capacity in a MultiSlot room, else 0 (read without the lock)
 std::atomic<bool> createdCurrent{false};
 
 // The room update's last decision, logged when it changes.
@@ -322,6 +323,8 @@ void Beat() {
     if (kindChanged) {
         current.kind = kind;
         current.capacity = capacity;
+        // Capacity before kind: the menu thread reads the kind first and must not see a MultiSlot room of size 0.
+        currentCapacity.store(kind == LobbyKind::MultiSlot ? capacity : 0);
         currentKind.store(static_cast<int>(kind));
     }
     ReleaseSRWLockExclusive(&current.lock);
@@ -611,6 +614,7 @@ RoomUpdate DecideRoomUpdate(std::uintptr_t room) {
 }
 
 LobbyKind CurrentLobbyKind() { return static_cast<LobbyKind>(currentKind.load()); }
+int CurrentLobbyCapacity() { return currentCapacity.load(); }
 bool CreatedCurrentLobby() { return createdCurrent.load(); }
 
 void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::uint32_t createdCapacity) {
@@ -628,6 +632,7 @@ void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::u
     current.copyLost = false;
     current.kind = kind;
     current.capacity = kind == LobbyKind::MultiSlot ? CapacityToKeep(creation) : kVanillaPlayers;
+    currentCapacity.store(kind == LobbyKind::MultiSlot ? current.capacity : 0);  // before the kind, as above
     currentKind.store(static_cast<int>(kind));
     createdCurrent.store(createdCapacity != 0);
     ReleaseSRWLockExclusive(&current.lock);
@@ -643,6 +648,7 @@ void NoteLobbyLeft() {
     current.copyLost = false;
     current.kind = LobbyKind::Unknown;
     currentKind.store(static_cast<int>(LobbyKind::Unknown));
+    currentCapacity.store(0);
     createdCurrent.store(false);
     ReleaseSRWLockExclusive(&current.lock);
 }

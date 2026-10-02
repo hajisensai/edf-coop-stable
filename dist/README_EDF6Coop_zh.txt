@@ -1,14 +1,14 @@
-EDF6Coop 2.2.0 - 地球防卫军6 联机扩容 + 稳定插件
+EDF6Coop 2.3.0 - 地球防卫军6 联机扩容 + 稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 日本語: README_EDF6Coop_ja.txt
 遇到问题请提 Issue，并附上 Mods\Plugins\EDF6Coop.log。
 
 EDF6Coop 是一个 EDFModLoader 插件（Mods\Plugins\EDF6Coop.dll），把原来的 EDF6DirectNet 和
 EDF6MultiSlot 合成了一个 DLL、一份日志、一个设置文件：
-- 超过 4 人的房间（8Player MOD）和对应的任务；
+- 超过 4 人的房间（Player MOD，8 到 32 人由房主选）和对应的任务；
 - 玩家之间的直连，Epic 服务抽风时房间不散；
 - 丢包自动重发，短时间断线不被踢。
-不开 8Player MOD、不配直连时，玩法和原版完全一样，也能和没装 MOD 的人一起玩。
+Player MOD 为 OFF、不配直连时，玩法和原版完全一样，也能和没装 MOD 的人一起玩。
 
 [从 EDF6DirectNet / EDF6MultiSlot 升级]
 什么都不用手动做。INSTALL.bat（或第一次启动游戏时）会把 Mods\Plugins 里的 EDF6DirectNet.dll 和
@@ -17,10 +17,12 @@ EDF6MultiSlot.dll 改名为 .disabled，加载器就不再加载它们。旧的�
 （"is no longer a setting"）。
 想退回旧版：删掉 EDF6Coop.dll，再把旧 DLL 名字末尾的 ".disabled" 去掉即可。
 
-[房间人数：8p、10p、12p、16p、24p、32p]
-每种人数一个安装包（EDF6Coop-2.2.0-8p.zip 等）。某个人数的房间只有同人数版本才能加入：同一个房间里
-所有人必须用同一个包。拿不准就用 8p。
-8p 实际玩得最多；10p、12p 玩得少一些；16p、24p、32p 是 2.0.0 新增的，目前只用离线幽灵队员验证过，
+[房间人数：房主在游戏里选]
+从 2.3.0 起只有一个安装包（EDF6Coop-2.3.0.zip），所有人都装它。房间人数由建房的人在菜单里选
+（8、10、12、16、24、32，见下面的「大房间」），加入的人不用管：装了 2.3.0 的人能进任何人数的房间。
+2.3.0 和 2.2.x（任何人数的旧包）互相看不到、进不了对方的大房间，请大家都更新到 2.3.0
+（开着自动更新的话，启动一次游戏就会更新）。普通 4 人房照旧谁都能进。
+8 人实际玩得最多；10、12 人玩得少一些；16、24、32 人目前只用离线幽灵队员验证过，
 还没有真的那么多人联机测试过。
 房间越大，房主需要的上传带宽越大：开了直连时所有玩家的数据都经过房主转发。
 
@@ -35,10 +37,12 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 它会删除 EDF6Coop 的文件、设置、日志、自动更新的残留和它建立的 UPnP 映射；EDFModLoader、其他 MOD、
 以及你旧的 EDF6DirectNet / EDF6MultiSlot 设置文件都不会动。
 
-[大房间（8Player MOD）]
-- 在房间外的菜单按 F2 或按下左摇杆切换「8Player MOD」（显示在菜单左下角）。
-  OFF（默认）：建的是谁都能进的普通 4 人房；搜房两种房间都显示。
-  ON：建的是最多可容纳本版本人数、只有装了同版本 EDF6Coop 的人才能看到的房间；搜房只显示这种房间。
+[大房间（Player MOD）]
+- 在房间外的菜单按 F2 或按下左摇杆切换房间人数，依次是 OFF → 8 → 10 → 12 → 16 → 24 → 32 → OFF，
+  显示在菜单左下角（例如「F2/LS 12Player MOD :ON」）。选择保存在 EDF6Coop.ini 的 [MultiSlot] RoomSize。
+  OFF（默认）：建的是谁都能进的普通 4 人房；搜房只显示普通房间（要找大房间先切到 ON，选几人都行）。
+  ON：建的是你选的人数的房间，只有装了 EDF6Coop 2.3.0 及以上的人才能看到；搜房显示所有人数的这种房间。
+  房间建好后人数不变；在房间里时菜单显示的是这个房间的人数。
 - 在房间里按 F3 / Tab / 右摇杆按下 切换队员页（每页 4 人）。
 - 在房间里按 F4 / 左摇杆按下 开关「copy armor」：仅在任务中把你的护甲提到房间里其他人中最低的那位
   （优先同兵种）。给新手用，不写存档。
@@ -48,7 +52,7 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 - 任务里每个玩家在 HUD 上都有自己的颜色：状态灯、聊天气泡、雷达标记。1-4 号保持游戏原来的黄、绿、蓝、红，
   5-8 号是橙、粉、紫、青，以此类推直到 32 人。为此 MOD 会写出 Mods\HUD\ONLINEHUDTEXTURE.RAB（游戏自己的
   HUD 贴图加上新的灯和气泡）。如果那里已经有别的 MOD 的文件，则不动它，5 号以后的玩家沿用 1-4 号的颜色。
-- 按键在 ini 的 [RoomScreen] / [CopyArmor] 里改。F2 专用于 8Player MOD。
+- 按键在 ini 的 [RoomScreen] / [CopyArmor] 里改。F2 专用于 Player MOD。
 
 [直连（可选，只有房主需要设置）]
 进你房间的玩家会直接连到你。ini 里的注释（按 Windows 显示语言：中文 / 日文 / 英文）解释了每个设置。
@@ -65,7 +69,7 @@ Key= 是可选的共享密钥：房主设了，所有加入者必须填一样的
 房主重进，不经过 Epic。Epic 正常时一切照旧。被房主踢出、房间关闭或进了别的房间后就不再显示。房主和你都要是 2.2.0 及以上。
 
 [自动更新]
-游戏启动时 EDF6Coop 会从 GitHub 获取同人数的新版本，下次启动生效。
+游戏启动时 EDF6Coop 会从 GitHub 获取新版本，下次启动生效（2.2.x 的各人数版本也会更新到同一个 2.3.0）。
 发布文件有签名（ECDSA P-256），签名不对的文件绝不安装。新版本如果在进入标题画面后 20 秒内崩溃，会自动回滚。
 关闭下载：在 EDF6Coop.ini 设 [Update] AutoUpdate=0。
 

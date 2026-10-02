@@ -52,8 +52,6 @@ namespace {
 #define EDF6COOP_VERSION_TEXT \
     EDF6COOP_TEXT(MULTISLOT_VERSION_MAJOR) "." EDF6COOP_TEXT(MULTISLOT_VERSION_MINOR) "." EDF6COOP_TEXT(MULTISLOT_VERSION_PATCH)
 constexpr const char* kVersion = EDF6COOP_VERSION_TEXT;
-// Which room-size build this is (patches.h).
-constexpr const char* kRoomTag = "-" EDF6COOP_TEXT(MULTISLOT_MAX_PLAYERS) "p";
 HMODULE self = nullptr;
 
 // out: MAX_PATH characters. Refuses paths too long to also hold the rotated log name (log.cpp), instead of
@@ -348,8 +346,8 @@ bool KeepModFile(const ModFile& file, bool active, const char* area, const char*
 
 bool KeepMenuLayout(bool active) {
     char contents[64]{}, without[64]{};
-    _snprintf_s(contents, _TRUNCATE, "the menu layout plus the %dPlayer MOD label", kModRoomCapacity);
-    _snprintf_s(without, _TRUNCATE, "the %dPlayer MOD label is not shown (F2 still works)", kModRoomCapacity);
+    _snprintf_s(contents, _TRUNCATE, "the menu layout plus the Player MOD label");
+    _snprintf_s(without, _TRUNCATE, "the Player MOD label is not shown (F2 still works)");
     return KeepModFile(MenuLayoutFile(), active, "Menu", contents, without);
 }
 
@@ -376,12 +374,28 @@ bool ReadsSplitSync(const void* remote) {
     return dn::readsSplitSyncDirectly(remote) || multislot::PeerReadsSplitSync(remote);
 }
 
-// The room part: rooms of up to MULTISLOT_MAX_PLAYERS, the missions and room screen for them, and the crash log.
+// [MultiSlot] RoomSize, the size of the rooms this machine hosts (hostmode.h). An INI from 2.2 or earlier has
+// EightPlayerRooms instead, whose ON meant its build's size; the INI does not say which build that was, and eight
+// is the one most played, so ON becomes eight (F2 reaches the others).
+int ReadRoomSize(const wchar_t* iniPath) {
+    using namespace multislot;
+    const int size = static_cast<int>(GetPrivateProfileIntW(L"MultiSlot", L"RoomSize", static_cast<UINT>(-1), iniPath));
+    if (size == -1) {
+        if (GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", 0, iniPath) == 0) return 0;
+        Log("[MultiSlot] EightPlayerRooms=1 from an earlier version: rooms you host are for 8 players (F2 switches)");
+        return 8;
+    }
+    if (ValidRoomSize(size)) return size;
+    Log("[MultiSlot] RoomSize=%d is not 0, 8, 10, 12, 16, 24 or 32; hosting normal rooms", size);
+    return 0;
+}
+
+// The room part: rooms of up to kMaxPlayers, the missions and room screen for them, and the crash log.
 // Returns whether it runs; when it does not, it has changed nothing and started nothing.
 bool LoadRooms(const wchar_t* iniPath) {
     using namespace multislot;
     const bool enabled = GetPrivateProfileIntW(L"MultiSlot", L"Enabled", 1, iniPath) != 0;
-    const bool eightPlayers = GetPrivateProfileIntW(L"MultiSlot", L"EightPlayerRooms", 0, iniPath) != 0;
+    const int roomSize = ReadRoomSize(iniPath);
     const bool crashLog = GetPrivateProfileIntW(L"MultiSlot", L"CrashLog", 1, iniPath) != 0;
     // The room part's only contact outside the game: one read of the VR mod's release page,
     // so the menu can say when a newer package exists. Nothing is downloaded (updatecheck.h).
@@ -410,8 +424,8 @@ bool LoadRooms(const wchar_t* iniPath) {
         return false;
     }
     if (IniText(iniPath, L"MultiSlot", L"MaxPlayers", L"").size())
-        Log("[MultiSlot] MaxPlayers is no longer used: the %dPlayer MOD setting is switched on a menu screen "
-            "outside a room ([MultiSlot] Key and PadButton)", kModRoomCapacity);
+        Log("[MultiSlot] MaxPlayers is no longer used: the Player MOD setting is switched on a menu screen "
+            "outside a room ([MultiSlot] Key and PadButton)");
     RoomViewSettings roomView = ReadRoomView(iniPath);
     const bool mission = GetPrivateProfileIntW(L"Mission", L"Extend", 1, iniPath) != 0;
     int ghosts = static_cast<int>(GetPrivateProfileIntW(L"Test", L"GhostPlayers", 0, iniPath));
@@ -462,7 +476,7 @@ bool LoadRooms(const wchar_t* iniPath) {
         if (vk < 0) Log("[CopyArmor] Key=%ls is not a known key; using F4", text.c_str());
         copyArmorKey = vk < 0 ? VK_F4 : vk;
         if (copyArmorKey == hostModeKey) {
-            Log("[CopyArmor] Key may not be the %dPlayer MOD key; using F4", kModRoomCapacity);
+            Log("[CopyArmor] Key may not be the Player MOD key; using F4");
             copyArmorKey = copyArmorKey == VK_F4 ? 0 : VK_F4;
         }
         for (const int page : roomView.pageKeys)
@@ -542,7 +556,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitFinalHello(base);
     InitPeerTimeout(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
-    InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
+    InitHostMode(base, iniPath, roomSize, hostModeKey, hostModePad, hostModeHint);
     // The HUD archive goes in first: the HUD is patched for its lamps and balloons only when it is ours. Before the
     // game loads it, so a mission never meets patches without their textures. Without Extend the HUD is the game's.
     const bool hudColours = KeepHudArchive(mission);
@@ -552,13 +566,19 @@ bool LoadRooms(const wchar_t* iniPath) {
         return false;
     }
     KeepMenuLayout(true);
-    Log("Joining: normal rooms and MultiSlot rooms are both listed and joinable");
+    Log("Joining: normal rooms and MultiSlot rooms of every size from EDF6Coop 2.3.0 on are joinable (OFF lists the "
+        "normal ones, ON the MultiSlot ones)");
     Log("Rooms: %d user slots, packet sessions and voice chat HUD records (P2P links to every member of a %d-player "
         "room; 4 or fewer: the extra ones stay empty)", kMaxPlayers, kMaxPlayers);
-    Log("Hosting: %dPlayer MOD %s (%ls on a menu screen outside a room; inside one those page through the "
-        "members instead): OFF = normal 4-player rooms anyone can join, ON = MultiSlot rooms for %d players, "
+    char hosting[32]{};
+    if (roomSize)
+        _snprintf_s(hosting, _TRUNCATE, "%dPlayer MOD ON", roomSize);
+    else
+        _snprintf_s(hosting, _TRUNCATE, "Player MOD OFF");
+    Log("Hosting: %s (%ls on a menu screen outside a room steps OFF/8/10/12/16/24/32; inside one those page through "
+        "the members instead): OFF = normal 4-player rooms anyone can join, N = MultiSlot rooms for N players, "
         "hidden from players without this mod",
-        kModRoomCapacity, eightPlayers ? "ON" : "OFF", hostModeHint, kModRoomCapacity);
+        hosting, hostModeHint);
     if (copyArmorKey || copyArmorPad)
         Log("Copy armor: %ls in a room follows the lowest armor in it that is more than %d from yours (your own "
             "class if anyone else plays it, otherwise the room), up to %d/%d/%d/%d for Ranger/Wing Diver/Air "
@@ -677,9 +697,13 @@ bool LoadRooms(const wchar_t* iniPath) {
 }  // namespace
 
 
-// The version as the updater checks it inside a downloaded file (exported, so the linker keeps it). It names
-// the room size too (product.h), so a download of another size is refused. package.ps1 checks it.
+// The version as the updater checks it inside a downloaded file (exported, so the linker keeps it).
+// package.ps1 and sign-update.ps1 check it.
 extern "C" __declspec(dllexport) const char EDF6CoopVersion[] = EDF6COOP_MARKER_PREFIX EDF6COOP_VERSION_TEXT;
+// And as each 2.2.x updater checks it, one per room size it was built for (product.h), each followed by a NUL,
+// so every earlier install updates to this build.
+#define EDF6COOP_LEGACY_MARKER(n) "EDF6COOP_" #n "P_VERSION=" EDF6COOP_VERSION_TEXT "\0"
+extern "C" __declspec(dllexport) const char EDF6CoopLegacyVersions[] = EDF6COOP_LEGACY_SIZES(EDF6COOP_LEGACY_MARKER);
 
 namespace {
 
@@ -702,7 +726,7 @@ bool LoadCoop(PluginInfo* info) {
     info->name = "EDF6Coop";
     info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
 
-    Log("==== EDF6Coop %s%s ====", kVersion, kRoomTag);
+    Log("==== EDF6Coop %s ====", kVersion);
     const auto loader = GetModuleHandleW(L"winmm.dll");
     for (const auto name : {"timeBeginPeriod", "timeEndPeriod", "PlaySoundW"})
         Log("LOADER %s proxy=%s", name, LoaderProxyStyle(loader ? reinterpret_cast<const void*>(GetProcAddress(loader, name)) : nullptr));

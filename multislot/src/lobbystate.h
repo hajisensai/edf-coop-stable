@@ -35,7 +35,7 @@ struct LobbyFacts {
 // SEARCH_TYPE decides: this build's mirrored family is MultiSlot, 0x90..0x9F normal. Without one (a lobby just
 // created, before its first update) MaxMembers above four is MultiSlot.
 LobbyKind KindOf(const LobbyFacts& facts);
-// The capacity an update keeps in a MultiSlot lobby: its own MaxMembers, at most this build's room size.
+// The capacity an update keeps in a MultiSlot lobby: its own MaxMembers, at most kMaxPlayers.
 int CapacityToKeep(const LobbyFacts& facts);
 
 // What the room update (749AD0, the room object in r13) publishes.
@@ -49,6 +49,8 @@ RoomUpdate DecideRoomUpdate(std::uintptr_t room);
 
 // The lobby the game is in now (read once a second), for the menu label: Unknown outside a lobby and until read.
 LobbyKind CurrentLobbyKind();
+// Its size while it is a MultiSlot room (the lobby's MaxMembers), 0 otherwise.
+int CurrentLobbyCapacity();
 // This machine created the lobby the game is in now (the game's IsRoomHost can turn false while it stays in it).
 bool CreatedCurrentLobby();
 

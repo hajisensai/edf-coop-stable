@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 
 #include "midhook.h"
 #include "patches.h"
@@ -8,36 +9,48 @@
 
 namespace multislot {
 
-// "<n>Player MOD" (n = kModRoomCapacity): what kind of room you create as host.
-//   OFF (default) - a normal 4-player room anyone can find and join, exactly as without the mod.
-//   ON            - a MultiSlot room for kMaxPlayers that only players with this mod can find and join,
-//                   and the room search lists MultiSlot rooms only (invitations still reach any room).
-// F2 switches it on menu screens outside a room (saved to the INI). A room keeps the setting it was
-// created with for as long as it exists. The menu frame (UI/LYT_MAINFRAME.SGO, which the plugin writes to
-// Mods\UI with an extra text field MSLabel, modfile.h) shows the label in its lower left corner. The
-// main script plays that frame on the HQ, lobby and room screens but not in missions, so the label is gone
-// once a mission starts. In a room it shows the room's setting to its host and, as a control guide, which
-// keys switch the member page (see ComposeLabel).
-constexpr int kModRoomCapacity = kMaxPlayers;
+// "<n>Player MOD": what kind of room you create as host.
+//   OFF (0, default) - a normal 4-player room anyone can find and join, exactly as without the mod; the room
+//                      search lists normal rooms only, as the game asks.
+//   n (5..32)        - a MultiSlot room for n players that only players with this mod can find and join; the
+//                      room search lists MultiSlot rooms only, of every size (invitations still reach any room).
+// Every machine has slots for kMaxPlayers, so the size is the host's alone: it goes into the lobby's
+// MaxMembers, which every member follows (lobbystate.h). F2 steps through kRoomSizes and OFF on menu screens
+// outside a room (saved to the INI as RoomSize). A room keeps the size it was created with for as long as it
+// exists. The menu frame (UI/LYT_MAINFRAME.SGO, which the plugin writes to Mods\UI with an extra text field
+// MSLabel, modfile.h) shows the label in its lower left corner. The main script plays that frame on the HQ,
+// lobby and room screens but not in missions, so the label is gone once a mission starts. In a room it shows
+// the room's size to its host and, as a control guide, which keys switch the member page (see ComposeLabel).
+constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32};
+static_assert(kRoomSizes[std::size(kRoomSizes) - 1] == kMaxPlayers, "F2 must reach the largest room");
+// A size the INI may hold: 0 (OFF) or kVanillaPlayers+1..kMaxPlayers.
+constexpr bool ValidRoomSize(int size) {
+    for (int step : kRoomSizes)
+        if (step == size) return true;
+    return size == 0;
+}
+// What F2 switches to: the next of kRoomSizes above `size`, OFF after the largest.
+constexpr int NextRoomSize(int size) {
+    for (int step : kRoomSizes)
+        if (step > size) return step;
+    return 0;
+}
 
 // The SEARCH_TYPE range (high << 32 | low) the room list asks for, for a room kind whose vanilla range is
-// [0x91, high]. ON: this build's MultiSlot rooms only, [mirror(high), mirror(0x91)]. OFF in the 8-player build:
-// normal and MultiSlot rooms, [mirror(high), high]. OFF in a 10- or 12-player build: normal rooms only, as the
-// game asks: its family lies below 0x54, so a range reaching down to it would also list every 8-player room
-// (0x54..0x57), which that build's join check refuses.
-constexpr bool kModOffListsModRooms = kMaxPlayers == 8;
+// [0x91, high]. ON: MultiSlot rooms of every size, [mirror(high), mirror(0x91)]. OFF: normal rooms only, as
+// the game asks.
 constexpr std::uint64_t SearchTypeRange(std::uint32_t high, bool on) {
-    const std::uint64_t mirrorHigh = 2 * kSearchTypeCenter - high;
     const std::uint64_t top = on ? 2 * kSearchTypeCenter - 0x91 : high;
-    const std::uint64_t bottom = on || kModOffListsModRooms ? mirrorHigh : 0x91;
+    const std::uint64_t bottom = on ? 2 * kSearchTypeCenter - high : 0x91;
     return (top << 32) | bottom;
 }
 
 // iniPath may be null (nothing is saved). `key` and `padButton` switch the setting, which only happens
 // outside a room; `hint` is what the label calls them ("F2/LS").
-void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, bool eightPlayers, int key,
-                  std::uint32_t padButton, const wchar_t* hint);
-bool EightPlayerRooms();
+void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, int roomSize, int key, std::uint32_t padButton,
+                  const wchar_t* hint);
+// The size rooms created now get, 0 when OFF.
+int HostRoomSize();
 
 // Mid-function hooks for HostModeHooks() in patches.h, by site RVA.
 MidHandler HostModeHookHandler(std::uint32_t rva);
@@ -62,19 +75,21 @@ struct MenuContext {
     int copyArmorTo;               // the armor copy armor is giving this player, 0 when it is giving none
     bool copyArmorAtMax;           // and that armor is this class's ceiling, not what was found in the room
     int roomMode = -1;             // the room's kind as its lobby says (LobbyKind: 1 MultiSlot, 0 normal), -1 unknown
+    int roomCapacity = 0;          // and in a MultiSlot room its size (the lobby's MaxMembers)
 };
 // Long enough for the fullest line a room can show: the room's setting, the page guide and copy armor.
 constexpr std::size_t kLabelChars = 96;
-// Only what the player can do where they are. Outside a room: "F2/LS 8Player MOD :ON" / ":OFF", the setting for
-// the rooms they create, which is the one thing there is to do there. In a room: the host also sees that room's
-// own setting ("8Player MOD :ON"), which nothing can change now but nothing else reports; then the page guide
-// "F3/Tab/RS: Members 5-8" (the page those inputs switch to) while more than four members are shown, and always
-// in a MultiSlot room this player hosts; then "F4/LS copy armor :ON" / ":OFF". Nothing to show is a single space.
-// roomEightPlayers: the setting this machine created its last room with, shown while context.roomMode is -1.
-std::size_t ComposeLabel(const MenuContext& context, bool eightPlayers, bool roomEightPlayers, wchar_t* out,
-                         std::size_t outChars);
-// One menu frame update: the 8Player MOD input edge (down), then the label.
+// Only what the player can do where they are. Outside a room: "F2/LS 12Player MOD :ON" / "F2/LS Player MOD :OFF",
+// the setting for the rooms they create, which is the one thing there is to do there. In a room: the host also
+// sees that room's own size ("12Player MOD :ON"), which nothing can change now but nothing else reports; then the
+// page guide "F3/Tab/RS: Members 5-8" (the page those inputs switch to) while more than four members are shown, and
+// always in a MultiSlot room this player hosts; then "F4/LS copy armor :ON" / ":OFF". Nothing to show is a single
+// space. roomSize: the setting (0 OFF); createdSize: the size this machine created its last room with (0 normal),
+// shown while context.roomMode is -1.
+std::size_t ComposeLabel(const MenuContext& context, int roomSize, int createdSize, wchar_t* out, std::size_t outChars);
+// One menu frame update: the Player MOD input edge (down), then the label.
 void UpdateMenuFrame(void* frame, bool down, const MenuContext& context);
-bool RoomCreatedWithEightPlayers();
+// The size this machine created its last room with, 0 for a normal room.
+int CreatedRoomSize();
 
 }  // namespace multislot

@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md) | **日本語**
 
-**EDF6Coop** は EARTH DEFENSE FORCE 6（PC / Steam）のオンライン協力プレイを大人数・安定にします：最大 8・10・12・16・24・32 人の部屋（8Player MOD）、Epic が不安定でも切れないプレイヤー間の直結、失われたパケットの再送。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグイン `EDF6Coop.dll` 1つで、これまでの EDF6DirectNet と EDF6MultiSlot の2つを置き換えます。
+**EDF6Coop** は EARTH DEFENSE FORCE 6（PC / Steam）のオンライン協力プレイを大人数・安定にします：最大 8・10・12・16・24・32 人の部屋（人数はホストがゲーム内で選択、Player MOD）、Epic が不安定でも切れないプレイヤー間の直結、失われたパケットの再送。[EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) のプラグイン `EDF6Coop.dll` 1つで、これまでの EDF6DirectNet と EDF6MultiSlot の2つを置き換えます。
 
 地球防衛軍シリーズ向けのオンライン安定化 Mod です。現在の対応作品：**EDF6**。EDF6 が安定したら EDF5 などほかの作品にも対応する予定です。
 
@@ -12,7 +12,7 @@
 
 ## 部屋の人数と古いプラグイン
 
-部屋の人数ごとにパッケージがあります：**8p・10p・12p・16p・24p・32p**（`EDF6Coop-<バージョン>-<N>p.zip`）。ある人数の部屋には同じ人数の版でしか入れないので、同じ部屋の全員が同じパッケージを使います。迷ったら 8p です。いちばん遊ばれているのは 8p、10p と 12p はそれより少なめです。**16p・24p・32p は 2.0.0 で追加したもので、今のところオフラインのゴースト隊員でしか確認していません**（実際にその人数でのオンラインはまだ試していません）。部屋が大きいほどホストに必要な上り回線が増えます。直結では全員のデータがホストを通るためです。
+パッケージは全員共通の `EDF6Coop-<バージョン>.zip` ひとつです。どの環境にも 32 人分のメモリがあり、部屋の人数は**ホスト**がゲーム内で選びます。部屋の外のメニュー画面で **F2**（または左スティック押し込み）を押すと、OFF → 8 → 10 → 12 → 16 → 24 → 32 → OFF と切り替わり、メニュー左下に `F2/LS 12Player MOD :ON` や `F2/LS Player MOD :OFF` と表示されます。選択は `EDF6Coop.ini` の `[MultiSlot]` の `RoomSize=` に保存されます（`0` = 通常の 4 人部屋、`5`～`32` = その人数の MultiSlot 部屋。古い `EightPlayerRooms=1` は `RoomSize=8` として読み込まれ、次の保存で置き換わります）。OFF は誰でも入れる通常の 4 人部屋を作り、部屋一覧には通常の部屋だけが出ます。ON は選んだ人数の MultiSlot 部屋を作り、EDF6Coop 2.3.0 以降にしか見えず、部屋一覧にはすべての人数の MultiSlot 部屋が出ます。ゲストはどの人数の部屋にも入れ、部屋は作成時の人数のままです。**16・24・32 人は今のところオフラインのゴースト隊員でしか確認していません**（実際にその人数でのオンラインはまだ試していません）。部屋が大きいほどホストに必要な上り回線が増えます。直結では全員のデータがホストを通るためです。
 
 部屋の部分（8Player MOD：5人以上、部屋画面、ミッション、アーマーコピー）は **momotori01** さんが EDF6MultiSlot として書いたものです（パブリックドメイン、[multislot/LICENSE](multislot/LICENSE)）。履歴とテストは [multislot/](multislot/README.md) にあります。2.0.0 から EDF6DirectNet と DLL 1つ・ログ1つ（`EDF6Coop.log`）・設定ファイル1つ（`EDF6Coop.ini`）にまとまりました。インストール時に古い `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` は `.disabled` に改名されます。古い設定ファイルは残り、初回起動時にその値が `EDF6Coop.ini` に引き継がれます。
 
@@ -29,7 +29,7 @@
 
 ## インストール
 
-1. [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) から部屋の人数に合った `EDF6Coop-<バージョン>-<N>p.zip`（上記参照）をダウンロードし、任意のフォルダに**すべて展開**します。
+1. [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) から `EDF6Coop-<バージョン>.zip` をダウンロードし、任意のフォルダに**すべて展開**します。
 2. **`INSTALL.bat`** をダブルクリック：Steam ライブラリから EDF6 を自動で見つけてインストールします。
    - EDFModLoader が入っていない場合は同梱のローダーを導入します：[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10（MIT）に、**公式版のマルチスレッドの不具合の修正**を入れたものです（関数の転送口が同じ呼び出し先変数を共有していたため、複数スレッドが同時に呼ぶと別の関数へ飛ぶことがありました。詳細は [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)）。既存の `winmm.dll` は上書きしませんが、公式 v1.0.10 とバイト単位で完全に同じ場合だけは例外で、修正版に置き換え、元のファイルを `winmm.dll.bak-official` として残します。それ以外のローダー（新しい版やパッチ済みのもの）には手を付けません。
    - ゲームが見つからない場合はゲームフォルダのパスを貼り付けるよう求められます（Steam ライブラリで EDF6 を右クリック → 管理 → ローカルファイルを閲覧）。
@@ -37,7 +37,7 @@
 
 zip には README_EDF6Coop.txt（English）、README_EDF6Coop_zh.txt（中文）、README_EDF6Coop_ja.txt（日本語）が含まれ、デフォルトの設定ファイルのコメントは Windows の表示言語（中国語 / 日本語 / それ以外は英語）で書かれます。
 
-アップデート：プラグインは自動で更新されます。ゲーム起動時に裏で GitHub の最新リリースを確認し、新しい版があれば同じ人数の `EDF6Coop-<N>p.dll` と署名付きマニフェスト `EDF6Coop-<N>p.dll.sig` をダウンロードして DLL（`EDF6Coop.dll`）を置き換え、次回の起動から有効になります（ログに `UPDATE installed ...` と出ます）。GitHub に接続できなくてもゲームには影響しません（通信はシステムのプロキシ設定に従います）。新しい版の `INSTALL.bat` を手動で実行する方法も従来どおり使え、設定は保持されます。守られること：
+アップデート：プラグインは自動で更新されます。ゲーム起動時に裏で GitHub の最新リリースを確認し、新しい版があれば`EDF6Coop.dll` と署名付きマニフェスト `EDF6Coop.dll.sig` をダウンロードして DLL（`EDF6Coop.dll`）を置き換え、次回の起動から有効になります（ログに `UPDATE installed ...` と出ます）。GitHub に接続できなくてもゲームには影響しません（通信はシステムのプロキシ設定に従います）。新しい版の `INSTALL.bat` を手動で実行する方法も従来どおり使え、設定は保持されます。守られること：
 
 - **リリースは署名されています。** マニフェスト（版番号と DLL の SHA-256）は ECDSA P-256 で署名され、秘密鍵はリリースのパイプラインだけが持ちます。対応する公開鍵はプラグインに組み込まれています。署名が正しく、署名された版番号がインストール中のリリースと一致して実行中の版より新しく、DLL の SHA-256 が署名と一致して中の版番号も合っている場合だけインストールされます。有効な署名のないファイルは入れず、ダウンロードもこのリポジトリのリリース URL からだけです。リリースのファイルや通信を書き換えられても、署名できない相手には何もインストールさせられません。
 - **自動ロールバック。** 置き換えられた DLL は、ゲームがタイトル画面に達してから新しい版が 20 秒間動作するまで `EDF6Coop.dll.old` として隣に残ります。その前にゲームが落ちたり強制終了されたりした場合、次回の起動で自動的に古い版へ戻し、失敗した版を記録して（`EDF6Coop.dll.bad`、再インストールしません）、そのセッションはプラグインなしで動きます。それまでにゲームを普通に終了するのは失敗ではありません。次回の起動でも新しい版のお試しが続きます。
@@ -158,34 +158,33 @@ EDF6 は受信した EOS パケットをすべてゲームデータとして解�
 
 ```powershell
 $env:EDF6_GAME_DIR = 'C:\Program Files (x86)\Steam\steamapps\common\EARTH DEFENSE FORCE 6'
-powershell -ExecutionPolicy Bypass -File build.ps1 -Players 8 -Test    # -> multislot\dist\EDF6Coop.dll
-powershell -ExecutionPolicy Bypass -File build.ps1 -Players 12 -Test   # -> multislot\dist-12p\EDF6Coop.dll
-powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> release\EDF6Coop-<version>-8p.zip (+ .sha256)
+powershell -ExecutionPolicy Bypass -File build.ps1 -Test    # -> multislot\dist\EDF6Coop.dll
+powershell -ExecutionPolicy Bypass -File package.ps1        # -> release\EDF6Coop-<version>.zip (+ .sha256)
 ```
 
-- `-Players` で部屋の人数（8・10・12・16・24・32）を選びます。人数ごとに別のビルドです。`-Test` でテストを実行します（ユニットテスト、ループバックの複数ノード直結テスト、全パッチ箇所をゲームの `EDF.dll` と照合するテスト。ゲームがなければ照合はスキップ）。
-- ゲームフォルダは読むだけです：`Root.cpk` から「8Player MOD」表示付きのメニュー枠を作り（`multislot/tools/make_menu_label.py` が `multislot/assets/LYT_MAINFRAME.SGO` を書きます。ゲーム由来なのでコミットしません）、`HUD/ONLINEHUDTEXTURE.RAB` からプレイヤーごとの色の HUD テクスチャを作り（`multislot/tools/make_hud_colours.py` が `multislot/assets/ONLINEHUDTEXTURE.RAB` を書きます。これもコミットしません）、`EDF.dll` はテストに使います。
+- ビルドはすべての人数で共通のひとつです（部屋の人数はゲーム内で選びます。上記参照）。`-Test` でテストを実行します（ユニットテスト、ループバックの複数ノード直結テスト、全パッチ箇所をゲームの `EDF.dll` と照合するテスト。ゲームがなければ照合はスキップ）。
+- ゲームフォルダは読むだけです：`Root.cpk` から「Player MOD」表示付きのメニュー枠を作り（`multislot/tools/make_menu_label.py` が `multislot/assets/LYT_MAINFRAME.SGO` を書きます。ゲーム由来なのでコミットしません）、`HUD/ONLINEHUDTEXTURE.RAB` からプレイヤーごとの色の HUD テクスチャを作り（`multislot/tools/make_hud_colours.py` が `multislot/assets/ONLINEHUDTEXTURE.RAB` を書きます。これもコミットしません）、`EDF.dll` はテストに使います。
 - `build.ps1` は公式 EDFModLoader v1.0.10 の `winmm.dll` を取得し（SHA-256 で確認）、パッケージに入れる修正版ローダーを作ります（`multislot/tools/fix_winmm_proxy.py`）。
-- `package.ps1` は人数やバージョンの合わないビルド、ソースより古い DLL、CI ビルド（`build.ps1 -CI` はゲームのメニューと HUD の素材なしでビルドし、仮のデータを入れます）をパッケージにしません。
+- `package.ps1` はバージョンの合わないビルド、ソースより古い DLL、CI ビルド（`build.ps1 -CI` はゲームのメニューと HUD の素材なしでビルドし、仮のデータを入れます）をパッケージにしません。
 
 ## リリース
 
-リリースパッケージにはゲームのメニュー素材が必要で、それはビルドサーバーに置けません。そのためリリースパッケージはゲームのある PC でビルドします。GitHub Actions は CI のビルドとテストを行います（`.github/workflows/ci.yml`、全人数）。
+リリースパッケージにはゲームのメニュー素材が必要で、それはビルドサーバーに置けません。そのためリリースパッケージはゲームのある PC でビルドします。GitHub Actions は CI のビルドとテストを行います（`.github/workflows/ci.yml`）。
 
 1. バージョンを上げる：`multislot/CMakeLists.txt` の `project(EDF6Coop VERSION x.y.z)` と、同梱の説明書 3 つ `dist/README_EDF6Coop*.txt` の 1 行目。
 2. リリースノート `release-notes/<バージョン>.md` を書く（Release ページの本文で、パッケージ内の `RELEASE_NOTES_EDF6Coop.md` にもなります）。
 3. `main` にコミットし、タグを付けて push します：`git tag v2.0.0 && git push origin v2.0.0`。
-4. ゲームのある PC で、そのコミットの状態で `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload` を実行します。人数ごとに `build.ps1 -Players <N> -Test` と `package.ps1 -Players <N>` を実行し、`EDF6Coop-<N>p.dll`・`EDF6Coop-<バージョン>-<N>p.zip` とその `.sha256` を入れた**下書き**の Release を作ります（`-Upload` なしなら `release\upload-<バージョン>\` に置くだけ）。署名はしません。
-5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：タグが `main` 上にありバージョンと一致すること、下書きに全人数がそろっていること、各 zip が `.sha256` と一致しその DLL を含むこと、CI ビルドでないことを確認し、`sign-update.ps1 -Players <N>` で各 DLL に署名し（鍵はリポジトリの secret `EDF6DN_UPDATE_SIGNING_KEY`。読み取り専用トークンの job にだけ渡します）、`EDF6Coop-<N>p.dll.sig` と `.dll.sha256` をアップロードして、Release を最新として公開します。
+4. ゲームのある PC で、そのコミットの状態で `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload` を実行します。`build.ps1 -Test` と `package.ps1` を実行し、`EDF6Coop.dll`・`EDF6Coop-<バージョン>.zip` とその `.sha256`、および 2.2.x の全人数版が更新できるよう同じ DLL を旧名 `EDF6Coop-<N>p.dll`（8・10・12・16・24・32）でも入れた**下書き**の Release を作ります（`-Upload` なしなら `release\upload-<バージョン>\` に置くだけ）。署名はしません。
+5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：タグが `main` 上にありバージョンと一致すること、下書きに DLL と zip がそろっていること、各 zip が `.sha256` と一致しその DLL を含むこと、CI ビルドでないことを確認し、`sign-update.ps1` で DLL に署名し（鍵はリポジトリの secret `EDF6DN_UPDATE_SIGNING_KEY`。読み取り専用トークンの job にだけ渡します）、`.dll.sig` と `.dll.sha256` を（旧名の分も）アップロードして、Release を最新として公開します。
 
-インストール済みのすべてのプラグインは、最新の Release から自分の人数の `EDF6Coop-<N>p.dll` / `.dll.sig` をダウンロードします。そのため Release は 6 種類の人数がそろってから最新にします。
+インストール済みのすべてのプラグインは、最新の Release から `EDF6Coop.dll` / `.dll.sig` をダウンロードします。2.2.x は自分の人数の `EDF6Coop-<N>p.dll` を探すため、Release には同じ DLL を 6 つの旧名でも入れます。
 
 ## ディレクトリ構成
 
 | パス | 内容 |
 |---|---|
 | `multislot/src/plugin.cpp` | EDFModLoader のエントリポイント：`EDF6Coop.ini` を読み（古い設定ファイルの値を引き継ぐ）、部屋の部分と直結を起動 |
-| `multislot/src/` | 部屋の部分（8Player MOD）：パッチ、部屋画面、ミッション、アーマーコピー、メニュー配置、HUD の色、ログ |
+| `multislot/src/` | 部屋の部分（Player MOD）：パッチ、部屋画面、ミッション、アーマーコピー、メニュー配置、HUD の色、ログ |
 | `src/config.*` | 直結の設定とそのコメント（Windows の表示言語で中国語 / 日本語 / 英語） |
 | `src/eos_min.h` | 使用する EOS SDK の構造体（公式 1.15.5 ヘッダより。ゲームは 1.16.1） |
 | `src/eos_hooks.cpp`、`src/iat.*` | `EDF.dll` のインポートテーブルを書き換え、EOS P2P / ロビーの呼び出しを引き受ける |
@@ -193,7 +192,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 | `src/lobby_marker.*` | ロビーメンバー属性：プラグインの有無の判別、ホストアドレスの配布 |
 | `src/direct_net.*`、`src/reliable.*`、`src/wire.*`、`src/auth.*` | 直結の通信 |
 | `src/netif.*`、`src/upnp.*` | 物理アダプターの判別、UPnP |
-| `src/updater.*`、`src/product.h` | 署名付きの自動更新。各リリースが持つ部屋の人数とバージョン |
+| `src/updater.*`、`src/product.h` | 署名付きの自動更新。各リリースが持つバージョン |
 | `multislot/CMakeLists.txt` | ビルドと唯一のバージョン番号（`project(EDF6Coop VERSION x.y.z)`） |
 | `multislot/packaging/` | パッケージに同梱するローダー修正とハンドシェイク回復の説明 |
 | `dist/` | インストールスクリプトと同梱の説明書（英語 / 中国語 / 日本語） |

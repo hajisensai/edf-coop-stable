@@ -6,7 +6,8 @@ Layout, all little-endian unless noted (HUD/ONLINEHUDTEXTURE.RAB, 14 textures in
   entry (0x20 bytes): name (UTF-16, offset from the entry), stored size, 16 zero bytes, data offset, folder
   name index (8 bytes each): name (offset from the pair), entry number; sorted by UTF-16 code unit
   folder (4 bytes each): name (offset from the folder entry)
-  Entries are sorted by name ignoring case; the data of each entry follows the strings, unaligned.
+  Entries are sorted by name ignoring case. The strings (folder and entry names, each once) follow the folder table
+  sorted by UTF-16 code unit; the data of each entry follows the strings, unaligned.
 Entry data is 'CMPL', the unpacked size (big-endian) and LZSS: a flag byte per eight items, bit set = literal
 byte, bit clear = two bytes a, b copying (b & 15) + 3 bytes from ring position (a << 4) | (b >> 4) of a
 4096-byte ring that starts zeroed with the write position at 0xFEE.
@@ -128,7 +129,7 @@ def write(folders, entries):
     strings = folder_table + 4 * len(folders)
     pool = bytearray()
     at = {}
-    for text in folders + [e[0] for e in entries]:
+    for text in sorted(set(folders) | {e[0] for e in entries}, key=lambda t: t.encode('utf-16-be')):
         if text not in at:
             at[text] = strings + len(pool)
             pool += text.encode('utf-16-le') + b'\0\0'

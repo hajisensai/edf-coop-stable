@@ -23,7 +23,7 @@ constexpr KnownFile kKnownLayouts[] = {
     {7098, 0xDA755A27A8E88468ull},  // 0.6.0, 1.0.0, 1.1.0, 1.1.1, 1.2.0-1.5.3
 };
 constexpr KnownFile kKnownHudArchives[] = {
-    {205334, 0x4232FD2F80B54284ull},  // 2.1.0
+    {205334, 0x1CD5561D661F20BBull},  // 2.1.0
 };
 
 const ModFile kMenuLayout{L"UI\\LYT_MAINFRAME.SGO", kMenuLayoutBytes, sizeof(kMenuLayoutBytes), kKnownLayouts,

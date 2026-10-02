@@ -123,7 +123,10 @@ def main():
     if hashlib.sha256(data).hexdigest() != ORIGINAL_SHA256:
         raise SystemExit('Root.cpk has a different HUD/ONLINEHUDTEXTURE.RAB than the one these colours were made for')
     folders, entries = rab.read(data)
-    files = {name: (folder, rab.unpack(blob)) for name, folder, blob in entries}
+    # The writer lays an archive out the way the game does: the game's own archive comes back byte for byte.
+    if rab.write(folders, entries) != data:
+        raise SystemExit("rab.write does not reproduce the game's archive")
+    files ={name: (folder, rab.unpack(blob)) for name, folder, blob in entries}
     colours = palette()
 
     lamp_header = files['player_lamp.dds'][1]

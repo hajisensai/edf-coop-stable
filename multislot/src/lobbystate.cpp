@@ -323,8 +323,9 @@ void Beat() {
     if (kindChanged) {
         current.kind = kind;
         current.capacity = capacity;
-        currentKind.store(static_cast<int>(kind));
+        // Capacity before kind: the menu thread reads the kind first and must not see a MultiSlot room of size 0.
         currentCapacity.store(kind == LobbyKind::MultiSlot ? capacity : 0);
+        currentKind.store(static_cast<int>(kind));
     }
     ReleaseSRWLockExclusive(&current.lock);
 
@@ -631,8 +632,8 @@ void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::u
     current.copyLost = false;
     current.kind = kind;
     current.capacity = kind == LobbyKind::MultiSlot ? CapacityToKeep(creation) : kVanillaPlayers;
+    currentCapacity.store(kind == LobbyKind::MultiSlot ? current.capacity : 0);  // before the kind, as above
     currentKind.store(static_cast<int>(kind));
-    currentCapacity.store(kind == LobbyKind::MultiSlot ? current.capacity : 0);
     createdCurrent.store(createdCapacity != 0);
     ReleaseSRWLockExclusive(&current.lock);
 }

@@ -168,9 +168,9 @@ int main() {
     Check(NextRoomSize(0) == 8 && NextRoomSize(8) == 10 && NextRoomSize(10) == 12 && NextRoomSize(12) == 16 &&
               NextRoomSize(16) == 24 && NextRoomSize(24) == 32 && NextRoomSize(32) == 0 && NextRoomSize(20) == 24,
           "F2 steps OFF/8/10/12/16/24/32");
-    Check(ValidRoomSize(0) && ValidRoomSize(5) && ValidRoomSize(kMaxPlayers) && !ValidRoomSize(4) &&
-              !ValidRoomSize(kMaxPlayers + 1) && !ValidRoomSize(-1),
-          "the INI may hold OFF or 5..32");
+    Check(ValidRoomSize(0) && ValidRoomSize(8) && ValidRoomSize(12) && ValidRoomSize(kMaxPlayers) && !ValidRoomSize(4) &&
+              !ValidRoomSize(5) && !ValidRoomSize(9) && !ValidRoomSize(kMaxPlayers + 1) && !ValidRoomSize(-1),
+          "the INI may hold OFF or one of F2's sizes");
     InitHostMode(image, nullptr, kMaxPlayers + 1, VK_F2, 0xB0, L"F2/LS");
     Check(HostRoomSize() == 0, "a size no room can have hosts normal rooms");
 

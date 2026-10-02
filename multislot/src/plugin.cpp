@@ -386,7 +386,7 @@ int ReadRoomSize(const wchar_t* iniPath) {
         return 8;
     }
     if (ValidRoomSize(size)) return size;
-    Log("[MultiSlot] RoomSize=%d is neither 0 nor %d..%d; hosting normal rooms", size, kVanillaPlayers + 1, kMaxPlayers);
+    Log("[MultiSlot] RoomSize=%d is not 0, 8, 10, 12, 16, 24 or 32; hosting normal rooms", size);
     return 0;
 }
 

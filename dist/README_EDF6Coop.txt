@@ -47,7 +47,8 @@ settings files are left alone.
 - Outside a room, F2 or pressing the left stick steps the room size OFF -> 8 -> 10 -> 12 -> 16 -> 24 -> 32
   -> OFF, shown bottom left of the menu (e.g. "F2/LS 12Player MOD :ON") and saved as [MultiSlot] RoomSize
   in EDF6Coop.ini.
-  OFF (default): you create normal 4-player rooms anyone can join; the room search shows normal rooms.
+  OFF (default): you create normal 4-player rooms anyone can join; the room search shows normal rooms
+  (to look for a bigger room, switch to ON first, any size).
   ON: you create a room of the size you picked that only players with EDF6Coop 2.3.0 or later see; the
   room search shows those rooms, of every size.
   A room keeps the size it was created with; inside a room the menu shows that room's size.

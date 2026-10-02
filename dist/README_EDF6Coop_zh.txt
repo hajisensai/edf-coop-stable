@@ -40,7 +40,7 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 [大房间（Player MOD）]
 - 在房间外的菜单按 F2 或按下左摇杆切换房间人数，依次是 OFF → 8 → 10 → 12 → 16 → 24 → 32 → OFF，
   显示在菜单左下角（例如「F2/LS 12Player MOD :ON」）。选择保存在 EDF6Coop.ini 的 [MultiSlot] RoomSize。
-  OFF（默认）：建的是谁都能进的普通 4 人房；搜房只显示普通房间。
+  OFF（默认）：建的是谁都能进的普通 4 人房；搜房只显示普通房间（要找大房间先切到 ON，选几人都行）。
   ON：建的是你选的人数的房间，只有装了 EDF6Coop 2.3.0 及以上的人才能看到；搜房显示所有人数的这种房间。
   房间建好后人数不变；在房间里时菜单显示的是这个房间的人数。
 - 在房间里按 F3 / Tab / 右摇杆按下 切换队员页（每页 4 人）。

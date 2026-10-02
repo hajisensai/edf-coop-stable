@@ -24,7 +24,11 @@ namespace multislot {
 constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32};
 static_assert(kRoomSizes[std::size(kRoomSizes) - 1] == kMaxPlayers, "F2 must reach the largest room");
 // A size the INI may hold: 0 (OFF) or kVanillaPlayers+1..kMaxPlayers.
-constexpr bool ValidRoomSize(int size) { return size == 0 || (size > kVanillaPlayers && size <= kMaxPlayers); }
+constexpr bool ValidRoomSize(int size) {
+    for (int step : kRoomSizes)
+        if (step == size) return true;
+    return size == 0;
+}
 // What F2 switches to: the next of kRoomSizes above `size`, OFF after the largest.
 constexpr int NextRoomSize(int size) {
     for (int step : kRoomSizes)

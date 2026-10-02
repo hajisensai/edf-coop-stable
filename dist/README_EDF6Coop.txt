@@ -1,4 +1,4 @@
-EDF6Coop 2.0.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.1.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
@@ -19,7 +19,7 @@ carried over. A setting that no longer exists is named in the log ("is no longer
 Going back is a rename: delete EDF6Coop.dll and remove ".disabled" from the old DLL.
 
 [Room sizes: 8p, 10p, 12p, 16p, 24p, 32p]
-There is one package per room size (EDF6Coop-2.0.0-8p.zip and so on). A room of one size can only be
+There is one package per room size (EDF6Coop-2.1.0-8p.zip and so on). A room of one size can only be
 joined with the same size build: everyone in a room must use the same package. When unsure, use 8p.
 8p is the size played the most. 10p and 12p are played less. 16p, 24p and 32p are new in 2.0.0 and have
 only been checked offline with ghost players, not yet in real online play with that many people.
@@ -33,7 +33,8 @@ If EDFModLoader (winmm.dll) is missing, the bundled one is installed: official v
 multithread bug (LOADER_FIX_JA.md). An existing winmm.dll is never overwritten, except one that is
 byte-for-byte the official v1.0.10 file: it is replaced and kept as winmm.dll.bak-official.
 Uninstall: first set Enabled=0 in the [MultiSlot] section of EDF6Coop.ini and start the game once (this
-removes the menu layout file the mod wrote, Mods\UI\LYT_MAINFRAME.SGO), then double-click UNINSTALL.bat
+removes the files the mod wrote, Mods\UI\LYT_MAINFRAME.SGO and Mods\HUD\ONLINEHUDTEXTURE.RAB), then
+double-click UNINSTALL.bat
 (as administrator to remove the firewall rule too). It removes EDF6Coop's files, its settings, log, update
 leftovers and its UPnP mapping. EDFModLoader, other mods and your old EDF6DirectNet / EDF6MultiSlot
 settings files are left alone.
@@ -49,6 +50,11 @@ settings files are left alone.
 - Missions with more than four players: extra players get their gear, spawn points and items. Enemy
   counts grow with the room: 5p x1.2, 6p x1.4, 7p x1.6, 8p and more x1.8 (fixed objects and big bosses
   do not). [Mission] ExtraEnemies=0 keeps the original counts (everyone in the room should set the same).
+- Every player of a mission has a colour of their own on the HUD: status lamp, chat balloon and radar
+  marker. Players 1-4 keep the game's yellow, green, blue and red; 5-8 are orange, pink, purple and cyan,
+  and so on up to 32. For this the mod writes Mods\HUD\ONLINEHUDTEXTURE.RAB (the game's HUD textures
+  plus the new lamps and balloons). If another mod already has a file there, it is left alone and
+  players 5 and up share the colours of players 1-4.
 - Keys and buttons are in [RoomScreen] / [CopyArmor] of the ini. F2 is reserved for 8Player MOD.
 
 [Direct link (optional, host only)]
@@ -82,5 +88,7 @@ Both 0: the plugin unloads itself.
 
 [Included]
 - EDF6Coop: Mods\Plugins\EDF6Coop.dll (MIT, LICENSE.txt; the room part is public domain). The menu layout it writes is the game's own
-  UI/LYT_MAINFRAME.SGO with one more label, built into the DLL.
+  UI/LYT_MAINFRAME.SGO with one more label, and the HUD textures are the game's HUD/ONLINEHUDTEXTURE.RAB
+  with more lamps and chat balloons, both built into the DLL. The colours of players 5-8 follow the
+  8-player HUD textures FevGrave made, who also found the HUD code to change.
 - EDFModLoader by BlueAmulet (MIT, EDFModLoader_LICENSE.txt): winmm.dll, with the fix in LOADER_FIX_JA.md.

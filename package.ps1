@@ -57,7 +57,7 @@ if ($loaderHash -ne 'BE94E1FAC0CA12C41B6924E2EB168851641C999CE951D2A5A9FAEA5161B
 # The DLL must be this room size and this version: the auto-updater of every installed copy trusts its marker.
 $pluginText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($sources['Mods\Plugins\EDF6Coop.dll']))
 if ($pluginText.Contains('MULTISLOT CI PLACEHOLDER')) {
-    throw 'EDF6Coop.dll is a CI build with a placeholder menu layout; build with assets\LYT_MAINFRAME.SGO (build.ps1 without -CI) to package'
+    throw 'EDF6Coop.dll is a CI build with placeholder menu and HUD assets; build with assets\LYT_MAINFRAME.SGO and assets\ONLINEHUDTEXTURE.RAB (build.ps1 without -CI) to package'
 }
 $marker = "EDF6COOP_${Players}P_VERSION=$version"
 if ($pluginText.IndexOf("$marker`0") -lt 0) { throw "EDF6Coop.dll does not carry $marker; rebuild with build.ps1 -Players $Players" }

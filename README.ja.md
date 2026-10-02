@@ -156,9 +156,9 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 ```
 
 - `-Players` で部屋の人数（8・10・12・16・24・32）を選びます。人数ごとに別のビルドです。`-Test` でテストを実行します（ユニットテスト、ループバックの複数ノード直結テスト、全パッチ箇所をゲームの `EDF.dll` と照合するテスト。ゲームがなければ照合はスキップ）。
-- ゲームフォルダは読むだけです：`Root.cpk` から「8Player MOD」表示付きのメニュー枠を作り（`multislot/tools/make_menu_label.py` が `multislot/assets/LYT_MAINFRAME.SGO` を書きます。ゲーム由来なのでコミットしません）、`EDF.dll` はテストに使います。
+- ゲームフォルダは読むだけです：`Root.cpk` から「8Player MOD」表示付きのメニュー枠を作り（`multislot/tools/make_menu_label.py` が `multislot/assets/LYT_MAINFRAME.SGO` を書きます。ゲーム由来なのでコミットしません）、`HUD/ONLINEHUDTEXTURE.RAB` からプレイヤーごとの色の HUD テクスチャを作り（`multislot/tools/make_hud_colours.py` が `multislot/assets/ONLINEHUDTEXTURE.RAB` を書きます。これもコミットしません）、`EDF.dll` はテストに使います。
 - `build.ps1` は公式 EDFModLoader v1.0.10 の `winmm.dll` を取得し（SHA-256 で確認）、パッケージに入れる修正版ローダーを作ります（`multislot/tools/fix_winmm_proxy.py`）。
-- `package.ps1` は人数やバージョンの合わないビルド、ソースより古い DLL、CI ビルド（`build.ps1 -CI` はゲームのメニュー素材なしでビルドし、仮のデータを入れます）をパッケージにしません。
+- `package.ps1` は人数やバージョンの合わないビルド、ソースより古い DLL、CI ビルド（`build.ps1 -CI` はゲームのメニューと HUD の素材なしでビルドし、仮のデータを入れます）をパッケージにしません。
 
 ## リリース
 
@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File package.ps1 -Players 8        # -> rele
 | パス | 内容 |
 |---|---|
 | `multislot/src/plugin.cpp` | EDFModLoader のエントリポイント：`EDF6Coop.ini` を読み（古い設定ファイルの値を引き継ぐ）、部屋の部分と直結を起動 |
-| `multislot/src/` | 部屋の部分（8Player MOD）：パッチ、部屋画面、ミッション、アーマーコピー、メニュー配置、ログ |
+| `multislot/src/` | 部屋の部分（8Player MOD）：パッチ、部屋画面、ミッション、アーマーコピー、メニュー配置、HUD の色、ログ |
 | `src/config.*` | 直結の設定とそのコメント（Windows の表示言語で中国語 / 日本語 / 英語） |
 | `src/eos_min.h` | 使用する EOS SDK の構造体（公式 1.15.5 ヘッダより。ゲームは 1.16.1） |
 | `src/eos_hooks.cpp`、`src/iat.*` | `EDF.dll` のインポートテーブルを書き換え、EOS P2P / ロビーの呼び出しを引き受ける |

@@ -23,8 +23,9 @@
 #include "log.h"
 #include "loaderproxy.h"
 #include "lobbystate.h"
-#include "menulayout.h"
+#include "hud.h"
 #include "midhook.h"
+#include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
 #include "packetfit.h"
@@ -137,8 +138,8 @@ struct SlotWrite {
 
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
-bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diagnostics, bool armor, bool recovery,
-           bool keepRoom, float smoothing, ThunkPage& thunks) {
+bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int ghosts, bool diagnostics, bool armor,
+           bool recovery, bool keepRoom, float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
     patches.insert(patches.end(), sessionPatches.begin(), sessionPatches.end());
@@ -154,6 +155,13 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
         for (const auto& site : MissionHooks()) hooks.push_back({site, MissionHookHandler(site.rva)});
+        if (hudColours) {
+            const auto hudPatches = HudColourPatches();
+            patches.insert(patches.end(), hudPatches.begin(), hudPatches.end());
+            for (const auto& site : HudColourHooks()) hooks.push_back({site, HudColourHookHandler(site.rva)});
+        } else {
+            for (const auto& site : HudIndexWrapHooks()) hooks.push_back({site, MissionHookHandler(site.rva)});
+        }
         if (spawns)
             for (const auto& site : SpawnHooks()) hooks.push_back({site, SpawnHookHandler(site.rva)});
         if (ghosts > 0)
@@ -297,47 +305,63 @@ bool Apply(unsigned char* base, bool mission, bool spawns, int ghosts, bool diag
     return true;
 }
 
-// Mods\UI\LYT_MAINFRAME.SGO exists only while the plugin is active (menulayout.h): otherwise the game
-// gets its own menu layout back.
-void KeepMenuLayout(bool active) {
+// A file under Mods (modfile.h) exists only while the plugin is active and uses it: otherwise the game gets its
+// own file back. `area` starts the log lines, `contents` says what the file is, `without` what is missing while
+// it is not ours. True when our file is in place.
+bool KeepModFile(const ModFile& file, bool active, const char* area, const char* contents, const char* without) {
     wchar_t plugin[MAX_PATH]{};
     wchar_t path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(self, plugin, MAX_PATH);
-    if (!length || length >= MAX_PATH || !MenuLayoutPath(plugin, path, MAX_PATH)) {
-        if (active)
-            Log("Menu: the plugin is not in Mods\\Plugins, so the %dPlayer MOD label is not shown (F2 still works)",
-                kModRoomCapacity);
-        return;
+    if (!length || length >= MAX_PATH || !ModFilePath(file, plugin, path, MAX_PATH)) {
+        if (active) Log("%s: the plugin is not in Mods\\Plugins, so %s", area, without);
+        return false;
     }
     if (!active) {
-        const LayoutRemoval removal = RemoveMenuLayout(path);
-        if (removal == LayoutRemoval::Removed)
-            Log("Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO; the game's own menu layout is used");
-        else if (removal == LayoutRemoval::Failed)
-            Log("Menu: could not remove Mods\\UI\\LYT_MAINFRAME.SGO (error %lu)", GetLastError());
-        return;
+        const FileRemoval removal = RemoveModFile(file, path);
+        if (removal == FileRemoval::Removed)
+            Log("%s: removed Mods\\%ls; the game's own file is used", area, file.path);
+        else if (removal == FileRemoval::Failed)
+            Log("%s: could not remove Mods\\%ls (error %lu)", area, file.path, GetLastError());
+        return false;
     }
-#ifdef MULTISLOT_PLACEHOLDER_LAYOUT
-    // A CI build (CMake MULTISLOT_CI) has no layout of the game's to embed, only a placeholder that would break the
-    // menu; it is never written to a game folder.
-    Log("Menu: this is a CI test build with a placeholder layout; Mods\\UI\\LYT_MAINFRAME.SGO is not written");
+#ifdef MULTISLOT_PLACEHOLDER_ASSETS
+    // A CI build (CMake MULTISLOT_CI) has no files of the game's to embed, only placeholders that would break the
+    // game; they are never written to a game folder.
+    Log("%s: this is a CI test build with placeholder files; Mods\\%ls (%s) is not written, so %s", area, file.path,
+        contents, without);
+    return false;
 #else
-    switch (InstallMenuLayout(path)) {
-        case LayoutInstall::Written:
-            Log("Menu: wrote Mods\\UI\\LYT_MAINFRAME.SGO (the menu layout plus the %dPlayer MOD label)", kModRoomCapacity);
-            break;
-        case LayoutInstall::Updated: Log("Menu: updated Mods\\UI\\LYT_MAINFRAME.SGO"); break;
-        case LayoutInstall::Current: break;
-        case LayoutInstall::Foreign:
-            Log("Menu: Mods\\UI\\LYT_MAINFRAME.SGO belongs to another mod and was left alone; the %dPlayer MOD label "
-                "is not shown (F2 still works)", kModRoomCapacity);
-            break;
-        case LayoutInstall::Failed:
-            Log("Menu: could not write Mods\\UI\\LYT_MAINFRAME.SGO (error %lu); the %dPlayer MOD label is not shown "
-                "(F2 still works)", GetLastError(), kModRoomCapacity);
-            break;
+    switch (InstallModFile(file, path)) {
+        case FileInstall::Written: Log("%s: wrote Mods\\%ls (%s)", area, file.path, contents); return true;
+        case FileInstall::Updated: Log("%s: updated Mods\\%ls", area, file.path); return true;
+        case FileInstall::Current: return true;
+        case FileInstall::Foreign:
+            Log("%s: Mods\\%ls belongs to another mod and was left alone; %s", area, file.path, without);
+            return false;
+        case FileInstall::Failed:
+            Log("%s: could not write Mods\\%ls (error %lu); %s", area, file.path, GetLastError(), without);
+            return false;
     }
+    return false;
 #endif
+}
+
+bool KeepMenuLayout(bool active) {
+    char contents[64]{}, without[64]{};
+    _snprintf_s(contents, _TRUNCATE, "the menu layout plus the %dPlayer MOD label", kModRoomCapacity);
+    _snprintf_s(without, _TRUNCATE, "the %dPlayer MOD label is not shown (F2 still works)", kModRoomCapacity);
+    return KeepModFile(MenuLayoutFile(), active, "Menu", contents, without);
+}
+
+bool KeepHudArchive(bool active) {
+    return KeepModFile(HudArchiveFile(), active, "HUD",
+                       "the online HUD textures plus a lamp and a chat balloon for every player colour",
+                       "players 5+ share the HUD colours of players 1-4");
+}
+
+void RemoveModFiles() {
+    KeepMenuLayout(false);
+    KeepHudArchive(false);
 }
 
 ThunkPage thunks;
@@ -376,7 +400,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     SetDetailLog(netLog);
     if (!enabled) {
         Log("[MultiSlot] Enabled=0: rooms, missions and the room screen are left untouched");
-        KeepMenuLayout(false);
+        RemoveModFiles();
         return false;
     }
     if (IniText(iniPath, L"MultiSlot", L"MaxPlayers", L"").size())
@@ -491,7 +515,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     if (!game || !SupportedImage(base)) {
         Log("REFUSED: EDF.dll is not the supported build (TimeDateStamp %08X, SizeOfImage %X); nothing was changed",
             kImageTimeDateStamp, kImageSize);
-        KeepMenuLayout(false);
+        RemoveModFiles();
         return false;
     }
     if (roomView.dummies && copyArmorKey) {
@@ -513,9 +537,12 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitPeerTimeout(base);
     InitArmor(base, copyArmorKey, copyArmorPad, copyArmorHint, copyArmorIgnore, copyArmorCaps);
     InitHostMode(base, iniPath, eightPlayers, hostModeKey, hostModePad, hostModeHint);
-    if (!Apply(base, mission, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery, keepRoom,
+    // The HUD archive goes in first: the HUD is patched for its lamps and balloons only when it is ours. Before the
+    // game loads it, so a mission never meets patches without their textures. Without Extend the HUD is the game's.
+    const bool hudColours = KeepHudArchive(mission);
+    if (!Apply(base, mission, hudColours, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery, keepRoom,
                smoothing, thunks)) {
-        KeepMenuLayout(false);
+        RemoveModFiles();
         return false;
     }
     KeepMenuLayout(true);
@@ -538,6 +565,11 @@ bool LoadRooms(const wchar_t* iniPath) {
     if (mission) {
         Log("Mission: players 5-%d get loadout sidecars, player slots 5-%d and spawn points (4 or fewer: unchanged)",
             kMaxPlayers, kMaxPlayers);
+        if (hudColours)
+            Log("HUD: one colour per player for all %d - status lamp, chat balloon and radar marker (1-4 the game's own)",
+                kMaxPlayers);
+        else
+            Log("HUD: players 5-%d share the colours of players 1-4", kMaxPlayers);
         Log("Mission: 5+ players online - enemy durability, damage and speed stay at the 4-player values");
         if (spawns) {
             // The factor is (players + 1) / 5 (spawn.cpp), written out so the log says what every machine does.

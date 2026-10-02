@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # EDF6Coop: the room part (src/ here) and the direct-link part (../src) as one plugin, EDF6Coop.dll.
-project(EDF6Coop VERSION 2.0.0 LANGUAGES CXX)
+project(EDF6Coop VERSION 2.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -38,38 +38,47 @@ file(READ "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini" MULTISLOT_DEFAULT_INI)
 # The INI is a template for the room size (@MULTISLOT_MAX_PLAYERS@, @MULTISLOT_MAX_GHOSTS@).
 string(CONFIGURE "${MULTISLOT_DEFAULT_INI}" MULTISLOT_DEFAULT_INI @ONLY)
 configure_file(src/default_ini.h.in "${CMAKE_BINARY_DIR}/generated/default_ini.h" @ONLY)
-# The menu frame layout with the 8Player MOD label field (tools/make_menu_label.py); the plugin writes it
-# to Mods/UI while it is active.
-set(MENU_LAYOUT "${CMAKE_SOURCE_DIR}/assets/LYT_MAINFRAME.SGO")
-# CI has no game: MULTISLOT_CI=ON builds the plugin and every test that does not need the game with a
-# placeholder in place of the layout. The placeholder names itself (MULTISLOT CI PLACEHOLDER), the plugin never
-# writes it into a game folder, and package.ps1 refuses a DLL that carries it, so such a build cannot ship.
-option(MULTISLOT_CI "Build without assets/LYT_MAINFRAME.SGO (placeholder layout; the result cannot be packaged)" OFF)
-set(MULTISLOT_PLACEHOLDER_LAYOUT OFF)
-if(NOT EXISTS "${MENU_LAYOUT}")
-    if(NOT MULTISLOT_CI)
-        # Made from the game's own UI/LYT_MAINFRAME.SGO, so it is not in the repository.
-        message(FATAL_ERROR "assets/LYT_MAINFRAME.SGO is missing: run `python -B tools/make_menu_label.py` with "
-                            "EDF6_GAME_DIR set to the game folder first (it reads Root.cpk there)")
-    endif()
-    message(WARNING "MULTISLOT_CI: no assets/LYT_MAINFRAME.SGO, so the plugin embeds a placeholder layout. "
-                    "This build is for tests only; package.ps1 refuses it")
-    set(MULTISLOT_PLACEHOLDER_LAYOUT ON)
-    # An SGO header, the marker package.ps1 looks for, and the label name in UTF-16, so the file handling tests
-    # have something shaped like the real layout.
-    string(HEX "SGO" SGO_HEX)
-    string(HEX "MULTISLOT CI PLACEHOLDER - not the game's layout, never packaged" MARKER_HEX)
-    set(MENU_LAYOUT_HEX "${SGO_HEX}00${MARKER_HEX}004d0053004c006100620065006c000000")
-    add_compile_definitions(MULTISLOT_PLACEHOLDER_LAYOUT=1)
-else()
-    file(READ "${MENU_LAYOUT}" MENU_LAYOUT_HEX HEX)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MENU_LAYOUT}")
-endif()
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," MENU_LAYOUT_BYTES "${MENU_LAYOUT_HEX}")
+# Files the plugin writes under Mods while it is active (src/modfile.h), made from the game's own files and so not
+# in the repository: the menu frame layout with the 8Player MOD label field (tools/make_menu_label.py) and the
+# online HUD textures with a lamp and chat balloon per player colour (tools/make_hud_colours.py).
+# CI has no game: MULTISLOT_CI=ON builds the plugin and every test that does not need the game with placeholders in
+# place of the missing files. A placeholder names itself (MULTISLOT CI PLACEHOLDER), the plugin never writes one into
+# a game folder, and package.ps1 refuses a DLL that carries it, so such a build cannot ship.
+option(MULTISLOT_CI "Build without the assets/ files (placeholders; the result cannot be packaged)" OFF)
+set(MULTISLOT_PLACEHOLDER_ASSETS OFF)
 set(BYTE "0x[0-9a-f][0-9a-f],")
-string(REGEX REPLACE "(${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE})"
-       "\\1\n" MENU_LAYOUT_BYTES "${MENU_LAYOUT_BYTES}")
-configure_file(src/menu_layout.h.in "${CMAKE_BINARY_DIR}/generated/menu_layout.h" @ONLY)
+# The bytes of `file` as a C array initializer, 16 to a line, in `out`; `placeholder` (hex) when it is missing.
+function(embed_asset file tool placeholder out)
+    if(EXISTS "${file}")
+        file(READ "${file}" hex HEX)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${file}")
+    elseif(MULTISLOT_CI)
+        message(WARNING "MULTISLOT_CI: no ${file}, so the plugin embeds a placeholder. This build is for tests only; "
+                        "package.ps1 refuses it")
+        set(MULTISLOT_PLACEHOLDER_ASSETS ON PARENT_SCOPE)
+        set(hex "${placeholder}")
+    else()
+        message(FATAL_ERROR "${file} is missing: run `python -B ${tool}` with EDF6_GAME_DIR set to the game folder "
+                            "first (it reads Root.cpk there)")
+    endif()
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," bytes "${hex}")
+    string(REGEX REPLACE "(${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE}${BYTE})"
+           "\\1\n" bytes "${bytes}")
+    set(${out} "${bytes}" PARENT_SCOPE)
+endfunction()
+string(HEX "MULTISLOT CI PLACEHOLDER - not the game's file, never packaged" MARKER_HEX)
+# Shaped like the real files, so the file handling tests have something to work on: an SGO header, the marker and
+# the label name in UTF-16; an SSA header and the marker.
+string(HEX "SGO" SGO_HEX)
+string(HEX "SSA" SSA_HEX)
+embed_asset("${CMAKE_SOURCE_DIR}/assets/LYT_MAINFRAME.SGO" tools/make_menu_label.py
+            "${SGO_HEX}00${MARKER_HEX}004d0053004c006100620065006c000000" MENU_LAYOUT_BYTES)
+embed_asset("${CMAKE_SOURCE_DIR}/assets/ONLINEHUDTEXTURE.RAB" tools/make_hud_colours.py
+            "${SSA_HEX}00${MARKER_HEX}00" HUD_ARCHIVE_BYTES)
+if(MULTISLOT_PLACEHOLDER_ASSETS)
+    add_compile_definitions(MULTISLOT_PLACEHOLDER_ASSETS=1)
+endif()
+configure_file(src/mod_assets.h.in "${CMAKE_BINARY_DIR}/generated/mod_assets.h" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/EDF6MultiSlot.ini")
 
 # The direct-link part, compiled with its own flags (it is not built for /permissive- and defines what the room
@@ -91,7 +100,7 @@ target_compile_options(DirectNetPart PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(DirectNetPart PUBLIC DirectNetCore)
 
 add_library(EDF6Coop SHARED
-    src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/menulayout.cpp
+    src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp)
@@ -156,7 +165,7 @@ if(NOT EXISTS "${EDF_DLL}")
                     "(PatchTablesMatchEDF, PluginLoad_*) will be reported as skipped")
 endif()
 
-add_executable(MultiSlotTests tests/tests.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
+add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
 add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
 set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
@@ -181,10 +190,10 @@ target_link_libraries(HostModeTests PRIVATE winhttp)
 target_compile_options(HostModeTests PRIVATE ${WARNINGS})
 add_test(NAME HostModeAndMenuLabel COMMAND HostModeTests)
 
-add_executable(MenuLayoutTests tests/menulayout_test.cpp src/menulayout.cpp)
-target_include_directories(MenuLayoutTests PRIVATE "${CMAKE_BINARY_DIR}/generated")
-target_compile_options(MenuLayoutTests PRIVATE ${WARNINGS})
-add_test(NAME MenuLayoutFile COMMAND MenuLayoutTests "${CMAKE_BINARY_DIR}/layouttest")
+add_executable(ModFileTests tests/modfile_test.cpp src/modfile.cpp)
+target_include_directories(ModFileTests PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_compile_options(ModFileTests PRIVATE ${WARNINGS})
+add_test(NAME ModFiles COMMAND ModFileTests "${CMAKE_BINARY_DIR}/modfiletest")
 
 add_executable(DefaultIniTests tests/default_ini_test.cpp)
 target_include_directories(DefaultIniTests PRIVATE "${CMAKE_BINARY_DIR}/generated")

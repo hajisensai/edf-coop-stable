@@ -1,4 +1,4 @@
-EDF6Coop 2.0.0 - 地球防衛軍6 のオンライン協力プレイを大人数・安定にするプラグイン
+EDF6Coop 2.1.0 - 地球防衛軍6 のオンライン協力プレイを大人数・安定にするプラグイン
 プロジェクトページ：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 中文: README_EDF6Coop_zh.txt
 問題があれば Issue を作り、Mods\Plugins\EDF6Coop.log を添付してください。
@@ -18,7 +18,7 @@ Mods\Plugins\EDF6Coop.ini を作って、これまでの設定値を引き継ぎ
 元に戻すとき：EDF6Coop.dll を消し、古い DLL の名前の ".disabled" を外してください。
 
 ■ 部屋の人数：8p・10p・12p・16p・24p・32p
-人数ごとにパッケージが分かれています（EDF6Coop-2.0.0-8p.zip など）。ある人数の部屋には同じ人数の版でしか
+人数ごとにパッケージが分かれています（EDF6Coop-2.1.0-8p.zip など）。ある人数の部屋には同じ人数の版でしか
 入れません。同じ部屋の全員が同じパッケージを使ってください。迷ったら 8p です。
 いちばん遊ばれているのは 8p、10p と 12p はそれより少なめです。16p・24p・32p は 2.0.0 で追加したもので、
 今のところオフラインのゴースト隊員でしか確認しておらず、実際にその人数でのオンラインはまだ試していません。
@@ -31,7 +31,7 @@ EDFModLoader（winmm.dll）がなければ同梱のものを入れます：公�
 加えたものです（LOADER_FIX_JA.md）。既存の winmm.dll は上書きしません。ただし公式 v1.0.10 とバイト単位で
 同じものだけは修正版に置き換え、元のファイルを winmm.dll.bak-official に保存します。
 削除：まず EDF6Coop.ini の [MultiSlot] を Enabled=0 にして一度ゲームを起動し（MOD が書いた
-Mods\UI\LYT_MAINFRAME.SGO が消えます）、次に UNINSTALL.bat をダブルクリックします（管理者として実行すると
+Mods\UI\LYT_MAINFRAME.SGO と Mods\HUD\ONLINEHUDTEXTURE.RAB が消えます）、次に UNINSTALL.bat をダブルクリックします（管理者として実行すると
 ファイアウォールの規則も消します）。EDF6Coop のファイル・設定・ログ・自動更新の残り・UPnP の設定を消します。
 EDFModLoader、ほかの MOD、古い EDF6DirectNet / EDF6MultiSlot の設定ファイルはそのままです。
 
@@ -45,6 +45,10 @@ EDFModLoader、ほかの MOD、古い EDF6DirectNet / EDF6MultiSlot の設定フ
 ・5人以上のミッション：増えた人の装備・出現位置・アイテムに対応しています。敵の数は 5人 1.2倍、6人 1.4倍、
   7人 1.6倍、8人以上 1.8倍（位置が決まった物と大型ボスは増えません）。[Mission] ExtraEnemies=0 で元の数
   （部屋の全員が同じ設定にしてください）。
+・ミッションでは全員が HUD 上で自分の色を持ちます：状態ランプ、チャットの吹き出し、レーダーのマーカー。
+  1～4人目はゲーム本来の黄・緑・青・赤、5～8人目は橙・ピンク・紫・水色で、32人まで続きます。このために
+  Mods\HUD\ONLINEHUDTEXTURE.RAB（ゲームの HUD テクスチャに新しいランプと吹き出しを足したもの）を書きます。
+  そこに別の MOD のファイルがあるときは触らず、5人目以降は 1～4人目の色を使います。
 ・キーとボタンは ini の [RoomScreen] / [CopyArmor] で変えられます。F2 は 8Player MOD 専用です。
 
 ■ 直接接続（任意、ホストだけ）
@@ -77,5 +81,7 @@ Mods\Plugins\EDF6Coop.log：すべてを1つのログに書きます（直接接
 
 ■ 同梱物
 ・EDF6Coop：Mods\Plugins\EDF6Coop.dll（MIT、LICENSE.txt。部屋の部分はパブリックドメイン）。書き出すメニューの
-  枠のデータは、ゲームの UI/LYT_MAINFRAME.SGO に表示欄を1つ足したもので、DLL の中に入っています。
+  枠のデータは、ゲームの UI/LYT_MAINFRAME.SGO に表示欄を1つ足したもの、HUD テクスチャはゲームの
+  HUD/ONLINEHUDTEXTURE.RAB にランプと吹き出しを足したもので、どちらも DLL の中に入っています。5～8人目の色は
+  FevGrave さんが作った8人用 HUD テクスチャに合わせました。変更する HUD のコードも FevGrave さんが見つけたものです。
 ・EDFModLoader（BlueAmulet 作、MIT、EDFModLoader_LICENSE.txt）：winmm.dll（LOADER_FIX_JA.md の修正入り）。

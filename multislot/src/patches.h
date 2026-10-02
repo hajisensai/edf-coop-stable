@@ -134,6 +134,15 @@ PointerSlot LobbySlot();
 std::vector<Patch> MissionPatches();
 std::vector<MidSite> MissionHooks();
 std::vector<CallSite> MissionCalls();
+// The online HUD (status lamps, chat balloons, radar markers) keeps one colour per player in tables of four that
+// 7FFBD0's player index reads; players 5+ read past their end, which crashed every machine on a mission's first
+// frame (1.2.1-1.2.5). With Extend=1 one of two fixes is applied:
+// - HudColourPatches and HudColourHooks (hud.h), when Mods\HUD\ONLINEHUDTEXTURE.RAB is ours (modfile.h): the
+//   tables are built for kMaxPlayers from the archive's lamps and balloons and hudcolours.h, one colour each;
+// - otherwise HudIndexWrapHooks: the index the tables are read with wraps, so player 5 shares player 1's colour.
+std::vector<Patch> HudColourPatches();
+std::vector<MidSite> HudColourHooks();
+std::vector<MidSite> HudIndexWrapHooks();
 // Callback vtable slots replaced by mission handlers (mission.h, MissionSlotHandler).
 std::vector<PointerSlot> MissionSlots();
 

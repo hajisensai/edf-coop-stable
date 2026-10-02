@@ -27,7 +27,8 @@ if (-not $CI -and -not (Test-Path -LiteralPath (Join-Path $multislot 'assets\ONL
 }
 
 $configure = "cmake -S `"$multislot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMULTISLOT_MAX_PLAYERS=$Players"
-if ($CI) { $configure += ' -DMULTISLOT_CI=ON' }
+# Always explicit: CMake keeps a cached ON, and a later build without -CI would stay a placeholder build.
+$configure += if ($CI) { ' -DMULTISLOT_CI=ON' } else { ' -DMULTISLOT_CI=OFF' }
 if ($env:LOADER_PYTHON) { $configure += " `"-DPython3_EXECUTABLE=$env:LOADER_PYTHON`"" }
 $steps = @(
     "call `"$(Join-Path $multislot 'tools\msvc-x64-env.cmd')`" >nul",

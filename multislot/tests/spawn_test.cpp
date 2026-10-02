@@ -73,6 +73,8 @@ int main() {
         {5, 5, 6},   {10, 5, 12}, {10, 6, 14},   {10, 7, 16}, {10, 8, 18},   {7, 6, 10},   {4, 6, 6},
         {12, 6, 17}, {2, 7, 3},   {2, 8, 4},     {5, 8, 9},   {150, 8, 270},               {20, 1, 20},
         {20, 0, 20}, {0, 8, 0},   {-1, 8, -1},   {9000, 8, 10000},           {20000, 8, 20000},
+        {10, 9, 20}, {10, 12, 26}, {10, 16, 34}, {10, 24, 50}, {10, 32, 66}, {1, 32, 7},   {150, 32, 990},
+        {2000, 32, 10000},
     };
     for (const auto& row : rows) {
         const int got = ScaledEnemyCount(row.count, row.players);
@@ -82,9 +84,8 @@ int main() {
         }
     }
     // Every count the mod supports, against the factors the README and the INI promise (tenths, half up).
-    // Past eight players the factor stays at eight's x1.8 (kEnemyScalePlayers).
-    // x1.0 up to four, +0.2 per player to x1.8 at eight, x1.8 from there on.
-    const auto factorTenths = [](int players) { return 10 + 2 * (std::min(std::max(players, 4), 8) - 4); };
+    // x1.0 up to four, then +0.2 per player: x1.8 at eight ... x6.6 at 32.
+    const auto factorTenths = [](int players) { return 10 + 2 * (std::min(std::max(players, 4), kMaxPlayers) - 4); };
     bool factors = true;
     for (int players = 1; players <= kMaxPlayers; ++players)
         for (const int count : {1, 2, 3, 5, 10, 150}) {

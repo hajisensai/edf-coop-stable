@@ -334,6 +334,13 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
         SizeText(setting, size);
         _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%s", context.hostModeHint ? context.hostModeHint : L"",
                      context.hostModeHint && context.hostModeHint[0] ? L" " : L"", size);
+        // This plugin's version and its update (updatecheck.h): outside rooms, where the field has room for it.
+        wchar_t status[kLabelChars]{};
+        if (CopyPluginStatus(status, kLabelChars)) {
+            wchar_t line[kLabelChars]{};
+            _snwprintf_s(line, _TRUNCATE, L"   %ls", status);
+            wcsncat_s(out, outChars, line, _TRUNCATE);
+        }
     } else {
         // The page guide: while the room screen shows more than four members, and always in a MultiSlot room
         // this player hosts (there it names the second page before anyone fills it).

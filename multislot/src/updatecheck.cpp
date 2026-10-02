@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <cstring>
 #include <cwchar>
 
@@ -199,6 +200,28 @@ Version InstalledVrVersion(const wchar_t* gameFolder) {
 }
 
 const wchar_t* UpdateNotice() { return noticeReady.load() ? notice : L""; }
+
+namespace {
+// Written by the update thread, read by the menu frame: copied under the lock, never shown half written.
+std::mutex statusLock;
+wchar_t pluginStatus[kNoticeChars]{};
+}  // namespace
+
+void SetPluginStatus(const char* text) {
+    wchar_t wide[kNoticeChars]{};
+    if (text && text[0] &&
+        !MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, static_cast<int>(kNoticeChars)))
+        _snwprintf_s(wide, _TRUNCATE, L"%hs", text);  // longer than the field: ASCII as it is, cut off
+    std::lock_guard<std::mutex> lock(statusLock);
+    wmemcpy(pluginStatus, wide, kNoticeChars);
+}
+
+std::size_t CopyPluginStatus(wchar_t* out, std::size_t outChars) {
+    if (!out || !outChars) return 0;
+    std::lock_guard<std::mutex> lock(statusLock);
+    _snwprintf_s(out, outChars, _TRUNCATE, L"%ls", pluginStatus);
+    return wcslen(out);
+}
 
 void SetUpdateNoticeForTest(const wchar_t* text) {
     if (!text || !text[0]) {

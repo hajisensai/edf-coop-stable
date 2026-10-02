@@ -5,12 +5,12 @@
 
 namespace multislot {
 
-// Enemy spawn counts in online missions with 5-8 players ([Mission] ExtraEnemies=1). Every machine runs
+// Enemy spawn counts in online missions with 5 or more players ([Mission] ExtraEnemies=1). Every machine runs
 // the mission script and creates the same objects in the same order, so the result depends only on the
 // script's own arguments, the created object's class and the mission's player count, which all players
 // share. Four or fewer players, offline missions and other teams are never changed.
 
-// count * (1 + 0.2 per player above four), rounded half up: 1.2x for 5 players ... 1.8x for 8.
+// count * (1 + 0.2 per player above four), rounded half up: 1.2x for 5 players, 1.8x for 8 ... 6.6x for 32.
 int ScaledEnemyCount(int count, int players);
 
 // Scene object classes (xgs_scene_object_class, which is also the C++ class name) whose spawns grow:

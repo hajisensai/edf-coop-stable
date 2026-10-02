@@ -14,9 +14,6 @@ constexpr int kVanillaPlayers = 4;
 // The size of a room is the host's choice when creating it (hostmode.h, 5..32) and lives in its lobby's
 // MaxMembers, so every room any of us hosts can be joined by any of us (2.3.0; before, each size was a build).
 constexpr int kMaxPlayers = 32;
-// Past eight players enemy counts stop growing (spawn.h): every extra player already costs the host frame time,
-// and a room that asked for ten did not ask for more enemies than eight get.
-constexpr int kEnemyScalePlayers = kMaxPlayers < 8 ? kMaxPlayers : 8;
 // The signed imm8/disp8 operands written from the room size (patches.cpp: `cmp r, N`, the destructor's
 // N-0x10, FindPlayerIndex's -(N+1)) hold up to 0x7E players; EOS lobbies hold 64 members.
 static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,

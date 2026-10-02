@@ -420,6 +420,23 @@ int main() {
     Check(Compose(Menu(false, false, 0, 0), kSize, 0).find(L"NEW EDF6VR") == std::wstring::npos,
           "with nothing to say the label is exactly as before");
 
+    // EDF6Coop's own version and update (dn::menuStatusText): outside rooms, after the size and before a VR notice.
+    SetPluginStatus("EDF6Coop 2.3.2 (updated from 2.3.1)");
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == L"F2/LS " + Size(kSize) + L"   EDF6Coop 2.3.2 (updated from 2.3.1)",
+          "outside a room the label says which version runs and that it was updated");
+    SetUpdateNoticeForTest(L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat");
+    const std::wstring both = Compose(Menu(false, false, 0, 0), kSize, 0);
+    Check(both.find(L"EDF6Coop 2.3.2") < both.find(L"NEW EDF6VR"), "the VR notice still goes on the end");
+    SetUpdateNoticeForTest(L"");
+    Check(Compose(Menu(true, true, 8, 0), 0, kSize).find(L"EDF6Coop") == std::wstring::npos &&
+              Compose(Menu(true, false, 8, 0), 0, kSize).find(L"EDF6Coop") == std::wstring::npos,
+          "in a room the field belongs to the page and copy armor guides");
+    wchar_t narrow[32]{};
+    ComposeLabel(Menu(false, false, 0, 0), kSize, 0, narrow, 32);
+    Check(std::wstring(narrow).find(Size(kSize)) != std::wstring::npos, "a full field keeps the size before the version");
+    SetPluginStatus("");
+    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == L"F2/LS " + Size(kSize), "no status, no text");
+
     // Menu frame updates write the label through the game's functions, once per change.
     wchar_t iniPath[MAX_PATH]{};
     GetTempPathW(MAX_PATH, iniPath);

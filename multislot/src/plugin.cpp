@@ -599,12 +599,11 @@ bool LoadRooms(const wchar_t* iniPath) {
         Log("Mission: 5+ players online - enemy durability, damage and speed stay at the 4-player values");
         if (spawns) {
             // The factor is (players + 1) / 5 (spawn.cpp), written out so the log says what every machine does.
-            char factors[160]{};
+            char factors[400]{};
             int used = 0;
             for (int players = kVanillaPlayers + 1; players <= kMaxPlayers && used >= 0; ++players) {
-                const int p = players < kEnemyScalePlayers ? players : kEnemyScalePlayers;  // capped at eight
                 const int written = _snprintf_s(factors + used, sizeof(factors) - used, _TRUNCATE, "%sx%d.%d (%d)",
-                                                used ? " " : "", (p + 1) / 5, (p + 1) * 2 % 10, players);
+                                                used ? " " : "", (players + 1) / 5, (players + 1) * 2 % 10, players);
                 used = written < 0 ? -1 : used + written;
             }
             Log("Mission: 5+ players online - enemy counts %s, rounded; nests, anchors, ships and other fixed "
@@ -722,6 +721,7 @@ bool LoadCoop(PluginInfo* info) {
         return false;
     LogOpen(logPath);
     dn::logToSink(&ForwardDirectNetLine);
+    dn::statusToSink(&SetPluginStatus);
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDF6Coop";
     info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);
@@ -771,10 +771,8 @@ bool LoadCoop(PluginInfo* info) {
         // Without the EOS hooks no EOS tick says the game is up; the trial then counts from here.
         if (!direct.eosHooked) dn::noteGameRunning();
     }
-    if (settings.autoUpdate)
-        dn::startAutoUpdate(plugin, kVersion);
-    else
-        Log("UPDATE automatic updates are off ([Update] AutoUpdate=0)");
+    dn::startAutoUpdate(plugin, kVersion, settings.autoUpdate);
+    if (!settings.autoUpdate) Log("UPDATE automatic updates are off ([Update] AutoUpdate=0)");
     return true;  // stays loaded: call stubs, import wrappers, threads and the exception handler point here
 }
 

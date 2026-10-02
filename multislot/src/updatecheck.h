@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace multislot {
@@ -42,6 +43,12 @@ const wchar_t* UpdateNotice();
 
 // Test seam: what the label should append, without a request. An empty string clears it.
 void SetUpdateNoticeForTest(const wchar_t* text);
+
+// EDF6Coop's own version and what its updater did (dn::menuStatusText, "EDF6Coop 2.3.2 (latest)"), shown
+// outside rooms so a player can see that an update happened. Set from any thread; "" clears it.
+void SetPluginStatus(const char* text);
+// Copies the current status into `out` (always terminated); returns its length.
+std::size_t CopyPluginStatus(wchar_t* out, std::size_t outChars);
 
 // What is installed, read the way Update-EDF6VR.ps1 reads it: EDF6VR\PACKAGE_MANIFEST.json first, then
 // the version string inside EDF6VR.dll (or EDF6VR.dll.disabled). Invalid when neither is there.

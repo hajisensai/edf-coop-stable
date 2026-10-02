@@ -124,10 +124,32 @@ std::string fileVersion(const std::wstring& path);
 // The version recorded in installed.bad, invalid when none.
 Version badVersion(const std::wstring& installed);
 
+// What the game's menu says about this plugin, so a player sees an update happen without reading the log
+// (one short ASCII line, e.g. "EDF6Coop 2.3.2 (latest)").
+enum class UpdateStage {
+    Off,          // [Update] AutoUpdate=0
+    Checking,     // the request is on its way
+    Latest,       // nothing newer
+    Installed,    // `downloaded` runs from the next start
+    CheckFailed,  // GitHub could not be asked (offline, blocked)
+    Failed,       // a newer release could not be taken; the log says why
+};
+struct MenuStatus {
+    std::string version;      // the running version
+    std::string updatedFrom;  // the version this one replaced, while it is on trial after an update; "" otherwise
+    std::string downloaded;   // Installed: the version that runs from the next start
+    UpdateStage stage = UpdateStage::Checking;
+};
+std::string menuStatusText(const MenuStatus& status);
+using StatusSink = void (*)(const char* text);
+// Every change of the menu status goes to `sink` as menuStatusText, the current one at once.
+void statusToSink(StatusSink sink);
+
 // Checks once and installs a newer release over `installed` (currently at `current`); blocks on the
-// network. Returns the log line saying what happened.
-std::string updateOnce(const std::wstring& installed, const std::string& current);
-// Runs updateOnce on a background thread and logs its result.
-void startAutoUpdate(const std::wstring& installed, const char* current);
+// network. Returns the log line saying what happened; `stage` and `downloaded` say it for the menu.
+std::string updateOnce(const std::wstring& installed, const std::string& current, UpdateStage* stage = nullptr,
+                       std::string* downloaded = nullptr);
+// Runs updateOnce on a background thread and logs its result; with `enabled` false only says so in the menu.
+void startAutoUpdate(const std::wstring& installed, const char* current, bool enabled);
 
 }  // namespace dn

@@ -1,4 +1,4 @@
-EDF6Coop 2.3.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.3.1 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
@@ -19,7 +19,7 @@ carried over. A setting that no longer exists is named in the log ("is no longer
 Going back is a rename: delete EDF6Coop.dll and remove ".disabled" from the old DLL.
 
 [Room sizes: the host picks]
-Since 2.3.0 there is one package (EDF6Coop-2.3.0.zip) and everyone installs it. Whoever creates a room
+Since 2.3.0 there is one package (EDF6Coop-<version>.zip) and everyone installs it. Whoever creates a room
 picks its size in the menu (8, 10, 12, 16, 24 or 32, see "Bigger rooms" below); joiners have nothing to
 choose: with 2.3.0 you can join a room of any size.
 2.3.0 and 2.2.x (any size package) neither see nor join each other's bigger rooms, so everyone should
@@ -27,6 +27,7 @@ update to 2.3.0 (with automatic updates on, starting the game once does it). Nor
 with everyone, as before.
 8 players is the size played the most. 10 and 12 are played less. 16, 24 and 32 have only been checked
 offline with ghost players, not yet in real online play with that many people.
+Rooms of 24 and 32 have no in-game voice chat: Epic allows a voice chat room only up to 16 players.
 The bigger the room, the more upload bandwidth the host needs: with the direct link every player's data
 goes through the host.
 

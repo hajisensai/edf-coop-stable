@@ -19,6 +19,7 @@ powershell -ExecutionPolicy Bypass -File ..\package.ps1        # -> ..\release\E
 EDF6MultiSlot 1.5.x 及以前的改动见 [release-notes/](release-notes/)；2.0.0 起见 [../release-notes/](../release-notes/)。
 
 16、24、32 人房间是 2.0.0 新增的，目前只用离线幽灵队员验证过。
+24、32 人房间没有游戏内语音：Epic 的语音聊天只支持 16 人以内的房间（2.3.1 起；之前这种房间根本建不起来）。
 
 ## 许可
 

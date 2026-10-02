@@ -166,6 +166,9 @@ std::vector<MidSite> HostModeHooks() {
         {"steam lobby create capacity", 0x7435F7, {0x41, 0xB8, 0x04, 0x00, 0x00, 0x00}, 0, 0},
         // Lobby create options: `mov qword [rbp-0x60], 4` (MaxLobbyMembers); the handler stores the capacity.
         {"lobby create capacity", 0x742A9D, {0x48, 0xC7, 0x45, 0xA0, 0x04, 0x00, 0x00, 0x00}, 0, 0},
+        // Lobby create options complete: `lea r9, [rdx+8]; test rcx, rcx` (run after the handler). Rooms larger
+        // than Epic's voice chat room limit are created without one.
+        {"lobby create voice room", 0x742AF3, {0x4C, 0x8D, 0x4A, 0x08, 0x48, 0x85, 0xC9}, 0, 7},
         // Room update: `mov edx, 4` before SetMaxMembers.
         {"lobby update capacity", 0x749C91, {0xBA, 0x04, 0x00, 0x00, 0x00}, 0, 0},
         // Room update: `mov ebx, 0x9x`, the SEARCH_TYPE published for the room kind in [r14+0x90].

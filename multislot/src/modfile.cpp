@@ -42,9 +42,11 @@ std::uint64_t Fnv1a(const unsigned char* data, std::size_t size) {
 
 // No *_s string functions here: on overflow they end the process through the invalid parameter handler.
 bool CopyText(wchar_t* out, std::size_t chars, const wchar_t* text) {
-    const std::size_t length = wcslen(text);
+    // Reads at most `chars` of text: a text that does not fit is refused without being read past what would fit.
+    const std::size_t length = wcsnlen(text, chars);
     if (length >= chars) return false;
-    wmemcpy(out, text, length + 1);
+    wmemcpy(out, text, length);
+    out[length] = L'\0';
     return true;
 }
 
@@ -61,12 +63,15 @@ Existing Inspect(const ModFile& file, const wchar_t* path) {
         const DWORD error = GetLastError();
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? Existing::Absent : Existing::Unreadable;
     }
-    LARGE_INTEGER size{};
-    bool ok = GetFileSizeEx(handle, &size) != 0;
-    const bool small = ok && size.QuadPart >= 0 && static_cast<unsigned long long>(size.QuadPart) <= kMaxModFileBytes;
+    DWORD high = 0;
+    SetLastError(NO_ERROR);  // INVALID_FILE_SIZE is also a valid low part; only an error code says it failed
+    const DWORD low = GetFileSize(handle, &high);
+    bool ok = low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR;
+    const std::uint64_t size = (static_cast<std::uint64_t>(high) << 32) | low;
+    const bool small = ok && size <= kMaxModFileBytes;
     std::vector<unsigned char> data;
-    if (small && size.QuadPart > 0) {
-        data.resize(static_cast<std::size_t>(size.QuadPart));
+    if (small && size > 0) {
+        data.resize(static_cast<std::size_t>(size));
         DWORD read = 0;
         ok = ReadFile(handle, data.data(), static_cast<DWORD>(data.size()), &read, nullptr) && read == data.size();
     }

@@ -118,7 +118,7 @@ def paint_balloon(red, colour):
 
 
 def main():
-    out = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'assets' / 'ONLINEHUDTEXTURE.RAB'
+    out = HERE.parent / 'assets' / 'ONLINEHUDTEXTURE.RAB'
     data = original_archive()
     if hashlib.sha256(data).hexdigest() != ORIGINAL_SHA256:
         raise SystemExit('Root.cpk has a different HUD/ONLINEHUDTEXTURE.RAB than the one these colours were made for')

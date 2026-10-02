@@ -36,7 +36,7 @@ def original_layout():
 
 
 def main():
-    out = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'assets' / 'LYT_MAINFRAME.SGO'
+    out = HERE.parent / 'assets' / 'LYT_MAINFRAME.SGO'
     data = original_layout()
     if hashlib.sha256(data).hexdigest() != ORIGINAL_SHA256:
         raise SystemExit('Root.cpk has a different UI/LYT_MAINFRAME.SGO than the one this label was made for')

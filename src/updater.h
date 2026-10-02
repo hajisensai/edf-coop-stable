@@ -24,6 +24,7 @@
 // downloading off (rollback still works).
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -141,7 +142,7 @@ struct MenuStatus {
     UpdateStage stage = UpdateStage::Checking;
 };
 std::string menuStatusText(const MenuStatus& status);
-using StatusSink = void (*)(const char* text);
+using StatusSink = std::function<void(const char* text)>;
 // Every change of the menu status goes to `sink` as menuStatusText, the current one at once.
 void statusToSink(StatusSink sink);
 

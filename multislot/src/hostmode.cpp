@@ -334,13 +334,6 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
         SizeText(setting, size);
         _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%s", context.hostModeHint ? context.hostModeHint : L"",
                      context.hostModeHint && context.hostModeHint[0] ? L" " : L"", size);
-        // This plugin's version and its update (updatecheck.h): outside rooms, where the field has room for it.
-        wchar_t status[kLabelChars]{};
-        if (CopyPluginStatus(status, kLabelChars)) {
-            wchar_t line[kLabelChars]{};
-            _snwprintf_s(line, _TRUNCATE, L"   %ls", status);
-            wcsncat_s(out, outChars, line, _TRUNCATE);
-        }
     } else {
         // The page guide: while the room screen shows more than four members, and always in a MultiSlot room
         // this player hosts (there it names the second page before anyone fills it).
@@ -387,6 +380,10 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
         _snwprintf_s(line, _TRUNCATE, L"%s%ls", out[0] ? L"   " : L"", update);
         wcsncat_s(out, outChars, line, _TRUNCATE);
     }
+    // This plugin's version and its update (updatecheck.h), outside rooms. After the EDF6VR notice, which asks
+    // the player to run something: when the field is full, this is what gives way.
+    if (const std::wstring status = context.inRoom ? std::wstring() : PluginStatus(); !status.empty())
+        wcsncat_s(out, outChars, ((out[0] ? L"   " : L"") + status).c_str(), _TRUNCATE);
     // Test harness: the players a mission started alone would have (hidden while it is off).
     if (context.ghosts > 0) {
         wchar_t ghosts[24]{};

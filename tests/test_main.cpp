@@ -2676,8 +2676,11 @@ std::wstring freshDir(const wchar_t* name) {
 }
 
 // What the updater last told the menu (dn::statusToSink).
-std::string g_menuStatus;
-void recordMenuStatus(const char* text) { g_menuStatus = text; }
+std::string& menuStatus() {
+    static std::string text;
+    return text;
+}
+void recordMenuStatus(const char* text) { menuStatus() = text; }
 
 void testMenuStatus() {
     using dn::UpdateStage;
@@ -2702,7 +2705,7 @@ void testMenuStatus() {
 
     // AutoUpdate=0 says so at once, without a thread or a request.
     dn::startAutoUpdate(L"", "2.3.2", false);
-    CHECK(g_menuStatus == "EDF6Coop 2.3.2 (auto update off)");
+    CHECK(menuStatus() == "EDF6Coop 2.3.2 (auto update off)");
 }
 
 void testUpdateRollback() {
@@ -2729,7 +2732,7 @@ void testUpdateRollback() {
     install("0.3.7");
     putFile(trial, "0.3.7 0\n");
     CHECK(dn::beginRun(dll, "0.3.7") == dn::RunState::Normal && !fileExists(trial));
-    CHECK(g_menuStatus.rfind("EDF6Coop 0.3.7 (", 0) == 0 && g_menuStatus.find("updated") == std::string::npos);  // no update behind this start
+    CHECK(menuStatus().rfind("EDF6Coop 0.3.7 (", 0) == 0 && menuStatus().find("updated") == std::string::npos);  // no update behind this start
 
     // 0.3.7 updates itself to 0.3.8: 0.3.7 is kept as .old.
     std::vector<uint8_t> v038 = testDll("0.3.8");
@@ -2737,7 +2740,7 @@ void testUpdateRollback() {
     CHECK(fileText(old).find("EDF6COOP_VERSION=0.3.7") != std::string::npos && fileText(dll).size() == v038.size());
     // The first start of 0.3.8 is a trial; healthy after a while: the trial and .old go.
     CHECK(dn::beginRun(dll, "0.3.8") == dn::RunState::Trial);
-    CHECK(g_menuStatus == "EDF6Coop 0.3.8 (updated from 0.3.7)");  // the menu confirms the update
+    CHECK(menuStatus() == "EDF6Coop 0.3.8 (updated from 0.3.7)");  // the menu confirms the update
     CHECK(fileText(trial) == "0.3.8 " + std::to_string(GetCurrentProcessId()) + "\n");
     dn::confirmHealthy(dll, "0.3.7");  // someone else's trial: nothing happens
     CHECK(fileExists(trial) && fileExists(old));

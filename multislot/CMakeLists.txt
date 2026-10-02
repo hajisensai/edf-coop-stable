@@ -84,7 +84,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_D
 # The direct-link part, compiled with its own flags (it is not built for /permissive- and defines what the room
 # part's sources define themselves).
 set(DIRECTNET_DIR "${CMAKE_SOURCE_DIR}/../src")
-set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traffic updater upnp)
+set(DIRECTNET_CORE log auth wire reliable direct_net netif config iat hold traffic updater upnp room_view
+    fake_lobby)
 list(TRANSFORM DIRECTNET_CORE PREPEND "${DIRECTNET_DIR}/")
 list(TRANSFORM DIRECTNET_CORE APPEND ".cpp")
 set(DIRECTNET_DEFINES WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS

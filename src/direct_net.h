@@ -130,6 +130,11 @@ public:
     void setActive(bool active);
 
     std::vector<std::string> directMembers();
+    // host: who our game has in the room (us included), sent to every joiner with the roster.
+    void setRoomMembers(std::vector<std::string> members);
+    // join: who the host's game has in the room, as last heard; `version` goes up whenever it changes.
+    // Empty until the host first said (a host of protocol 6 says it right after welcoming us).
+    std::vector<std::string> hostRoom(uint64_t* version);
     std::string statusLine();
     WireTraffic takeWireTraffic();
     // Link datagrams dropped since start because they failed authentication: a bad tag (forged,
@@ -162,6 +167,7 @@ private:
         uint64_t txCounter = 0;
         ReplayWindow replay;
         uint64_t rosterCounter = 0;  // joiner: counter of the newest member list applied
+        uint64_t roomCounter = 0;    // joiner: counter of the newest room list applied
         PublicKey peerEcdh{};  // host: the client's ECDH key of this session
         WelcomeMsg welcome;  // host: what we answer this session's hellos with (signed on demand)
         std::vector<uint8_t> welcomeDatagram;  // ...and its last encoding, reused while the roster stays
@@ -203,6 +209,7 @@ private:
     bool sendRaw(const std::vector<uint8_t>& dg, const sockaddr_storage& to, int toLen);
     void tick(uint64_t now);
     void broadcastRoster();
+    void sendRoom(Link& link);
     void rosterChanged();
     std::vector<std::string> rosterLocked() const;
     Link* hostClientByAddr(const sockaddr_storage& addr, int len);
@@ -241,6 +248,8 @@ private:
     std::vector<std::string> lastRoster_;  // what the clients were last told
     bool active_ = true;
     uint64_t rosterBurstUntilMs_ = 0;
+    std::vector<std::string> roomMembers_;  // see setRoomMembers
+    bool roomSet_ = false;
 
     // Join mode.
     std::optional<Link> hostLink_;
@@ -249,6 +258,8 @@ private:
     std::optional<Cookie> cookie_;  // the host's cookie for our current session
     std::string roomOwner_, roomOwnerId_;  // see setRoomOwner
     std::vector<std::string> roster_;
+    std::vector<std::string> hostRoom_;  // see hostRoom
+    uint64_t hostRoomVersion_ = 0;
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;
     sockaddr_storage hostReplyAddr_{};  // where the host's Welcome came from (may differ, see onClientDatagram)

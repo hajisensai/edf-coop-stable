@@ -5,6 +5,7 @@
 #pragma once
 #include <windows.h>
 
+#include <cstdint>
 #include <string>
 
 #include "config.h"
@@ -20,5 +21,16 @@ struct PartState {
 PartState startPart(const Config& settings, const std::wstring& dir, HMODULE game, HMODULE eos);
 // DLL_PROCESS_DETACH: EDF.dll may still call EOS through the hooks while static objects go away.
 void detachPart();
+
+// Coming back into the room we were last in without Epic (eos_hooks.h installVirtualRoomHooks): after the room
+// part installed its wrappers, so these sit in front of them. False: unavailable (the part does not run).
+bool startRejoin(HMODULE game);
+// EOS_LobbyDetails_CopyInfo / EOS_LobbyDetails_Info_Release that also answer the room list entries of
+// startRejoin, for code that reads the game's LobbyDetails handles itself. Only once startRejoin succeeded.
+int32_t lobbyInfoCopy(void* details, const void* options, void** info);
+void lobbyInfoRelease(void* info);
+// Whether `remote` (an EOS_ProductUserId) plays with us over a direct link now: a build of the same direct-link
+// protocol, which reads a split mission start message.
+bool readsSplitSyncDirectly(const void* remote);
 
 }  // namespace dn

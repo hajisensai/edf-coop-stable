@@ -30,12 +30,10 @@ struct LobbyDetailsInfo {
 };
 
 using MemberCountFn = std::uint32_t(*)(void*);
-using CopyInfoFn = std::int32_t(*)(void*, const CopyInfoOptions*, LobbyDetailsInfo**);
-using ReleaseInfoFn = void(*)(LobbyDetailsInfo*);
 
 MemberCountFn memberCount = nullptr;
-CopyInfoFn copyInfo = nullptr;
-ReleaseInfoFn releaseInfo = nullptr;
+std::atomic<LobbyInfoCopyFn> copyInfo{nullptr};
+std::atomic<LobbyInfoReleaseFn> releaseInfo{nullptr};
 std::atomic<int> reports{0};
 
 void* HandleOf(void* holder) {
@@ -54,12 +52,14 @@ std::uint32_t Capacity(void* holder, std::uint32_t members) {
     void* handle = HandleOf(holder);
     LobbyDetailsInfo* info = nullptr;
     const CopyInfoOptions options{1};
-    if (handle && copyInfo && releaseInfo && copyInfo(handle, &options, &info) == 0 && info) {
+    const LobbyInfoCopyFn copy = copyInfo.load();
+    const LobbyInfoReleaseFn release = releaseInfo.load();
+    if (handle && copy && release && copy(handle, &options, reinterpret_cast<void**>(&info)) == 0 && info) {
         capacity = CapacityFromInfo(members, info->AvailableSlots, info->MaxMembers);
         if (DetailLog() && reports.fetch_add(1) < 40)
             Log("ROOM members=%u available=%u max=%u -> capacity %u%s", members, info->AvailableSlots, info->MaxMembers,
                 capacity ? capacity : kVanillaPlayers, capacity ? "" : " (inconsistent, vanilla fallback)");
-        releaseInfo(info);
+        release(info);
     }
     return capacity ? capacity : static_cast<std::uint32_t>(kVanillaPlayers);
 }
@@ -77,9 +77,14 @@ std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlo
 void InitRooms(const unsigned char* gameBase) {
     memberCount = reinterpret_cast<MemberCountFn>(gameBase + kMemberCountWrapper);
     const HMODULE sdk = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
-    copyInfo = sdk ? reinterpret_cast<CopyInfoFn>(GetProcAddress(sdk, "EOS_LobbyDetails_CopyInfo")) : nullptr;
-    releaseInfo = sdk ? reinterpret_cast<ReleaseInfoFn>(GetProcAddress(sdk, "EOS_LobbyDetails_Info_Release")) : nullptr;
-    if (!copyInfo || !releaseInfo) Log("ROOM: EOS_LobbyDetails_CopyInfo unavailable; room list keeps the vanilla 4-player view");
+    copyInfo = sdk ? reinterpret_cast<LobbyInfoCopyFn>(GetProcAddress(sdk, "EOS_LobbyDetails_CopyInfo")) : nullptr;
+    releaseInfo = sdk ? reinterpret_cast<LobbyInfoReleaseFn>(GetProcAddress(sdk, "EOS_LobbyDetails_Info_Release")) : nullptr;
+    if (!copyInfo.load() || !releaseInfo.load()) Log("ROOM: EOS_LobbyDetails_CopyInfo unavailable; room list keeps the vanilla 4-player view");
+}
+
+void RouteLobbyInfo(LobbyInfoCopyFn copy, LobbyInfoReleaseFn release) {
+    releaseInfo = release;  // first: a copy made through the new function is always released through its pair
+    copyInfo = copy;
 }
 
 std::uint64_t RoomCountAndCapacity(void* holder) {

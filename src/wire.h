@@ -18,7 +18,9 @@
 // 256 after its cumulative point), carries the game's own reliability (0 = sent unreliably, carried
 // with a sequence number but given up after a deadline) and adds Forward, which moves the receiver
 // past packets the sender gave up. Peers of different protocols reject each other's datagrams
-// (BadProtocol) and so keep using EOS with each other.
+// (BadProtocol) and so keep using EOS with each other. Protocol 6 adds Room: the host tells its joiners
+// who its game has in the room, which every member's game follows (a player can come back into a room
+// without Epic's lobby service, see room_view.h).
 #pragma once
 #include <array>
 #include <cstdint>
@@ -31,7 +33,7 @@
 namespace dn {
 
 constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
-constexpr uint16_t kProtocol = 5;
+constexpr uint16_t kProtocol = 6;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
 // Longest id / socket name on the wire. Decoding rejects longer ones instead of reading a string the
@@ -57,6 +59,7 @@ enum class MsgType : uint8_t {
     // a joiner acts on it only when its link has gone quiet anyway.
     Reset = 10,
     Forward = 11,  // sender -> receiver: every sequence number below this is acknowledged or given up
+    Room = 12,     // host -> clients: who the host's game has in the room
 };
 
 struct HelloMsg {
@@ -87,6 +90,13 @@ struct WelcomeMsg {
 struct RosterMsg {
     uint32_t hostNonce = 0;
     std::vector<std::string> roster;
+};
+
+// The host's game's members (the host included), as RoomView keeps them. Like Roster it carries the
+// host's nonce, and a newer link counter supersedes an older list.
+struct RoomMsg {
+    uint32_t hostNonce = 0;
+    std::vector<std::string> members;
 };
 
 struct DataMsg {
@@ -146,6 +156,7 @@ struct Message {
     ChallengeMsg challenge;
     WelcomeMsg welcome;
     RosterMsg roster;
+    RoomMsg room;
     DataMsg data;
     AckMsg ack;
     ForwardMsg forward;
@@ -155,7 +166,7 @@ struct Message {
 // Messages sent only on an established link, authenticated with its keys (see sealLink()).
 inline bool isLinkScoped(MsgType t) {
     return t == MsgType::Data || t == MsgType::Ack || t == MsgType::Forward || t == MsgType::Ping ||
-           t == MsgType::Pong || t == MsgType::Roster || t == MsgType::Bye;
+           t == MsgType::Pong || t == MsgType::Roster || t == MsgType::Bye || t == MsgType::Room;
 }
 
 inline uint32_t linkEpoch(uint32_t clientNonce, uint32_t hostNonce) {

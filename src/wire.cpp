@@ -128,6 +128,10 @@ void writeBody(Writer& w, const Message& m) {
             w.u32(m.roster.hostNonce);
             writeRoster(w, m.roster.roster);
             break;
+        case MsgType::Room:
+            w.u32(m.room.hostNonce);
+            writeRoster(w, m.room.members);
+            break;
         case MsgType::Data:
             w.u32(m.data.seq);
             w.str(m.data.src);
@@ -192,6 +196,10 @@ bool readBody(Reader& r, Message& m) {
         case MsgType::Roster:
             m.roster.hostNonce = r.u32();
             m.roster.roster = readRoster(r);
+            return true;
+        case MsgType::Room:
+            m.room.hostNonce = r.u32();
+            m.room.members = readRoster(r);
             return true;
         case MsgType::Data:
             m.data.seq = r.u32();

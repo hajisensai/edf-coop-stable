@@ -122,10 +122,14 @@ void HostDataLink::Received(const std::string& peer, const hostdata::Packet& pac
 }
 
 void HostDataLink::Tick(std::uint64_t now) {
-    // A question that could not go out yet goes now, and the wait for an answer starts when it did.
+    // A question that could not go out yet goes now, and the wait for an answer starts when it did. One that cannot
+    // go out for as long as all asks may take (the host never reached over P2P) gives up as well.
     if (state_ == Fetching::Running && !asked_) {
         asked_ = send_(host_, hostdata::EncodeGet(digest_));
-        if (asked_) lastProgress_ = now;
+        if (asked_)
+            lastProgress_ = now;
+        else if (now - lastProgress_ >= kStallMs * kMaxAsks)
+            Fail("the host could not be reached over P2P");
     } else if (state_ == Fetching::Running && now - lastProgress_ >= kStallMs) {
         if (asks_ >= kMaxAsks)
             Fail("the host did not send its files (asked " + std::to_string(asks_) + " times)");
@@ -207,6 +211,8 @@ struct Runtime {
     std::shared_ptr<const hostdata::Overlay> ready;
     std::size_t extra = 0;
     bool loggedServing = false;
+    bool storing = false;   // a fetched bundle is being written (outside the lock)
+    std::string fetchHost;  // who the running fetch asks
     // EOS, learnt from what the game receives.
     EosReceiveFn receive = nullptr;
     EosSendFn send = nullptr;
@@ -265,18 +271,20 @@ std::shared_ptr<const hostdata::Overlay> CachedLocked(const Digest& digest) {
     return nullptr;
 }
 
-// Writes a fetched bundle to the store: into <digest>.part, then renamed. Caller holds the lock.
-std::shared_ptr<const hostdata::Overlay> StoreLocked(const Digest& digest, const std::vector<std::uint8_t>& bytes) {
+// Writes a fetched bundle to `store`: into <digest>.part, then renamed. Its files, or nullopt. Without the lock (up
+// to 4 MB of disk writes must not hold up the game's receive and menu).
+std::optional<std::vector<hostdata::DataFile>> WriteStore(const std::wstring& store, const Digest& digest,
+                                                          const std::vector<std::uint8_t>& bytes) {
     std::string why;
-    const auto files = hostdata::ParseBundle(bytes, &why);
+    auto files = hostdata::ParseBundle(bytes, &why);
     if (!files) {
         Log("Host data: the host's files were refused: %s", why.c_str());
-        return nullptr;
+        return std::nullopt;
     }
-    const std::wstring name = Rt().store + L"\\" + Wide(hostdata::DigestHex(digest));
+    const std::wstring name = store + L"\\" + Wide(hostdata::DigestHex(digest));
     const std::wstring part = name + L".part";
     DeleteTree(part);
-    CreateDirectoryW(Rt().store.c_str(), nullptr);
+    CreateDirectoryW(store.c_str(), nullptr);
     bool ok = CreateDirectoryW(part.c_str(), nullptr) && CreateDirectoryW((part + L"\\WEAPON").c_str(), nullptr) &&
               CreateDirectoryW((part + L"\\OBJECT").c_str(), nullptr);
     for (const hostdata::DataFile& file : *files) {
@@ -284,14 +292,15 @@ std::shared_ptr<const hostdata::Overlay> StoreLocked(const Digest& digest, const
         std::replace(path.begin(), path.end(), L'/', L'\\');
         ok = ok && WriteWhole(path, file.bytes);
     }
-    ok = ok && (MoveFileExW(part.c_str(), name.c_str(), 0) || GetFileAttributesW(name.c_str()) != INVALID_FILE_ATTRIBUTES);
+    // Only what was just written and checked becomes <digest>: a folder that is somehow there already is not used.
+    ok = ok && MoveFileExW(part.c_str(), name.c_str(), 0);
     if (!ok) {
         Log("Host data: the host's files could not be written to %ls (error %lu)", part.c_str(), GetLastError());
         DeleteTree(part);
-        return nullptr;
+        return std::nullopt;
     }
     Log("Host data: %zu file(s) of the host kept in %ls", files->size(), name.c_str());
-    return MakeOverlayLocked(digest, *files);
+    return files;
 }
 
 // Stops using the host's files (they stay in the store). Caller holds the lock.
@@ -308,13 +317,14 @@ void DropLocked(const char* why) {
 // Gets the host's files: kept from before, or fetched. Caller holds the lock.
 void TakeLocked() {
     Runtime& rt = Rt();
-    if (!rt.target || rt.ready || rt.link.State() == HostDataLink::Fetching::Running) return;
+    if (!rt.target || rt.ready || rt.storing || rt.link.State() == HostDataLink::Fetching::Running) return;
     rt.ready = CachedLocked(*rt.target);
     if (rt.ready) {
         rt.stage = HostDataStage::Ready;
         return;
     }
-    rt.link.Fetch(rt.room.hostId, *rt.target, GetTickCount64());
+    rt.fetchHost = rt.room.hostId;
+    rt.link.Fetch(rt.fetchHost, *rt.target, GetTickCount64());
     rt.stage = HostDataStage::Fetching;
     Log("Host data: fetching the host's files %s", hostdata::DigestHex(*rt.target).c_str());
 }
@@ -343,6 +353,12 @@ void DecideLocked() {
     } else if (rt.stage == None || rt.stage == Same || rt.stage == HostHasNone) {
         rt.stage = Differs;
     }
+    // The lobby moved to another owner with the same files: ask the new one (the old one may be gone).
+    if (rt.target && rt.link.State() == HostDataLink::Fetching::Running && rt.fetchHost != room.hostId) {
+        Log("Host data: the room has a new host; fetching from it");
+        rt.fetchHost = room.hostId;
+        rt.link.Fetch(rt.fetchHost, *rt.target, GetTickCount64());
+    }
     if (rt.target && rt.wanted && rt.stage == Differs) TakeLocked();
 }
 
@@ -354,9 +370,33 @@ void Observe(const LobbyView& view) {
 }
 
 // After every EOS tick: the link's sends, and what a fetch came to.
+bool TickLocked();
+
 void AfterTick(void*) {
     Runtime& rt = Rt();
+    std::optional<Digest> fetched;
+    std::vector<std::uint8_t> bytes;
+    std::wstring store;
+    {
+        std::scoped_lock lock(rt.lock);
+        if (!TickLocked()) return;
+        fetched = rt.target;
+        bytes = rt.link.TakeBundle();
+        store = rt.store;
+        rt.storing = true;
+    }
+    const auto files = WriteStore(store, *fetched, bytes);
     std::scoped_lock lock(rt.lock);
+    rt.storing = false;
+    if (rt.target != fetched) return;  // the room changed while it was written
+    rt.ready = files ? MakeOverlayLocked(*fetched, *files) : nullptr;
+    rt.stage = rt.ready ? HostDataStage::Ready : HostDataStage::Failed;
+    if (!rt.ready) rt.wanted = false;
+}
+
+// The tick's part under the lock: true when a fetched bundle is ready to be written.
+bool TickLocked() {
+    Runtime& rt = Rt();
     rt.link.Tick(GetTickCount64());
     if (rt.link.Serving() && !rt.loggedServing) Log("Host data: sending this machine's files to %zu player(s)", rt.link.Serving());
     rt.loggedServing = rt.link.Serving() != 0;
@@ -368,11 +408,8 @@ void AfterTick(void*) {
         rt.stage = HostDataStage::Failed;
         rt.wanted = false;
     }
-    if (rt.link.State() == Done && rt.target) {
-        rt.ready = StoreLocked(*rt.target, rt.link.TakeBundle());
-        rt.stage = rt.ready ? HostDataStage::Ready : HostDataStage::Failed;
-        if (!rt.ready) rt.wanted = false;
-    }
+    if (rt.link.State() == Done && !rt.target) rt.link.Cancel();
+    return rt.link.State() == Done;
 }
 
 // Who `peer` is, as text; learnt once per handle (EOS keeps a user's handle for as long as it runs).
@@ -398,7 +435,7 @@ EosResult HostDataReceive(void* handle, const void* options, void** peer, void* 
         if (options) rt.localUser = static_cast<const EosReceiveOptions*>(options)->LocalUserId;
         const std::string& from = PeerTextLocked(*peer);
         if (*channel != kHostDataChannel) {
-            if (socket && !rt.socket.SocketName[0]) std::memcpy(&rt.socket, socket, sizeof(rt.socket));
+            if (socket) std::memcpy(&rt.socket, socket, sizeof(rt.socket));  // the game's socket, as it is now
             return result;
         }
         // Ours, whatever it holds: the game never sends on this channel and must not see it.
@@ -457,34 +494,33 @@ bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings
             Log("Host data: %zu weapon/vehicle file(s) of this machine, %zu bytes, SHA-256 %s", bundle->files,
                 bundle->bytes.size(), hostdata::DigestHex(bundle->digest).c_str());
         }
-        PublishMemberText(kHostDataKey, kHostDataFormat);
-        if (bundle && settings.share) {
-            PublishMemberText(kHostDigestKey, hostdata::DigestHex(bundle->digest));
-            rt.link.Share(std::make_shared<const hostdata::Bundle>(std::move(*bundle)));
-        }
+        if (bundle && settings.share) rt.link.Share(std::make_shared<const hostdata::Bundle>(std::move(*bundle)));
         rt.send = eos ? reinterpret_cast<EosSendFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_P2P_SendPacket")))
                       : nullptr;
     }
-    WatchMemberTexts({kHostDataKey, kHostDigestKey}, &Observe);
-    ListenToTicks(&AfterTick);
+    // Only once our channel is taken out before the game reads it does this machine say it takes part: a member
+    // sends our packets only to one that said so, and a machine without the wrapper would read them as game data.
     const bool received = rt.send && redirect(game, "EOSSDK-Win64-Shipping.dll", "EOS_P2P_ReceivePacket",
                                               reinterpret_cast<void*>(&HostDataReceive),
                                               reinterpret_cast<void**>(&rt.receive));
-    if (!received) Log("Host data: EOS P2P could not be reached; the host's files cannot be fetched");
-    return received;
+    if (!received) {
+        Log("Host data: EOS P2P could not be reached; nothing is offered or fetched");
+        return false;
+    }
+    PublishMemberText(kHostDataKey, kHostDataFormat);
+    if (settings.share && rt.own != Digest{}) PublishMemberText(kHostDigestKey, hostdata::DigestHex(rt.own));
+    WatchMemberTexts({kHostDataKey, kHostDigestKey}, &Observe);
+    ListenToTicks(&AfterTick);
+    return true;
 }
 
 std::wstring HostDataMenuFrame(bool inRoom, bool pressed) {
     using enum HostDataStage;
     Runtime& rt = Rt();
     std::scoped_lock lock(rt.lock);
-    if (!inRoom) {
-        if (rt.target || HostOverlay()) {
-            rt.room = HostDataRoom{};
-            DecideLocked();
-        }
-        return L"";
-    }
+    // Only what is shown follows the game's room session; what is taken follows the lobby (Observe), which also
+    // says when we left it. While joining, the lobby is there before the game's session is.
+    if (!inRoom) return L"";
     if (pressed && rt.target && rt.settings.accept != HostAccept::Never) {
         rt.wanted = !rt.wanted;
         if (rt.wanted) {

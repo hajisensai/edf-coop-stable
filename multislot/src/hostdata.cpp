@@ -21,12 +21,19 @@ static_assert(kPartHead + kPartBytes <= kMaxPacket, "a part must fit one EOS pac
 
 bool NameChar(char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 
-// "<NAME>.SGO" with NAME made of A-Z 0-9 _ only: one dot, so WEAPONTEXT.EN.SGO is not one.
+// A name Windows opens as a device, whatever the extension: NUL.SGO is the NUL device, not a file.
+bool DeviceName(std::string_view stem) {
+    constexpr std::string_view kDevices[] = {"CON", "PRN", "AUX", "NUL"};
+    if (std::find(std::begin(kDevices), std::end(kDevices), stem) != std::end(kDevices)) return true;
+    return stem.size() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem[3] >= '0' && stem[3] <= '9';
+}
+
+// "<NAME>.SGO" with NAME made of A-Z 0-9 _ only (and not a device): one dot, so WEAPONTEXT.EN.SGO is not one.
 bool SgoName(std::string_view name) {
     constexpr std::string_view kExt = ".SGO";
     if (name.size() <= kExt.size() || !name.ends_with(kExt)) return false;
     const std::string_view stem = name.substr(0, name.size() - kExt.size());
-    return std::all_of(stem.begin(), stem.end(), NameChar);
+    return std::all_of(stem.begin(), stem.end(), NameChar) && !DeviceName(stem);
 }
 
 void Put32(std::vector<std::uint8_t>& out, std::uint32_t value) {

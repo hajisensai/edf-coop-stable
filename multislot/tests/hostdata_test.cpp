@@ -40,6 +40,11 @@ void Paths() {
     Check(!SharedPath("WEAPON/WEAPONTABLE.SGO"), "the weapon table never travels");
     Check(!SharedPath("WEAPON/WEAPONTEXT.EN.SGO"), "weapon names never travel");
     Check(!SharedPath("WEAPON/SUB/X.SGO"), "no sub folders");
+    for (const char* device : {"WEAPON/NUL.SGO", "WEAPON/CON.SGO", "WEAPON/PRN.SGO", "WEAPON/AUX.SGO", "WEAPON/COM1.SGO",
+                               "WEAPON/LPT9.SGO", "WEAPON/COM0.SGO"})
+        Check(!SharedPath(device), "a device name is never a file");
+    Check(SharedPath("WEAPON/COM10.SGO") && SharedPath("WEAPON/NULL.SGO") && SharedPath("WEAPON/CONSOLE.SGO"),
+          "names that only start like a device are files");
     Check(!SharedPath("WEAPON/../EDF.DLL"), "no way out of the folder");
     Check(!SharedPath("WEAPON/X.DLL"), "no DLLs");
     Check(!SharedPath("WEAPON/.SGO"), "a name is needed");

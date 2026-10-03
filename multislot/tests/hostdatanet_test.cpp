@@ -194,7 +194,7 @@ void Stalls() {
     // Before EOS is learnt nothing goes out; the question goes once it can, and only then does the wait start.
     net.refuses["guest"] = true;
     guest.Fetch("host", bundle.digest, now);
-    now += HostDataLink::kStallMs * 3;
+    now += HostDataLink::kStallMs * 2;
     guest.Tick(now);
     Check(guest.State() == HostDataLink::Fetching::Running && net.sends == 0, "a refused question is no ask");
     net.refuses["guest"] = false;
@@ -212,6 +212,13 @@ void Stalls() {
     guest.Tick(now);
     Check(guest.State() == HostDataLink::Fetching::Failed && net.sends == HostDataLink::kMaxAsks,
           "then the fetch gives up");
+    // A host never reached over P2P: the question never goes out, and the fetch still ends.
+    net.refuses["guest"] = true;
+    guest.Fetch("host", bundle.digest, now);
+    guest.Tick(now + HostDataLink::kStallMs * HostDataLink::kMaxAsks - 1);
+    Check(guest.State() == HostDataLink::Fetching::Running, "a question that cannot go out is tried for a while");
+    guest.Tick(now + HostDataLink::kStallMs * HostDataLink::kMaxAsks);
+    Check(guest.State() == HostDataLink::Fetching::Failed, "and then the fetch gives up too");
 }
 
 void ManyAskers() {

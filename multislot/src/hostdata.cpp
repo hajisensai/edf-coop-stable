@@ -36,6 +36,20 @@ bool SgoName(std::string_view name) {
     return std::all_of(stem.begin(), stem.end(), NameChar) && !DeviceName(stem);
 }
 
+// `name` is `prefix` and a three digit vehicle number, then anything: V401_TANK.SGO, VEHICLE404_BIGTANK_AI.SGO.
+bool VehicleNumber(std::string_view name, std::string_view prefix) {
+    if (!name.starts_with(prefix) || name.size() < prefix.size() + 3) return false;
+    const std::string_view number = name.substr(prefix.size(), 3);
+    return std::all_of(number.begin(), number.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+// Why a file found in WEAPON or OBJECT is not shared.
+const char* SkipReason(std::string_view path) {
+    if (path.starts_with("WEAPON/WEAPONTEXT")) return "holds weapon names, which the game reads once at start";
+    if (path == "WEAPON/WEAPONTABLE.SGO") return "is the weapon list (new weapons would stay in saves)";
+    return "is not a weapon or vehicle data file name (WEAPON\\<A-Z 0-9 _>.SGO, OBJECT\\V<nnn>* or VEHICLE<nnn>*)";
+}
+
 void Put32(std::vector<std::uint8_t>& out, std::uint32_t value) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
 }
@@ -121,7 +135,7 @@ void ScanFolder(const std::wstring& mods, const wchar_t* folder, const wchar_t* 
         std::string why;
         DataFile file{path, {}};
         if (path.empty() || !SharedPath(path)) {
-            why = "is not a weapon or vehicle data file (only A-Z 0-9 _ names are shared)";
+            why = SkipReason(path);
         } else if (ReadSmallFile(dir + found.cFileName, file.bytes, &why) && !LooksLikeSgo(file.bytes)) {
             why = "is not an SGO file";
         }
@@ -149,9 +163,7 @@ bool SharedPath(std::string_view path) {
     }
     if (path.starts_with(kObject)) {
         const std::string_view name = path.substr(kObject.size());
-        return name.size() > 4 && name[0] == 'V' && std::isdigit(static_cast<unsigned char>(name[1])) &&
-               std::isdigit(static_cast<unsigned char>(name[2])) && std::isdigit(static_cast<unsigned char>(name[3])) &&
-               SgoName(name);
+        return SgoName(name) && (VehicleNumber(name, "V") || VehicleNumber(name, "VEHICLE"));
     }
     return false;
 }
@@ -249,7 +261,7 @@ std::optional<std::vector<DataFile>> ParseBundle(const std::vector<std::uint8_t>
 std::vector<DataFile> ScanMods(const std::wstring& mods, std::vector<std::string>* skipped) {
     std::vector<DataFile> files;
     ScanFolder(mods, L"WEAPON", L"*.SGO", files, skipped);
-    ScanFolder(mods, L"OBJECT", L"V*.SGO", files, skipped);
+    ScanFolder(mods, L"OBJECT", L"V*.SGO", files, skipped);  // V<nnn>* and VEHICLE<nnn>*
     std::sort(files.begin(), files.end(), [](const DataFile& a, const DataFile& b) { return a.path < b.path; });
     return files;
 }

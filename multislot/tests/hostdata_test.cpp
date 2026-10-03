@@ -53,6 +53,10 @@ void Paths() {
     Check(SharedPath("OBJECT/V401_TANK.SGO"), "a vehicle with a suffix");
     Check(!SharedPath("OBJECT/E101.SGO"), "enemies do not travel");
     Check(!SharedPath("OBJECT/VA01.SGO"), "a vehicle number is three digits");
+    Check(SharedPath("OBJECT/VEHICLE404_BIGTANK_AI.SGO") && SharedPath("OBJECT/VEHICLE404.SGO"), "VEHICLE<nnn> too");
+    Check(!SharedPath("OBJECT/VEHICLE40.SGO") && !SharedPath("OBJECT/VEHICLEX404.SGO") && !SharedPath("OBJECT/VEHICLE.SGO"),
+          "VEHICLE needs its three digits right after it");
+    Check(!SharedPath("OBJECT/EDF6VC_JET.SGO") && !SharedPath("OBJECT/VEHICLE404.MRAB"), "other objects do not travel");
     Check(!SharedPath("PATCHES/X.TXT"), "patches never travel");
     Check(!SharedPath("PLUGINS/X.DLL"), "plugins never travel");
     Check(!SharedPath(std::string("WEAPON/") + std::string(60, 'A') + ".SGO"), "paths are short");

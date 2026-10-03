@@ -54,7 +54,7 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 - 任务里每个玩家在 HUD 上都有自己的颜色：状态灯、聊天气泡、雷达标记。1-4 号保持游戏原来的黄、绿、蓝、红，
   5-8 号是橙、粉、紫、青，以此类推直到 32 人。为此 MOD 会写出 Mods\HUD\ONLINEHUDTEXTURE.RAB（游戏自己的
   HUD 贴图加上新的灯和气泡）。如果那里已经有别的 MOD 的文件，则不动它，5 号以后的玩家沿用 1-4 号的颜色。
-- 房主的魔改武器和载具：房主的 Mods\WEAPON / Mods\OBJECT\V*.SGO 和你的不一样时，房间里的菜单显示
+- 房主的魔改武器和载具：房主的 Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO 和你的不一样时，房间里的菜单显示
   「F1 host weapons :OFF」。按 F1 从房主那里下载，对照房主发布的 SHA-256 校验，从下一个菜单画面起使用，
   只在这个房间有效；再按 F1 换回自己的。只传武器（不含 WEAPONTABLE/WEAPONTEXT）和载具文件，最多 4 MB，
   绝不传 DLL 或补丁。文件放在 Mods\Plugins\EDF6Coop.hostdata，绝不写进你的 Mods 文件夹。ini 的 [HostData]：

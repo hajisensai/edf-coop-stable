@@ -64,7 +64,7 @@ settings files are left alone.
   and so on up to 32. For this the mod writes Mods\HUD\ONLINEHUDTEXTURE.RAB (the game's HUD textures
   plus the new lamps and balloons). If another mod already has a file there, it is left alone and
   players 5 and up share the colours of players 1-4.
-- The host's modified weapons and vehicles: when the host's Mods\WEAPON / Mods\OBJECT\V*.SGO files differ
+- The host's modified weapons and vehicles: when the host's Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO files differ
   from yours, a room's menu says "F1 host weapons :OFF". F1 fetches them from the host, checks them against
   the SHA-256 the host published and uses them from the next menu screen, for that room only; F1 again goes
   back to yours. Only weapon (not WEAPONTABLE/WEAPONTEXT) and vehicle files travel, at most 4 MB, never a DLL

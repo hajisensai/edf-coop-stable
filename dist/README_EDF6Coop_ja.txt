@@ -56,7 +56,7 @@ EDFModLoader、ほかの MOD、古い EDF6DirectNet / EDF6MultiSlot の設定フ
   1～4人目はゲーム本来の黄・緑・青・赤、5～8人目は橙・ピンク・紫・水色で、32人まで続きます。このために
   Mods\HUD\ONLINEHUDTEXTURE.RAB（ゲームの HUD テクスチャに新しいランプと吹き出しを足したもの）を書きます。
   そこに別の MOD のファイルがあるときは触らず、5人目以降は 1～4人目の色を使います。
-・ホストの改造武器とビークル：ホストの Mods\WEAPON / Mods\OBJECT\V*.SGO が自分のものと違うと、部屋の
+・ホストの改造武器とビークル：ホストの Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO が自分のものと違うと、部屋の
   メニューに「F1 host weapons :OFF」と出ます。F1 でホストから取得し、ホストが公開した SHA-256 と照合して、
   次のメニュー画面からその部屋の間だけ使います。もう一度 F1 で自分のものに戻ります。送られるのは武器
   （WEAPONTABLE/WEAPONTEXT は除く）とビークルのファイルだけ、最大 4 MB で、DLL やパッチは決して送りません。

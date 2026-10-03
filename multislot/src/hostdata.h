@@ -9,7 +9,7 @@
 //   WEAPON\<name>.SGO       a weapon or a vehicle's gun; not WEAPONTABLE.SGO (the list of weapons: new IDs
 //                           there would sit in the save, which crashes the menu once the files are gone) and
 //                           not WEAPONTEXT.*.SGO (names, loaded once at start)
-//   OBJECT\V<nnn>*.SGO      a vehicle
+//   OBJECT\V<nnn>*.SGO      a vehicle; also OBJECT\VEHICLE<nnn>*.SGO (VEHICLE404_BIGTANK_AI.SGO)
 // Never a DLL, Patches\*.txt (machine code) or anything else. Every file starts with an SGO magic, is at most
 // kMaxFileBytes and there are at most kMaxFiles of them, kMaxTotalBytes in all.
 //

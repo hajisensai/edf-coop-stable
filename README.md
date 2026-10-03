@@ -139,7 +139,7 @@ The game learns its room's members from the lobby: the list when it enters, then
 
 ### The host's weapon and vehicle files
 
-With modified weapons or vehicles (`Mods\WEAPON\*.SGO`, `Mods\OBJECT\V*.SGO`), everyone else in the room still loads their own files, so the host's modified gun fires as the original on their screens. EDF6Coop lets the host offer its files and a player in its room use them, for that room only:
+With modified weapons or vehicles (`Mods\WEAPON\*.SGO`, `Mods\OBJECT\V*.SGO` / `VEHICLE*.SGO`), everyone else in the room still loads their own files, so the host's modified gun fires as the original on their screens. EDF6Coop lets the host offer its files and a player in its room use them, for that room only:
 
 - Every machine publishes the SHA-256 of its weapon/vehicle files on its own lobby entry, which only it can write. When the host's differ from yours, the menu says `F1 host weapons :OFF`.
 - F1 fetches them over the P2P link the game already has to the host (`host weapons 37%`), checks every byte against the SHA-256 the host published, and switches them on at the next menu screen (`F1 host weapons :ON`). F1 again goes back to your own files. `[HostData] Accept=Always` takes them without asking, `Never` only reports the difference.

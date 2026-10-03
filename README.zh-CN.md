@@ -139,7 +139,7 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 ### 房主的武器和载具文件
 
-改过武器或载具（`Mods\WEAPON\*.SGO`、`Mods\OBJECT\V*.SGO`）时，房间里其他人加载的还是自己的文件，房主的魔改枪在别人屏幕上就是原版。EDF6Coop 让房主提供自己的文件，房间里的玩家可以拿来用，只在这个房间有效：
+改过武器或载具（`Mods\WEAPON\*.SGO`、`Mods\OBJECT\V*.SGO` / `VEHICLE*.SGO`）时，房间里其他人加载的还是自己的文件，房主的魔改枪在别人屏幕上就是原版。EDF6Coop 让房主提供自己的文件，房间里的玩家可以拿来用，只在这个房间有效：
 
 - 每台机器把自己武器/载具文件的 SHA-256 发布在自己的大厅成员信息上（只有本人能写）。房主的和你的不一样时，菜单显示 `F1 host weapons :OFF`。
 - 按 F1 通过游戏本来就有的、到房主的 P2P 连接下载（`host weapons 37%`），每个字节都对照房主发布的 SHA-256 校验，下一个菜单画面起生效（`F1 host weapons :ON`）。再按 F1 换回自己的文件。`[HostData] Accept=Always` 不问直接用，`Never` 只提示不一样。

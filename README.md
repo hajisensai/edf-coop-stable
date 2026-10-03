@@ -85,7 +85,7 @@ Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works th
 
 ## Settings reference (`EDF6Coop.ini`, restart the game after editing)
 
-The direct link's keys are below. The same file also has `[MultiSlot]`, `[Smoothing]`, `[RoomScreen]`, `[Mission]` and `[CopyArmor]` for the bigger rooms; the comments in the file explain every key. `[MultiSlot] Enabled=0` and `[DirectNet] Enabled=0` together unload the plugin.
+The direct link's keys are below. The same file also has `[MultiSlot]`, `[Smoothing]`, `[RoomScreen]`, `[Mission]`, `[CopyArmor]` and `[HostData]` for the bigger rooms; the comments in the file explain every key. `[MultiSlot] Enabled=0` and `[DirectNet] Enabled=0` together unload the plugin.
 
 | Key | Default | Description |
 |---|---|---|
@@ -136,6 +136,17 @@ The game learns its room's members from the lobby: the list when it enters, then
 
 - Host: a player Epic does not list, with a direct link, whom the game does not have is let into the room while it has space (their plugin dials the host only while their game is in the room); one in the room by its direct link only has left once that link stayed down for `GraceSeconds`; one that just left is not brought back by its old link before that times out, only by a new one. A player the host kicked is not let back in by their direct link in that room, unless they come in through Epic again. Kicking a player Epic does not know of is done by the plugin.
 - Member: while in someone else's room, the plugin notes it every 2 s (host, the host's published identity and addresses, the room's attributes). For 30 minutes after leaving, a room search Epic cannot run (its lobby service down) gets that room as its result; a search Epic answers reaches the game as it is. choosing it dials the host at the noted addresses (5 s each, 30 s in all), and the room is entered once the host's member list includes you. It is forgotten when the room closes, when you are kicked, when you enter another room, or when the room's host changes. That room is the host's real room, but Epic does not know you are in it: leaving or closing it in the game completes locally.
+
+### The host's weapon and vehicle files
+
+With modified weapons or vehicles (`Mods\WEAPON\*.SGO`, `Mods\OBJECT\V*.SGO`), everyone else in the room still loads their own files, so the host's modified gun fires as the original on their screens. EDF6Coop lets the host offer its files and a player in its room use them, for that room only:
+
+- Every machine publishes the SHA-256 of its weapon/vehicle files on its own lobby entry, which only it can write. When the host's differ from yours, the menu says `F1 host weapons :OFF`.
+- F1 fetches them over the P2P link the game already has to the host (`host weapons 37%`), checks every byte against the SHA-256 the host published, and switches them on at the next menu screen (`F1 host weapons :ON`). F1 again goes back to your own files. `[HostData] Accept=Always` takes them without asking, `Never` only reports the difference.
+- Only data travels: weapon files (not `WEAPONTABLE` or `WEAPONTEXT`, so no new weapons and nothing that stays in your save) and vehicle files, at most 128 files, 256 KB each, 4 MB in all. Never a DLL, a patch or anything else, and a file that is not an SGO is refused.
+- The files are kept in `Mods\Plugins\EDF6Coop.hostdata\<SHA-256>` (the newest four sets), never in your Mods folders. The game is pointed at them file by file while you use them, in memory only: leaving the room, quitting or a crash all bring back your own files.
+- Your own extra files that the host does not have stay in use; the menu counts them (`+2 own`).
+- `[HostData] Share=0` offers nothing as host; `Enabled=0` turns all of this off and leaves the game's file loading alone.
 
 ## Troubleshooting
 
@@ -207,6 +218,8 @@ The auto-updater of every installed copy downloads `EDF6Coop.dll` / `.dll.sig` f
 - Direct-link traffic is authenticated, not encrypted: someone on the network path can read it (as they can see who plays with whom), and can always drop it (the game then falls back to EOS).
 - UPnP mappings are not removed when the game exits (there is no safe point for the network calls then): the plugin removes the one it made at the next game start that does not host (`Mode` not `host`, or `UPnP=0`), and `UNINSTALL.bat` removes it too. It never touches mappings that belong to other devices. Until then it is harmless while nothing listens on the port; you can also delete the mapping named `EDF6DirectNet` in your router's admin page.
 - Nothing can be hidden when the direct link itself is down: if a player's own internet drops for longer than `GraceSeconds`, the game handles it as usual.
+
+- The host's weapon and vehicle files switch on and off between missions only, and only the kinds listed above travel: mods that add weapons (`WEAPONTABLE`), `mod.cpk` / `mod.dll` mods and patches are not shared.
 
 ## License
 

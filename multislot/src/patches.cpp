@@ -416,6 +416,10 @@ std::vector<MidSite> DiagnosticHooks() {
     };
 }
 
+std::vector<MidSite> HostDataHooks() {
+    return {{"file open path", 0x74210, {0x4C, 0x8D, 0x45, 0xD8, 0x48, 0x8B, 0xD7}, 0, 7}};
+}
+
 std::vector<CallSite> DiagnosticCalls() {
     return {
         {"handshake validation succeeded", 0x12D56CE, 0x12C7C40},

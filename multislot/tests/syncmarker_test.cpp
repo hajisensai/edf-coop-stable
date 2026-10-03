@@ -84,6 +84,26 @@ void AddMember(const char* id, bool marked) {
     if (marked) Fake<void (*)(const char*, const char*, std::int64_t)>("FakeEos_SetAttribute")(id, kSplitSyncKey, 1);
 }
 
+// What the text observer (WatchMemberTexts) was last handed, and how often.
+LobbyView lastView;
+int views = 0;
+void ObserveView(const LobbyView& view) {
+    lastView = view;
+    ++views;
+}
+std::string Text(const char* member, const char* key) {
+    const char* text = Fake<const char* (*)(const char*, const char*)>("FakeEos_Text")(member, key);
+    return text ? text : "<none>";
+}
+std::string ViewText(const std::string& member, const std::string& key) {
+    for (const auto& seen : lastView.members) {
+        if (seen.id != member) continue;
+        const auto found = seen.texts.find(key);
+        return found == seen.texts.end() ? "<none>" : found->second;
+    }
+    return "<not listed>";
+}
+
 std::string ReadLog(const std::wstring& path) {
     LogFlush();
     std::string text;
@@ -120,14 +140,16 @@ void TestRoomWithoutEos() {
 }
 
 void TestLobby(const wchar_t* fakePath) {
-    Check(!InstallSyncMarker(nullptr, &FakeRedirect) && redirected.empty(),
+    Check(!InstallSyncMarker(nullptr, &FakeRedirect, true) && redirected.empty(),
           "without the EOS SDK loaded nothing is redirected");
     Check(!PeerReadsSplitSync(nullptr), "a null peer reads nothing");
     fake = LoadLibraryW(fakePath);
     Check(fake != nullptr, "the stand-in EOS SDK loads");
     if (!fake) return;
     Fake<void (*)(const char*)>("FakeEos_Reset")("self");
-    Check(InstallSyncMarker(nullptr, &FakeRedirect), "the marker installs");
+    Check(InstallSyncMarker(nullptr, &FakeRedirect, true), "the marker installs");
+    WatchMemberTexts({"TEXT_A", "TEXT_B"}, &ObserveView);
+    PublishMemberText("TEXT_A", "ours");
     const std::string sdk = "EOSSDK-Win64-Shipping.dll!";
     Check(redirected == std::vector<std::string>({sdk + "EOS_Lobby_LeaveLobby", sdk + "EOS_Lobby_DestroyLobby",
                                                  sdk + "EOS_Platform_Tick", sdk + "EOS_Lobby_CreateLobby",
@@ -148,6 +170,9 @@ void TestLobby(const wchar_t* fakePath) {
     Check(Updates() == 1 && Published(kSplitSyncKey) == -1, "our marker is sent a beat later");
     Tick();
     Check(Published(kSplitSyncKey) == kSplitSyncFormat && Published(kSplitSyncSeqKey) == 1, "and is in the lobby");
+    Check(Text("self", "TEXT_A") == "ours", "a text attribute goes out with the marker");
+    Check(views == 1 && lastView.lobbyId == "lobby-created" && lastView.owner == "self" && lastView.self == "self",
+          "the beat hands the observer the lobby and its owner");
     Check(PeerReadsSplitSync(User("self")) == false, "we are not observed yet");
 
     // Two members join: one with the split, one without. The next observation sees them and sends our marker again.
@@ -155,12 +180,18 @@ void TestLobby(const wchar_t* fakePath) {
     AddMember("older", false);
     AddMember("zero", false);
     Fake<void (*)(const char*, const char*, std::int64_t)>("FakeEos_SetAttribute")("zero", kSplitSyncKey, 0);
+    Fake<void (*)(const char*, const char*, const char*)>("FakeEos_SetText")("newer", "TEXT_B", "theirs");
+    Fake<void (*)(const char*, const char*, const char*)>("FakeEos_SetText")("newer", "TEXT_C", "unwatched");
     Tick();
     Check(Updates() == 1, "members are observed once a second, not every tick");
     NextObservation();
     Check(Updates() == 2, "a newcomer gets our marker sent again");
     Tick();
     Check(Published(kSplitSyncSeqKey) == 2, "with a new sequence number, so EOS sends it to everyone");
+    Check(ViewText("newer", "TEXT_B") == "theirs" && ViewText("newer", "TEXT_A") == "<none>" &&
+              ViewText("newer", "TEXT_C") == "<none>" && ViewText("older", "TEXT_B") == "<none>" &&
+              ViewText("self", "TEXT_A") == "ours",
+          "the observer gets the watched texts of every member, and only those");
     Check(PeerReadsSplitSync(User("newer")) && PeerReadsSplitSync(User("self")), "members with the marker read it");
     Check(!PeerReadsSplitSync(User("older")) && !PeerReadsSplitSync(User("older")), "a member without it does not");
     Check(!PeerReadsSplitSync(User("stranger")), "nor does someone not in the room");
@@ -170,6 +201,20 @@ void TestLobby(const wchar_t* fakePath) {
     Fake<void (*)(const char*)>("FakeEos_ClearAttributes")("newer");
     NextObservation();
     Check(PeerReadsSplitSync(User("newer")), "a marker once seen stays while we are in the room");
+    // So does a text: our copy drops a member's attributes when its game updates the lobby (the host's files
+    // notice went away two seconds after joining, 2026-10-03).
+    Fake<void (*)(const char*)>("FakeEos_ClearTexts")("newer");
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "theirs", "a text once seen stays while its member is in the room");
+    Fake<void (*)(const char*, const char*, const char*)>("FakeEos_SetText")("newer", "TEXT_B", "theirs again");
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "theirs again", "a new value replaces it");
+    Fake<void (*)(const char*)>("FakeEos_ClearTexts")("newer");
+    Fake<void (*)(const char*)>("FakeEos_RemoveMember")("newer");
+    NextObservation();
+    AddMember("newer", false);  // its marker stays lost in our copy (checked in the next room)
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "<none>", "and one who left and came back is read afresh");
 
     // A publish that fails is sent again with the next observation, not on every tick.
     Fake<void (*)(std::int32_t)>("FakeEos_SetUpdateResult")(10);
@@ -209,6 +254,14 @@ void TestLobby(const wchar_t* fakePath) {
     NextObservation();
     Check(PeerReadsSplitSync(User("third")) && Updates() == 5, "without a lobby copy what we know stays");
     Fake<void (*)(int)>("FakeEos_SetCopyFails")(0);
+    const int updatesBefore = Updates();
+    PublishMemberText("TEXT_A", "ours");
+    NextObservation();
+    Check(Updates() == updatesBefore, "the same text again is not published again");
+    PublishMemberText("TEXT_A", "changed");
+    NextObservation();
+    Tick();
+    Check(Updates() == updatesBefore + 1 && Text("self", "TEXT_A") == "changed", "a changed text goes out on the next beat");
 
     // Leaving: everything about the room is forgotten, records and held packets included.
     StubInfo stub{9, 4, 0};
@@ -218,6 +271,7 @@ void TestLobby(const wchar_t* fakePath) {
     reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
     Check(Fake<int (*)()>("FakeEos_Leaves")() == 1, "the game's leave goes through");
     Check(!SplitSync().InLobby() && !PeerReadsSplitSync(User("newer")), "after leaving nobody is known");
+    Check(lastView.lobbyId.empty() && lastView.members.empty(), "and the observer is told there is no lobby");
     Check(!FindRecord(stub, nullptr), "and the records of that room are gone");
     const int updates = Updates();
     NextObservation();
@@ -232,11 +286,32 @@ void TestLobby(const wchar_t* fakePath) {
           "the room joined is known");
     NextObservation();
     Check(Updates() == updates + 1, "joining publishes our marker in the new room");
+    Tick();
+    Check(Text("self", "TEXT_A") == "changed", "and our texts, which are kept from room to room");
     Check(PeerReadsSplitSync(User("third")) && !PeerReadsSplitSync(User("newer")),
           "members are read on entering (newer lost its marker in our copy, and this is a new room)");
     Fake<void (*)(const char*)>("FakeEos_RemoveMember")("older");
     reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_DestroyLobby"])(nullptr, nullptr, nullptr, nullptr);
     Check(!SplitSync().InLobby(), "closing a room leaves it too");
+}
+
+// Without the split (Extend=0, or packetfit could not redirect both imports) only the texts are published.
+void TestTextsOnly() {
+    if (!fake) return;
+    Fake<void (*)(const char*)>("FakeEos_Reset")("self");
+    Check(InstallSyncMarker(nullptr, &FakeRedirect, false), "the lobby glue installs without the split");
+    Fake<void (*)(const char*, const char*)>("FakeEos_EnterLobby")("lobby-before", "host");
+    const int lobbyHandle = 0;
+    const LobbyOptions join{1, Fake<void* (*)(const char*)>("FakeEos_Details")("lobby-host"), User("self")};
+    reinterpret_cast<LobbyCallFn>(replacements["EOS_Lobby_JoinLobby"])(
+        const_cast<int*>(&lobbyHandle), &join, &gameMarker, &GameLobbyCallback);
+    Tick();
+    NextObservation();
+    Tick();
+    Check(Text("self", "TEXT_A") == "changed" && Published(kSplitSyncKey) == -1,
+          "the texts go out, the split marker does not");
+    Check(lastView.owner == "host" && lastView.lobbyId == "lobby-host", "the owner is someone else's id when we joined");
+    reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
 }
 
 void TestLog(const std::wstring& path) {
@@ -266,6 +341,7 @@ int main(int argc, char** argv) {
     TestRoomWithoutEos();
     TestLobby(fakePath.c_str());
     TestLog(logPath);
+    TestTextsOnly();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

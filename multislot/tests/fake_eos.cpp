@@ -109,6 +109,7 @@ constexpr std::int32_t kNotFound = 18, kNotOwner = 9000, kAlreadyMember = 9002;
 std::map<std::string, std::unique_ptr<User>> users;
 std::vector<std::string> members;                                  // in the lobby, in order
 std::map<std::string, std::map<std::string, std::int64_t>> attributes;  // member -> key -> int64
+std::map<std::string, std::map<std::string, std::string>> texts;        // member -> key -> UTF-8
 std::string self;
 std::string lobbyId;
 bool copyFails = false;
@@ -128,6 +129,7 @@ std::deque<std::function<void()>> completions;
 
 struct Modification {
     std::map<std::string, std::int64_t> attributes;
+    std::map<std::string, std::string> texts;
 };
 
 const User* Handle(const std::string& id) {
@@ -159,6 +161,7 @@ void Complete(LobbyIdCallback callback, void* clientData, std::int32_t result, c
 EXPORT void FakeEos_Reset(const char* selfId) {
     members.clear();
     attributes.clear();
+    texts.clear();
     completions.clear();
     self = selfId;
     lobbyId.clear();
@@ -192,6 +195,15 @@ EXPORT std::int64_t FakeEos_Attribute(const char* member, const char* key) {
     if (m == attributes.end()) return -1;
     auto a = m->second.find(key);
     return a == m->second.end() ? -1 : a->second;
+}
+EXPORT void FakeEos_SetText(const char* member, const char* key, const char* value) { texts[member][key] = value; }
+EXPORT void FakeEos_ClearTexts(const char* member) { texts.erase(member); }
+// The text `member` has under `key`, or null.
+EXPORT const char* FakeEos_Text(const char* member, const char* key) {
+    const auto m = texts.find(member);
+    if (m == texts.end()) return nullptr;
+    const auto t = m->second.find(key);
+    return t == m->second.end() ? nullptr : t->second.c_str();
 }
 EXPORT void FakeEos_SetCopyFails(int fails) { copyFails = fails != 0; }
 EXPORT void FakeEos_SetUpdateResult(std::int32_t result) { updateResult = result; }
@@ -281,6 +293,7 @@ EXPORT void EOS_Lobby_LeaveLobby(void*, const LeaveOptions* options, void* clien
     if (leaveResult == 0) {
         FakeEos_RemoveMember(self.c_str());
         attributes.erase(self);
+        texts.erase(self);
     }
     Complete(callback, clientData, leaveResult, id);
 }
@@ -292,6 +305,7 @@ EXPORT void EOS_Lobby_DestroyLobby(void*, const LeaveOptions* options, void* cli
     if (result == 0) {
         FakeEos_RemoveMember(self.c_str());
         attributes.erase(self);
+        texts.erase(self);
     }
     Complete(callback, clientData, result, id);
 }
@@ -303,19 +317,30 @@ EXPORT std::int32_t EOS_Lobby_UpdateLobbyModification(void*, const void*, void**
     return 0;
 }
 EXPORT std::int32_t EOS_LobbyModification_AddMemberAttribute(void* modification, const AddMemberAttributeOptions* options) {
-    if (!options->Attribute || options->Attribute->ValueType != 1) return 10;
-    static_cast<Modification*>(modification)->attributes[options->Attribute->Key] = options->Attribute->Value.AsInt64;
+    if (!options->Attribute) return 10;
+    auto* changes = static_cast<Modification*>(modification);
+    if (options->Attribute->ValueType == 3 && options->Attribute->Value.AsUtf8) {
+        changes->texts[options->Attribute->Key] = options->Attribute->Value.AsUtf8;
+        return 0;
+    }
+    if (options->Attribute->ValueType != 1) return 10;
+    changes->attributes[options->Attribute->Key] = options->Attribute->Value.AsInt64;
     return 0;
 }
 EXPORT void EOS_LobbyModification_Release(void* modification) { delete static_cast<Modification*>(modification); }
 EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void* clientData, LobbyIdCallback callback) {
     ++updates;
-    const auto copy = static_cast<Modification*>(options->LobbyModificationHandle)->attributes;  // EOS copies it
+    const Modification copy = *static_cast<Modification*>(options->LobbyModificationHandle);  // EOS copies it
     const std::int32_t result = updateResult;
     const std::string lobby = lobbyId;
     completions.push_back([=]() {
-        if (result == 0)
-            for (const auto& [key, value] : copy) attributes[self][key] = value;
+        if (result != 0) {
+            LobbyIdCallbackInfo info{result, clientData, lobby.c_str()};
+            callback(&info);
+            return;
+        }
+        for (const auto& [key, value] : copy.attributes) attributes[self][key] = value;
+        for (const auto& [key, value] : copy.texts) texts[self][key] = value;
         LobbyIdCallbackInfo info{result, clientData, lobby.c_str()};
         callback(&info);
     });
@@ -337,6 +362,15 @@ EXPORT const void* EOS_LobbyDetails_GetMemberByIndex(void* details, const GetMem
 }
 EXPORT std::int32_t EOS_LobbyDetails_CopyMemberAttributeByKey(void*, const CopyMemberAttributeOptions* options,
                                                               Attribute** out) {
+    if (const char* text = FakeEos_Text(static_cast<const User*>(options->TargetUserId)->text, options->AttrKey)) {
+        auto* data = new AttributeData{1, options->AttrKey, {}, 3};
+        const std::size_t size = std::strlen(text) + 1;
+        auto* copy = new char[size];
+        std::memcpy(copy, text, size);
+        data->Value.AsUtf8 = copy;
+        *out = new Attribute{1, data, 0};
+        return 0;
+    }
     const std::int64_t value = FakeEos_Attribute(static_cast<const User*>(options->TargetUserId)->text, options->AttrKey);
     if (value < 0) return kNotFound;
     auto* data = new AttributeData{1, options->AttrKey, {}, 1};
@@ -367,6 +401,7 @@ EXPORT const void* EOS_LobbyDetails_GetLobbyOwner(void* details, const void*) {
 }
 EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<Details*>(details); }
 EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {
+    if (attribute->Data->ValueType == 3) delete[] attribute->Data->Value.AsUtf8;
     delete attribute->Data;
     delete attribute;
 }

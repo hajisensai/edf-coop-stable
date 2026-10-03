@@ -157,6 +157,11 @@ std::vector<CallSite> PeerTimeoutCalls();
 std::vector<MidSite> GhostHooks();
 std::vector<CallSite> GhostCalls();
 
+// Host data (hostdataopen.h): the game's file open (741C0, the function EDFModLoader wraps to read Mods\), at the
+// point where rdi is the path's characters and is about to be handed to the open (`lea r8, [rbp-0x28];
+// mov rdx, rdi`). The handler may point rdi at another path; both moves run after it.
+std::vector<MidSite> HostDataHooks();
+
 bool Matches(const std::uint8_t* at, const Patch& patch);
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva);
 bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t targetRva);

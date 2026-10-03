@@ -325,6 +325,7 @@ int main() {
     CheckDisplaced(ArmorHooks(), "ArmorHooks");
     CheckDisplaced(DiagnosticHooks(), "DiagnosticHooks");
     CheckDisplaced(GhostHooks(), "GhostHooks");
+    CheckDisplaced(HostDataHooks(), "HostDataHooks");
 
     page.Release();
     Check(RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(pThunk)), &imageBase, nullptr) == nullptr,

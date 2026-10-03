@@ -641,6 +641,21 @@ int main(int argc, char** argv) {
     const auto ghostHooks = GhostHooks();
     allHooks.insert(allHooks.end(), ghostHooks.begin(), ghostHooks.end());
     allHooks.insert(allHooks.end(), peerTimeoutHooks.begin(), peerTimeoutHooks.end());
+    // Host data (hostdataopen.h): the file open EDFModLoader wraps. After `call [vtable+0x10]` on rcx, rdi is the
+    // path wstring (rdx), turned into its characters when not stored inline (capacity 8+); the moves at the site
+    // hand them to the open (752E0); after it rdi only holds a result byte (`sete dil`/`setne dil`).
+    const auto hostDataHooks = HostDataHooks();
+    Check(hostDataHooks.size() == 1, "host data hook table size");
+    for (const auto& hook : hostDataHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the open keeps both moves", hook.rva);
+    }
+    Check(Bytes(0x741E6, {0x48, 0x8B, 0xFA}) && Bytes(0x74206, {0x48, 0x83, 0x7F, 0x18, 0x08, 0x72, 0x03, 0x48, 0x8B, 0x3F}) &&
+              Bytes(0x74217, {0x48, 0x8B, 0x0D}) && CallTargets(image.At(0x7421E, 5), 0x7421E, 0x752E0) &&
+              Bytes(0x74266, {0x40, 0x0F, 0x94, 0xC7}) && Bytes(0x7428C, {0x40, 0x0F, 0x95, 0xC7}),
+          "the file open: rdi = the path's characters, handed to 752E0, then only a result", 0x741C0);
+    allHooks.insert(allHooks.end(), hostDataHooks.begin(), hostDataHooks.end());
     // 8Player MOD (hostmode.cpp): the sites it replaces, and the game functions it calls from the menu frame.
     const auto hostHooks = HostModeHooks();
     Check(hostHooks.size() == 12, "host mode hook table size");

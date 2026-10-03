@@ -102,7 +102,7 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -194,6 +194,12 @@ target_include_directories(HostDataTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(HostDataTests PRIVATE ${WARNINGS})
 target_link_libraries(HostDataTests PRIVATE DirectNetCore)
 add_test(NAME HostDataBundles COMMAND HostDataTests "${CMAKE_BINARY_DIR}/hostdatatest")
+add_executable(HostDataNetTests tests/hostdatanet_test.cpp src/hostdatanet.cpp src/hostdata.cpp src/hostdataopen.cpp
+    src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
+target_include_directories(HostDataNetTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(HostDataNetTests PRIVATE ${WARNINGS})
+target_link_libraries(HostDataNetTests PRIVATE DirectNetCore)
+add_test(NAME HostDataLinkTransfer COMMAND HostDataNetTests)
 
 add_executable(ModFileTests tests/modfile_test.cpp src/modfile.cpp)
 target_include_directories(ModFileTests PRIVATE "${CMAKE_BINARY_DIR}/generated")

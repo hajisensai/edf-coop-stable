@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <string>
 
 #include "midhook.h"
 #include "patches.h"
@@ -79,6 +80,7 @@ struct MenuContext {
     bool copyArmorAtMax;           // and that armor is this class's ceiling, not what was found in the room
     int roomMode = -1;             // the room's kind as its lobby says (LobbyKind: 1 MultiSlot, 0 normal), -1 unknown
     int roomCapacity = 0;          // and in a MultiSlot room its size (the lobby's MaxMembers)
+    const wchar_t* roomNotice = nullptr;  // the room feature's words (SetRoomFeature), shown in a room after copy armor
 };
 // Long enough for the fullest line a room can show: the room's setting, the page guide and copy armor.
 constexpr std::size_t kLabelChars = 96;
@@ -94,5 +96,10 @@ std::size_t ComposeLabel(const MenuContext& context, int roomSize, int createdSi
 void UpdateMenuFrame(void* frame, bool down, const MenuContext& context);
 // The size this machine created its last room with, 0 for a normal room.
 int CreatedRoomSize();
+
+// A room feature on the menu (hostdatanet.h): on every menu frame `frame(inRoom, pressed)` runs, `pressed` when
+// `key` (a virtual key, 0 for none) went down in a room with the game in front; what it returns is shown in a room.
+using RoomFeatureFrame = std::wstring (*)(bool inRoom, bool pressed);
+void SetRoomFeature(int key, RoomFeatureFrame frame);
 
 }  // namespace multislot

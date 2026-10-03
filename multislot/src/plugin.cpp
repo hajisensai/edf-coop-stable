@@ -19,6 +19,7 @@
 #include "default_ini.h"
 #include "fakemembers.h"
 #include "hostdataopen.h"
+#include "hostdatanet.h"
 #include "hostmode.h"
 #include "joinlog.h"
 #include "log.h"
@@ -73,6 +74,30 @@ std::wstring IniText(const wchar_t* ini, const wchar_t* section, const wchar_t* 
     wchar_t value[64]{};
     GetPrivateProfileStringW(section, key, fallback, value, 64, ini);
     return value;
+}
+
+// [HostData] (hostdatanet.h). The accept key's name stays readable for as long as the game runs (the menu shows it).
+HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey) {
+    static wchar_t keyName[16]{};
+    HostDataSettings settings;
+    settings.share = GetPrivateProfileIntW(L"HostData", L"Share", 1, ini) != 0;
+    const auto accept = IniText(ini, L"HostData", L"Accept", L"Ask");
+    if (_wcsicmp(accept.c_str(), L"Always") == 0)
+        settings.accept = HostAccept::Always;
+    else if (_wcsicmp(accept.c_str(), L"Never") == 0)
+        settings.accept = HostAccept::Never;
+    else if (_wcsicmp(accept.c_str(), L"Ask") != 0)
+        Log("[HostData] Accept=%ls is not Ask, Always or Never; using Ask", accept.c_str());
+    auto key = IniText(ini, L"HostData", L"AcceptKey", L"F1");
+    *acceptKey = VirtualKey(key.c_str());
+    if (*acceptKey <= 0) {
+        Log("[HostData] AcceptKey=%ls is not a known key; using F1", key.c_str());
+        *acceptKey = VK_F1;
+        key = L"F1";
+    }
+    wcsncpy_s(keyName, key.c_str(), _TRUNCATE);
+    settings.keyName = keyName;
+    return settings;
 }
 
 RoomViewSettings ReadRoomView(const wchar_t* ini) {
@@ -625,12 +650,36 @@ bool LoadRooms(const wchar_t* iniPath) {
             "or one that fails, leaves it");
     else
         Log("Lobby state: UNAVAILABLE - room updates publish the game's own values (%d players)", kVanillaPlayers);
+    // Host data's receive wrapper sits next to EOS, before packetfit's and the net log's: its packets never reach
+    // them (hostdatanet.h). Its lobby attributes go out once the lobby glue below is in.
+    if (hostData) {
+        int acceptKey = 0;
+        HostDataSettings settings = ReadHostData(iniPath, &acceptKey);
+        wchar_t folder[MAX_PATH]{};
+        if (SiblingPath(folder, L".dll")) {
+            for (int up = 0; up < 3; ++up)
+                if (wchar_t* slash = wcsrchr(folder, L'\\')) *slash = 0;
+            settings.gameFolder = folder;
+        }
+        if (!settings.gameFolder.empty() && StartHostData(game, &RedirectGameImport, settings)) {
+            SetRoomFeature(acceptKey, &HostDataMenuFrame);
+            Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls (weapon and vehicle files only, checked against "
+                "the host's SHA-256, kept in Mods\\Plugins\\EDF6Coop.hostdata)",
+                settings.share ? 1 : 0,
+                settings.accept == HostAccept::Ask ? L"Ask" : settings.accept == HostAccept::Always ? L"Always" : L"Never",
+                settings.keyName);
+        } else {
+            Log("Host data: UNAVAILABLE - the host's files cannot be fetched in rooms");
+        }
+    }
     // Before the net log: its wrappers go in front of these, so they still see the game as their caller.
+    const int imports = mission ? InstallPacketFit(game, &RedirectGameImport) : 0;
+    // One set of lobby wrappers carries the split marker and host data's attributes (syncmarker.h). The marker says
+    // this machine reads a split message: only true once both P2P imports are ours.
+    const bool lobbyGlue = (imports == 2 || hostData) && InstallSyncMarker(game, &RedirectGameImport, imports == 2);
+    const bool marker = imports == 2 && lobbyGlue;
+    if (marker) SetSplitSyncReaders(&ReadsSplitSync);
     if (mission) {
-        const int imports = InstallPacketFit(game, &RedirectGameImport);
-        // The marker says this machine reads a split message: only true once both P2P imports are ours.
-        const bool marker = imports == 2 && InstallSyncMarker(game, &RedirectGameImport);
-        if (marker) SetSplitSyncReaders(&ReadsSplitSync);
         if (imports == 2)
             Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "
                 "what fits and sends the other loadout records beside it; smaller ones are unchanged. It only goes to "
@@ -641,11 +690,11 @@ bool LoadRooms(const wchar_t* iniPath) {
                 "cannot start", imports);
     }
     if (netLog || recovery) {
-        const int imports = InstallNetLog(game, netLog, recovery);
+        const int netImports = InstallNetLog(game, netLog, recovery);
         if (netLog)
-            Log("Net log: %d EOS imports redirected (NetLog=0 turns the detailed log off; the log file keeps its newest 2 MB)", imports);
+            Log("Net log: %d EOS imports redirected (NetLog=0 turns the detailed log off; the log file keeps its newest 2 MB)", netImports);
         else
-            Log("Recovery transport: %d EOS import redirected; detailed network logging off", imports);
+            Log("Recovery transport: %d EOS import redirected; detailed network logging off", netImports);
     } else {
         Log("HandshakeRecovery=0: off");
     }

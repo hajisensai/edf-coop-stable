@@ -341,6 +341,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(Untouched(base, guest) == static_cast<int>(guest.size()), "Enabled=0 leaves every guest patch site untouched");
         Check(Untouched(base, sessions) == static_cast<int>(sessions.size()), "Enabled=0 leaves the room tables at four");
         for (const auto& hook : hostHooks) Check(SiteUntouched(base, hook), "Enabled=0 leaves the host room sites untouched");
+        for (const auto& hook : HostDataHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves the file open untouched");
         const PointerSlot frame = MainFrameSlot();
         Check(SlotTargets(base + frame.rva, reinterpret_cast<std::uint64_t>(base), frame.target), "Enabled=0 leaves the menu frame vtable untouched");
         const PointerSlot lobbySlot = LobbySlot();
@@ -410,6 +411,8 @@ int wmain(int argc, wchar_t** argv) {
         // 8Player MOD: the room sites and the menu frame are hooked whatever the setting; the setting is
         // read when a room is created (hostmode_test covers the handlers).
         for (const auto& hook : hostHooks) Check(HookedInto(base, hook, plugin), hook.name);
+        // Host data ([HostData] Enabled=1 by default): the file open, which only logs until an overlay is on.
+        for (const auto& hook : HostDataHooks()) Check(HookedInto(base, hook, plugin), hook.name);
         Check(SlotInto(base, MainFrameSlot(), plugin), "HUiMainFrame OnUpdate vtable slot points into the plugin");
         Check(SlotInto(base, LobbySlot(), plugin), "HUiLobby OnUpdate vtable slot points into the plugin");
         Check(Contains(log, eightPlayers ? "Hosting: 8Player MOD ON" : "Hosting: Player MOD OFF"), "the host mode setting is logged");

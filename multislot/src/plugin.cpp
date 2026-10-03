@@ -18,6 +18,7 @@
 #include "crashlog.h"
 #include "default_ini.h"
 #include "fakemembers.h"
+#include "hostdataopen.h"
 #include "hostmode.h"
 #include "joinlog.h"
 #include "log.h"
@@ -137,7 +138,7 @@ struct SlotWrite {
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
 bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int ghosts, bool diagnostics, bool armor,
-           bool recovery, bool keepRoom, float smoothing, ThunkPage& thunks) {
+           bool recovery, bool keepRoom, bool hostData, float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
     patches.insert(patches.end(), sessionPatches.begin(), sessionPatches.end());
@@ -149,6 +150,8 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         for (const auto& site : DiagnosticHooks()) hooks.push_back({site, JoinLogHookHandler(site.rva)});
     if (keepRoom)
         for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
+    if (hostData)
+        for (const auto& site : HostDataHooks()) hooks.push_back({site, &HostDataOpenHandler});
     if (mission) {
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
@@ -417,6 +420,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     const bool recovery = GetPrivateProfileIntW(L"MultiSlot", L"HandshakeRecovery", 1, iniPath) != 0;
     // An established member stays in the room when a newcomer's P2P handshake with it times out (peertimeout.h).
     const bool keepRoom = GetPrivateProfileIntW(L"MultiSlot", L"KeepRoomOnPeerTimeout", 1, iniPath) != 0;
+    const bool hostData = GetPrivateProfileIntW(L"HostData", L"Enabled", 1, iniPath) != 0;
     SetDetailLog(netLog);
     if (!enabled) {
         Log("[MultiSlot] Enabled=0: rooms, missions and the room screen are left untouched");
@@ -561,7 +565,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     // game loads it, so a mission never meets patches without their textures. Without Extend the HUD is the game's.
     const bool hudColours = KeepHudArchive(mission);
     if (!Apply(base, mission, hudColours, spawns, ghosts, netLog, copyArmorKey || copyArmorPad, recovery, keepRoom,
-               smoothing, thunks)) {
+               hostData, smoothing, thunks)) {
         RemoveModFiles();
         return false;
     }

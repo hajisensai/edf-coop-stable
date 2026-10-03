@@ -201,6 +201,20 @@ void TestLobby(const wchar_t* fakePath) {
     Fake<void (*)(const char*)>("FakeEos_ClearAttributes")("newer");
     NextObservation();
     Check(PeerReadsSplitSync(User("newer")), "a marker once seen stays while we are in the room");
+    // So does a text: our copy drops a member's attributes when its game updates the lobby (the host's files
+    // notice went away two seconds after joining, 2026-10-03).
+    Fake<void (*)(const char*)>("FakeEos_ClearTexts")("newer");
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "theirs", "a text once seen stays while its member is in the room");
+    Fake<void (*)(const char*, const char*, const char*)>("FakeEos_SetText")("newer", "TEXT_B", "theirs again");
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "theirs again", "a new value replaces it");
+    Fake<void (*)(const char*)>("FakeEos_ClearTexts")("newer");
+    Fake<void (*)(const char*)>("FakeEos_RemoveMember")("newer");
+    NextObservation();
+    AddMember("newer", false);  // its marker stays lost in our copy (checked in the next room)
+    NextObservation();
+    Check(ViewText("newer", "TEXT_B") == "<none>", "and one who left and came back is read afresh");
 
     // A publish that fails is sent again with the next observation, not on every tick.
     Fake<void (*)(std::int32_t)>("FakeEos_SetUpdateResult")(10);

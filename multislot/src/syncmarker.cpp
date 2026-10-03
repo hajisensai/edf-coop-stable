@@ -146,6 +146,10 @@ struct Local {
     bool splitReader = false;  // kSplitSyncKey is ours to publish
     std::map<std::string, std::string, std::less<>> texts;  // PublishMemberText
     std::vector<std::string> watched;                       // WatchMemberTexts
+    // The watched texts each member of this lobby has shown. Our copy of the lobby drops a member's attributes when
+    // that member's game updates the lobby (EOS logs "Lobby backend has attributes missing from client"): a text
+    // once seen stays until its member publishes another value or leaves, like the split marker.
+    std::map<std::string, std::map<std::string, std::string, std::less<>>, std::less<>> seen;
     LobbyObserver observer;
     std::function<void(void*)> tickListener;
 } local;
@@ -265,6 +269,7 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members, LobbyView& view) {
     view.owner = UserText(api.lobbyOwner(details, &ownerOptions));
     const GetMemberCountOptions countOptions{1};
     const std::uint32_t count = std::min(api.memberCount(details, &countOptions), kMaxMembersRead);
+    decltype(local.seen) present;  // only members still in the lobby are remembered
     for (std::uint32_t i = 0; i < count; ++i) {
         const GetMemberByIndexOptions memberOptions{1, i};
         const void* member = api.memberByIndex(details, &memberOptions);
@@ -274,7 +279,12 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members, LobbyView& view) {
         LobbyView::Member& seen = view.members.emplace_back();
         seen.id = id;
         for (const std::string& key : local.watched) ReadText(details, member, key, seen.texts);
+        auto& known = local.seen[id];
+        for (const auto& [key, value] : seen.texts) known[key] = value;
+        seen.texts = known;
+        present[id] = std::move(known);
     }
+    local.seen = std::move(present);
     api.releaseDetails(details);
     return true;
 }
@@ -311,6 +321,7 @@ void Entered(const LobbyCall& call, const char* lobbyId) {
     local.lobby = call.lobby;
     local.user = call.user;
     local.lobbyId = lobbyId;
+    local.seen.clear();
     local.dirty = true;
     local.nextBeat = GetTickCount64() + kObserveIntervalMs;
     local.failureLogged = false;
@@ -342,6 +353,7 @@ void JoinLobbyHook(void* lobby, const JoinLobbyOptionsHead* options, void* clien
 void LeftLobby() {
     AcquireSRWLockExclusive(&local.lock);
     local.lobbyId.clear();
+    local.seen.clear();
     local.dirty = false;
     const LobbyObserver observer = local.observer;
     ReleaseSRWLockExclusive(&local.lock);

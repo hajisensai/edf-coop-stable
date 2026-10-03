@@ -197,6 +197,7 @@ EXPORT std::int64_t FakeEos_Attribute(const char* member, const char* key) {
     return a == m->second.end() ? -1 : a->second;
 }
 EXPORT void FakeEos_SetText(const char* member, const char* key, const char* value) { texts[member][key] = value; }
+EXPORT void FakeEos_ClearTexts(const char* member) { texts.erase(member); }
 // The text `member` has under `key`, or null.
 EXPORT const char* FakeEos_Text(const char* member, const char* key) {
     const auto m = texts.find(member);

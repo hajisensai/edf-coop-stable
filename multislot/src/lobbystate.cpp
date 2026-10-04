@@ -15,6 +15,7 @@ namespace {
 // --- EOS lobby API (eos_lobby.h, eos_lobby_types.h) ---
 using EosResult = std::int32_t;
 constexpr EosResult kEosSuccess = 0;
+constexpr EosResult kEosNotFound = 18;              // EOS_NotFound
 constexpr EosResult kEosLobbyAlreadyExists = 9002;  // EOS_Lobby_LobbyAlreadyExists: still a member of it
 
 struct CreateLobbyOptionsHead {  // leading fields of EOS_Lobby_CreateLobbyOptions
@@ -97,6 +98,13 @@ using GetOwnerFn = const void* (*)(void* details, const VersionOnly*);
 using CopyAttributeFn = EosResult (*)(void* details, const CopyAttributeOptions*, Attribute** out);
 using ReleaseAttributeFn = void (*)(Attribute* attribute);
 using ReleaseDetailsFn = void (*)(void* details);
+struct CopyResultOptions {  // EOS_LobbySearch_CopySearchResultByIndexOptions
+    std::int32_t ApiVersion;
+    std::uint32_t LobbyIndex;
+};
+using FindFn = void (*)(void* search, const void* options, void* clientData, void* completion);
+using ResultCountFn = std::uint32_t (*)(void* search, const void* options);
+using CopyResultFn = EosResult (*)(void* search, const CopyResultOptions*, void** details);
 using IsCompleteFn = std::int32_t (*)(EosResult);
 using ToStringFn = const char* (*)(EosResult);
 
@@ -118,6 +126,9 @@ struct Api {
     LobbyCallFn createLobby = nullptr;
     LobbyCallFn joinLobby = nullptr;
     PlatformTickFn tick = nullptr;
+    FindFn find = nullptr;
+    ResultCountFn resultCount = nullptr;
+    CopyResultFn copyResult = nullptr;
 } api;
 
 constexpr const char* kSearchTypeKey = "SEARCH_TYPE";
@@ -546,6 +557,70 @@ void JoinLobbyHook(void* lobby, const void* options, void* clientData, LobbyIdCa
     api.leaveLobby(lobby, &leave, pending, &LeftBeforeJoin);
 }
 
+// --- The room list: normal and MultiSlot rooms, without earlier MultiSlot versions' (lobbystate.h) ---
+
+// What the game is shown of the room list's last search: EOS's index of each room, in order. Worked out again
+// when the search runs again or EOS's count changes (its results came in); EDF6DirectNet, which adds a room of
+// its own after these, asks for the count again for every result it copies.
+struct Shown {
+    SRWLOCK lock = SRWLOCK_INIT;
+    void* search = nullptr;  // null: nothing worked out since the last Find
+    std::uint32_t found = 0;  // EOS's count when it was worked out
+    std::vector<std::uint32_t> results;
+} shown;
+
+// Whether EOS's result `index` is a room this build can join. One whose details cannot be read stays: the game
+// handles it as it always did.
+bool Joinable(void* search, std::uint32_t index) {
+    const CopyResultOptions options{1, index};
+    void* details = nullptr;
+    if (api.copyResult(search, &options, &details) != kEosSuccess || !details) return true;
+    LobbyFacts facts;
+    ReadDetails(details, facts, nullptr);
+    api.releaseDetails(details);
+    return !facts.hasSearchType || SearchTypeKind(facts.searchType) != LobbyKind::Unknown;
+}
+
+void FindHook(void* search, const void* options, void* clientData, void* completion) {
+    AcquireSRWLockExclusive(&shown.lock);
+    shown.search = nullptr;  // its results are about to change
+    ReleaseSRWLockExclusive(&shown.lock);
+    api.find(search, options, clientData, completion);
+}
+
+std::uint32_t ResultCountHook(void* search, const void* options) {
+    const std::uint32_t found = api.resultCount(search, options);
+    AcquireSRWLockShared(&shown.lock);
+    const bool known = search && shown.search == search && shown.found == found;
+    const auto count = static_cast<std::uint32_t>(shown.results.size());
+    ReleaseSRWLockShared(&shown.lock);
+    if (known) return count;
+    std::vector<std::uint32_t> results;
+    for (std::uint32_t i = 0; i < found; ++i)
+        if (Joinable(search, i)) results.push_back(i);
+    const auto kept = static_cast<std::uint32_t>(results.size());
+    if (kept < found)
+        Log("LOBBY room list: %u of %u room(s) left out, made by an earlier MultiSlot version this one cannot join",
+            found - kept, found);
+    AcquireSRWLockExclusive(&shown.lock);
+    shown.search = search;
+    shown.found = found;
+    shown.results = std::move(results);
+    ReleaseSRWLockExclusive(&shown.lock);
+    return kept;
+}
+
+EosResult CopyResultHook(void* search, const CopyResultOptions* options, void** details) {
+    CopyResultOptions asked = options ? *options : CopyResultOptions{};
+    AcquireSRWLockShared(&shown.lock);
+    const bool mapped = options && search && shown.search == search;
+    const bool within = mapped && asked.LobbyIndex < shown.results.size();
+    if (within) asked.LobbyIndex = shown.results[asked.LobbyIndex];
+    ReleaseSRWLockShared(&shown.lock);
+    if (!mapped) return api.copyResult(search, options, details);
+    return within ? api.copyResult(search, &asked, details) : kEosNotFound;
+}
+
 template <typename T>
 bool Resolve(HMODULE eos, const char* name, T& out) {
     out = reinterpret_cast<T>(reinterpret_cast<void*>(GetProcAddress(eos, name)));
@@ -563,14 +638,16 @@ bool Redirect(HMODULE game, ImportRedirect redirect, const char* name, T replace
 
 }  // namespace
 
+LobbyKind SearchTypeKind(std::int64_t value) {
+    if (value >= static_cast<std::int64_t>(2 * kSearchTypeCenter - 0x94) &&
+        value <= static_cast<std::int64_t>(2 * kSearchTypeCenter - 0x91))
+        return LobbyKind::MultiSlot;
+    return (value & ~std::int64_t{0xF}) == 0x90 ? LobbyKind::Normal : LobbyKind::Unknown;
+}
+
 LobbyKind KindOf(const LobbyFacts& facts) {
-    if (facts.hasSearchType) {
-        const auto value = facts.searchType;
-        if (value >= static_cast<std::int64_t>(2 * kSearchTypeCenter - 0x94) &&
-            value <= static_cast<std::int64_t>(2 * kSearchTypeCenter - 0x91))
-            return LobbyKind::MultiSlot;
-        if ((value & ~std::int64_t{0xF}) == 0x90) return LobbyKind::Normal;
-    }
+    const LobbyKind kind = facts.hasSearchType ? SearchTypeKind(facts.searchType) : LobbyKind::Unknown;
+    if (kind != LobbyKind::Unknown) return kind;
     if (!facts.maxMembers) return LobbyKind::Unknown;
     return facts.maxMembers > static_cast<std::uint32_t>(kVanillaPlayers) ? LobbyKind::MultiSlot : LobbyKind::Normal;
 }
@@ -677,6 +754,10 @@ bool InstallLobbyState(HMODULE game, ImportRedirect redirect) {
     ok = ok && Redirect(game, redirect, "EOS_Platform_Tick", &TickHook, api.tick);
     ok = ok && Redirect(game, redirect, "EOS_Lobby_CreateLobby", &CreateLobbyHook, api.createLobby);
     ok = ok && Redirect(game, redirect, "EOS_Lobby_JoinLobby", &JoinLobbyHook, api.joinLobby);
+    // The room list. EDF6DirectNet wraps these later (plugin.cpp), so the room it adds comes after ours.
+    ok = ok && Redirect(game, redirect, "EOS_LobbySearch_Find", &FindHook, api.find);
+    ok = ok && Redirect(game, redirect, "EOS_LobbySearch_GetSearchResultCount", &ResultCountHook, api.resultCount);
+    ok = ok && Redirect(game, redirect, "EOS_LobbySearch_CopySearchResultByIndex", &CopyResultHook, api.copyResult);
     return ok;
 }
 

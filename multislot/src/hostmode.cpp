@@ -25,12 +25,6 @@ constexpr std::uint32_t kSessionHolder = 0x20B2AC0;    // session holder; object
 constexpr std::uint32_t kOnlineManager = 0x20B2AC8;
 constexpr std::uint32_t kIsRoomHost = 0x787370;         // IsRoomHost(): (online manager) -> bool
 constexpr std::uint32_t kMainFrameOnUpdate = 0x8C12B0;  // HUiMainFrame::OnUpdate(this, context)
-constexpr std::uint32_t kLobbyOnUpdate = 0x8ECBB0;      // HUiLobby::OnUpdate(this, context), the room list screen
-constexpr std::uint32_t kLobbyRefresh = 0x8EDBC0;       // HUiLobby: shows "Lobby_Refreshing" and starts a new room search
-constexpr std::size_t kLobbySearch = 0x7E0;             // HUiLobby: its room search (8EDD28, started by 73A6B0)
-constexpr std::size_t kSearchActive = 0x43;             // search: set when one starts (73A852)
-constexpr std::size_t kSearchResultsIn = 0x40;          // search: cleared then (73A85F), set when the results are in (73AEB7)
-constexpr std::size_t kLobbyDialogCallback = 0x118 + 0x38;  // HUiLobby: the std::function its dialogs run on closing (8F0087)
 constexpr std::uint32_t kComponentIndex = 0x839600;     // HUiLayout: (this, const std::wstring& name) -> index or -1
 constexpr std::uint32_t kTextComponent = 0x8859C0;      // HUiLayout: (this, shared_ptr<HUiTextField>* out, index)
 constexpr std::uint32_t kSetText = 0x863690;            // HUiTextField: (this, const wchar_t*)
@@ -221,40 +215,11 @@ void SearchTypeHandler(CpuContext* context) {
     context->rbx = keep.kind == LobbyKind::MultiSlot ? 2 * kSearchTypeCenter - Vanilla : Vanilla;
 }
 
-// Room search (74AC50 `movabs rax, (high << 32) | 0x91`): the SEARCH_TYPE range asked for per room kind, from
-// the setting as it is now (hostmode.h SearchTypeRange). ON lists MultiSlot rooms of every size only: someone set
-// to play in a big room is shown only big rooms (the user's request, 2026-09-25). OFF lists normal rooms only.
-// Invitations and joins by id do not search, so they still reach any room the join check accepts.
-std::atomic<int> searchLogged{-1};
-
-// F2 on the room list (the user's request, 2026-09-25): the list shown was searched with the old setting, so it
-// searches again. Only when the list was on screen at the press (its update ran within kLobbyVisibleMs), and only
-// once it may: the game's search start (73A6B0) has no guard of its own and replaces a search still running.
-constexpr std::uint64_t kLobbyVisibleMs = 250, kSearchAgainMs = 10000;
-std::atomic<std::uint64_t> lobbySeenAt{0};    // the room list's last update (GetTickCount64)
-std::atomic<std::uint64_t> searchAgainAt{0};  // when F2 asked for a new search there, 0 when nothing is asked
-
-// 1: the list may search now, 0: not yet (a search is running or a dialog is open), -1: not readable.
-int LobbyMaySearch(const unsigned char* lobby) {
-    return Probing([&]() -> int {
-        __try {
-            const unsigned char* search = lobby + kLobbySearch;
-            void* dialog = nullptr;
-            std::memcpy(&dialog, lobby + kLobbyDialogCallback, sizeof(dialog));
-            return LobbyMaySearchAgain(search[kSearchActive], search[kSearchResultsIn], dialog != nullptr) ? 1 : 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return -1;
-        }
-    });
-}
+// Room search (74AC50 `movabs rax, (high << 32) | 0x91`): the SEARCH_TYPE range asked for per room kind, normal
+// and MultiSlot rooms alike (hostmode.h SearchTypeRange).
 template <std::uint32_t High>
 void SearchRangeHandler(CpuContext* context) {
-    const bool on = roomSize.load() != 0;
-    context->rax = SearchTypeRange(High, on);
-    const int mode = on ? 1 : 0;
-    if (searchLogged.exchange(mode) != mode)
-        Log(on ? "SEARCH Player MOD ON: the room list shows MultiSlot rooms of every size only"
-               : "SEARCH Player MOD OFF: the room list shows normal rooms only");
+    context->rax = SearchTypeRange(High);
 }
 
 }  // namespace
@@ -274,47 +239,12 @@ void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, int size, int
     roomSize.store(ValidRoomSize(size) ? size : 0);
     createdSize.store(0);
     steamLobbyCaptured.store(false);
-    searchLogged.store(-1);
-    lobbySeenAt.store(0);
-    searchAgainAt.store(0);
     keyWasDown = false;
     for (auto& state : frames) state = FrameState{};
 }
 
 int HostRoomSize() { return roomSize.load(); }
 
-bool LobbyMaySearchAgain(std::uint8_t searchActive, std::uint8_t resultsIn, bool dialogOpen) {
-    return !dialogOpen && (!searchActive || resultsIn);
-}
-
-std::uint64_t LobbyOnUpdateHook(void* lobby, void* context) {
-    using OnUpdateFn = std::uint64_t(__fastcall*)(void*, void*);
-    const std::uint64_t result = reinterpret_cast<OnUpdateFn>(game + kLobbyOnUpdate)(lobby, context);
-    const std::uint64_t now = GetTickCount64();
-    lobbySeenAt.store(now);
-    const std::uint64_t wanted = searchAgainAt.load();
-    if (!wanted || !lobby) return result;
-    if (now - wanted > kSearchAgainMs) {
-        searchAgainAt.store(0);
-        Log("SEARCH the room list stayed busy for %llu s after F2; not searched again", kSearchAgainMs / 1000);
-        return result;
-    }
-    const int may = LobbyMaySearch(static_cast<const unsigned char*>(lobby));
-    if (may < 0) {
-        searchAgainAt.store(0);
-        Log("SEARCH the room list could not be read; not searched again");
-        return result;
-    }
-    if (!may) return result;
-    searchAgainAt.store(0);
-    using RefreshFn = void(__fastcall*)(void*);
-    reinterpret_cast<RefreshFn>(game + kLobbyRefresh)(lobby);
-    if (const int size = roomSize.load())
-        Log("SEARCH the room list searched again after F2 (%dPlayer MOD ON)", size);
-    else
-        Log("SEARCH the room list searched again after F2 (Player MOD OFF)");
-    return result;
-}
 int CreatedRoomSize() { return createdSize.load(); }
 
 // "12Player MOD :ON" for a size, "Player MOD :OFF" for none.
@@ -413,12 +343,6 @@ void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
                 iniFile[0] ? "saved" : "not saved");
         else
             Log("MENU F2: Player MOD OFF - rooms you create are normal 4-player rooms (%s)", iniFile[0] ? "saved" : "not saved");
-        // The list changes only between OFF and ON: every MultiSlot size is listed while ON.
-        const std::uint64_t now = GetTickCount64();
-        if ((previous != 0) != (size != 0) && now - lobbySeenAt.load() < kLobbyVisibleMs) {
-            searchAgainAt.store(now);
-            Log("MENU F2 on the room list: it searches again for %s", size ? "MultiSlot rooms only" : "normal rooms only");
-        }
     }
     if (!frame) return;
     wchar_t label[kLabelChars]{};

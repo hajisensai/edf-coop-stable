@@ -23,6 +23,11 @@ namespace multislot {
 // every later join) that never answers a P2P handshake, and every member's link to it times out for good. So a
 // destroy of a lobby someone else owns becomes a leave, a destroy that fails is followed by a leave, and a join
 // into a lobby EOS still lists this machine in leaves it first.
+//
+// The room list (the user's request, 2026-10-04): every machine with this plugin lists normal and MultiSlot rooms
+// of every size, whatever its F2 setting. One search asks for both families (hostmode.h SearchTypeRange); between
+// them lie the SEARCH_TYPE values of earlier MultiSlot versions, whose rooms are left out of the results the game is
+// handed, so the list shows only rooms this build can join.
 
 enum class LobbyKind : int { Unknown = -1, Normal = 0, MultiSlot = 1 };
 
@@ -35,6 +40,9 @@ struct LobbyFacts {
 // SEARCH_TYPE decides: this build's mirrored family is MultiSlot, 0x90..0x9F normal. Without one (a lobby just
 // created, before its first update) MaxMembers above four is MultiSlot.
 LobbyKind KindOf(const LobbyFacts& facts);
+// SEARCH_TYPE alone: this build's mirrored family MultiSlot, 0x90..0x9F normal, anything else Unknown (an earlier
+// MultiSlot version's room, which this build cannot join).
+LobbyKind SearchTypeKind(std::int64_t value);
 // The capacity an update keeps in a MultiSlot lobby: its own MaxMembers, at most kMaxPlayers.
 int CapacityToKeep(const LobbyFacts& facts);
 

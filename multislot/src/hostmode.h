@@ -11,10 +11,9 @@
 namespace multislot {
 
 // "<n>Player MOD": what kind of room you create as host.
-//   OFF (0, default) - a normal 4-player room anyone can find and join, exactly as without the mod; the room
-//                      search lists normal rooms only, as the game asks.
-//   n (5..32)        - a MultiSlot room for n players that only players with this mod can find and join; the
-//                      room search lists MultiSlot rooms only, of every size (invitations still reach any room).
+//   OFF (0, default) - a normal 4-player room anyone can find and join, exactly as without the mod.
+//   n (5..32)        - a MultiSlot room for n players that only players with this mod can find and join.
+// The room search lists both kinds, of every size, whatever the setting (lobbystate.h).
 // Every machine has slots for kMaxPlayers, so the size is the host's alone: it goes into the lobby's
 // MaxMembers, which every member follows (lobbystate.h). F2 steps through kRoomSizes and OFF on menu screens
 // outside a room (saved to the INI as RoomSize). A room keeps the size it was created with for as long as it
@@ -41,12 +40,10 @@ constexpr int NextRoomSize(int size) {
 }
 
 // The SEARCH_TYPE range (high << 32 | low) the room list asks for, for a room kind whose vanilla range is
-// [0x91, high]. ON: MultiSlot rooms of every size, [mirror(high), mirror(0x91)]. OFF: normal rooms only, as
-// the game asks.
-constexpr std::uint64_t SearchTypeRange(std::uint32_t high, bool on) {
-    const std::uint64_t top = on ? 2 * kSearchTypeCenter - 0x91 : high;
-    const std::uint64_t bottom = on ? 2 * kSearchTypeCenter - high : 0x91;
-    return (top << 32) | bottom;
+// [0x91, high]: MultiSlot rooms of every size and normal rooms, [mirror(high), high], whatever the setting. What
+// lies between is earlier MultiSlot versions'; lobbystate.h leaves those rooms out.
+constexpr std::uint64_t SearchTypeRange(std::uint32_t high) {
+    return (static_cast<std::uint64_t>(high) << 32) | (2 * kSearchTypeCenter - high);
 }
 
 // iniPath may be null (nothing is saved). `key` and `padButton` switch the setting, which only happens
@@ -58,12 +55,6 @@ int HostRoomSize();
 
 // Mid-function hooks for HostModeHooks() in patches.h, by site RVA.
 MidHandler HostModeHookHandler(std::uint32_t rva);
-// HUiLobby::OnUpdate vtable slot (LobbySlot() in patches.h): the room list screen. F2 pressed while it is shown
-// makes it search again with the new setting, as soon as no search is running and no dialog is open over it.
-std::uint64_t LobbyOnUpdateHook(void* lobby, void* context);
-// Test seam: whether the list may start a search now. searchActive/resultsIn are the search's bytes +0x43 (set when
-// a search starts) and +0x40 (set when its results are in); dialogOpen is the lobby's pending dialog callback.
-bool LobbyMaySearchAgain(std::uint8_t searchActive, std::uint8_t resultsIn, bool dialogOpen);
 // HUiMainFrame::OnUpdate vtable slot (MainFrameSlot() in patches.h).
 std::uint64_t MainFrameOnUpdateHook(void* frame, void* context);
 

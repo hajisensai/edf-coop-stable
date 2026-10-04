@@ -12,7 +12,7 @@
 
 ## 房间人数与旧插件
 
-所有人用同一个安装包：`EDF6Coop-<版本>.zip`。每个安装都带 32 人的内存，房间人数由**房主**在游戏里选：在房间外的菜单画面按 **F2**（或按下左摇杆），依次切换 关 → 8 → 10 → 12 → 16 → 24 → 32 → 关，菜单左下角显示如 `F2/LS 12Player MOD :ON` 或 `F2/LS Player MOD :OFF`。选择保存在 `EDF6Coop.ini` 的 `[MultiSlot]` 下的 `RoomSize=`（`0` = 普通 4 人房间，`5`～`32` = 该人数的 MultiSlot 房间；旧的 `EightPlayerRooms=1` 读作 `RoomSize=8`，下次保存时被替换）。关：创建谁都能加入的普通 4 人房间，房间列表只显示普通房间。开：创建所选人数的 MultiSlot 房间，只有 EDF6Coop 2.3.0 及以上能看到，房间列表显示所有人数的 MultiSlot 房间；客人可以加入任何人数的房间，房间保持创建时的人数。**16、24、32 人目前只用离线幽灵队员验证过**，还没有真的这么多人联机测试过。24、32 人房间没有游戏内语音：Epic 的语音聊天只支持 16 人以内的房间。房间越大，房主需要的上传带宽越大：开了直连时所有玩家的数据都经过房主。
+所有人用同一个安装包：`EDF6Coop-<版本>.zip`。每个安装都带 32 人的内存，房间人数由**房主**在游戏里选：在房间外的菜单画面按 **F2**（或按下左摇杆），依次切换 关 → 8 → 10 → 12 → 16 → 24 → 32 → 关，菜单左下角显示如 `F2/LS 12Player MOD :ON` 或 `F2/LS Player MOD :OFF`。选择保存在 `EDF6Coop.ini` 的 `[MultiSlot]` 下的 `RoomSize=`（`0` = 普通 4 人房间，`5`～`32` = 该人数的 MultiSlot 房间；旧的 `EightPlayerRooms=1` 读作 `RoomSize=8`，下次保存时被替换）。关：创建谁都能加入的普通 4 人房间。开：创建所选人数的 MultiSlot 房间，只有 EDF6Coop 2.3.0 及以上能看到。不管开关如何，房间列表都同时显示普通房间和所有人数的 MultiSlot 房间；客人可以加入任何人数的房间，房间保持创建时的人数。**16、24、32 人目前只用离线幽灵队员验证过**，还没有真的这么多人联机测试过。24、32 人房间没有游戏内语音：Epic 的语音聊天只支持 16 人以内的房间。房间越大，房主需要的上传带宽越大：开了直连时所有玩家的数据都经过房主。
 
 房间部分（8Player MOD：超过 4 人、房间画面、任务、护甲复制）原作者是 **momotori01**，原名 EDF6MultiSlot（公有领域，[multislot/LICENSE](multislot/LICENSE)），历史和测试在 [multislot/](multislot/README.zh-CN.md)。从 2.0.0 起它和 EDF6DirectNet 合成一个 DLL、一份日志（`EDF6Coop.log`）、一个设置文件（`EDF6Coop.ini`）。安装时旧的 `EDF6DirectNet.dll` / `EDF6MultiSlot.dll` 会改名为 `.disabled`；旧设置文件保留，第一次启动时把值搬进 `EDF6Coop.ini`。
 

@@ -177,7 +177,7 @@ std::vector<MidSite> HostModeHooks() {
         {"publish search type kind 1", 0x749CCD, {0xBB, 0x94, 0x00, 0x00, 0x00}, 0, 0},
         {"publish search type kind 0", 0x749CD4, {0xBB, 0x91, 0x00, 0x00, 0x00}, 0, 0},
         // Room search (74AC50): `movabs rax, (high << 32) | 0x91`, the SEARCH_TYPE range asked for per room kind.
-        // OFF lists normal and MultiSlot rooms of the kind, ON MultiSlot rooms only (hostmode.cpp).
+        // Normal and MultiSlot rooms of the kind, whatever the setting (hostmode.cpp).
         {"search range kind 3", 0x74AC69, {0x48, 0xB8, 0x91, 0x00, 0x00, 0x00, 0x93, 0x00, 0x00, 0x00}, 0, 0},
         {"search range kind 2", 0x74AC74, {0x48, 0xB8, 0x91, 0x00, 0x00, 0x00, 0x92, 0x00, 0x00, 0x00}, 0, 0},
         {"search range kind 1", 0x74AC7F, {0x48, 0xB8, 0x91, 0x00, 0x00, 0x00, 0x94, 0x00, 0x00, 0x00}, 0, 0},
@@ -187,10 +187,6 @@ std::vector<MidSite> HostModeHooks() {
 
 PointerSlot MainFrameSlot() {
     return {"HUiMainFrame OnUpdate", 0x1806D38, 0x8C12B0};
-}
-
-PointerSlot LobbySlot() {
-    return {"HUiLobby OnUpdate", 0x1809B90, 0x8ECBB0};
 }
 
 std::vector<Patch> MissionPatches() {

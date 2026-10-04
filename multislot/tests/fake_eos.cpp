@@ -126,6 +126,8 @@ std::map<std::string, std::int64_t> lobbyAttributes;
 std::int32_t leaveResult = 0;
 std::int32_t destroyResult = 0;
 std::deque<std::function<void()>> completions;
+std::vector<std::int64_t> searchTypes;  // what a room search finds: each room's SEARCH_TYPE, -1 for none
+int finds = 0;
 
 struct Modification {
     std::map<std::string, std::int64_t> attributes;
@@ -178,7 +180,13 @@ EXPORT void FakeEos_Reset(const char* selfId) {
     lobbyAttributes.clear();
     leaveResult = 0;
     destroyResult = 0;
+    searchTypes.clear();
+    finds = 0;
 }
+EXPORT void FakeEos_SetSearchResults(const std::int64_t* values, int count) { searchTypes.assign(values, values + count); }
+EXPORT int FakeEos_Finds() { return finds; }
+// The lobby id of a details handle the fake handed out.
+EXPORT const char* FakeEos_DetailsId(void* details) { return static_cast<Details*>(details)->lobbyId.c_str(); }
 EXPORT const void* FakeEos_User(const char* id) { return Handle(id); }
 EXPORT void FakeEos_AddMember(const char* id) { members.push_back(id); }
 EXPORT void FakeEos_RemoveMember(const char* id) {
@@ -400,6 +408,23 @@ EXPORT const void* EOS_LobbyDetails_GetLobbyOwner(void* details, const void*) {
     return lobby->owner.empty() ? nullptr : Handle(lobby->owner);
 }
 EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<Details*>(details); }
+// A room search: every handle finds the results FakeEos_SetSearchResults set, by their SEARCH_TYPE.
+struct SearchResultOptions {
+    std::int32_t ApiVersion;
+    std::uint32_t LobbyIndex;
+};
+EXPORT void EOS_LobbySearch_Find(void*, const void*, void*, void*) { ++finds; }
+EXPORT std::uint32_t EOS_LobbySearch_GetSearchResultCount(void*, const void*) {
+    return static_cast<std::uint32_t>(searchTypes.size());
+}
+EXPORT std::int32_t EOS_LobbySearch_CopySearchResultByIndex(void*, const SearchResultOptions* options, void** out) {
+    if (!options || options->LobbyIndex >= searchTypes.size()) return kNotFound;
+    auto* details = new Details;
+    details->lobbyId = "room" + std::to_string(options->LobbyIndex);
+    if (searchTypes[options->LobbyIndex] >= 0) details->attributes["SEARCH_TYPE"] = searchTypes[options->LobbyIndex];
+    *out = details;
+    return 0;
+}
 EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {
     if (attribute->Data->ValueType == 3) delete[] attribute->Data->Value.AsUtf8;
     delete attribute->Data;

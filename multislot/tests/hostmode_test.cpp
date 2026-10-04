@@ -146,10 +146,6 @@ std::wstring Compose(const MenuContext& context, int setting, int created) {
 
 }  // namespace
 
-int lobbyUpdates = 0, lobbyRefreshes = 0;
-void* refreshedLobby = nullptr;
-std::uint64_t __fastcall FakeLobbyUpdate(void*, void*) { ++lobbyUpdates; return 0x1234; }
-void __fastcall FakeLobbyRefresh(void* lobby) { ++lobbyRefreshes; refreshedLobby = lobby; }
 
 int main() {
     const std::size_t imageSize = 0x900000;
@@ -159,8 +155,6 @@ int main() {
     JumpTo(image + kComponentIndex, reinterpret_cast<void*>(&FakeIndex));
     JumpTo(image + kTextComponent, reinterpret_cast<void*>(&FakeTextComponent));
     JumpTo(image + kSetText, reinterpret_cast<void*>(&FakeSetText));
-    JumpTo(image + 0x8ECBB0, reinterpret_cast<void*>(&FakeLobbyUpdate));
-    JumpTo(image + 0x8EDBC0, reinterpret_cast<void*>(&FakeLobbyRefresh));
 
     for (const auto& hook : HostModeHooks()) Check(HostModeHookHandler(hook.rva) != nullptr, hook.name);
     Check(HostModeHookHandler(0x1234) == nullptr, "unknown site has no handler");
@@ -208,7 +202,8 @@ int main() {
     for (const auto& range : ranges) {
         CpuContext search{};
         HostModeHookHandler(range.first)(&search);
-        Check(search.rax == ((range.second << 32) | 0x91), "OFF: the room search lists normal rooms only, as the game asks");
+        Check(search.rax == ((range.second << 32) | (2 * kSearchTypeCenter - range.second)),
+              "OFF: the room search lists normal and MultiSlot rooms of the kind");
     }
 
     // ON at every size: that many slots in both lobbies, and the one search range of the 32-slot family.
@@ -235,10 +230,8 @@ int main() {
         for (const auto& range : ranges) {
             CpuContext search{};
             HostModeHookHandler(range.first)(&search);
-            const std::uint64_t low = search.rax & 0xFFFFFFFFull, high = search.rax >> 32;
-            Check(low == 2 * kSearchTypeCenter - range.second && high == 2 * kSearchTypeCenter - 0x91 && high < 0x20 &&
-                      low <= high,
-                  "ON: the room search lists MultiSlot rooms of every size only, below every earlier family");
+            Check(search.rax == ((range.second << 32) | (2 * kSearchTypeCenter - range.second)),
+                  "ON: the room search lists the same rooms as OFF");
         }
     }
 
@@ -269,14 +262,15 @@ int main() {
     UpdateMenuFrame(nullptr, false, outside);
     HostModeHookHandler(0x742A9D)(&create);
     Check(Stack64(frameMemory + 0x20) == 16 && CreatedRoomSize() == 16, "the next room follows the new setting");
-    // From the largest size F2 turns it OFF, and the room search follows at once.
+    // From the largest size F2 turns it OFF; the room search lists the same rooms either way.
     InitHostMode(image, nullptr, kMaxPlayers, VK_F2, 0xB0, L"F2/LS");
     UpdateMenuFrame(nullptr, false, outside);
     UpdateMenuFrame(nullptr, true, outside);
     UpdateMenuFrame(nullptr, false, outside);
     CpuContext searchAfterF2{};
     HostModeHookHandler(0x74AC8A)(&searchAfterF2);
-    Check(HostRoomSize() == 0 && searchAfterF2.rax == ((0x91ull << 32) | 0x91), "after 32 comes OFF, and the search follows");
+    Check(HostRoomSize() == 0 && searchAfterF2.rax == ((0x91ull << 32) | (2 * kSearchTypeCenter - 0x91)),
+          "after 32 comes OFF, and the search still lists both kinds of room");
     // The room update reads the lobby it updates, never the setting: a room this machine did not create (or one
     // that is not the lobby it created) gets the game's own values while nothing says what it is.
     InitHostMode(image, nullptr, kSize, VK_F2, 0xB0, L"F2/LS");
@@ -312,40 +306,6 @@ int main() {
     HostModeHookHandler(0x742A9D)(&create);
     Check(Stack64(frameMemory + 0x20) == 10 && CreatedRoomSize() == 10, "a lobby without a Steam step uses the current setting");
 
-    // F2 on the room list searches again: only while the list is on screen, only when no search is running and no
-    // dialog is open, and once.
-    Check(LobbyMaySearchAgain(0, 0, false) && LobbyMaySearchAgain(1, 1, false) && !LobbyMaySearchAgain(1, 0, false) &&
-              !LobbyMaySearchAgain(0, 0, true),
-          "the list searches again only when idle and without a dialog");
-    {
-        InitHostMode(image, nullptr, kMaxPlayers, VK_F2, 0xB0, L"F2/LS");
-        std::vector<std::uint8_t> lobby(0x1000, 0);
-        lobbyUpdates = lobbyRefreshes = 0;
-        UpdateMenuFrame(nullptr, false, outside);
-        UpdateMenuFrame(nullptr, true, outside);  // F2 with no room list on screen: 32 -> OFF
-        UpdateMenuFrame(nullptr, false, outside);
-        Check(LobbyOnUpdateHook(lobby.data(), nullptr) == 0x1234 && lobbyUpdates == 1 && lobbyRefreshes == 0,
-              "F2 away from the room list asks for no search; the list's own update still runs");
-        UpdateMenuFrame(nullptr, true, outside);  // F2 while the list is shown: OFF -> 8
-        UpdateMenuFrame(nullptr, false, outside);
-        lobby[0x7E0 + 0x43] = 1;                  // a search is running
-        LobbyOnUpdateHook(lobby.data(), nullptr);
-        Check(lobbyRefreshes == 0, "no second search while one is running");
-        lobby[0x7E0 + 0x40] = 1;                  // its results are in
-        void* pending = &lobby;                   // but a dialog is open
-        std::memcpy(lobby.data() + 0x118 + 0x38, &pending, sizeof(pending));
-        LobbyOnUpdateHook(lobby.data(), nullptr);
-        Check(lobbyRefreshes == 0, "no search while a dialog is open over the list");
-        std::memset(lobby.data() + 0x118 + 0x38, 0, sizeof(pending));
-        LobbyOnUpdateHook(lobby.data(), nullptr);
-        Check(lobbyRefreshes == 1 && refreshedLobby == lobby.data(), "F2 on the list searches again once it may");
-        LobbyOnUpdateHook(lobby.data(), nullptr);
-        Check(lobbyRefreshes == 1, "and only once");
-        UpdateMenuFrame(nullptr, true, outside);  // 8 -> 10 while the list is shown: it lists the same rooms
-        UpdateMenuFrame(nullptr, false, outside);
-        LobbyOnUpdateHook(lobby.data(), nullptr);
-        Check(lobbyRefreshes == 1 && HostRoomSize() == 10, "F2 from one size to another does not search again");
-    }
     InitHostMode(image, nullptr, 0, VK_F2, 0xB0, L"F2/LS");
 
     // Label texts.

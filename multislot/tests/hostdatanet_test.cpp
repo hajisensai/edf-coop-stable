@@ -78,43 +78,94 @@ struct Net {
     }
 };
 
-void Rooms() {
-    const Bundle bundle = Make(1);
+// Who brings what in a room, in the order that decides a file two of them have.
+void Plan() {
+    const Bundle mods = Make(1), hostPage = Make(2), guestPage = Make(3), thirdPage = Make(4), oldPage = Make(5);
     LobbyView view;
     view.lobbyId = "lobby";
     view.self = "guest";
     view.owner = "host";
-    view.members = {{"host", {{kHostDataKey, kHostDataFormat}, {kHostDigestKey, DigestHex(bundle.digest)}}},
-                    {"guest", {{kHostDataKey, kHostDataFormat}}}};
-    HostDataRoom room = ReadHostDataRoom(view);
-    Check(room.inRoom && !room.hosting && room.hostTakesPart && room.hostId == "host", "a guest sees the host take part");
-    Check(room.hostDigest && *room.hostDigest == bundle.digest, "and the digest it shares");
+    view.members = {{"third", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, DigestHex(thirdPage.digest)}}},
+                    {"host",
+                     {{kHostDataKey, kHostDataFormat},
+                      {kHostDigestKey, DigestHex(mods.digest)},
+                      {kPageDigestKey, DigestHex(hostPage.digest)}}},
+                    {"guest", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, "not yet"}}},
+                    {"old", {{kPageDigestKey, DigestHex(oldPage.digest)}}},
+                    {"none", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, ""}}}};
+    std::vector<RoomSource> plan = PlanRoomSources(view, std::nullopt, guestPage.digest);
+    Check(plan == std::vector<RoomSource>{{"host", mods.digest, true},
+                                          {"host", hostPage.digest, false},
+                                          {"third", thirdPage.digest, false},
+                                          {"guest", guestPage.digest, false}},
+          "the host's Mods, its page, then the others' pages in the lobby's order; our own page as we have it");
+    Check(PlanRoomSources(view, std::nullopt, std::nullopt).size() == 3, "no page of ours: none of ours");
+    // Owning the lobby: our Mods as we have them, whatever the lobby shows yet.
     view.self = "host";
-    Check(ReadHostDataRoom(view).hosting, "the owner is hosting");
+    plan = PlanRoomSources(view, guestPage.digest, std::nullopt);
+    Check(plan.size() == 2 && plan[0] == RoomSource{"host", guestPage.digest, true} && plan[1].member == "third",
+          "the owner's own Mods and page come from this machine");
+    plan = PlanRoomSources(view, std::nullopt, std::nullopt);
+    Check(plan.size() == 1 && plan[0].member == "third", "an owner sharing nothing brings nothing");
+    // Another packet format takes no part.
     view.self = "guest";
-    view.members[0].texts[kHostDataKey] = "2";
-    room = ReadHostDataRoom(view);
-    Check(!room.hostTakesPart && !room.hostDigest, "another packet format is not taken part in, and its digest is ignored");
-    view.members[0].texts = {{kHostDataKey, kHostDataFormat}, {kHostDigestKey, "not hex"}};
-    room = ReadHostDataRoom(view);
-    Check(room.hostTakesPart && !room.hostDigest, "a digest that is not one is no digest");
-    view.owner.clear();
-    Check(!ReadHostDataRoom(view).hostTakesPart && !ReadHostDataRoom(view).hosting, "no owner known: nothing to take");
-    Check(!ReadHostDataRoom(LobbyView{}).inRoom, "no lobby: no room");
+    view.members[1].texts[kHostDataKey] = "2";
+    plan = PlanRoomSources(view, std::nullopt, std::nullopt);
+    Check(plan.size() == 1 && plan[0].member == "third", "an owner in another format brings nothing");
+    view.owner = "nobody";
+    Check(PlanRoomSources(view, std::nullopt, std::nullopt).size() == 1, "no owner in the lobby: only the pages");
+    Check(PlanRoomSources(LobbyView{}, mods.digest, guestPage.digest).empty(), "no lobby: no room sources");
+}
+
+// The room's files: each path the first source's, and what the later ones lose.
+void Merge() {
+    const SourceFiles native{{"WEAPON/A.SGO", "WEAPON/B.SGO"}, L""};
+    const SourceFiles first{{"WEAPON/B.SGO", "WEAPON/C.SGO"}, L"./b/"};
+    const SourceFiles second{{"OBJECT/V401.SGO", "WEAPON/C.SGO", "WEAPON/D.SGO"}, L"./c/"};
+    const RoomOverlay merged = MergeSources({&native, nullptr, &first, &second});
+    const std::vector<Overlay::Entry> expected{
+        {"OBJECT/V401.SGO", L"./c/"}, {"WEAPON/C.SGO", L"./b/"}, {"WEAPON/D.SGO", L"./c/"}};
+    Check(merged.overlay.entries == expected,
+          "a path goes to the first source with it; files the game reads anyway are not pointed anywhere");
+    Check(merged.lost == std::vector<std::size_t>{0, 0, 1, 1}, "each later source loses the paths an earlier one has");
+    Check(MergeSources({}).overlay.entries.empty(), "no sources, nothing to read elsewhere");
 }
 
 void Notices() {
-    using enum HostDataStage;
-    Check(HostDataNotice(None, HostAccept::Ask, L"F1", 0, 0).empty(), "nothing to say outside a room");
-    Check(HostDataNotice(Same, HostAccept::Ask, L"F1", 0, 0).empty(), "nor with the host's files");
-    Check(HostDataNotice(Differs, HostAccept::Ask, L"F1", 0, 0) == L"F1 host weapons :OFF", "different files, the key");
-    Check(HostDataNotice(Differs, HostAccept::Never, L"F1", 0, 0) == L"weapons differ from host", "Never: only said");
-    Check(HostDataNotice(Fetching, HostAccept::Ask, L"F1", 42, 0) == L"F1 host weapons 42%", "a fetch says how far");
-    Check(HostDataNotice(Fetching, HostAccept::Ask, L"F1", 100, 0) == L"F1 host weapons 99%", "and never 100% before done");
-    Check(HostDataNotice(Using, HostAccept::Always, L"F1", 0, 2) == L"F1 host weapons :ON +2 own", "own extras are named");
-    Check(HostDataNotice(Using, HostAccept::Ask, L"F1", 0, 0) == L"F1 host weapons :ON", "and left out when none");
-    Check(HostDataNotice(Failed, HostAccept::Ask, L"", 0, 0) == L"host weapons failed (log)", "no key name, no key");
-    Check(HostDataNotice(HostHasNone, HostAccept::Ask, L"F1", 0, 0) == L"host has no weapon mods", "host has none");
+    WeaponsView view;
+    view.pageKey = L"F6";
+    view.acceptKey = L"F1";
+    Check(WeaponsNotice(view).empty(), "no pages and no room: nothing to say");
+    view.pages = 2;
+    Check(WeaponsNotice(view) == L"F6 Page:off", "pages but none picked");
+    view.page = L"Laser";
+    Check(WeaponsNotice(view) == L"F6 Page:Laser", "the page picked");
+    view.inRoom = true;
+    view.wanted = true;
+    Check(WeaponsNotice(view) == L"F6 Page:Laser", "a room whose files are all ours says nothing of it");
+    view.remote = 2;
+    Check(WeaponsNotice(view) == L"ROOM WEAPONS :ON (2)   F6 Page:Laser", "the room's files in use, first");
+    view.percent = 42;
+    Check(WeaponsNotice(view) == L"ROOM WEAPONS 42%   F6 Page:Laser", "while they come");
+    view.percent = 100;
+    Check(WeaponsNotice(view) == L"ROOM WEAPONS 99%   F6 Page:Laser", "never 100% before they are in use");
+    view.percent = -1;
+    view.failed = 1;
+    view.lost = 3;
+    Check(WeaponsNotice(view) == L"ROOM WEAPONS :ON (2) 1 failed -3 of yours   F6 Page:Laser",
+          "what failed and what of our page gave way");
+    view.failed = view.lost = 0;
+    view.accept = HostAccept::Ask;
+    view.wanted = false;
+    Check(WeaponsNotice(view) == L"F1 ROOM WEAPONS :OFF (2)   F6 Page:Laser", "Ask: the key takes them");
+    view.wanted = true;
+    Check(WeaponsNotice(view) == L"F1 ROOM WEAPONS :ON (2)   F6 Page:Laser", "and gives them back");
+    view.accept = HostAccept::Never;
+    view.wanted = false;
+    Check(WeaponsNotice(view) == L"ROOM WEAPONS differ (2)   F6 Page:Laser", "Never: only said");
+    view.pages = 0;
+    view.inRoom = false;
+    Check(WeaponsNotice(view).empty(), "outside a room the room is not mentioned");
 }
 
 void Transfer() {
@@ -137,6 +188,27 @@ void Transfer() {
     const int sendsDone = net.sends;
     net.Run(now, 5);
     Check(net.sends == sendsDone, "nothing is sent once done");
+}
+
+// One machine serves its Mods and its page; two others fetch one each.
+void ManyBundles() {
+    Net net;
+    HostDataLink host(net.SenderFor("host")), first(net.SenderFor("first")), second(net.SenderFor("second"));
+    net.links = {{"host", &host}, {"first", &first}, {"second", &second}};
+    const auto mods = std::make_shared<const Bundle>(Make(10));
+    const auto page = std::make_shared<const Bundle>(Make(11));
+    host.Share({mods, page, nullptr});
+    std::uint64_t now = 0;
+    first.Fetch("host", mods->digest, now);
+    second.Fetch("host", page->digest, now);
+    net.Run(now, 40);
+    Check(first.State() == HostDataLink::Fetching::Done && first.TakeBundle() == mods->bytes, "one gets the Mods");
+    Check(second.State() == HostDataLink::Fetching::Done && second.TakeBundle() == page->bytes, "the other the page");
+    Check(host.Serving() == 0, "and the host is done with both");
+    host.Share(std::vector<std::shared_ptr<const Bundle>>{});
+    first.Fetch("host", page->digest, now);
+    net.Run(now, 2);
+    Check(first.State() == HostDataLink::Fetching::Failed, "sharing nothing: a question is told so");
 }
 
 void Refusals() {
@@ -244,9 +316,11 @@ void ManyAskers() {
 }  // namespace
 
 int main() {
-    Rooms();
+    Plan();
+    Merge();
     Notices();
     Transfer();
+    ManyBundles();
     Refusals();
     Forged();
     Stalls();

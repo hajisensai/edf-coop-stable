@@ -71,7 +71,7 @@ struct MenuContext {
     bool copyArmorAtMax;           // and that armor is this class's ceiling, not what was found in the room
     int roomMode = -1;             // the room's kind as its lobby says (LobbyKind: 1 MultiSlot, 0 normal), -1 unknown
     int roomCapacity = 0;          // and in a MultiSlot room its size (the lobby's MaxMembers)
-    const wchar_t* roomNotice = nullptr;  // the room feature's words (SetRoomFeature), shown in a room after copy armor
+    const wchar_t* weaponsNotice = nullptr;  // the weapon feature's words (SetWeaponFeature), first in the label
 };
 // Long enough for the fullest line a room can show: the room's setting, the page guide and copy armor.
 constexpr std::size_t kLabelChars = 96;
@@ -88,9 +88,11 @@ void UpdateMenuFrame(void* frame, bool down, const MenuContext& context);
 // The size this machine created its last room with, 0 for a normal room.
 int CreatedRoomSize();
 
-// A room feature on the menu (hostdatanet.h): on every menu frame `frame(inRoom, pressed)` runs, `pressed` when
-// `key` (a virtual key, 0 for none) went down in a room with the game in front; what it returns is shown in a room.
-using RoomFeatureFrame = std::wstring (*)(bool inRoom, bool pressed);
-void SetRoomFeature(int key, RoomFeatureFrame frame);
+// The weapon feature on the menu (hostdatanet.h): on every menu frame `frame(inRoom, acceptPressed, pagePressed)` runs,
+// acceptPressed when `acceptKey` went down in a room, pagePressed when `pageKey` went down anywhere (virtual keys, 0
+// for none; the game in front). What it returns is shown first in the label, in a room and outside: what the player's
+// game is using matters more than the guides after it.
+using WeaponFeatureFrame = std::wstring (*)(bool inRoom, bool acceptPressed, bool pagePressed);
+void SetWeaponFeature(int acceptKey, int pageKey, WeaponFeatureFrame frame);
 
 }  // namespace multislot

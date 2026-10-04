@@ -441,7 +441,7 @@ int wmain(int argc, wchar_t** argv) {
                       Contains(written, "[DirectNet]") && Contains(written, "[Update]") &&
                       Contains(written, "DummyMembers=0") && Contains(written, "PageKeys=F3,Tab\r\n") &&
                       Contains(written, "[CopyArmor]") && Contains(written, "PadButton=LeftStick\r\n") &&
-                      Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "PageKey=") &&
+                      Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "\r\nPageKey=") &&
                       !Contains(written, "@MULTISLOT_"),
                   "missing INI is written with the documented defaults (CRLF)");
             Check(Contains(log, "Settings: wrote EDF6Coop.ini with the defaults"), "writing the default INI is logged");

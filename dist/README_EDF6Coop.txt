@@ -63,12 +63,21 @@ settings files are left alone.
   and so on up to 32. For this the mod writes Mods\HUD\ONLINEHUDTEXTURE.RAB (the game's HUD textures
   plus the new lamps and balloons). If another mod already has a file there, it is left alone and
   players 5 and up share the colours of players 1-4.
-- The host's modified weapons and vehicles: when the host's Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO files differ
-  from yours, a room's menu says "F1 host weapons :OFF". F1 fetches them from the host, checks them against
-  the SHA-256 the host published and uses them from the next menu screen, for that room only; F1 again goes
-  back to yours. Only weapon (not WEAPONTABLE/WEAPONTEXT) and vehicle files travel, at most 4 MB, never a DLL
-  or a patch. They are kept in Mods\Plugins\EDF6Coop.hostdata, never in your Mods folders. [HostData] in
-  the ini: Accept=Always / Never, Share=0 (offer nothing as host), Enabled=0 (all off).
+- Weapon pages: put modified weapon files in Mods\Variants\<page name>\WEAPON\*.SGO (vehicles in
+  Mods\Variants\<page name>\OBJECT\V*.SGO or VEHICLE*.SGO). Each file takes the place of the game's weapon or
+  vehicle with the same file name, so the weapon table and your save do not change: no new weapons, you need
+  the original weapon to equip it, and its name stays the original's. Use ASCII folder names. F6 on any menu
+  screen steps through off -> page 1 -> page 2 ... -> off ("F6 Page:<name>"); it takes effect from the next
+  mission, offline too.
+- In a room everyone uses the same files: the host's Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO files and every
+  member's page (the host's Mods first, then the host's page, then the others' pages in join order). They are
+  taken automatically: the menu says "ROOM WEAPONS 42%", then "ROOM WEAPONS :ON (2)". Each file is checked
+  against the SHA-256 its owner published, switched between missions only, and you get your own files back
+  when you leave the room. Only weapon (not WEAPONTABLE/WEAPONTEXT) and vehicle files travel, at most 128
+  files and 4 MB per page, never a DLL or a patch. They are kept in Mods\Plugins\EDF6Coop.hostdata, never in
+  your Mods folders. Players without the plugin see the original weapons. [HostData] in the ini:
+  Accept=Always (default) / Ask (F1 takes them) / Never, WeaponPageKey, Page, Share=0 (offer nothing),
+  Enabled=0 (all off).
 - Keys and buttons are in [RoomScreen] / [CopyArmor] of the ini. F2 is reserved for Player MOD.
 
 [Direct link (optional, host only)]

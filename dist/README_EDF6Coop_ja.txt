@@ -57,12 +57,20 @@ EDFModLoader、ほかの MOD、古い EDF6DirectNet / EDF6MultiSlot の設定フ
   1～4人目はゲーム本来の黄・緑・青・赤、5～8人目は橙・ピンク・紫・水色で、32人まで続きます。このために
   Mods\HUD\ONLINEHUDTEXTURE.RAB（ゲームの HUD テクスチャに新しいランプと吹き出しを足したもの）を書きます。
   そこに別の MOD のファイルがあるときは触らず、5人目以降は 1～4人目の色を使います。
-・ホストの改造武器とビークル：ホストの Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO が自分のものと違うと、部屋の
-  メニューに「F1 host weapons :OFF」と出ます。F1 でホストから取得し、ホストが公開した SHA-256 と照合して、
-  次のメニュー画面からその部屋の間だけ使います。もう一度 F1 で自分のものに戻ります。送られるのは武器
-  （WEAPONTABLE/WEAPONTEXT は除く）とビークルのファイルだけ、最大 4 MB で、DLL やパッチは決して送りません。
-  ファイルは Mods\Plugins\EDF6Coop.hostdata に置かれ、Mods フォルダには書き込みません。ini の [HostData]：
-  Accept=Always / Never、Share=0（ホストとして提供しない）、Enabled=0（すべて無効）。
+・武器ページ：改造武器のファイルを Mods\Variants\<ページ名>\WEAPON\*.SGO に（ビークルは
+  Mods\Variants\<ページ名>\OBJECT\V*.SGO か VEHICLE*.SGO に）置きます。各ファイルはゲームの同じファイル名の
+  武器やビークルの代わりになるので、武器表もセーブも変わりません：新しい武器は増えず、装備するには元の武器が
+  必要で、名前も元の武器のままです。フォルダ名は ASCII にしてください。どのメニュー画面でも F6 で
+  オフ -> 1 ページ目 -> 2 ページ目 ... -> オフ と切り替わり（「F6 Page:<名前>」）、次のミッションから有効です。
+  オフラインでも使えます。
+・部屋では全員が同じファイルを使います：ホストの Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO と、各メンバーの
+  ページ（まずホストの Mods、次にホストのページ、その後は参加順に他の人のページ）。自動で使われ、メニューに
+  「ROOM WEAPONS 42%」、その後「ROOM WEAPONS :ON (2)」と出ます。各ファイルは持ち主が公開した SHA-256 と照合され、
+  切り替えはミッションの間だけで、部屋を出ると自分のファイルに戻ります。送られるのは武器
+  （WEAPONTABLE/WEAPONTEXT は除く）とビークルのファイルだけ、1 ページ最大 128 個・4 MB で、DLL やパッチは
+  決して送りません。ファイルは Mods\Plugins\EDF6Coop.hostdata に置かれ、Mods フォルダには書き込みません。
+  プラグインのない人にはオリジナルの武器が見えます。ini の [HostData]：Accept=Always（既定）/ Ask（F1 で使う）
+  / Never、WeaponPageKey、Page、Share=0（何も提供しない）、Enabled=0（すべて無効）。
 ・キーとボタンは ini の [RoomScreen] / [CopyArmor] で変えられます。F2 は Player MOD 専用です。
 
 ■ 直接接続（任意、ホストだけ）

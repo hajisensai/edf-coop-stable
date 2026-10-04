@@ -2,7 +2,7 @@
 //
 // Weapon pages: Mods\Variants\<page>\WEAPON\*.SGO (and OBJECT\V*/VEHICLE*.SGO) hold modified weapons that take the
 // place of the game's own weapons of the same file name - a mod weapon on an existing weapon's slot, so the weapon
-// table, the save and every other player's list stay as they are. A player picks one page with PageKey (or none);
+// table, the save and every other player's list stay as they are. A player picks one page with WeaponPageKey (or none);
 // it is used from the next mission on, offline too.
 //
 // In a room every machine uses the same files. Each brings what it has: the owner its Mods (kHostDigestKey) and

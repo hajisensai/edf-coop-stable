@@ -55,11 +55,17 @@ Mods\UI\LYT_MAINFRAME.SGO 和 Mods\HUD\ONLINEHUDTEXTURE.RAB），再双击 UNINS
 - 任务里每个玩家在 HUD 上都有自己的颜色：状态灯、聊天气泡、雷达标记。1-4 号保持游戏原来的黄、绿、蓝、红，
   5-8 号是橙、粉、紫、青，以此类推直到 32 人。为此 MOD 会写出 Mods\HUD\ONLINEHUDTEXTURE.RAB（游戏自己的
   HUD 贴图加上新的灯和气泡）。如果那里已经有别的 MOD 的文件，则不动它，5 号以后的玩家沿用 1-4 号的颜色。
-- 房主的魔改武器和载具：房主的 Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO 和你的不一样时，房间里的菜单显示
-  「F1 host weapons :OFF」。按 F1 从房主那里下载，对照房主发布的 SHA-256 校验，从下一个菜单画面起使用，
-  只在这个房间有效；再按 F1 换回自己的。只传武器（不含 WEAPONTABLE/WEAPONTEXT）和载具文件，最多 4 MB，
-  绝不传 DLL 或补丁。文件放在 Mods\Plugins\EDF6Coop.hostdata，绝不写进你的 Mods 文件夹。ini 的 [HostData]：
-  Accept=Always / Never，Share=0（当房主时不提供），Enabled=0（全部关闭）。
+- 武器页：把魔改武器文件放在 Mods\Variants\<页名>\WEAPON\*.SGO（载具放在
+  Mods\Variants\<页名>\OBJECT\V*.SGO 或 VEHICLE*.SGO）。每个文件替换游戏里同文件名的武器或载具，所以武器表
+  和存档都不变：不会多出新武器，要装备它得有那把原版武器，名字也还是原版的。文件夹名请用 ASCII。在任意菜单
+  画面按 F6 切换：关 -> 第 1 页 -> 第 2 页 ... -> 关（「F6 Page:<页名>」），从下一个任务起生效，离线也能用。
+- 房间里所有人用同一套文件：房主的 Mods\WEAPON / Mods\OBJECT\V*/VEHICLE*.SGO 和每个成员的页（先房主的
+  Mods，再房主的页，再按加入顺序排其他人的页）。默认自动使用，菜单显示「ROOM WEAPONS 42%」，之后是
+  「ROOM WEAPONS :ON (2)」。每个文件都对照它的主人发布的 SHA-256 校验，只在任务之间切换，退出房间就回到你
+  自己的文件。只传武器（不含 WEAPONTABLE/WEAPONTEXT）和载具文件，每页最多 128 个、4 MB，绝不传 DLL 或补丁。
+  文件放在 Mods\Plugins\EDF6Coop.hostdata，绝不写进你的 Mods 文件夹。没装插件的人看到的是原版武器。
+  ini 的 [HostData]：Accept=Always（默认）/ Ask（按 F1 才用）/ Never，WeaponPageKey，Page，Share=0（什么都不提供），
+  Enabled=0（全部关闭）。
 - 按键在 ini 的 [RoomScreen] / [CopyArmor] 里改。F2 专用于 Player MOD。
 
 [直连（可选，只有房主需要设置）]

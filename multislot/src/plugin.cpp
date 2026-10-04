@@ -103,7 +103,7 @@ HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey, int* pageKey) 
     else if (_wcsicmp(accept.c_str(), L"Always") != 0)
         Log("[HostData] Accept=%ls is not Always, Ask or Never; using Always", accept.c_str());
     *acceptKey = HostDataKey(ini, L"AcceptKey", L"F1", VK_F1, keyName);
-    *pageKey = HostDataKey(ini, L"PageKey", L"F6", VK_F6, pageKeyName);
+    *pageKey = HostDataKey(ini, L"WeaponPageKey", L"F6", VK_F6, pageKeyName);
     settings.keyName = keyName;
     settings.pageKeyName = pageKeyName;
     settings.page = IniText(ini, L"HostData", L"Page", L"");
@@ -693,7 +693,7 @@ bool LoadRooms(const wchar_t* iniPath) {
         }
         if (!settings.gameFolder.empty() && StartHostData(game, &RedirectGameImport, settings)) {
             SetWeaponFeature(acceptKey, pageKey, &HostDataMenuFrame);
-            Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls, PageKey=%ls (weapon and vehicle files only, "
+            Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls, WeaponPageKey=%ls (weapon and vehicle files only, "
                 "checked against the SHA-256 their member published, kept in Mods\\Plugins\\EDF6Coop.hostdata)",
                 settings.share ? 1 : 0,
                 settings.accept == HostAccept::Ask ? L"Ask" : settings.accept == HostAccept::Always ? L"Always" : L"Never",

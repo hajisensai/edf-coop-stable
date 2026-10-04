@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -69,10 +71,34 @@ SplitSyncRoom& SplitSync();
 // marker is logged once per room. Thread-safe; asks EOS for the id's text, like the net log does on any thread.
 bool PeerReadsSplitSync(const void* remote);
 
+// --- text attributes of other features (hostdata), on the same beat ---
+
+// Our lobby as the beat read it: who owns it, and the watched attributes of each member (absent: not set).
+struct LobbyView {
+    std::string lobbyId;
+    std::string self;   // EOS_ProductUserId as text
+    std::string owner;  // empty when the lobby details do not say
+    struct Member {
+        std::string id;
+        std::map<std::string, std::string, std::less<>> texts;
+    };
+    std::vector<Member> members;
+};
+using LobbyObserver = std::function<void(const LobbyView& view)>;
+// Read `keys` of every member on each beat (once a second while we are in a lobby) and hand them to `observer`, on
+// the EOS tick, outside every lock of this file. Leaving a lobby hands it an empty view.
+void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer);
+// Our value of `key` (at most 1000 characters), published on our lobby member on the next beat and in every lobby
+// we enter afterwards. Any thread.
+void PublishMemberText(const std::string& key, const std::string& value);
+// Called after every EOS tick with the platform handle, outside every lock of this file (hostdatanet.h: P2P).
+void ListenToTicks(std::function<void(void* platform)> listener);
+
 // Redirects EOS_Lobby_CreateLobby, EOS_Lobby_JoinLobby, EOS_Lobby_LeaveLobby, EOS_Lobby_DestroyLobby and
-// EOS_Platform_Tick (the tick publishes and reads attributes, on the thread EOS wants its calls on). Returns false
-// when the EOS functions it needs are missing or an import could not be redirected: then nobody is known to read a
-// split message and a host never sends one (packetfit.h).
-bool InstallSyncMarker(HMODULE game, ImportRedirect redirect);
+// EOS_Platform_Tick (the tick publishes and reads attributes, on the thread EOS wants its calls on). `splitReader`:
+// this machine reads a split start message (both packetfit imports are ours), so kSplitSyncKey is published; without
+// it only the text attributes are. Returns false when the EOS functions it needs are missing or an import could
+// not be redirected: then nobody is known to read a split message and a host never sends one (packetfit.h).
+bool InstallSyncMarker(HMODULE game, ImportRedirect redirect, bool splitReader);
 
 }  // namespace multislot

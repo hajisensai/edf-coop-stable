@@ -110,6 +110,9 @@ bool RoomHost() {
 constexpr int kGhostKey = 0x77;  // VK_F8
 bool ghostKeyWasDown = false;
 bool copyArmorKeyWasDown = false;
+int roomFeatureKey = 0;
+RoomFeatureFrame roomFeatureFrame = nullptr;
+bool roomFeatureKeyWasDown = false;
 int hostModeKey = 0;
 std::uint32_t hostModePad = 0;
 wchar_t hostModeHint[24]{};
@@ -372,6 +375,9 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
                          CopyArmor() ? L"ON" : L"OFF");
         wcsncat_s(out, outChars, copy, _TRUNCATE);
     }
+    // The room feature (host data): what this player can take from the host, and its key.
+    if (context.inRoom && context.roomNotice && context.roomNotice[0])
+        wcsncat_s(out, outChars, ((out[0] ? L"   " : L"") + std::wstring(context.roomNotice)).c_str(), _TRUNCATE);
     // Last on purpose. The field holds 96 characters and the guides above tell the player what the
     // buttons do right now; if something has to be cut it should be this, so the notice is appended with
     // _TRUNCATE after everything else rather than competing with it.
@@ -447,6 +453,11 @@ MidHandler HostModeHookHandler(std::uint32_t rva) {
     }
 }
 
+void SetRoomFeature(int key, RoomFeatureFrame frame) {
+    roomFeatureKey = key;
+    roomFeatureFrame = frame;
+}
+
 std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
     using OnUpdateFn = std::uint64_t(__fastcall*)(void*, void*);
     const std::uint64_t result = reinterpret_cast<OnUpdateFn>(game + kMainFrameOnUpdate)(frame, context);
@@ -467,6 +478,13 @@ std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
     }
     MenuContext menu{};
     menu.inRoom = InRoomSession();
+    std::wstring roomNotice;
+    if (roomFeatureFrame) {
+        const bool down = roomFeatureKey && KeyDown(roomFeatureKey) && menu.inRoom;
+        roomNotice = roomFeatureFrame(menu.inRoom, down && !roomFeatureKeyWasDown);
+        roomFeatureKeyWasDown = down;
+    }
+    menu.roomNotice = roomNotice.c_str();
     // Out of a room there is nobody to copy from, and an offline mission must not keep the last room's
     // armor: the room screen is the only thing that recomputes it, and it stops running when the room goes.
     if (!menu.inRoom) ForgetRoom();

@@ -5,6 +5,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -327,23 +328,30 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
     Check(Logged(log, "LOBBY LeaveLobby ? requested by the game"), "a leave without options is passed on");
 }
 
+// What the game's import of `name` points at now.
+template <typename T>
+T Replaced(const char* name) {
+    return reinterpret_cast<T>(replacements[name]);
+}
+
 // The room list (the user's request, 2026-10-04): normal and MultiSlot rooms are both shown, an earlier MultiSlot
-// version's are left out, and the game's indexes name the rooms it is shown.
+// version's are left out, and the game's indexes name the rooms it is shown. A search handle is any address.
 void TestRoomList(const std::wstring& log) {
     if (!fake) return;
-    using FindFn = void (*)(void*, const void*, void*, void*);
-    using CountFn = std::uint32_t (*)(void*, const void*);
     struct ResultOptions {
         std::int32_t ApiVersion;
         std::uint32_t LobbyIndex;
     };
-    using CopyFn = std::int32_t (*)(void*, const ResultOptions*, void**);
-    using SetResultsFn = void (*)(const std::int64_t*, int);
-    const auto find = reinterpret_cast<FindFn>(replacements["EOS_LobbySearch_Find"]);
-    const auto count = reinterpret_cast<CountFn>(replacements["EOS_LobbySearch_GetSearchResultCount"]);
-    const auto copy = reinterpret_cast<CopyFn>(replacements["EOS_LobbySearch_CopySearchResultByIndex"]);
-    const auto results = Fake<SetResultsFn>("FakeEos_SetSearchResults");
-    const auto room = [&](void* search, std::uint32_t index) {
+    using FindFn = void (*)(int*, const void*, void*, void*);
+    using CountFn = std::uint32_t (*)(int*, const void*);
+    using CopyFn = std::int32_t (*)(int*, const ResultOptions*, void**);
+    const auto find = Replaced<FindFn>("EOS_LobbySearch_Find");
+    const auto count = Replaced<CountFn>("EOS_LobbySearch_GetSearchResultCount");
+    const auto copy = Replaced<CopyFn>("EOS_LobbySearch_CopySearchResultByIndex");
+    const auto results = [](const auto& types) {
+        Fake<void (*)(const std::int64_t*, int)>("FakeEos_SetSearchResults")(types.data(), static_cast<int>(types.size()));
+    };
+    const auto room = [&copy](int* search, std::uint32_t index) {
         const ResultOptions options{1, index};
         void* details = nullptr;
         if (copy(search, &options, &details) != 0 || !details) return std::string("<none>");
@@ -351,11 +359,11 @@ void TestRoomList(const std::wstring& log) {
         Fake<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
         return id;
     };
-    int search = 0, other = 0;
-    const auto mirrored = static_cast<std::int64_t>(kMirrored);
+    int search = 0;
+    int other = 0;
     // 0x8C and 0x7D: earlier MultiSlot versions' rooms; -1: a room that says no SEARCH_TYPE.
-    const std::int64_t found[] = {0x93, 0x8C, mirrored, 0x7D, -1, 0x91};
-    results(found, 6);
+    const std::array<std::int64_t, 6> found{0x93, 0x8C, static_cast<std::int64_t>(kMirrored), 0x7D, -1, 0x91};
+    results(found);
     find(&search, nullptr, nullptr, nullptr);
     Check(Fake<int (*)()>("FakeEos_Finds")() == 1, "the game's search goes to EOS");
     Check(count(&search, nullptr) == 4, "an earlier MultiSlot version's rooms are left out of the count");
@@ -367,14 +375,13 @@ void TestRoomList(const std::wstring& log) {
     Check(Logged(log, "LOBBY room list: 2 of 6 room(s) left out"), "the log says how many were left out");
     Check(room(&other, 1) == "room1", "a search the game has not counted is passed through as it is");
     // A new search on the same handle is worked out again, and so are results that come in after the first count.
-    const std::int64_t next[] = {0x8F, 0x92};
-    results(next, 2);
+    results(std::array<std::int64_t, 2>{0x8F, 0x92});
     find(&search, nullptr, nullptr, nullptr);
     Check(count(&search, nullptr) == 1 && room(&search, 0) == "room1", "a search run again is worked out again");
-    results(nullptr, 0);
+    results(std::array<std::int64_t, 0>{});
     find(&search, nullptr, nullptr, nullptr);
     Check(count(&search, nullptr) == 0, "no results yet");
-    results(found, 6);
+    results(found);
     Check(count(&search, nullptr) == 4 && room(&search, 3) == "room5", "results that come in later are counted");
 }
 

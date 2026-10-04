@@ -269,7 +269,7 @@ int main() {
     UpdateMenuFrame(nullptr, false, outside);
     CpuContext searchAfterF2{};
     HostModeHookHandler(0x74AC8A)(&searchAfterF2);
-    Check(HostRoomSize() == 0 && searchAfterF2.rax == ((0x91ull << 32) | (2 * kSearchTypeCenter - 0x91)),
+    Check(HostRoomSize() == 0 && searchAfterF2.rax == ((0x91ULL << 32) | (2 * kSearchTypeCenter - 0x91)),
           "after 32 comes OFF, and the search still lists both kinds of room");
     // The room update reads the lobby it updates, never the setting: a room this machine did not create (or one
     // that is not the lobby it created) gets the game's own values while nothing says what it is.

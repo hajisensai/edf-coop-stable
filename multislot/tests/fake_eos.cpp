@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <functional>
 #include <map>
 #include <memory>
@@ -126,8 +127,15 @@ std::map<std::string, std::int64_t> lobbyAttributes;
 std::int32_t leaveResult = 0;
 std::int32_t destroyResult = 0;
 std::deque<std::function<void()>> completions;
-std::vector<std::int64_t> searchTypes;  // what a room search finds: each room's SEARCH_TYPE, -1 for none
-int finds = 0;
+// What a room search finds: each room's SEARCH_TYPE (-1 for none), and how many searches ran.
+struct SearchFake {
+    std::vector<std::int64_t> types;
+    int finds = 0;
+};
+SearchFake& Searches() {
+    static SearchFake searches;
+    return searches;
+}
 
 struct Modification {
     std::map<std::string, std::int64_t> attributes;
@@ -180,11 +188,12 @@ EXPORT void FakeEos_Reset(const char* selfId) {
     lobbyAttributes.clear();
     leaveResult = 0;
     destroyResult = 0;
-    searchTypes.clear();
-    finds = 0;
+    Searches() = SearchFake{};
 }
-EXPORT void FakeEos_SetSearchResults(const std::int64_t* values, int count) { searchTypes.assign(values, values + count); }
-EXPORT int FakeEos_Finds() { return finds; }
+EXPORT void FakeEos_SetSearchResults(const std::int64_t* values, int count) {
+    Searches().types.assign(values, values + count);
+}
+EXPORT int FakeEos_Finds() { return Searches().finds; }
 // The lobby id of a details handle the fake handed out.
 EXPORT const char* FakeEos_DetailsId(void* details) { return static_cast<Details*>(details)->lobbyId.c_str(); }
 EXPORT const void* FakeEos_User(const char* id) { return Handle(id); }
@@ -413,16 +422,17 @@ struct SearchResultOptions {
     std::int32_t ApiVersion;
     std::uint32_t LobbyIndex;
 };
-EXPORT void EOS_LobbySearch_Find(void*, const void*, void*, void*) { ++finds; }
+EXPORT void EOS_LobbySearch_Find(void*, const void*, void*, void*) { ++Searches().finds; }
 EXPORT std::uint32_t EOS_LobbySearch_GetSearchResultCount(void*, const void*) {
-    return static_cast<std::uint32_t>(searchTypes.size());
+    return static_cast<std::uint32_t>(Searches().types.size());
 }
 EXPORT std::int32_t EOS_LobbySearch_CopySearchResultByIndex(void*, const SearchResultOptions* options, void** out) {
-    if (!options || options->LobbyIndex >= searchTypes.size()) return kNotFound;
-    auto* details = new Details;
-    details->lobbyId = "room" + std::to_string(options->LobbyIndex);
-    if (searchTypes[options->LobbyIndex] >= 0) details->attributes["SEARCH_TYPE"] = searchTypes[options->LobbyIndex];
-    *out = details;
+    const std::vector<std::int64_t>& types = Searches().types;
+    if (!options || options->LobbyIndex >= types.size()) return kNotFound;
+    auto details = std::make_unique<Details>();
+    details->lobbyId = std::format("room{}", options->LobbyIndex);
+    if (types[options->LobbyIndex] >= 0) details->attributes["SEARCH_TYPE"] = types[options->LobbyIndex];
+    *out = details.release();  // EOS_LobbyDetails_Release frees it
     return 0;
 }
 EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {

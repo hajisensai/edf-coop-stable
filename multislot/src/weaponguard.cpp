@@ -47,10 +47,17 @@ bool ReadStatus(std::uint32_t& rows) {
         status = reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(pointer));
         using RowsFn = std::uint32_t(__fastcall*)();
         rows = reinterpret_cast<RowsFn>(game + kWeaponRows)();
-        return rows != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+    // Once: what the guard compares with, so a log shows which table this machine had.
+    static bool told = false;
+    if (rows && !told) {
+        told = true;
+        Log("WEAPONS this machine's weapon table has %u rows (the stock table 1564); other players' weapons past it "
+            "are replaced", rows);
+    }
+    return rows != 0;
 }
 
 bool ReadEquipped(std::int32_t (&equipped)[kWeaponClasses][kWeaponSlots]) {

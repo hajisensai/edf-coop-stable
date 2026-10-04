@@ -102,7 +102,7 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -189,6 +189,9 @@ target_link_libraries(HostModeTests PRIVATE winhttp)
 target_compile_options(HostModeTests PRIVATE ${WARNINGS})
 add_test(NAME HostModeAndMenuLabel COMMAND HostModeTests)
 
+add_executable(WeaponGuardTests tests/weaponguard_test.cpp src/weaponguard.cpp src/log.cpp)
+target_compile_options(WeaponGuardTests PRIVATE ${WARNINGS})
+add_test(NAME WeaponGuard COMMAND WeaponGuardTests)
 add_executable(HostDataTests tests/hostdata_test.cpp src/hostdata.cpp)
 target_include_directories(HostDataTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(HostDataTests PRIVATE ${WARNINGS})

@@ -322,12 +322,14 @@ int wmain(int argc, wchar_t** argv) {
     const auto hudPatches = HudColourPatches();
     const auto hudHooks = HudColourHooks();
     const auto hudWrap = HudIndexWrapHooks();
-    const auto missionUntouched = [&] {
+    // guarded: the weapon guard is in, and without the mission phase it hooks the mission start site alone.
+    const auto missionUntouched = [&](bool guarded) {
         bool untouched = Untouched(base, missionPatches) == static_cast<int>(missionPatches.size()) &&
                          Untouched(base, hudPatches) == static_cast<int>(hudPatches.size());
         for (const auto& hook : hudHooks) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& hook : hudWrap) untouched = untouched && SiteUntouched(base, hook);
-        for (const auto& hook : missionHooks) untouched = untouched && SiteUntouched(base, hook);
+        for (const auto& hook : missionHooks)
+            untouched = untouched && ((guarded && hook.rva == WeaponGuardHooks()[1].rva) || SiteUntouched(base, hook));
         for (const auto& call : missionCalls) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
         for (const auto& hook : SpawnHooks()) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& slot : MissionSlots()) untouched = untouched && SlotTargets(base + slot.rva, reinterpret_cast<std::uint64_t>(base), slot.target);
@@ -348,7 +350,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(after.family == before.family && after.decode == before.decode && after.range == before.range && after.map == before.map,
               "Enabled=0 leaves SEARCH_TYPE behaviour identical");
         Check(Contains(log, "Enabled=0"), "Enabled=0 is logged");
-        Check(missionUntouched(), "Enabled=0 leaves mission code untouched");
+        Check(missionUntouched(false), "Enabled=0 leaves mission code untouched");
         for (const auto& call : PeerTimeoutCalls())
             Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves the room-leave check untouched");
         for (const auto& hook : PeerTimeoutHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves Users::Add untouched");
@@ -411,6 +413,8 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& hook : hostHooks) Check(HookedInto(base, hook, plugin), hook.name);
         // Host data ([HostData] Enabled=1 by default): the file open, which only logs until an overlay is on.
         for (const auto& hook : HostDataHooks()) Check(HookedInto(base, hook, plugin), hook.name);
+        // The weapon guard's room info site; its mission start site is checked with the mission phase below.
+        Check(HookedInto(base, WeaponGuardHooks()[0], plugin), "the weapon guard hooks the room info parser");
         Check(SlotInto(base, MainFrameSlot(), plugin), "HUiMainFrame OnUpdate vtable slot points into the plugin");
         Check(Contains(log, eightPlayers ? "Hosting: 8Player MOD ON" : "Hosting: Player MOD OFF"), "the host mode setting is logged");
         Check(Contains(log, "EightPlayerRooms=1 from an earlier version") == (mode == L"host8"),
@@ -529,7 +533,8 @@ int wmain(int argc, wchar_t** argv) {
         }
 
         if (mode == L"nomission") {
-            Check(missionUntouched(), "Extend=0 leaves every mission site untouched, the HUD's included");
+            Check(missionUntouched(true), "Extend=0 leaves every mission site untouched, the HUD's included");
+            Check(HookedInto(base, WeaponGuardHooks()[1], plugin), "Extend=0: the weapon guard hooks the mission start message alone");
             Check(Contains(log, "Mission: Extend=0"), "Extend=0 is logged");
             Check(!Contains(log, "Mission sync:"), "Extend=0 leaves the mission start message alone");
             Check(GetFileAttributesW(hudPath.c_str()) == INVALID_FILE_ATTRIBUTES && Contains(log, "HUD: removed Mods\\HUD\\ONLINEHUDTEXTURE.RAB"),

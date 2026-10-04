@@ -107,12 +107,14 @@ bool ReadSmallFile(const std::wstring& path, std::vector<std::uint8_t>& out, std
     const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return Fail(why, "cannot be read");
-    LARGE_INTEGER size{};
-    bool ok = GetFileSizeEx(file, &size) != 0;
-    if (ok && static_cast<unsigned long long>(size.QuadPart) > kMaxFileBytes) {
+    DWORD high = 0;
+    const DWORD low = GetFileSize(file, &high);  // two DWORDs rather than LARGE_INTEGER's union
+    bool ok = low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR;
+    const std::uint64_t size = (static_cast<std::uint64_t>(high) << 32) | low;
+    if (ok && size > kMaxFileBytes) {
         ok = Fail(why, "is larger than " + std::to_string(kMaxFileBytes / 1024) + " KB");
     } else if (ok) {
-        out.resize(static_cast<std::size_t>(size.QuadPart));
+        out.resize(static_cast<std::size_t>(size));
         DWORD read = 0;
         ok = out.empty() || (ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) &&
                              read == out.size());

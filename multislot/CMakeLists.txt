@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # EDF6Coop: the room part (src/ here) and the direct-link part (../src) as one plugin, EDF6Coop.dll.
-project(EDF6Coop VERSION 2.4.0 LANGUAGES CXX)
+project(EDF6Coop VERSION 2.4.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 

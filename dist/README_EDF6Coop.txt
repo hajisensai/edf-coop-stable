@@ -1,4 +1,4 @@
-EDF6Coop 2.4.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.4.1 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.

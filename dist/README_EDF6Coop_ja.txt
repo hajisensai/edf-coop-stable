@@ -1,4 +1,4 @@
-EDF6Coop 2.4.0 - 地球防衛軍6 のオンライン協力プレイを大人数・安定にするプラグイン
+EDF6Coop 2.4.1 - 地球防衛軍6 のオンライン協力プレイを大人数・安定にするプラグイン
 プロジェクトページ：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 中文: README_EDF6Coop_zh.txt
 問題があれば Issue を作り、Mods\Plugins\EDF6Coop.log を添付してください。

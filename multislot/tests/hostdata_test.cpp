@@ -214,8 +214,9 @@ void Packets() {
 }
 
 void Scan(const char* scratch) {
-    const std::wstring root = std::wstring(scratch, scratch + std::strlen(scratch)) + L"\\Mods";
-    CreateDirectoryW(std::wstring(scratch, scratch + std::strlen(scratch)).c_str(), nullptr);
+    const std::string folder(scratch);
+    const std::wstring root = std::wstring(folder.begin(), folder.end()) + L"\\Mods";
+    CreateDirectoryW(std::wstring(folder.begin(), folder.end()).c_str(), nullptr);
     CreateDirectoryW(root.c_str(), nullptr);
     CreateDirectoryW((root + L"\\WEAPON").c_str(), nullptr);
     CreateDirectoryW((root + L"\\OBJECT").c_str(), nullptr);

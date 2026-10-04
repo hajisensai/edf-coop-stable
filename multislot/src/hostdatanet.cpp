@@ -155,6 +155,8 @@ void HostDataLink::Tick(std::uint64_t now) {
 // --- the game's side ---
 namespace {
 
+constexpr EosResult kEosNotFound = 18;  // EOS_NotFound: what ReceivePacket returns when no packet is waiting
+
 struct EosReceiveOptions {  // EOS_P2P_ReceivePacketOptions (packetfit.cpp)
     std::int32_t ApiVersion;
     const void* LocalUserId;
@@ -427,8 +429,12 @@ const std::string& PeerTextLocked(const void* peer) {
 EosResult HostDataReceive(void* handle, const void* options, void** peer, void* socket, std::uint8_t* channel, void* data,
                           std::uint32_t* size) {
     Runtime& rt = Rt();
+    // RedirectGameImport stores the original before it swaps the import, so the game cannot reach this wrapper
+    // without one; should it ever, the game is told no packet came rather than calling nothing.
+    const EosReceiveFn receive = rt.receive;
+    if (!receive) return kEosNotFound;
     for (;;) {
-        const EosResult result = rt.receive(handle, options, peer, socket, channel, data, size);
+        const EosResult result = receive(handle, options, peer, socket, channel, data, size);
         if (result != 0 || !data || !size || !channel || !peer || !*peer) return result;
         std::scoped_lock lock(rt.lock);
         rt.p2p = handle;

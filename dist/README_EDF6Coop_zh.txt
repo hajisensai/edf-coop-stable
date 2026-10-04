@@ -1,4 +1,4 @@
-EDF6Coop 2.4.0 - 地球防卫军6 联机扩容 + 稳定插件
+EDF6Coop 2.4.1 - 地球防卫军6 联机扩容 + 稳定插件
 项目主页：https://github.com/hajisensai/edf-coop-stable
 English: README_EDF6Coop.txt / 日本語: README_EDF6Coop_ja.txt
 遇到问题请提 Issue，并附上 Mods\Plugins\EDF6Coop.log。

@@ -364,7 +364,7 @@ EXPORT std::int32_t EOS_LobbyDetails_CopyMemberAttributeByKey(void*, const CopyM
                                                               Attribute** out) {
     if (const char* text = FakeEos_Text(static_cast<const User*>(options->TargetUserId)->text, options->AttrKey)) {
         auto* data = new AttributeData{1, options->AttrKey, {}, 3};
-        const std::size_t size = std::strlen(text) + 1;
+        const std::size_t size = std::string_view(text).size() + 1;
         auto* copy = new char[size];
         std::memcpy(copy, text, size);
         data->Value.AsUtf8 = copy;

@@ -72,8 +72,6 @@ Spans WriteSpans(const std::vector<Patch>& patches, const std::vector<CallSite>&
     spans.insert({slot.rva, slot.rva + 8});
     const PointerSlot frame = MainFrameSlot();
     spans.insert({frame.rva, frame.rva + 8});
-    const PointerSlot lobby = LobbySlot();
-    spans.insert({lobby.rva, lobby.rva + 8});
     for (const auto& missionSlot : MissionSlots()) spans.insert({missionSlot.rva, missionSlot.rva + 8});
     return spans;
 }
@@ -194,8 +192,6 @@ int main(int argc, char** argv) {
     Check(SlotTargets(image.At(slot.rva, 8), image.nt->OptionalHeader.ImageBase, slot.target), slot.name, slot.rva);
     const PointerSlot frameSlot = MainFrameSlot();
     Check(SlotTargets(image.At(frameSlot.rva, 8), image.nt->OptionalHeader.ImageBase, frameSlot.target), frameSlot.name, frameSlot.rva);
-    const PointerSlot lobbySlot = LobbySlot();
-    Check(SlotTargets(image.At(lobbySlot.rva, 8), image.nt->OptionalHeader.ImageBase, lobbySlot.target), lobbySlot.name, lobbySlot.rva);
 
     // Constants roomview.cpp relies on, checked where the game itself uses them.
     const auto RipTarget = [&](std::uint32_t rva, std::size_t length) {
@@ -227,27 +223,6 @@ int main(int argc, char** argv) {
     Check(SmoothingSettleMs(0.5f) > 250 && SmoothingSettleMs(0.5f) < 350, "half closes it in about 0.3 s", 0);
     Check(SmoothingSettleMs(0.0f) == 0 && SmoothingSettleMs(-1.0f) == 0 && SmoothingSettleMs(2.0f) == 0,
           "a factor outside (0, 1] has no settle time", 0);
-    // What LobbyOnUpdateHook (hostmode.cpp) relies on. 8EDBC0 takes the lobby alone, shows "Lobby_Refreshing" and
-    // starts the search at lobby+0x7E0 through 73A6B0, which marks +0x43 and clears +0x40; 73ABE0 sets +0x40 once the
-    // results are in. The lobby's dialogs keep the callback they run on closing at lobby+0x118+0x38 (8F0082 clears it
-    // and then searches again, as the other dialog callbacks do).
-    const std::uint8_t lobbyThis[] = {0x48, 0x8B, 0xF1};                                 // mov rsi, rcx
-    const std::uint8_t lobbySearch[] = {0x48, 0x8D, 0x8E, 0xE0, 0x07, 0x00, 0x00};         // lea rcx, [rsi+0x7E0]
-    Check(std::memcmp(image.At(0x8EDBEE, 3), lobbyThis, 3) == 0 && RipTarget(0x8EDBF1, 7) == 0x180A2E8 &&
-              std::memcmp(image.At(0x180A2E8, 34), L"Lobby_Refreshing", 34) == 0,
-          "8EDBC0 takes the lobby and shows Lobby_Refreshing", 0x8EDBF1);
-    Check(std::memcmp(image.At(0x8EDD28, 7), lobbySearch, 7) == 0 && CallTargets(image.At(0x8EDD2F, 5), 0x8EDD2F, 0x73A6B0),
-          "8EDBC0 starts the search at lobby+0x7E0", 0x8EDD28);
-    const std::uint8_t searchStarts[] = {0xC6, 0x43, 0x43, 0x01}, resultsCleared[] = {0xC6, 0x43, 0x40, 0x00},
-                       resultsIn[] = {0xC6, 0x47, 0x40, 0x01};
-    Check(std::memcmp(image.At(0x73A852, 4), searchStarts, 4) == 0 && std::memcmp(image.At(0x73A85F, 4), resultsCleared, 4) == 0 &&
-              std::memcmp(image.At(0x73AEB7, 4), resultsIn, 4) == 0,
-          "search flags: +0x43 set at start, +0x40 cleared then and set when the results are in", 0x73A852);
-    const std::uint8_t dialogOwner[] = {0x48, 0x8B, 0x5F, 0x08}, dialogSlot[] = {0x48, 0x81, 0xC3, 0x18, 0x01, 0x00, 0x00},
-                       dialogCallback[] = {0x48, 0x8B, 0x4B, 0x38};
-    Check(std::memcmp(image.At(0x8F0087, 4), dialogOwner, 4) == 0 && std::memcmp(image.At(0x8F008B, 7), dialogSlot, 7) == 0 &&
-              std::memcmp(image.At(0x8F0099, 4), dialogCallback, 4) == 0 && CallTargets(image.At(0x8F0105, 5), 0x8F0105, 0x8EDBC0),
-          "a lobby dialog's close callback lives at lobby+0x118+0x38 and searches again", 0x8F0087);
     // MemberInfo's name, which roomview.cpp logs as the room roster. Creation (the shared_ptr block starts
     // 0x10 before the object) clears the class-ok byte at +0x08, writes the class at +0x0C and then builds
     // the name in place at +0x10; 8F1E80 is that constructor.

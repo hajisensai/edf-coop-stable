@@ -21,9 +21,9 @@ static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
 
 // Lobby SEARCH_TYPE. Vanilla rooms publish 0x90+k (k = 1..4) and a search asks for the range
 // [0x91, 0x90+m]; joining checks (v & ~0xF) == 0x90. MultiSlot rooms publish the mirror of the vanilla
-// value around kSearchTypeCenter: 2*centre - v (0x18..0x1B). With the Player MOD ON a modded search asks for
-// [2*centre-0x90-m, 2*centre-0x91], MultiSlot rooms of the kinds asked for only; OFF it asks for what the game
-// asks, normal rooms only (hostmode.h). Vanilla searches never reach below 0x91 and vanilla's join check
+// value around kSearchTypeCenter: 2*centre - v (0x18..0x1B). A modded search asks for
+// [2*centre-0x90-m, 0x90+m], both families at once, and leaves out the rooms of the values between them
+// (hostmode.h, lobbystate.h). Vanilla searches never reach below 0x91 and vanilla's join check
 // refuses every mirrored value. Earlier MultiSlot versions cannot share a
 // room of five or more with this one (0.2-0.4.1: mirror 0x8C..0x8F, enemy counts and strength not adjusted;
 // 0.4.2-0.4.3: 0x7C..0x7F; 0.5.0-1.0.0: 0x74..0x77, the fifth player also raised enemy durability;
@@ -102,12 +102,10 @@ struct MidSite {
 
 // Rooms you host (hostmode.h): lobby capacity and published SEARCH_TYPE follow the 8Player MOD setting
 // the room was created with (OFF: 4 and the vanilla value, ON: 8 and the mirrored value). Rooms you search
-// for follow the current setting (OFF: normal and MultiSlot rooms, ON: MultiSlot rooms only).
+// for are both kinds, whatever the setting.
 std::vector<MidSite> HostModeHooks();
 // HUiMainFrame::OnUpdate (the menu frame), replaced by MainFrameOnUpdateHook.
 PointerSlot MainFrameSlot();
-// HUiLobby::OnUpdate (the room list screen), replaced by LobbyOnUpdateHook: F2 there searches again.
-PointerSlot LobbySlot();
 
 // Mission phase for players 5-8 (applied with [Mission] Extend=1). With four or fewer players every
 // changed instruction computes what the game computed: records and array entries 1-4 stay where the

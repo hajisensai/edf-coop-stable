@@ -218,8 +218,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
             for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
     }
     std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook)},
-                                 {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)},
-                                 {LobbySlot(), reinterpret_cast<void*>(&LobbyOnUpdateHook)}};
+                                 {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)}};
     if (mission)
         for (const auto& missionSlot : MissionSlots()) slots.push_back({missionSlot, MissionSlotHandler(missionSlot.rva)});
 
@@ -595,8 +594,8 @@ bool LoadRooms(const wchar_t* iniPath) {
         return false;
     }
     KeepMenuLayout(true);
-    Log("Joining: normal rooms and MultiSlot rooms of every size from EDF6Coop 2.3.0 on are joinable (OFF lists the "
-        "normal ones, ON the MultiSlot ones)");
+    Log("Joining: normal rooms and MultiSlot rooms of every size from EDF6Coop 2.3.0 on are joinable, and the room "
+        "list shows both whatever the setting");
     Log("Rooms: %d user slots, packet sessions and voice chat HUD records (P2P links to every member of a %d-player "
         "room; 4 or fewer: the extra ones stay empty)", kMaxPlayers, kMaxPlayers);
     char hosting[32]{};

@@ -344,8 +344,6 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& hook : HostDataHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves the file open untouched");
         const PointerSlot frame = MainFrameSlot();
         Check(SlotTargets(base + frame.rva, reinterpret_cast<std::uint64_t>(base), frame.target), "Enabled=0 leaves the menu frame vtable untouched");
-        const PointerSlot lobbySlot = LobbySlot();
-        Check(SlotTargets(base + lobbySlot.rva, reinterpret_cast<std::uint64_t>(base), lobbySlot.target), "Enabled=0 leaves the room list vtable untouched");
         for (const auto& call : calls) Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves calls untouched");
         Check(after.family == before.family && after.decode == before.decode && after.range == before.range && after.map == before.map,
               "Enabled=0 leaves SEARCH_TYPE behaviour identical");
@@ -414,7 +412,6 @@ int wmain(int argc, wchar_t** argv) {
         // Host data ([HostData] Enabled=1 by default): the file open, which only logs until an overlay is on.
         for (const auto& hook : HostDataHooks()) Check(HookedInto(base, hook, plugin), hook.name);
         Check(SlotInto(base, MainFrameSlot(), plugin), "HUiMainFrame OnUpdate vtable slot points into the plugin");
-        Check(SlotInto(base, LobbySlot(), plugin), "HUiLobby OnUpdate vtable slot points into the plugin");
         Check(Contains(log, eightPlayers ? "Hosting: 8Player MOD ON" : "Hosting: Player MOD OFF"), "the host mode setting is logged");
         Check(Contains(log, "EightPlayerRooms=1 from an earlier version") == (mode == L"host8"),
               "a 2.2 INI's EightPlayerRooms=1 is read as eight-player rooms, and the log says so");
@@ -520,17 +517,10 @@ int wmain(int argc, wchar_t** argv) {
             const std::uint64_t old = before.range[kind];
             const auto low = static_cast<std::uint32_t>(old), high = static_cast<std::uint32_t>(old >> 32);
             if (low == 0x91 && high >= 0x91 && high <= 0x94) {
-                // OFF asks exactly what the game asks; ON asks for the 32-slot family's rooms of the kind only.
-                const std::uint64_t bottom = eightPlayers ? 2 * kSearchTypeCenter - high : 0x91;
-                const std::uint64_t top = eightPlayers ? 2 * kSearchTypeCenter - 0x91 : high;
-                Check(after.range[kind] == ((top << 32) | bottom),
-                      eightPlayers ? "Player MOD ON: the search lists MultiSlot rooms of every size only"
-                                   : "Player MOD OFF: the search lists vanilla rooms only");
-                const auto searchedLow = static_cast<std::uint32_t>(after.range[kind]);
-                const auto searchedHigh = static_cast<std::uint32_t>(after.range[kind] >> 32);
-                bool listsEarlierRooms = false;
-                for (std::uint32_t v = 0x20; v <= 0x8F; ++v) listsEarlierRooms = listsEarlierRooms || (v >= searchedLow && v <= searchedHigh);
-                Check(!listsEarlierRooms, "no search lists the rooms of a 2.2 build, which the join check refuses");
+                // Both families of the kind, whatever the setting: [mirror(high), high]. The rooms of earlier
+                // MultiSlot versions between them are left out of the results (lobbystate_test TestRoomList).
+                Check(after.range[kind] == ((static_cast<std::uint64_t>(high) << 32) | (2 * kSearchTypeCenter - high)),
+                      "the search lists normal and MultiSlot rooms of the kind, whatever the setting");
             } else {
                 Check(after.range[kind] == old, "unknown search kinds are unchanged");
             }

@@ -232,6 +232,7 @@ void Scan(const char* scratch) {
     put(L"WEAPON\\BROKEN.SGO", std::vector<std::uint8_t>(64, 'M'));
     put(L"OBJECT\\V401.SGO", Sgo(64, 4));
     put(L"OBJECT\\E101.SGO", Sgo(64, 5));
+    put(L"WEAPON\\HUGE.SGO", Sgo(kMaxFileBytes + 1, 6));
     std::vector<std::string> skipped;
     const auto files = ScanMods(root, &skipped);
     Check(files.size() == 2, "two shareable files");
@@ -239,7 +240,10 @@ void Scan(const char* scratch) {
         Check(files[0].path == "OBJECT/V401.SGO" && files[1].path == "WEAPON/AWEAPON1.SGO", "scanned paths");
         Check(files[1].bytes == Sgo(64, 1), "scanned bytes");
     }
-    Check(skipped.size() == 3, "table, names and the broken file are skipped and said");
+    Check(skipped.size() == 4, "table, names, the broken and the too large file are skipped and said");
+    Check(std::any_of(skipped.begin(), skipped.end(),
+                      [](const std::string& line) { return line.find("HUGE.SGO is larger than") != std::string::npos; }),
+          "a file over the size limit says so");
     Check(ScanMods(root + L"\\nowhere", nullptr).empty(), "no Mods folder");
 }
 

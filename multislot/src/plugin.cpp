@@ -701,9 +701,18 @@ bool LoadRooms(const wchar_t* iniPath) {
     const int imports = mission ? InstallPacketFit(game, &RedirectGameImport) : 0;
     // One set of lobby wrappers carries the split marker and host data's attributes (syncmarker.h). The marker says
     // this machine reads a split message: only true once both P2P imports are ours.
+    if (imports == 2 && PackingAvailable()) SetMarkerFormat(kPackedFormat);
     const bool lobbyGlue = (imports == 2 || hostData) && InstallSyncMarker(game, &RedirectGameImport, imports == 2);
     const bool marker = imports == 2 && lobbyGlue;
     if (marker) SetSplitSyncReaders(&ReadsSplitSync);
+    if (marker && PackingAvailable()) {
+        SetPackedReaders(&PeerReadsPacked, [] { return SplitSync().EveryoneReadsPacked(); });
+        Log("Packing: game packets of %zu bytes and more go packed (XPRESS) to members that unpack them, when that "
+            "saves at least %zu%%; a start message of up to %zu bytes then needs no side packets", kPackMinimum,
+            kPackSavingPercent, kPackedSyncLimit);
+    } else if (marker) {
+        Log("Packing: UNAVAILABLE (ntdll has no XPRESS); packets go as they are");
+    }
     if (mission) {
         if (imports == 2)
             Log("Mission sync: a start message too large for one EOS packet (%zu bytes; eight players made 1180) keeps "

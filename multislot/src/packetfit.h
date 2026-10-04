@@ -139,6 +139,35 @@ constexpr unsigned long long kHeldPacketMs = 30000;
 // Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.
 using SplitSyncReaders = bool (*)(const void* remote);
 void SetSplitSyncReaders(SplitSyncReaders readers);
+// --- packed packets (bandwidth) ---
+// A member that publishes kPackedFormat (syncmarker.h) reads packed packets: kPackHeader bytes (a magic and the
+// original size), then the original bytes compressed with XPRESS (ntdll RtlCompressBuffer: fast, part of Windows).
+// Every game packet of kPackMinimum bytes and more goes to such a member packed when that saves at least
+// kPackSavingMin bytes and kPackSavingPercent of it; the receiver unpacks it before anything else looks at it. The
+// game reads packets into a 4096-byte buffer (12C8D1D) and sends up to kGameMaxPacket bytes (12D0BE6), so a start
+// message of up to kPackedSyncLimit bytes keeps all its records once it fits one EOS packet packed.
+constexpr std::size_t kPackHeader = 10;
+constexpr std::size_t kPackMinimum = 200;
+constexpr std::size_t kPackSavingMin = 16;
+constexpr std::size_t kPackSavingPercent = 5;
+constexpr std::size_t kMaxUnpacked = 4096;
+constexpr std::size_t kGameMaxPacket = 1400;
+constexpr std::size_t kPackedSyncLimit =
+    kGameMaxPacket - kSessionHeader - kControllerHeader - kMessageHeaders - kBatchedAllowance;  // 1330
+// XPRESS is there (ntdll); without it nothing is packed and kSplitSyncFormat is published.
+bool PackingAvailable();
+// `data` packed into `out` (capacity bytes); 0 when it is too small to pack, packing saves too little, or the
+// result does not fit.
+std::size_t PackPacket(const std::uint8_t* data, std::size_t size, std::uint8_t* out, std::size_t capacity);
+bool IsPackedPacket(const std::uint8_t* data, std::size_t size);
+// A packed packet's original bytes into `out`; 0 when it is not one, is damaged, or its original does not fit.
+std::size_t UnpackPacket(const std::uint8_t* data, std::size_t size, std::uint8_t* out, std::size_t capacity);
+// Who reads packed packets (syncmarker.h PeerReadsPacked), and whether every member of the room does now. Unset:
+// nobody, and nothing is packed.
+using PackedReaders = bool (*)(const void* remote);
+using RoomReadsPacked = bool (*)();
+void SetPackedReaders(PackedReaders readers, RoomReadsPacked room);
+
 // Test: the start message holds at most `budget` bytes of records inline (0 or kMissionSyncBudget and above: the
 // normal budget), so a small room exercises the side packets ([Test] SplitSyncBudget).
 void SetSyncBudget(std::size_t budget);

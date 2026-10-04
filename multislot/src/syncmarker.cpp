@@ -144,6 +144,7 @@ struct Local {
     ULONGLONG nextBeat = 0;
     bool failureLogged = false;  // in this lobby
     bool splitReader = false;  // kSplitSyncKey is ours to publish
+    std::int64_t markerFormat = kSplitSyncFormat;  // its value (SetMarkerFormat)
     std::map<std::string, std::string, std::less<>> texts;  // PublishMemberText
     std::vector<std::string> watched;                       // WatchMemberTexts
     // The watched texts each member of this lobby has shown. Our copy of the lobby drops a member's attributes when
@@ -201,7 +202,7 @@ void PublishLocked() {
         AttributeData& marker = attributes.emplace_back();
         marker.ApiVersion = 1;
         marker.Key = kSplitSyncKey;
-        marker.Value.AsInt64 = kSplitSyncFormat;
+        marker.Value.AsInt64 = local.markerFormat;
         marker.ValueType = kInt64;
     }
     for (const auto& [key, value] : local.texts) {
@@ -231,14 +232,16 @@ void PublishLocked() {
     api.releaseModification(modification);
 }
 
-bool ReadMarker(void* details, const void* member) {
+// A member's marker value, 0 for none.
+std::int64_t ReadMarker(void* details, const void* member) {
     const CopyMemberAttributeOptions options{1, member, kSplitSyncKey};
     Attribute* attribute = nullptr;
-    const bool marked = api.copyMemberAttribute(details, &options, &attribute) == kEosSuccess && attribute &&
-                        attribute->Data && attribute->Data->ValueType == kInt64 &&
-                        attribute->Data->Value.AsInt64 >= kSplitSyncFormat;
+    const std::int64_t value = api.copyMemberAttribute(details, &options, &attribute) == kEosSuccess && attribute &&
+                                       attribute->Data && attribute->Data->ValueType == kInt64
+                                   ? attribute->Data->Value.AsInt64
+                                   : 0;
     if (attribute) api.releaseAttribute(attribute);
-    return marked;
+    return value;
 }
 
 // A text attribute of `member`, or nothing.
@@ -275,7 +278,8 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members, LobbyView& view) {
         const void* member = api.memberByIndex(details, &memberOptions);
         const std::string id = UserText(member);
         if (id.empty()) continue;
-        members.push_back({id, ReadMarker(details, member)});
+        const std::int64_t marker = ReadMarker(details, member);
+        members.push_back({id, marker >= kSplitSyncFormat, marker >= kPackedFormat});
         LobbyView::Member& seen = view.members.emplace_back();
         seen.id = id;
         for (const std::string& key : local.watched) ReadText(details, member, key, seen.texts);
@@ -394,6 +398,7 @@ void SplitSyncRoom::Entered(const std::string& lobbyId) {
     lobby_ = lobbyId;
     members_.clear();
     marked_.clear();
+    packed_.clear();
     refused_.clear();
     ReleaseSRWLockExclusive(&lock_);
 }
@@ -409,6 +414,7 @@ bool SplitSyncRoom::Observe(const std::vector<LobbyMember>& members) {
             members_.push_back(member.id);
             newcomer = true;
         }
+        if (member.packed && !Contains(packed_, member.id)) packed_.push_back(member.id);
         if (!member.marked || Contains(marked_, member.id)) continue;
         marked_.push_back(member.id);
         if (Contains(refused_, member.id)) late.push_back(member.id);
@@ -441,6 +447,21 @@ bool SplitSyncRoom::Marked(const std::string& id) const {
     return marked;
 }
 
+bool SplitSyncRoom::Packed(const std::string& id) const {
+    AcquireSRWLockShared(&lock_);
+    const bool packed = Contains(packed_, id);
+    ReleaseSRWLockShared(&lock_);
+    return packed;
+}
+
+bool SplitSyncRoom::EveryoneReadsPacked() const {
+    AcquireSRWLockShared(&lock_);
+    const bool everyone = !lobby_.empty() && !members_.empty() &&
+                          std::all_of(members_.begin(), members_.end(), [this](const std::string& id) { return Contains(packed_, id); });
+    ReleaseSRWLockShared(&lock_);
+    return everyone;
+}
+
 std::vector<std::string> SplitSyncRoom::Unmarked() const {
     AcquireSRWLockShared(&lock_);
     std::vector<std::string> unmarked;
@@ -470,6 +491,17 @@ bool PeerReadsSplitSync(const void* remote) {
             "up); otherwise it runs no MultiSlot 1.5.15 or later and cannot start this mission",
             id);
     return marked;
+}
+
+bool PeerReadsPacked(const void* remote) {
+    char id[40]{};
+    return remote && *ProductUserIdText(remote, id, sizeof(id)) && SplitSync().Packed(id);
+}
+
+void SetMarkerFormat(std::int64_t format) {
+    AcquireSRWLockExclusive(&local.lock);
+    local.markerFormat = format;
+    ReleaseSRWLockExclusive(&local.lock);
 }
 
 void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer) {

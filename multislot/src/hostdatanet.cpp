@@ -545,7 +545,9 @@ std::wstring HostDataMenuFrame(bool inRoom, bool pressed) {
         Log("Host data: the game now reads the host's %zu weapon/vehicle file(s) (%zu of this machine's own stay)",
             rt.ready->paths.size(), rt.extra);
     }
-    return HostDataNotice(rt.stage, rt.settings.accept, rt.settings.keyName, rt.link.Percent(), rt.extra);
+    // While a fetched bundle is written the link holds nothing any more (its bytes were taken): all of it came.
+    const int percent = rt.storing ? 100 : rt.link.Percent();
+    return HostDataNotice(rt.stage, rt.settings.accept, rt.settings.keyName, percent, rt.extra);
 }
 
 }  // namespace multislot

@@ -160,6 +160,13 @@ std::vector<CallSite> GhostCalls();
 // mov rdx, rdi`). The handler may point rdi at another path; both moves run after it.
 std::vector<MidSite> HostDataHooks();
 
+// Other players' weapon ids this machine's table does not have (weaponguard.h). [0]: the room info parser 744AB0
+// right after it stored a member's six ids (`lea r12, [r13+0x38]`, r13 the PlayerInfo; the nop after it is not
+// kept). [1]: the mission start message 790600 at 790887 (`imul r8, rcx, 0xD4`), the decoded record at rbp+0x20,
+// before it is copied anywhere - the same site as MissionHooks' "loadout record MissionSync header", so it is
+// installed only when the mission phase is not (plugin.cpp runs the guard inside the mission handler otherwise).
+std::vector<MidSite> WeaponGuardHooks();
+
 bool Matches(const std::uint8_t* at, const Patch& patch);
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva);
 bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t targetRva);

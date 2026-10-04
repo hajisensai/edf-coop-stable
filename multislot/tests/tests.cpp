@@ -631,6 +631,26 @@ int main(int argc, char** argv) {
               Bytes(0x74266, {0x40, 0x0F, 0x94, 0xC7}) && Bytes(0x7428C, {0x40, 0x0F, 0x95, 0xC7}),
           "the file open: rdi = the path's characters, handed to 752E0, then only a result", 0x741C0);
     allHooks.insert(allHooks.end(), hostDataHooks.begin(), hostDataHooks.end());
+    // Weapon guard (weaponguard.h): its two sites, and what it reads of the game.
+    const auto guardHooks = WeaponGuardHooks();
+    Check(guardHooks.size() == 2, "weapon guard hook table size");
+    for (const auto& hook : guardHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+    }
+    Check(guardHooks[0].displacedOffset == 0 && guardHooks[0].displacedSize == 4,
+          "the room info site keeps its lea r12, [r13+0x38] (the nop after it goes)", guardHooks[0].rva);
+    Check(Bytes(0x745640, {0x41, 0x8B, 0x34, 0x24}), "the room info loop starts after the site (mov esi, [r12])", 0x745640);
+    const auto missionStart = std::find_if(missionHooks.begin(), missionHooks.end(),
+                                           [&](const MidSite& site) { return site.rva == guardHooks[1].rva; });
+    Check(missionStart != missionHooks.end() && missionStart->original == guardHooks[1].original &&
+              guardHooks[1].displacedSize == guardHooks[1].original.size(),
+          "the mission start site is the mission phase's, and alone it runs its imul unchanged", guardHooks[1].rva);
+    // 959F80: () -> the WEAPONTABLE's rows, e23f0 on [20B2890]+0x130.
+    Check(Bytes(0x959F80, {0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x0D}) && Bytes(0x959F8B, {0x48, 0x81, 0xC1, 0x30, 0x01, 0x00, 0x00}) &&
+              CallTargets(image.At(0x959F92, 5), 0x959F92, 0xE23F0),
+          "959F80 returns the weapon table's rows from GameStatus+0x130", 0x959F80);
+    allHooks.push_back(guardHooks[0]);
     // 8Player MOD (hostmode.cpp): the sites it replaces, and the game functions it calls from the menu frame.
     const auto hostHooks = HostModeHooks();
     Check(hostHooks.size() == 12, "host mode hook table size");

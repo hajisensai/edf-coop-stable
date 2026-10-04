@@ -19,6 +19,7 @@
 #include "default_ini.h"
 #include "fakemembers.h"
 #include "hostdataopen.h"
+#include "weaponguard.h"
 #include "hostdatanet.h"
 #include "hostmode.h"
 #include "joinlog.h"
@@ -162,6 +163,15 @@ struct SlotWrite {
 
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
 // read a capacity from a call that was never redirected, or page a member list the builder never sees.
+// The mission start message's site, which the mission phase hooks too: the weapon guard first, then the mission
+// phase's own handler.
+constexpr std::uint32_t kMissionStart = 0x790887;
+MidHandler missionStartHandler = nullptr;
+void MissionStartHandler(CpuContext* context) {
+    MissionWeaponsHandler(context);
+    missionStartHandler(context);
+}
+
 bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int ghosts, bool diagnostics, bool armor,
            bool recovery, bool keepRoom, bool hostData, float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
@@ -177,10 +187,20 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
     if (hostData)
         for (const auto& site : HostDataHooks()) hooks.push_back({site, &HostDataOpenHandler});
+    const auto guard = WeaponGuardHooks();
+    hooks.push_back({guard[0], &RoomWeaponsHandler});
+    if (!mission) hooks.push_back({guard[1], &MissionWeaponsHandler});
     if (mission) {
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
-        for (const auto& site : MissionHooks()) hooks.push_back({site, MissionHookHandler(site.rva)});
+        for (const auto& site : MissionHooks()) {
+            if (site.rva != kMissionStart) {
+                hooks.push_back({site, MissionHookHandler(site.rva)});
+                continue;
+            }
+            missionStartHandler = MissionHookHandler(site.rva);
+            hooks.push_back({site, &MissionStartHandler});
+        }
         if (hudColours) {
             const auto hudPatches = HudColourPatches();
             patches.insert(patches.end(), hudPatches.begin(), hudPatches.end());
@@ -580,6 +600,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitPacketFit(base);
+    InitWeaponGuard(base);
     InitJoinLog(base);
     InitFinalHello(base);
     InitPeerTimeout(base);

@@ -139,6 +139,9 @@ constexpr unsigned long long kHeldPacketMs = 30000;
 // Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.
 using SplitSyncReaders = bool (*)(const void* remote);
 void SetSplitSyncReaders(SplitSyncReaders readers);
+// Test: the start message holds at most `budget` bytes of records inline (0 or kMissionSyncBudget and above: the
+// normal budget), so a small room exercises the side packets ([Test] SplitSyncBudget).
+void SetSyncBudget(std::size_t budget);
 // The clock held packets age by (GetTickCount64 unless a test sets its own).
 using PacketFitClock = unsigned long long (*)();
 void SetPacketFitClock(PacketFitClock clock);

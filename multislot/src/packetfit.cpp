@@ -122,6 +122,7 @@ constexpr std::int32_t kReliableOrdered = 2;  // EOS_PR_ReliableOrdered
 constexpr std::size_t kMaxStubsPerPacket = kMaxPlayers;
 
 SplitSyncReaders splitSyncReaders = nullptr;
+std::size_t syncBudget = kMissionSyncBudget;  // [Test] SplitSyncBudget lowers it
 
 unsigned long long SystemClock() { return GetTickCount64(); }
 PacketFitClock packetClock = &SystemClock;
@@ -416,7 +417,7 @@ void FlushRecords(void* stream) {
         refs.push_back({batch.records[i].index, batch.records[i].size});
         full += batch.records[i].size;
     }
-    const auto inlined = PlanInline(header, refs, kMissionSyncBudget);
+    const auto inlined = PlanInline(header, refs, syncBudget);
     std::size_t moved = 0;
     for (std::size_t i = 0; i < batch.count; ++i) {
         const Pending& pending = batch.records[i];
@@ -437,7 +438,7 @@ void FlushRecords(void* stream) {
     if (moved)
         Log("MISSION sync: %zu loadout records would make the start message %zu bytes (EOS takes %zu per packet, so "
             "the message may hold %zu); %zu of them are sent beside it, the message is %zu bytes",
-            batch.count, full, kEosMaxPacket, kMissionSyncBudget, moved, StreamSize(stream));
+            batch.count, full, kEosMaxPacket, syncBudget, moved, StreamSize(stream));
     batch.stream = nullptr;
     batch.count = 0;
 }
@@ -484,6 +485,8 @@ void SetEosFunctions(EosSendFn send, EosReceiveFn receive) {
 }
 
 void SetSplitSyncReaders(SplitSyncReaders readers) { splitSyncReaders = readers; }
+
+void SetSyncBudget(std::size_t budget) { syncBudget = budget && budget < kMissionSyncBudget ? budget : kMissionSyncBudget; }
 
 void SetPacketFitClock(PacketFitClock clock) { packetClock = clock ? clock : &SystemClock; }
 

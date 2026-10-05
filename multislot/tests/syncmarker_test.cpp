@@ -150,6 +150,7 @@ void TestLobby(const wchar_t* fakePath) {
     Check(InstallSyncMarker(nullptr, &FakeRedirect, true), "the marker installs");
     WatchMemberTexts({"TEXT_A", "TEXT_B"}, &ObserveView);
     PublishMemberText("TEXT_A", "ours");
+    PublishMemberText("TEXT_B", "");  // EOS refuses an empty text, and the whole update with it
     const std::string sdk = "EOSSDK-Win64-Shipping.dll!";
     Check(redirected == std::vector<std::string>({sdk + "EOS_Lobby_LeaveLobby", sdk + "EOS_Lobby_DestroyLobby",
                                                  sdk + "EOS_Platform_Tick", sdk + "EOS_Lobby_CreateLobby",
@@ -171,6 +172,7 @@ void TestLobby(const wchar_t* fakePath) {
     Tick();
     Check(Published(kSplitSyncKey) == kSplitSyncFormat && Published(kSplitSyncSeqKey) == 1, "and is in the lobby");
     Check(Text("self", "TEXT_A") == "ours", "a text attribute goes out with the marker");
+    Check(Text("self", "TEXT_B") == "<none>", "an empty text is not published, and does not sink the marker with it");
     Check(views == 1 && lastView.lobbyId == "lobby-created" && lastView.owner == "self" && lastView.self == "self",
           "the beat hands the observer the lobby and its owner");
     Check(PeerReadsSplitSync(User("self")) == false, "we are not observed yet");

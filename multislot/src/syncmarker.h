@@ -89,7 +89,8 @@ using LobbyObserver = std::function<void(const LobbyView& view)>;
 // the EOS tick, outside every lock of this file. Leaving a lobby hands it an empty view.
 void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer);
 // Our value of `key` (at most 1000 characters), published on our lobby member on the next beat and in every lobby
-// we enter afterwards. Any thread.
+// we enter afterwards. Any thread. Never empty: EOS refuses an empty text with EOS_InvalidParameters, and with it the
+// whole update - our split marker and every other text - so an empty value is logged and not published.
 void PublishMemberText(const std::string& key, const std::string& value);
 // Called after every EOS tick with the platform handle, outside every lock of this file (hostdatanet.h: P2P).
 void ListenToTicks(std::function<void(void* platform)> listener);

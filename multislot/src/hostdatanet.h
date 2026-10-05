@@ -39,7 +39,10 @@ namespace multislot {
 
 constexpr const char* kHostDataKey = "EDF6CO_HD";     // this machine takes part, in this packet format
 constexpr const char* kHostDigestKey = "EDF6CO_HDD";  // the bundle of its Mods (hex SHA-256), read from the owner
-constexpr const char* kPageDigestKey = "EDF6CO_HDP";  // the bundle of the weapon page it uses, "" for none
+constexpr const char* kPageDigestKey = "EDF6CO_HDP";  // the bundle of the weapon page it uses, kPageNone for none
+// No page. Not "": EOS refuses an empty text (syncmarker.h, PublishMemberText). Anything that is no hex digest reads
+// as no page, so members that published "" before keep reading the same.
+constexpr const char* kPageNone = "none";
 constexpr const char* kHostDataFormat = "1";
 constexpr std::uint8_t kHostDataChannel = 0x48;
 

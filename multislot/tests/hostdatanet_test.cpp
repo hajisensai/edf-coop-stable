@@ -92,7 +92,8 @@ void Plan() {
                       {kPageDigestKey, DigestHex(hostPage.digest)}}},
                     {"guest", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, "not yet"}}},
                     {"old", {{kPageDigestKey, DigestHex(oldPage.digest)}}},
-                    {"none", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, ""}}}};
+                    {"none", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, kPageNone}}},
+                    {"earlier none", {{kHostDataKey, kHostDataFormat}, {kPageDigestKey, ""}}}};
     std::vector<RoomSource> plan = PlanRoomSources(view, std::nullopt, guestPage.digest);
     Check(plan == std::vector<RoomSource>{{"host", mods.digest, true},
                                           {"host", hostPage.digest, false},

@@ -813,8 +813,10 @@ EXPORT EOS_EResult EOS_LobbyModification_AddMemberAttribute(void* handle, const 
     gamenet::Attribute value{};
     Copy(value.key, sizeof(value.key), options->Attribute->Key);
     if (options->Attribute->ValueType == kString) {
+        // Like EOS: an empty text is invalid, and the caller's whole update with it.
+        if (!options->Attribute->Value.AsUtf8 || !*options->Attribute->Value.AsUtf8) return EOS_InvalidParameters;
         value.type = 4;
-        Copy(value.text, sizeof(value.text), options->Attribute->Value.AsUtf8 ? options->Attribute->Value.AsUtf8 : "");
+        Copy(value.text, sizeof(value.text), options->Attribute->Value.AsUtf8);
     } else {
         value.type = 1;
         value.number = options->Attribute->Value.AsInt64;

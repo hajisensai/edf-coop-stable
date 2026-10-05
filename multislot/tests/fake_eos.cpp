@@ -336,7 +336,10 @@ EXPORT std::int32_t EOS_Lobby_UpdateLobbyModification(void*, const void*, void**
 EXPORT std::int32_t EOS_LobbyModification_AddMemberAttribute(void* modification, const AddMemberAttributeOptions* options) {
     if (!options->Attribute) return 10;
     auto* changes = static_cast<Modification*>(modification);
-    if (options->Attribute->ValueType == 3 && options->Attribute->Value.AsUtf8) {
+    // Like EOS: an empty text is invalid (EOS_InvalidParameters), and the caller's whole update with it.
+    if (options->Attribute->ValueType == 3 && (!options->Attribute->Value.AsUtf8 || !*options->Attribute->Value.AsUtf8))
+        return 10;
+    if (options->Attribute->ValueType == 3) {
         changes->texts[options->Attribute->Key] = options->Attribute->Value.AsUtf8;
         return 0;
     }

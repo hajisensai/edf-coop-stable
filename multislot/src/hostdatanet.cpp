@@ -470,7 +470,7 @@ void ShareLocked() {
     if (!rt.settings.share) return;
     rt.link.Share({rt.mods, rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].bundle : nullptr});
     const std::optional<Digest> page = PageDigestLocked();
-    PublishMemberText(kPageDigestKey, page ? hostdata::DigestHex(*page) : std::string());
+    PublishMemberText(kPageDigestKey, page ? hostdata::DigestHex(*page) : std::string(kPageNone));
 }
 
 void NextPageLocked() {

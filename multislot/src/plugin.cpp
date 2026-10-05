@@ -866,6 +866,12 @@ bool LoadCoop(PluginInfo* info) {
 
 }  // namespace
 
+// Read-only, for the game-code tests (tests/gamenet): where the game's patched code finds the loadout record of
+// player `index` - its own GameStatus records for 1-4, a sidecar of this plugin from 5 on.
+extern "C" __declspec(dllexport) const std::uint8_t* EDF6Coop_LoadoutRecord(int index) {
+    return multislot::LoadoutRecord(index);
+}
+
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
     // Every line so far was written by this thread, so the startup report is on disk already.
     const bool loaded = LoadCoop(info);

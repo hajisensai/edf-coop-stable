@@ -16,6 +16,8 @@ powershell -ExecutionPolicy Bypass -File ..\package.ps1        # -> ..\release\E
 
 这个目录里的 `build.cmd` 等同于 `build.ps1 -Test`。
 
+`GameNet_*` 测试用游戏自己的联机代码模拟 2–8 人的房间，不开游戏窗口、不需要 Steam 和 Epic：见 [tests/gamenet/README.md](tests/gamenet/README.md)。
+
 EDF6MultiSlot 1.5.x 及以前的改动见 [release-notes/](release-notes/)；2.0.0 起见 [../release-notes/](../release-notes/)。
 
 16、24、32 人房间是 2.0.0 新增的，目前只用离线幽灵队员验证过。

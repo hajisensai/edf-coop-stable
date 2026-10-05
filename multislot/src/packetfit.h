@@ -106,8 +106,8 @@ MidHandler PacketFitHookHandler(std::uint32_t rva);
 //
 // So the host remembers the records its last sync moved out (FlushRecords), and the first packet that goes to a
 // member after that carries them ahead of itself as side packets of our own (reliable, kSideChannel, not
-// encrypted by the game): the sync is written before it is sent, so the records go before it. Only members that
-// read a split sync get them (SetSplitSyncReaders). A member takes side packets out of what its game receives. When
+// encrypted by the game): the sync is written before it is sent, so the records go before it. Every member gets
+// them, marker or not (SendRecordsAhead says why). A member takes side packets out of what its game receives. When
 // its game reads a stub whose record is not here yet (they travel apart), RecordReadHook waits for it up to
 // kRecordWaitMs, receiving from EOS itself: side packets are stored, anything else is held (kHeldPackets, oldest
 // dropped) and handed to the game, in order, before anything newer.
@@ -140,7 +140,8 @@ constexpr unsigned long long kRecordWaitMs = 1500;
 // How long RecordReadHook waits for a missing record (tests: 0, only what has arrived).
 void SetRecordWait(unsigned long long ms);
 constexpr unsigned long long kHeldPacketMs = 30000;
-// Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.
+// Asked about every member the records of a split sync go to (syncmarker.h: PeerReadsSplitSync), which logs the
+// members that show no marker that they read one. It decides nothing: they get the records all the same.
 using SplitSyncReaders = bool (*)(const void* remote);
 void SetSplitSyncReaders(SplitSyncReaders readers);
 // Test: the start message holds at most `budget` bytes of records inline (0 or kMissionSyncBudget and above: the

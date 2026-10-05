@@ -16,6 +16,9 @@ powershell -ExecutionPolicy Bypass -File ..\package.ps1        # -> ..\release\E
 
 `build.cmd` in this folder does the same as `build.ps1 -Test`.
 
+The `GameNet_*` tests play rooms of 2-8 players with the game's own network code, without the game window, Steam or
+Epic: [tests/gamenet/README.md](tests/gamenet/README.md).
+
 Changes up to EDF6MultiSlot 1.5.x: [release-notes/](release-notes/); from 2.0.0: [../release-notes/](../release-notes/).
 
 Rooms of 16, 24 and 32 players are new in 2.0.0 and have only been checked offline with ghost players.

@@ -390,6 +390,12 @@ std::uint64_t SidecarItem(int index) {
     return index >= kVanillaPlayers && index < kMaxPlayers ? sidecarItems[index - kVanillaPlayers] : 0;
 }
 
+const std::uint8_t* LoadoutRecord(std::int64_t index) {
+    std::uint64_t status = 0;
+    if (game) std::memcpy(&status, game + kGameStatusPointer, sizeof(status));
+    return status ? reinterpret_cast<const std::uint8_t*>(status + kLoadoutRecords + LoadoutRecordOffset(index)) : nullptr;
+}
+
 const std::uint8_t* LoadoutSidecar(int index) {
     return index >= kVanillaPlayers && index < kMaxPlayers ? sidecars[index - kVanillaPlayers] : nullptr;
 }

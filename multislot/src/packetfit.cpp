@@ -562,18 +562,23 @@ void SetPacketFitClock(PacketFitClock clock) { packetClock = clock ? clock : &Sy
 
 std::size_t HeldPacketCount() { return heldCount; }
 
-// The records of the last sync go to `options`' member ahead of the first packet to it since: each once.
+// The records of the last sync go to `options`' member ahead of the first packet to it since: each once, whoever
+// it is. The sync itself reaches every member whatever this plugin does (it is encrypted), so holding the records
+// back from a member whose marker has not shown up yet (Epic relays lobby attributes in their own time) only made
+// it wait for them, and past kRecordWaitMs it built that player from an empty record (GameNet_mission8rushed). A
+// member without EDF6Coop cannot read a split sync either way; its game drops the side packets as datagrams that
+// do not decrypt (GameNet_mission2plain).
 void SendRecordsAhead(void* handle, const EosSendOptions& options) {
     std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
     AcquireSRWLockExclusive(&outgoing.lock);
     const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
-                     std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end() &&
-                     splitSyncReaders && splitSyncReaders(options.RemoteUserId);
+                     std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end();
     if (due) {
         outgoing.sentTo.push_back(options.RemoteUserId);
         records = outgoing.records;
     }
     ReleaseSRWLockExclusive(&outgoing.lock);
+    if (due && splitSyncReaders) splitSyncReaders(options.RemoteUserId);  // says so if it shows no marker
     for (const auto& [stub, bytes] : records) {
         std::uint8_t packet[kSideHeader + kMaxRecordBytes];
         EosSendOptions side = options;

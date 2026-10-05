@@ -31,6 +31,9 @@ int MissionPlayers();
 // players 1-4 keep the game's records, 5 and up get one sidecar each, anything else a scratch record.
 std::uint64_t LoadoutRecordOffset(std::int64_t index);
 const std::uint8_t* LoadoutSidecar(int index);  // nullptr outside 4..kMaxPlayers-1
+// The record the game's patched code reads for player `index` (GameStatus+0x14C78 + LoadoutRecordOffset); null
+// before the game made its GameStatus. For the game-code tests (EDF6Coop_LoadoutRecord).
+const std::uint8_t* LoadoutRecord(std::int64_t index);
 
 // Mid-function hook handlers and call redirections for the tables in patches.h, by site RVA.
 MidHandler MissionHookHandler(std::uint32_t rva);

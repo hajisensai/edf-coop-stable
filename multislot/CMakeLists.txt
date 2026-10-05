@@ -161,7 +161,7 @@ set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 set(GAME_TEST_SKIPPED 77)
 if(NOT EXISTS "${EDF_DLL}")
     message(WARNING "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): the tests against the game's code "
-                    "(PatchTablesMatchEDF, PluginLoad_*) will be reported as skipped")
+                    "(PatchTablesMatchEDF, PluginLoad_*, GameNet_*) will be reported as skipped")
 endif()
 
 add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
@@ -253,6 +253,29 @@ foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff qui
     add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6Coop>"
              "${CMAKE_BINARY_DIR}/loadtest" ${mode})
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+endforeach()
+
+# Rooms played by several processes, each running the real EDF.dll and the real EDF6Coop.dll with a fake EOS
+# between them (tests/gamenet). The fake is named as Epic's SDK and sits next to GameMachine.exe, where the loader
+# looks first, so it never meets the FakeEosSdk above. Skipped (77) without the game.
+set(GAMENET_DIR "${CMAKE_BINARY_DIR}/gamenet")
+add_library(GameNetEos SHARED tests/gamenet/fake_eos_net.cpp)
+set_target_properties(GameNetEos PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${GAMENET_DIR}")
+target_compile_options(GameNetEos PRIVATE ${WARNINGS})
+add_executable(GameMachine tests/gamenet/machine.cpp tests/gamenet/roles.cpp tests/gamenet/game.cpp
+    tests/gamenet/missionsync.cpp)
+set_target_properties(GameMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}")
+target_include_directories(GameMachine PRIVATE ${MODLOADER_INCLUDE})
+target_compile_options(GameMachine PRIVATE ${WARNINGS})
+add_dependencies(GameMachine GameNetEos)
+add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
+target_compile_options(GameNetTests PRIVATE ${WARNINGS})
+add_dependencies(GameNetTests GameMachine EDF6Coop)
+foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon)
+    add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
+             "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
+    set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 endforeach()
 
 # The direct-link part's own tests (they need no game) and its join probe.

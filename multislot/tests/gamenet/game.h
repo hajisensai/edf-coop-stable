@@ -49,6 +49,7 @@ public:
     bool Connected(const std::string& member) const;
     int NetworkIndex(const std::string& member) const;  // User+0x40, -1 if unknown
     void* User(const std::string& member) const;        // eos::User*
+    Shared UserShared(const std::string& member) const;  // the shared_ptr Users::Add gave (no reference added)
     // eos::packet::Controller::SendReliable (12D0AC0): one record of `type` to `member`.
     bool SendReliable(const std::string& member, std::uint32_t type, const void* data, std::size_t size) const;
     // Every record of `type` the controller hands to its subscribers from now on.

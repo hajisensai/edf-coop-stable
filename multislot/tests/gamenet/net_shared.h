@@ -80,6 +80,7 @@ struct WireLog {
 struct Network {
     std::uint32_t magic;
     std::uint32_t refused;  // packets EOS refused (above kMaxPacket)
+    std::uint32_t finished;  // machines done with their part (FakeNet_Finish)
     Lobby lobby;
     Station machines[kMaxMachines];
     WireLog wire;

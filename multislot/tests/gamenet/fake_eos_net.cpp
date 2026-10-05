@@ -242,6 +242,16 @@ EXPORT void* FakeNet_RoomDetails() {
     return new Details{f.net->lobby};
 }
 
+// Counts this machine as done (`finish` 1) and returns how many are: machines keep the room's network running
+// until everyone is done, as players stay in the room.
+EXPORT std::uint32_t FakeNet_Finish(int finish) {
+    Fake& f = F();
+    if (!Open()) return 0;
+    Locked locked(f.netLock);
+    if (finish) ++f.net->finished;
+    return f.net->finished;
+}
+
 // --- EOS: platform ---
 EXPORT void* EOS_Platform_Create(const void*) { return reinterpret_cast<void*>(0x1000); }
 EXPORT void EOS_Platform_Release(void*) {}

@@ -149,6 +149,12 @@ void* Transport::User(const std::string& member) const {
     return nullptr;
 }
 
+Shared Transport::UserShared(const std::string& member) const {
+    for (const auto& [id, user] : members_)
+        if (id == member) return user;
+    return {};
+}
+
 bool Transport::Connected(const std::string& member) const {
     const auto* user = static_cast<const std::uint8_t*>(User(member));
     return user && (*reinterpret_cast<const std::uint32_t*>(user + kUserFlags) & 1) != 0;

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "game.h"
+#include "missionsync.h"
 #include "machine.h"
 #include "net_shared.h"
 
@@ -218,6 +219,76 @@ int Link(Machine& machine, bool host) {
     return all ? 0 : 1;
 }
 
+constexpr std::int32_t kSyncId = 0x5EED;  // the id the mission script passes (any; every machine the same)
+constexpr std::int32_t kHostMission = 7, kHostDifficulty = 3;
+
+// FNV-1a of a record, for comparing machines.
+std::uint64_t Fnv(const std::vector<std::uint8_t>& bytes) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (std::uint8_t b : bytes) hash = (hash ^ b) * 1099511628211ull;
+    return hash;
+}
+
+// Keeps the room's network going until every machine is done (or `timeoutMs`), as players stay in the room.
+void StayUntilEveryoneIsDone(Machine& machine, Transport& transport, std::size_t members) {
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    finish(1);
+    TickUntil(machine, 15000, [&] {
+        transport.Tick();
+        return finish(0) >= members;
+    });
+    TickUntil(machine, 300, [&] {
+        transport.Tick();
+        return false;
+    });
+}
+
+// The mission start sync: every machine runs MissionSync_Begin and then MissionSync_Update until it answers 0,
+// and reports what its game holds afterwards.
+int Mission(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    int place = 0;
+    while (room.members[static_cast<std::size_t>(place)] != machine.user) ++place;
+    const Loadout loadout{place % 4, 500 + place, 1000 + 37 * place, 100 + 37 * place};
+    MissionSync sync;
+    if (!sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) {
+        Result("mission", "the sync could not be set up");
+        return 1;
+    }
+    Result("loadout", "%d class=%d marker=%d armor=%d", place, loadout.soldierClass, loadout.marker, loadout.armor);
+    sync.Begin(kSyncId);
+    std::int32_t answer = 1;
+    const ULONGLONG start = GetTickCount64();
+    const bool done = TickUntil(machine, 20000, [&] {
+        transport.Tick();
+        answer = sync.Update(kSyncId);
+        return answer == 0;
+    });
+    Result("sync", "%s after %llu ms (MissionSync_Update answered %d)", done ? "done" : "NOT done",
+           GetTickCount64() - start, answer);
+    if (!done) sync.Dump();
+    const std::int32_t players = sync.Players();
+    Result("players", "%d", players);
+    Result("mission", "%d %d", sync.Mission(), sync.Difficulty());
+    for (int slot = 0; slot < static_cast<int>(room.members.size()); ++slot) {
+        const auto record = sync.Record(slot);
+        if (record.size() < 0x24) {
+            Result("record", "%d unavailable", slot);
+            continue;
+        }
+        std::int32_t soldierClass = 0, marker = 0, armor = 0;
+        std::memcpy(&soldierClass, record.data(), 4);
+        std::memcpy(&marker, record.data() + 4, 4);
+        std::memcpy(&armor, record.data() + 0x20, 4);
+        Result("record", "%d class=%d marker=%d armor=%d fnv=%016llx", slot, soldierClass, marker, armor, Fnv(record));
+    }
+    StayUntilEveryoneIsDone(machine, transport, room.members.size());
+    return done ? 0 : 1;
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -228,6 +299,7 @@ int RunRole(Machine& machine, const std::string& role) {
         return EnterRoom(machine, host, room) ? 0 : 1;
     }
     if (step == "link") return Link(machine, host);
+    if (step == "mission") return Mission(machine, host);
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

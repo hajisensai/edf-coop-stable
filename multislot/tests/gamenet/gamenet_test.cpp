@@ -170,6 +170,7 @@ int wmain(int argc, wchar_t** argv) {
     CreateDirectoryW(folder.c_str(), nullptr);
 
     std::vector<Spawned> machines;
+    SetEnvironmentVariableA("EDF6NET_MEMBERS", std::to_string(chosen->seats.size()).c_str());
     for (const auto& seat : chosen->seats) {
         Spawned machine;
         machine.user = seat.user;

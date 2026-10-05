@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <set>
 
 #include "hostdataopen.h"
 #include "identity.h"
@@ -12,44 +13,91 @@ namespace multislot {
 
 using hostdata::Digest;
 
-HostDataRoom ReadHostDataRoom(const LobbyView& view) {
-    HostDataRoom room;
-    room.inRoom = !view.lobbyId.empty();
-    room.hosting = room.inRoom && !view.owner.empty() && view.owner == view.self;
-    room.hostId = view.owner;
-    for (const LobbyView::Member& member : view.members) {
-        if (member.id != view.owner) continue;
-        const auto takesPart = member.texts.find(kHostDataKey);
-        room.hostTakesPart = takesPart != member.texts.end() && takesPart->second == kHostDataFormat;
-        const auto digest = member.texts.find(kHostDigestKey);
-        if (room.hostTakesPart && digest != member.texts.end()) room.hostDigest = hostdata::DigestFromHex(digest->second);
-    }
-    return room;
+namespace {
+
+bool TakesPart(const LobbyView::Member& member) {
+    const auto found = member.texts.find(kHostDataKey);
+    return found != member.texts.end() && found->second == kHostDataFormat;
 }
 
-std::wstring HostDataNotice(HostDataStage stage, HostAccept accept, const wchar_t* keyName, int percent, std::size_t extra) {
-    using enum HostDataStage;
-    const std::wstring key = keyName && keyName[0] && accept != HostAccept::Never ? std::wstring(keyName) + L" " : L"";
-    switch (stage) {
-        case HostHasNone: return L"host has no weapon mods";
-        case Differs: return accept == HostAccept::Never ? L"weapons differ from host" : key + L"host weapons :OFF";
-        case Fetching: return key + L"host weapons " + std::to_wstring(std::clamp(percent, 0, 99)) + L"%";
-        case Ready: return key + L"host weapons :ON";
-        case Using: return key + L"host weapons :ON" + (extra ? L" +" + std::to_wstring(extra) + L" own" : L"");
-        case Failed: return key + L"host weapons failed (log)";
-        default: return L"";
+std::optional<Digest> TextDigest(const LobbyView::Member& member, const char* key) {
+    if (!TakesPart(member)) return std::nullopt;
+    const auto found = member.texts.find(key);
+    return found == member.texts.end() ? std::nullopt : hostdata::DigestFromHex(found->second);
+}
+
+std::wstring RoomPart(const WeaponsView& view) {
+    const std::wstring key = view.accept == HostAccept::Ask && view.acceptKey[0] ? std::wstring(view.acceptKey) + L" " : L"";
+    const std::wstring count = L" (" + std::to_wstring(view.remote) + L")";
+    if (view.accept == HostAccept::Never) return L"ROOM WEAPONS differ" + count;
+    if (!view.wanted) return key + L"ROOM WEAPONS :OFF" + count;
+    if (view.percent >= 0) return key + L"ROOM WEAPONS " + std::to_wstring(std::clamp(view.percent, 0, 99)) + L"%";
+    std::wstring text = key + L"ROOM WEAPONS :ON" + count;
+    if (view.failed) text += L" " + std::to_wstring(view.failed) + L" failed";
+    if (view.lost) text += L" -" + std::to_wstring(view.lost) + L" of yours";
+    return text;
+}
+
+}  // namespace
+
+std::vector<RoomSource> PlanRoomSources(const LobbyView& view, const std::optional<Digest>& selfMods,
+                                        const std::optional<Digest>& selfPage) {
+    std::vector<RoomSource> sources;
+    if (view.lobbyId.empty()) return sources;
+    const auto page = [&](const LobbyView::Member& member) {
+        return member.id == view.self ? selfPage : TextDigest(member, kPageDigestKey);
+    };
+    const auto owner = std::find_if(view.members.begin(), view.members.end(),
+                                    [&view](const LobbyView::Member& member) { return member.id == view.owner; });
+    if (owner != view.members.end()) {
+        const auto mods = owner->id == view.self ? selfMods : TextDigest(*owner, kHostDigestKey);
+        if (mods) sources.push_back({owner->id, *mods, true});
+        if (const auto ownerPage = page(*owner)) sources.push_back({owner->id, *ownerPage, false});
     }
+    for (const LobbyView::Member& member : view.members) {
+        if (member.id == view.owner) continue;
+        if (const auto memberPage = page(member)) sources.push_back({member.id, *memberPage, false});
+    }
+    return sources;
+}
+
+RoomOverlay MergeSources(const std::vector<const SourceFiles*>& sources) {
+    RoomOverlay merged;
+    merged.lost.assign(sources.size(), 0);
+    std::map<std::string, const std::wstring*, std::less<>> claimed;  // path -> the folder of the first source with it
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        if (!sources[i]) continue;
+        for (const std::string& path : sources[i]->paths)
+            if (!claimed.try_emplace(path, &sources[i]->folder).second) ++merged.lost[i];
+    }
+    for (const auto& [path, folder] : claimed)
+        if (!folder->empty()) merged.overlay.entries.push_back({path, *folder});
+    return merged;
+}
+
+std::wstring WeaponsNotice(const WeaponsView& view) {
+    const std::wstring room = view.inRoom && view.remote ? RoomPart(view) : L"";
+    std::wstring page;
+    if (view.pages)
+        page = std::wstring(view.pageKey) + (view.pageKey[0] ? L" " : L"") + L"Page:" + (view.page.empty() ? L"off" : view.page);
+    if (room.empty() || page.empty()) return room + page;
+    return room + L"   " + page;
 }
 
 // --- HostDataLink ---
 
-void HostDataLink::Share(std::shared_ptr<const hostdata::Bundle> bundle) {
-    shared_ = std::move(bundle);
+void HostDataLink::Share(std::vector<std::shared_ptr<const hostdata::Bundle>> bundles) {
+    std::erase(bundles, nullptr);
+    shared_ = std::move(bundles);
     served_.clear();
 }
 
-void HostDataLink::Fetch(const std::string& host, const Digest& digest, std::uint64_t now) {
-    host_ = host;
+void HostDataLink::Share(std::shared_ptr<const hostdata::Bundle> bundle) {
+    Share(std::vector<std::shared_ptr<const hostdata::Bundle>>{std::move(bundle)});
+}
+
+void HostDataLink::Fetch(const std::string& member, const Digest& digest, std::uint64_t now) {
+    member_ = member;
     digest_ = digest;
     assembler_ = std::make_unique<hostdata::Assembler>(digest);
     fetched_.clear();
@@ -74,7 +122,7 @@ void HostDataLink::Fail(const std::string& why) {
 void HostDataLink::Ask(std::uint64_t now) {
     ++asks_;
     lastProgress_ = now;
-    asked_ = send_(host_, hostdata::EncodeGet(digest_));
+    asked_ = send_(member_, hostdata::EncodeGet(digest_));
 }
 
 int HostDataLink::Percent() const {
@@ -90,21 +138,25 @@ std::vector<std::uint8_t> HostDataLink::TakeBundle() {
 void HostDataLink::Received(const std::string& peer, const hostdata::Packet& packet, std::uint64_t now) {
     using enum hostdata::PacketType;
     if (packet.type == Get) {
-        if (!shared_ || packet.digest != shared_->digest) {
+        const auto bundle = std::find_if(shared_.begin(), shared_.end(),
+                                         [&packet](const auto& shared) { return shared->digest == packet.digest; });
+        if (bundle == shared_.end()) {
             send_(peer, hostdata::EncodeNone(packet.digest));
             return;
         }
-        // Asking again starts over (what got lost is not known); a new asker waits for a free place.
-        auto served = std::find_if(served_.begin(), served_.end(), [&peer](const Served& s) { return s.peer == peer; });
+        // Asking again starts over (what got lost is not known); a new question waits for a free place.
+        auto served = std::find_if(served_.begin(), served_.end(), [&](const Served& s) {
+            return s.peer == peer && s.bundle->digest == packet.digest;
+        });
         if (served != served_.end())
             served->next = 0;
         else if (served_.size() < kMaxServed)
-            served_.push_back({peer, 0});
+            served_.push_back({peer, *bundle, 0});
         return;
     }
-    if (state_ != Fetching::Running || peer != host_ || packet.digest != digest_) return;
+    if (state_ != Fetching::Running || peer != member_ || packet.digest != digest_) return;
     if (packet.type == None) {
-        Fail("the host no longer shares these files");
+        Fail("the member no longer shares these files");
         return;
     }
     if (!assembler_->Add(packet)) return;
@@ -123,31 +175,32 @@ void HostDataLink::Received(const std::string& peer, const hostdata::Packet& pac
 
 void HostDataLink::Tick(std::uint64_t now) {
     // A question that could not go out yet goes now, and the wait for an answer starts when it did. One that cannot
-    // go out for as long as all asks may take (the host never reached over P2P) gives up as well.
+    // go out for as long as all asks may take (the member never reached over P2P) gives up as well.
     if (state_ == Fetching::Running && !asked_) {
-        asked_ = send_(host_, hostdata::EncodeGet(digest_));
+        asked_ = send_(member_, hostdata::EncodeGet(digest_));
         if (asked_)
             lastProgress_ = now;
         else if (now - lastProgress_ >= kStallMs * kMaxAsks)
-            Fail("the host could not be reached over P2P");
+            Fail("the member could not be reached over P2P");
     } else if (state_ == Fetching::Running && now - lastProgress_ >= kStallMs) {
         if (asks_ >= kMaxAsks)
-            Fail("the host did not send its files (asked " + std::to_string(asks_) + " times)");
+            Fail("the member did not send its files (asked " + std::to_string(asks_) + " times)");
         else
             Ask(now);
     }
-    // Round robin over whoever is being served, one part each, until the budget is spent or a send is refused.
+    // Round robin over what is being sent, one part each, until the budget is spent or a send is refused.
+    const auto done = [](const Served& s) { return s.next >= hostdata::PartCount(s.bundle->bytes.size()); };
     std::size_t budget = kPartsPerTick;
-    while (budget && !served_.empty() && shared_) {
+    while (budget && !served_.empty()) {
         bool sent = false;
         for (Served& served : served_) {
-            if (!budget || served.next >= hostdata::PartCount(shared_->bytes.size())) continue;
-            if (!send_(served.peer, hostdata::EncodePart(*shared_, served.next))) return;
+            if (!budget || done(served)) continue;
+            if (!send_(served.peer, hostdata::EncodePart(*served.bundle, served.next))) return;
             ++served.next;
             --budget;
             sent = true;
         }
-        std::erase_if(served_, [this](const Served& s) { return s.next >= hostdata::PartCount(shared_->bytes.size()); });
+        std::erase_if(served_, done);
         if (!sent) break;
     }
 }
@@ -156,6 +209,7 @@ void HostDataLink::Tick(std::uint64_t now) {
 namespace {
 
 constexpr EosResult kEosNotFound = 18;  // EOS_NotFound: what ReceivePacket returns when no packet is waiting
+constexpr std::size_t kMaxPages = 16;
 
 struct EosReceiveOptions {  // EOS_P2P_ReceivePacketOptions (packetfit.cpp)
     std::int32_t ApiVersion;
@@ -199,22 +253,40 @@ bool WriteWhole(const std::wstring& path, const std::vector<std::uint8_t>& bytes
     return ok;
 }
 
+std::vector<std::string> PathsOf(const std::vector<hostdata::DataFile>& files) {
+    std::vector<std::string> paths;
+    for (const hostdata::DataFile& file : files) paths.push_back(file.path);
+    return paths;
+}
+
+// A weapon page of this machine: Mods\Variants\<name>.
+struct Page {
+    std::wstring name;
+    std::shared_ptr<const hostdata::Bundle> bundle;
+    SourceFiles files;  // its folder as the game takes it: ./Mods/Variants/<name>/
+};
+
 struct Runtime {
     std::mutex lock;
     HostDataSettings settings;
     std::wstring store;  // <game>\Mods\Plugins\EDF6Coop.hostdata
-    Digest own{};        // the digest of our own files, shared or not
+    std::shared_ptr<const hostdata::Bundle> mods;  // this machine's Mods, shareable or not
+    SourceFiles own;     // and as a source: files the game reads anyway
     Digest empty{};      // of a bundle without files
-    std::vector<std::string> ownPaths;
-    HostDataRoom room;
-    HostDataStage stage = HostDataStage::None;
-    bool wanted = false;  // the player takes the host's files in this room
-    std::optional<Digest> target;  // the host digest `wanted` and `ready` are about
-    std::shared_ptr<const hostdata::Overlay> ready;
-    std::size_t extra = 0;
+    std::vector<Page> pages;
+    int page = -1;       // the page picked, -1 none
+    LobbyView view;      // the lobby as last read; no lobby outside a room
+    std::string lobby;   // the lobby `wanted` and `failed` are about
+    bool wanted = false;
+    std::map<Digest, SourceFiles> have;  // other members' bundles here and checked
+    std::set<Digest> failed;             // those that could not be fetched in this lobby
+    std::vector<RoomSource> sources;     // the room's sources as last worked out
+    std::size_t remote = 0;              // of them, not this machine's own
+    bool waiting = false;                // one of them is still being fetched: `next` waits for it
+    std::shared_ptr<const hostdata::Overlay> next;  // what the game reads from the next menu frame
+    std::size_t lost = 0;                // files of this machine's page another source has first, in `next`
     bool loggedServing = false;
-    bool storing = false;   // a fetched bundle is being written (outside the lock)
-    std::string fetchHost;  // who the running fetch asks
+    bool storing = false;  // a fetched bundle is being written (outside the lock)
     // EOS, learnt from what the game receives.
     EosReceiveFn receive = nullptr;
     EosSendFn send = nullptr;
@@ -249,28 +321,16 @@ std::wstring OverlayFolder(const Digest& digest) {
     return L"./Mods/Plugins/EDF6Coop.hostdata/" + Wide(hostdata::DigestHex(digest)) + L"/";
 }
 
-// The host's files `files` (checked) for the overlay, and how many of ours they leave alone. Caller holds the lock.
-std::shared_ptr<const hostdata::Overlay> MakeOverlayLocked(const Digest& digest, const std::vector<hostdata::DataFile>& files) {
-    auto overlay = std::make_shared<hostdata::Overlay>();
-    for (const hostdata::DataFile& file : files) overlay->paths.push_back(file.path);
-    overlay->folder = OverlayFolder(digest);
-    Runtime& rt = Rt();
-    rt.extra = static_cast<std::size_t>(std::count_if(rt.ownPaths.begin(), rt.ownPaths.end(), [&overlay](const std::string& p) {
-        return !std::binary_search(overlay->paths.begin(), overlay->paths.end(), p);
-    }));
-    return overlay;
-}
-
 // A bundle fetched before and kept in the store, checked again. Caller holds the lock.
-std::shared_ptr<const hostdata::Overlay> CachedLocked(const Digest& digest) {
+std::optional<SourceFiles> CachedLocked(const Digest& digest) {
     const std::wstring folder = Rt().store + L"\\" + Wide(hostdata::DigestHex(digest));
-    if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES) return nullptr;
+    if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES) return std::nullopt;
     std::vector<hostdata::DataFile> files = hostdata::ScanMods(folder, nullptr);
     const auto bundle = hostdata::MakeBundle(files, nullptr);
-    if (bundle && bundle->digest == digest) return MakeOverlayLocked(digest, files);
+    if (bundle && bundle->digest == digest) return SourceFiles{PathsOf(files), OverlayFolder(digest)};
     Log("Host data: the kept copy of %s no longer matches; fetching it again", hostdata::DigestHex(digest).c_str());
     DeleteTree(folder);
-    return nullptr;
+    return std::nullopt;
 }
 
 // Writes a fetched bundle to `store`: into <digest>.part, then renamed. Its files, or nullopt. Without the lock (up
@@ -280,7 +340,7 @@ std::optional<std::vector<hostdata::DataFile>> WriteStore(const std::wstring& st
     std::string why;
     auto files = hostdata::ParseBundle(bytes, &why);
     if (!files) {
-        Log("Host data: the host's files were refused: %s", why.c_str());
+        Log("Host data: the files fetched were refused: %s", why.c_str());
         return std::nullopt;
     }
     const std::wstring name = store + L"\\" + Wide(hostdata::DigestHex(digest));
@@ -297,77 +357,139 @@ std::optional<std::vector<hostdata::DataFile>> WriteStore(const std::wstring& st
     // Only what was just written and checked becomes <digest>: a folder that is somehow there already is not used.
     ok = ok && MoveFileExW(part.c_str(), name.c_str(), 0);
     if (!ok) {
-        Log("Host data: the host's files could not be written to %ls (error %lu)", part.c_str(), GetLastError());
+        Log("Host data: the files fetched could not be written to %ls (error %lu)", part.c_str(), GetLastError());
         DeleteTree(part);
         return std::nullopt;
     }
-    Log("Host data: %zu file(s) of the host kept in %ls", files->size(), name.c_str());
+    Log("Host data: %zu file(s) from the room kept in %ls", files->size(), name.c_str());
     return files;
 }
 
-// Stops using the host's files (they stay in the store). Caller holds the lock.
-void DropLocked(const char* why) {
+// A digest that stands for files this machine has of its own: no files, its Mods, or one of its pages.
+const SourceFiles* OwnFilesLocked(const Digest& digest) {
+    static const SourceFiles none;
     Runtime& rt = Rt();
-    rt.link.Cancel();
-    rt.ready.reset();
-    if (HostOverlay()) {
-        SetHostOverlay(nullptr);
-        Log("Host data: back to this machine's own weapon files (%s)", why);
-    }
+    if (digest == rt.empty) return &none;
+    if (rt.mods && digest == rt.mods->digest) return &rt.own;
+    const auto page = std::find_if(rt.pages.begin(), rt.pages.end(), [&digest](const Page& p) { return p.bundle->digest == digest; });
+    return page == rt.pages.end() ? nullptr : &page->files;
 }
 
-// Gets the host's files: kept from before, or fetched. Caller holds the lock.
-void TakeLocked() {
+std::optional<Digest> PageDigestLocked() {
+    const Runtime& rt = Rt();
+    return rt.page >= 0 ? std::optional<Digest>(rt.pages[static_cast<std::size_t>(rt.page)].bundle->digest) : std::nullopt;
+}
+
+// The room's sources; outside a room this machine's page alone.
+std::vector<RoomSource> SourcesLocked() {
     Runtime& rt = Rt();
-    if (!rt.target || rt.ready || rt.storing || rt.link.State() == HostDataLink::Fetching::Running) return;
-    rt.ready = CachedLocked(*rt.target);
-    if (rt.ready) {
-        rt.stage = HostDataStage::Ready;
+    const std::optional<Digest> page = PageDigestLocked();
+    if (rt.view.lobbyId.empty()) return page ? std::vector<RoomSource>{{std::string(), *page, false}} : std::vector<RoomSource>{};
+    const std::optional<Digest> mods = rt.settings.share && rt.mods ? std::optional<Digest>(rt.mods->digest) : std::nullopt;
+    return PlanRoomSources(rt.view, mods, page);
+}
+
+// Starts or keeps the fetch of `missing`, or stops one nothing needs. Caller holds the lock.
+void FetchLocked(const std::optional<RoomSource>& missing) {
+    Runtime& rt = Rt();
+    const bool running = rt.link.State() == HostDataLink::Fetching::Running;
+    if (!missing) {
+        if (running) rt.link.Cancel();
         return;
     }
-    rt.fetchHost = rt.room.hostId;
-    rt.link.Fetch(rt.fetchHost, *rt.target, GetTickCount64());
-    rt.stage = HostDataStage::Fetching;
-    Log("Host data: fetching the host's files %s", hostdata::DigestHex(*rt.target).c_str());
+    if (rt.storing || (running && rt.link.FetchDigest() == missing->digest && rt.link.FetchMember() == missing->member))
+        return;
+    rt.link.Fetch(missing->member, missing->digest, GetTickCount64());
+    Log("Host data: fetching %s %s from %.8s", missing->mods ? "the host's Mods" : "a weapon page",
+        hostdata::DigestHex(missing->digest).c_str(), missing->member.c_str());
 }
 
-// What the lobby says now decides the stage. Caller holds the lock.
+// What the lobby, the page and what has arrived say now: the files the game reads from the next menu frame, and
+// what is still fetched. Caller holds the lock.
 void DecideLocked() {
-    using enum HostDataStage;
     Runtime& rt = Rt();
-    const HostDataRoom& room = rt.room;
-    const bool guest = room.inRoom && !room.hosting && room.hostTakesPart && room.hostDigest;
-    const std::optional<Digest> target = guest && *room.hostDigest != rt.own && *room.hostDigest != rt.empty
-                                             ? room.hostDigest
-                                             : std::nullopt;
-    if (target != rt.target) {
-        DropLocked(room.inRoom ? "the host's files changed" : "left the room");
-        rt.target = target;
-        rt.wanted = target && rt.settings.accept == HostAccept::Always;
-        if (target)
-            Log("Host data: the host's weapon files (%s) differ from this machine's (%s)",
-                hostdata::DigestHex(*target).c_str(), hostdata::DigestHex(rt.own).c_str());
+    if (rt.view.lobbyId != rt.lobby) {  // another lobby, or none: what was taken or failed was about the last one
+        rt.lobby = rt.view.lobbyId;
+        rt.wanted = rt.settings.accept == HostAccept::Always;
+        rt.failed.clear();
     }
-    if (!guest) {
-        rt.stage = None;
-    } else if (!target) {
-        rt.stage = *room.hostDigest == rt.own ? Same : (rt.ownPaths.empty() ? Same : HostHasNone);
-    } else if (rt.stage == None || rt.stage == Same || rt.stage == HostHasNone) {
-        rt.stage = Differs;
+    const std::vector<RoomSource> sources = SourcesLocked();
+    if (sources != rt.sources && !rt.view.lobbyId.empty())
+        Log("Host data: the room's weapon files come from %zu source(s) (its host's Mods and the pages its members use)",
+            sources.size());
+    rt.sources = sources;
+    rt.remote = 0;
+    std::vector<const SourceFiles*> files;
+    std::optional<RoomSource> missing;
+    for (const RoomSource& source : rt.sources) {
+        const SourceFiles* here = OwnFilesLocked(source.digest);
+        if (here) {
+            files.push_back(here);
+            continue;
+        }
+        ++rt.remote;
+        if (!rt.wanted || rt.failed.contains(source.digest)) {
+            files.push_back(nullptr);
+            continue;
+        }
+        if (!rt.have.contains(source.digest))
+            if (auto kept = CachedLocked(source.digest)) rt.have.emplace(source.digest, std::move(*kept));
+        const auto have = rt.have.find(source.digest);
+        files.push_back(have == rt.have.end() ? nullptr : &have->second);
+        if (have == rt.have.end() && !missing) missing = source;
     }
-    // The lobby moved to another owner with the same files: ask the new one (the old one may be gone).
-    if (rt.target && rt.link.State() == HostDataLink::Fetching::Running && rt.fetchHost != room.hostId) {
-        Log("Host data: the room has a new host; fetching from it");
-        rt.fetchHost = room.hostId;
-        rt.link.Fetch(rt.fetchHost, *rt.target, GetTickCount64());
-    }
-    if (rt.target && rt.wanted && rt.stage == Differs) TakeLocked();
+    FetchLocked(missing);
+    rt.waiting = missing.has_value();
+    if (rt.waiting) return;
+    RoomOverlay merged = MergeSources(files);
+    rt.lost = 0;
+    for (std::size_t i = 0; i < rt.sources.size(); ++i)
+        if (!rt.sources[i].mods && (rt.sources[i].member.empty() || rt.sources[i].member == rt.view.self))
+            rt.lost = merged.lost[i];
+    rt.next = std::make_shared<const hostdata::Overlay>(std::move(merged.overlay));
+}
+
+// Points the game at `next` if it is not already: on a menu frame, where no mission is reading its files.
+void ApplyLocked() {
+    Runtime& rt = Rt();
+    if (rt.waiting || !rt.next) return;
+    const auto current = HostOverlay();
+    const std::size_t files = rt.next->entries.size();
+    if ((current ? current->entries : std::vector<hostdata::Overlay::Entry>{}) == rt.next->entries) return;
+    SetHostOverlay(files ? rt.next : nullptr);
+    if (files)
+        Log("Host data: the game now reads %zu weapon/vehicle file(s) in place of its own (%zu from other members)",
+            files, static_cast<std::size_t>(std::count_if(rt.next->entries.begin(), rt.next->entries.end(),
+                                                          [](const auto& e) { return e.folder.starts_with(L"./Mods/Plugins/"); })));
+    else
+        Log("Host data: back to this machine's own weapon files");
+}
+
+void ShareLocked() {
+    Runtime& rt = Rt();
+    if (!rt.settings.share) return;
+    rt.link.Share({rt.mods, rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].bundle : nullptr});
+    const std::optional<Digest> page = PageDigestLocked();
+    PublishMemberText(kPageDigestKey, page ? hostdata::DigestHex(*page) : std::string());
+}
+
+void NextPageLocked() {
+    Runtime& rt = Rt();
+    if (rt.pages.empty()) return;
+    rt.page = rt.page + 1 >= static_cast<int>(rt.pages.size()) ? -1 : rt.page + 1;
+    const std::wstring name = rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].name : std::wstring();
+    if (!rt.settings.iniPath.empty())
+        WritePrivateProfileStringW(L"HostData", L"Page", name.c_str(), rt.settings.iniPath.c_str());
+    Log("Host data: %ls - weapon page %ls (from the next mission)", rt.settings.pageKeyName,
+        name.empty() ? L"off" : name.c_str());
+    ShareLocked();
+    DecideLocked();
 }
 
 void Observe(const LobbyView& view) {
     Runtime& rt = Rt();
     std::scoped_lock lock(rt.lock);
-    rt.room = ReadHostDataRoom(view);
+    rt.view = view;
     DecideLocked();
 }
 
@@ -376,24 +498,25 @@ bool TickLocked();
 
 void AfterTick(void*) {
     Runtime& rt = Rt();
-    std::optional<Digest> fetched;
+    Digest fetched{};
     std::vector<std::uint8_t> bytes;
     std::wstring store;
     {
         std::scoped_lock lock(rt.lock);
         if (!TickLocked()) return;
-        fetched = rt.target;
+        fetched = rt.link.FetchDigest();
         bytes = rt.link.TakeBundle();
         store = rt.store;
         rt.storing = true;
     }
-    const auto files = WriteStore(store, *fetched, bytes);
+    const auto files = WriteStore(store, fetched, bytes);
     std::scoped_lock lock(rt.lock);
     rt.storing = false;
-    if (rt.target != fetched) return;  // the room changed while it was written
-    rt.ready = files ? MakeOverlayLocked(*fetched, *files) : nullptr;
-    rt.stage = rt.ready ? HostDataStage::Ready : HostDataStage::Failed;
-    if (!rt.ready) rt.wanted = false;
+    if (files)
+        rt.have[fetched] = SourceFiles{PathsOf(*files), OverlayFolder(fetched)};
+    else
+        rt.failed.insert(fetched);
+    DecideLocked();
 }
 
 // The tick's part under the lock: true when a fetched bundle is ready to be written.
@@ -402,16 +525,13 @@ bool TickLocked() {
     rt.link.Tick(GetTickCount64());
     if (rt.link.Serving() && !rt.loggedServing) Log("Host data: sending this machine's files to %zu player(s)", rt.link.Serving());
     rt.loggedServing = rt.link.Serving() != 0;
-    using enum HostDataLink::Fetching;
-    if (rt.link.State() == Running) rt.stage = HostDataStage::Fetching;
-    if (rt.link.State() == Failed) {
-        Log("Host data: fetching the host's files failed: %s", rt.link.Failure().c_str());
+    if (rt.link.State() == HostDataLink::Fetching::Failed) {
+        Log("Host data: fetching %s failed: %s", hostdata::DigestHex(rt.link.FetchDigest()).c_str(), rt.link.Failure().c_str());
+        rt.failed.insert(rt.link.FetchDigest());
         rt.link.Cancel();
-        rt.stage = HostDataStage::Failed;
-        rt.wanted = false;
+        DecideLocked();
     }
-    if (rt.link.State() == Done && !rt.target) rt.link.Cancel();
-    return rt.link.State() == Done;
+    return rt.link.State() == HostDataLink::Fetching::Done;
 }
 
 // Who `peer` is, as text; learnt once per handle (EOS keeps a user's handle for as long as it runs).
@@ -452,7 +572,7 @@ EosResult HostDataReceive(void* handle, const void* options, void** peer, void* 
 
 // Removes what is left of an interrupted write, and all but the newest kept bundles.
 void Tidy(const std::wstring& store) {
-    constexpr std::size_t kKept = 4;
+    constexpr std::size_t kKept = 16;
     struct Kept {
         std::wstring name;
         FILETIME written;
@@ -476,6 +596,76 @@ void Tidy(const std::wstring& store) {
     for (std::size_t i = kKept; i < kept.size(); ++i) DeleteTree(store + L"\\" + kept[i].name);
 }
 
+// The folders under Mods\Variants, by name.
+std::vector<std::wstring> PageNames(const std::wstring& variants) {
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW found{};
+    const HANDLE find = FindFirstFileW((variants + L"\\*").c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE) return names;
+    do {
+        const std::wstring name = found.cFileName;
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && name != L"." && name != L"..") names.push_back(name);
+    } while (FindNextFileW(find, &found));
+    FindClose(find);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+// This machine's weapon pages, each checked as shared files are. Caller holds the lock.
+void LoadPagesLocked() {
+    Runtime& rt = Rt();
+    const std::wstring variants = rt.settings.gameFolder + L"\\Mods\\Variants";
+    for (const std::wstring& name : PageNames(variants)) {
+        if (rt.pages.size() == kMaxPages) {
+            Log("Host data: more than %zu weapon pages under Mods\\Variants; %ls and after are not used", kMaxPages, name.c_str());
+            break;
+        }
+        std::vector<std::string> skipped;
+        std::vector<hostdata::DataFile> files = hostdata::ScanMods(variants + L"\\" + name, &skipped);
+        for (const std::string& line : skipped) Log("Host data: weapon page %ls: %s; not used", name.c_str(), line.c_str());
+        std::vector<std::string> paths = PathsOf(files);
+        std::string why;
+        auto bundle = hostdata::MakeBundle(std::move(files), &why);
+        if (!bundle || paths.empty()) {
+            Log("Host data: weapon page %ls is not used (%s)", name.c_str(), bundle ? "no weapon or vehicle files" : why.c_str());
+            continue;
+        }
+        Log("Host data: weapon page %ls: %zu file(s), %zu bytes, SHA-256 %s", name.c_str(), paths.size(),
+            bundle->bytes.size(), hostdata::DigestHex(bundle->digest).c_str());
+        Page page;
+        page.name = name;
+        page.bundle = std::make_shared<const hostdata::Bundle>(std::move(*bundle));
+        page.files.paths = std::move(paths);
+        page.files.folder = L"./Mods/Variants/" + name + L"/";
+        rt.pages.push_back(std::move(page));
+    }
+    const auto picked = std::find_if(rt.pages.begin(), rt.pages.end(),
+                                     [&rt](const Page& p) { return _wcsicmp(p.name.c_str(), rt.settings.page.c_str()) == 0; });
+    if (picked != rt.pages.end())
+        rt.page = static_cast<int>(picked - rt.pages.begin());
+    else if (!rt.settings.page.empty())
+        Log("Host data: [HostData] Page=%ls is not a weapon page here; no page", rt.settings.page.c_str());
+}
+
+// This machine's Mods, scanned and checked. Caller holds the lock.
+void LoadModsLocked() {
+    Runtime& rt = Rt();
+    std::vector<std::string> skipped;
+    std::vector<hostdata::DataFile> files = hostdata::ScanMods(rt.settings.gameFolder + L"\\Mods", &skipped);
+    for (const std::string& line : skipped) Log("Host data: %s; not shared", line.c_str());
+    rt.own.paths = PathsOf(files);
+    std::string why;
+    auto bundle = hostdata::MakeBundle(std::move(files), &why);
+    if (const auto empty = hostdata::MakeBundle({}, nullptr)) rt.empty = empty->digest;
+    if (!bundle) {
+        Log("Host data: this machine's weapon files cannot be shared (%s); nothing is offered", why.c_str());
+        return;
+    }
+    Log("Host data: %zu weapon/vehicle file(s) of this machine, %zu bytes, SHA-256 %s", bundle->files,
+        bundle->bytes.size(), hostdata::DigestHex(bundle->digest).c_str());
+    rt.mods = std::make_shared<const hostdata::Bundle>(std::move(*bundle));
+}
+
 }  // namespace
 
 bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings& settings) {
@@ -486,23 +676,13 @@ bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings
         rt.settings = settings;
         rt.store = settings.gameFolder + L"\\Mods\\Plugins\\EDF6Coop.hostdata";
         Tidy(rt.store);
-        std::vector<std::string> skipped;
-        std::vector<hostdata::DataFile> files = hostdata::ScanMods(settings.gameFolder + L"\\Mods", &skipped);
-        for (const std::string& line : skipped) Log("Host data: %s; not shared", line.c_str());
-        for (const hostdata::DataFile& file : files) rt.ownPaths.push_back(file.path);
-        std::string why;
-        auto bundle = hostdata::MakeBundle(std::move(files), &why);
-        if (const auto empty = hostdata::MakeBundle({}, nullptr)) rt.empty = empty->digest;
-        if (!bundle) {
-            Log("Host data: this machine's weapon files cannot be shared (%s); nothing is offered", why.c_str());
-        } else {
-            rt.own = bundle->digest;
-            Log("Host data: %zu weapon/vehicle file(s) of this machine, %zu bytes, SHA-256 %s", bundle->files,
-                bundle->bytes.size(), hostdata::DigestHex(bundle->digest).c_str());
-        }
-        if (bundle && settings.share) rt.link.Share(std::make_shared<const hostdata::Bundle>(std::move(*bundle)));
+        LoadModsLocked();
+        LoadPagesLocked();
+        Log("Host data: %zu weapon page(s) under Mods\\Variants; using %ls (%ls switches)", rt.pages.size(),
+            rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].name.c_str() : L"none", settings.pageKeyName);
         rt.send = eos ? reinterpret_cast<EosSendFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_P2P_SendPacket")))
                       : nullptr;
+        DecideLocked();  // outside a room: the page, from the first menu frame
     }
     // Only once our channel is taken out before the game reads it does this machine say it takes part: a member
     // sends our packets only to one that said so, and a machine without the wrapper would read them as game data.
@@ -510,44 +690,49 @@ bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings
                                               reinterpret_cast<void*>(&HostDataReceive),
                                               reinterpret_cast<void**>(&rt.receive));
     if (!received) {
-        Log("Host data: EOS P2P could not be reached; nothing is offered or fetched");
-        return false;
+        Log("Host data: EOS P2P could not be reached; nothing is offered or fetched (pages still work offline)");
+        return true;
     }
     PublishMemberText(kHostDataKey, kHostDataFormat);
-    if (settings.share && rt.own != Digest{}) PublishMemberText(kHostDigestKey, hostdata::DigestHex(rt.own));
-    WatchMemberTexts({kHostDataKey, kHostDigestKey}, &Observe);
+    {
+        std::scoped_lock lock(rt.lock);
+        if (settings.share && rt.mods) PublishMemberText(kHostDigestKey, hostdata::DigestHex(rt.mods->digest));
+        ShareLocked();
+    }
+    WatchMemberTexts({kHostDataKey, kHostDigestKey, kPageDigestKey}, &Observe);
     ListenToTicks(&AfterTick);
     return true;
 }
 
-std::wstring HostDataMenuFrame(bool inRoom, bool pressed) {
-    using enum HostDataStage;
+std::wstring HostDataMenuFrame(bool inRoom, bool acceptPressed, bool pagePressed) {
     Runtime& rt = Rt();
     std::scoped_lock lock(rt.lock);
-    // Only what is shown follows the game's room session; what is taken follows the lobby (Observe), which also
-    // says when we left it. While joining, the lobby is there before the game's session is.
-    if (!inRoom) return L"";
-    if (pressed && rt.target && rt.settings.accept != HostAccept::Never) {
+    if (pagePressed) NextPageLocked();
+    if (acceptPressed && inRoom && rt.remote && rt.settings.accept == HostAccept::Ask) {
         rt.wanted = !rt.wanted;
-        if (rt.wanted) {
-            Log("Host data: %ls - taking the host's weapon files", rt.settings.keyName);
-            rt.stage = Differs;
-            TakeLocked();
-        } else {
-            DropLocked("turned off in the menu");
-            rt.stage = Differs;
-        }
+        Log("Host data: %ls - %s the room's weapon files", rt.settings.keyName, rt.wanted ? "taking" : "giving back");
+        DecideLocked();
     }
     // Between missions: this is the menu, so the game is not in the middle of reading a mission's files.
-    if (rt.wanted && rt.ready && rt.stage == Ready) {
-        SetHostOverlay(rt.ready);
-        rt.stage = Using;
-        Log("Host data: the game now reads the host's %zu weapon/vehicle file(s) (%zu of this machine's own stay)",
-            rt.ready->paths.size(), rt.extra);
-    }
+    ApplyLocked();
+    WeaponsView view;
+    view.pageKey = rt.settings.pageKeyName;
+    view.acceptKey = rt.settings.keyName;
+    view.pages = rt.pages.size();
+    view.page = rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].name : std::wstring();
+    // Only what is shown follows the game's room session; what is taken follows the lobby (Observe). While joining,
+    // the lobby is there before the game's session is.
+    view.inRoom = inRoom && !rt.view.lobbyId.empty();
+    view.remote = rt.remote;
+    view.accept = rt.settings.accept;
+    view.wanted = rt.wanted;
     // While a fetched bundle is written the link holds nothing any more (its bytes were taken): all of it came.
-    const int percent = rt.storing ? 100 : rt.link.Percent();
-    return HostDataNotice(rt.stage, rt.settings.accept, rt.settings.keyName, percent, rt.extra);
+    if (rt.waiting) view.percent = rt.storing ? 100 : rt.link.Percent();
+    view.failed = static_cast<std::size_t>(std::count_if(
+        rt.sources.begin(), rt.sources.end(), [&rt](const RoomSource& source) { return rt.failed.contains(source.digest); }));
+    view.using_ = !rt.waiting;
+    view.lost = rt.lost;
+    return WeaponsNotice(view);
 }
 
 }  // namespace multislot

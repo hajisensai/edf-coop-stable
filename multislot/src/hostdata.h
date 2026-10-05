@@ -80,11 +80,16 @@ std::optional<Digest> DigestFromHex(std::string_view hex);
 // either names, or empty for any other path.
 std::string OpenedDataPath(const wchar_t* gamePath);
 
-// The host's files a player uses: their DataFile paths, sorted, and the folder they are in, as the game's file
-// system takes it ("./Mods/Plugins/EDF6Coop.hostdata/<digest>/").
+// The files a player's game reads in place of its own: per DataFile path (sorted, each once), the folder it is read
+// from, as the game's file system takes it ("./Mods/Plugins/EDF6Coop.hostdata/<digest>/" for files from the room,
+// "./Mods/Variants/<page>/" for a weapon page of this machine; hostdatanet.h).
 struct Overlay {
-    std::vector<std::string> paths;
-    std::wstring folder;
+    struct Entry {
+        std::string path;
+        std::wstring folder;
+        bool operator==(const Entry&) const = default;
+    };
+    std::vector<Entry> entries;
 };
 // Where the game should read `gamePath` from instead, or nullopt to read it as it asked.
 std::optional<std::wstring> OverlayPath(const wchar_t* gamePath, const Overlay& overlay);

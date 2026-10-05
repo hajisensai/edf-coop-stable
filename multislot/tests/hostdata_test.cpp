@@ -144,10 +144,12 @@ void Overlays() {
     Check(OpenedDataPath(L"./Mods/Plugins/EDF6Coop.hostdata/x/WEAPON/A.SGO").empty(), "our own files are not ours");
     Check(OpenedDataPath(nullptr).empty(), "no path");
 
-    Overlay overlay{{"OBJECT/V401.SGO", "WEAPON/A.SGO"}, L"./Mods/Plugins/EDF6Coop.hostdata/ab/"};
+    Overlay overlay{{{"OBJECT/V401.SGO", L"./Mods/Variants/Page/"}, {"WEAPON/A.SGO", L"./Mods/Plugins/EDF6Coop.hostdata/ab/"}}};
     const auto to = OverlayPath(L"/cri_bind/WEAPON/A.SGO", overlay);
     Check(to && *to == L"./Mods/Plugins/EDF6Coop.hostdata/ab/WEAPON/A.SGO", "redirected to the host's file");
-    Check(OverlayPath(L"./Mods/OBJECT/v401.sgo", overlay).has_value(), "the player's own mod gives way too");
+    const auto page = OverlayPath(L"./Mods/OBJECT/v401.sgo", overlay);
+    Check(page && *page == L"./Mods/Variants/Page/OBJECT/V401.SGO",
+          "the player's own mod gives way too, each file to its own folder");
     Check(!OverlayPath(L"/cri_bind/WEAPON/B.SGO", overlay), "a file the host does not change");
     Check(!OverlayPath(L"/cri_bind/WEAPON/A.SGO", Overlay{}), "no overlay");
 }

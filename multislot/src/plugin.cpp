@@ -77,27 +77,37 @@ std::wstring IniText(const wchar_t* ini, const wchar_t* section, const wchar_t* 
     return value;
 }
 
-// [HostData] (hostdatanet.h). The accept key's name stays readable for as long as the game runs (the menu shows it).
-HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey) {
-    static wchar_t keyName[16]{};
+// A key of [HostData], `fallback` when it names none. Its name is kept in `name` for the menu.
+int HostDataKey(const wchar_t* ini, const wchar_t* setting, const wchar_t* fallback, int fallbackKey, wchar_t (&name)[16]) {
+    auto key = IniText(ini, L"HostData", setting, fallback);
+    int vk = VirtualKey(key.c_str());
+    if (vk <= 0) {
+        Log("[HostData] %ls=%ls is not a known key; using %ls", setting, key.c_str(), fallback);
+        vk = fallbackKey;
+        key = fallback;
+    }
+    wcsncpy_s(name, key.c_str(), _TRUNCATE);
+    return vk;
+}
+
+// [HostData] (hostdatanet.h). The keys' names stay readable for as long as the game runs (the menu shows them).
+HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey, int* pageKey) {
+    static wchar_t keyName[16]{}, pageKeyName[16]{};
     HostDataSettings settings;
     settings.share = GetPrivateProfileIntW(L"HostData", L"Share", 1, ini) != 0;
-    const auto accept = IniText(ini, L"HostData", L"Accept", L"Ask");
-    if (_wcsicmp(accept.c_str(), L"Always") == 0)
-        settings.accept = HostAccept::Always;
+    const auto accept = IniText(ini, L"HostData", L"Accept", L"Always");
+    if (_wcsicmp(accept.c_str(), L"Ask") == 0)
+        settings.accept = HostAccept::Ask;
     else if (_wcsicmp(accept.c_str(), L"Never") == 0)
         settings.accept = HostAccept::Never;
-    else if (_wcsicmp(accept.c_str(), L"Ask") != 0)
-        Log("[HostData] Accept=%ls is not Ask, Always or Never; using Ask", accept.c_str());
-    auto key = IniText(ini, L"HostData", L"AcceptKey", L"F1");
-    *acceptKey = VirtualKey(key.c_str());
-    if (*acceptKey <= 0) {
-        Log("[HostData] AcceptKey=%ls is not a known key; using F1", key.c_str());
-        *acceptKey = VK_F1;
-        key = L"F1";
-    }
-    wcsncpy_s(keyName, key.c_str(), _TRUNCATE);
+    else if (_wcsicmp(accept.c_str(), L"Always") != 0)
+        Log("[HostData] Accept=%ls is not Always, Ask or Never; using Always", accept.c_str());
+    *acceptKey = HostDataKey(ini, L"AcceptKey", L"F1", VK_F1, keyName);
+    *pageKey = HostDataKey(ini, L"WeaponPageKey", L"F6", VK_F6, pageKeyName);
     settings.keyName = keyName;
+    settings.pageKeyName = pageKeyName;
+    settings.page = IniText(ini, L"HostData", L"Page", L"");
+    settings.iniPath = ini;
     return settings;
 }
 
@@ -678,8 +688,8 @@ bool LoadRooms(const wchar_t* iniPath) {
     // Host data's receive wrapper sits next to EOS, before packetfit's and the net log's: its packets never reach
     // them (hostdatanet.h). Its lobby attributes go out once the lobby glue below is in.
     if (hostData) {
-        int acceptKey = 0;
-        HostDataSettings settings = ReadHostData(iniPath, &acceptKey);
+        int acceptKey = 0, pageKey = 0;
+        HostDataSettings settings = ReadHostData(iniPath, &acceptKey, &pageKey);
         wchar_t folder[MAX_PATH]{};
         if (SiblingPath(folder, L".dll")) {
             for (int up = 0; up < 3; ++up)
@@ -687,12 +697,12 @@ bool LoadRooms(const wchar_t* iniPath) {
             settings.gameFolder = folder;
         }
         if (!settings.gameFolder.empty() && StartHostData(game, &RedirectGameImport, settings)) {
-            SetRoomFeature(acceptKey, &HostDataMenuFrame);
-            Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls (weapon and vehicle files only, checked against "
-                "the host's SHA-256, kept in Mods\\Plugins\\EDF6Coop.hostdata)",
+            SetWeaponFeature(acceptKey, pageKey, &HostDataMenuFrame);
+            Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls, WeaponPageKey=%ls (weapon and vehicle files only, "
+                "checked against the SHA-256 their member published, kept in Mods\\Plugins\\EDF6Coop.hostdata)",
                 settings.share ? 1 : 0,
                 settings.accept == HostAccept::Ask ? L"Ask" : settings.accept == HostAccept::Always ? L"Always" : L"Never",
-                settings.keyName);
+                settings.keyName, settings.pageKeyName);
         } else {
             Log("Host data: UNAVAILABLE - the host's files cannot be fetched in rooms");
         }

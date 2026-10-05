@@ -311,10 +311,12 @@ std::string OpenedDataPath(const wchar_t* gamePath) {
 }
 
 std::optional<std::wstring> OverlayPath(const wchar_t* gamePath, const Overlay& overlay) {
-    if (overlay.paths.empty()) return std::nullopt;
+    if (overlay.entries.empty()) return std::nullopt;
     const std::string path = OpenedDataPath(gamePath);
-    if (path.empty() || !std::binary_search(overlay.paths.begin(), overlay.paths.end(), path)) return std::nullopt;
-    return overlay.folder + std::wstring(path.begin(), path.end());
+    const auto at = std::lower_bound(overlay.entries.begin(), overlay.entries.end(), path,
+                                     [](const Overlay::Entry& entry, const std::string& p) { return entry.path < p; });
+    if (path.empty() || at == overlay.entries.end() || at->path != path) return std::nullopt;
+    return at->folder + std::wstring(path.begin(), path.end());
 }
 
 std::vector<std::uint8_t> EncodeGet(const Digest& digest) { return PacketHead(PacketType::Get, digest); }

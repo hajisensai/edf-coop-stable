@@ -42,7 +42,7 @@ void HostDataOpenHandler(CpuContext* context) {
     // The probe: which of these files the game reads, when, and from where. Whether it reads them again for
     // each mission decides when the overlay may switch.
     const char* from = path[0] == L'.' ? "mods" : "game";
-    Log("Host data: open #%u %s (%s%s)", ++state.opens, data.c_str(), to ? "host, not " : "", from);
+    Log("Host data: open #%u %s (%s%s)", ++state.opens, data.c_str(), to ? "replaced, not from " : "", from);
     if (to) context->rdi = reinterpret_cast<std::uint64_t>(Keep(*to));
 }
 

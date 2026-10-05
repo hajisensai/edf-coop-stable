@@ -311,6 +311,17 @@ int main() {
     // Label texts.
     Check(Compose(outside, 0, kSize) == L"F2/LS Player MOD :OFF" && Compose(outside, kSize, 0) == L"F2/LS 12Player MOD :ON",
           "outside a room: the F2 setting");
+    // The weapon feature's words come first, in a room and outside; what does not fit after them gives way.
+    MenuContext weapons = outside;
+    weapons.weaponsNotice = L"F6 Page:Laser";
+    Check(Compose(weapons, 0, kSize) == L"F6 Page:Laser   F2/LS Player MOD :OFF", "weapons first outside a room");
+    MenuContext roomWeapons = Menu(true, true, 3);
+    roomWeapons.weaponsNotice = L"ROOM WEAPONS :ON (2)";
+    Check(Compose(roomWeapons, 0, kSize) == L"ROOM WEAPONS :ON (2)   " + Size(kSize) + L"   F3/Tab/RS: Members 5-8",
+          "and in a room");
+    const std::wstring longNotice(kLabelChars + 10, L'W');
+    roomWeapons.weaponsNotice = longNotice.c_str();
+    Check(Compose(roomWeapons, 0, kSize) == longNotice.substr(0, kLabelChars - 1), "a notice too long is what is left");
     Check(Compose(Menu(true, true, 3), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-8",
           "hosting a MultiSlot room: its size and the page guide, before anyone is on page 2");
     Check(Compose(Menu(true, true, 3), kSize, 0) == Size(0), "hosting a normal room: no page guide");

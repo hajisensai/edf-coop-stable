@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "../src/hostdatanet.h"
+#include "../src/hostdataprompt.h"
 
 using namespace multislot;
 using namespace multislot::hostdata;
@@ -142,6 +143,7 @@ void Notices() {
     view.page = L"Laser";
     Check(WeaponsNotice(view) == L"F6 Page:Laser", "the page picked");
     view.inRoom = true;
+    view.accept = HostAccept::Auto;
     view.wanted = true;
     Check(WeaponsNotice(view) == L"F6 Page:Laser", "a room whose files are all ours says nothing of it");
     view.remote = 2;
@@ -167,6 +169,42 @@ void Notices() {
     view.pages = 0;
     view.inRoom = false;
     Check(WeaponsNotice(view).empty(), "outside a room the room is not mentioned");
+}
+
+bool Has(const std::wstring& text, const std::wstring& part) { return text.find(part) != std::wstring::npos; }
+
+// The question before another member's files are used: who brings what, every file, and both answers' risks.
+void Prompt() {
+    const std::vector<PromptSource> sources = {
+        {true, "0002de167055479fbaeb19199b5d75f0", {"OBJECT/VEHICLE404_BIGTANK_AI.SGO", "WEAPON/AWEAPON346.SGO"}},
+        {false, "0002cf0177ee4e98ac2b8a3c1ecb00da", {"WEAPON/AWEAPON346.SGO", "WEAPON/EWEAPON076.SGO"}}};
+    const std::vector<std::string> yours = {"WEAPON/AWEAPON346.SGO"};
+    const std::wstring en = PromptText(sources, yours, L"F1", PromptLanguage::English);
+    Check(Has(en, L"the room host's Mods: 2 file(s)") && Has(en, L"the weapon page of member 0002cf01: 2 file(s)"),
+          "each source, by who brings it, with its file count");
+    Check(Has(en, L"  OBJECT/VEHICLE404_BIGTANK_AI.SGO\n") && Has(en, L"  WEAPON/EWEAPON076.SGO\n"),
+          "every file is named");
+    Check(Has(en, L"  WEAPON/AWEAPON346.SGO  (replaces the one in your Mods)\n"),
+          "a file of the player's own Mods says it takes its place");
+    Check(en.find(L"WEAPON/AWEAPON346.SGO") == en.rfind(L"WEAPON/AWEAPON346.SGO"), "a file two bring is listed once");
+    Check(Has(en, L"Yes:") && Has(en, L"Risks:") && Has(en, L"No:") && Has(en, L"crash") && Has(en, L"SHA-256"),
+          "both answers and their risks");
+    Check(Has(en, L"with F1 on a menu screen"), "and the key that changes it later");
+    const std::wstring zh = PromptText(sources, yours, L"F1", PromptLanguage::Chinese);
+    Check(Has(zh, L"房主的 Mods: 2 个文件") && Has(zh, L"风险") && Has(zh, L"按 F1 切换"), "in Chinese");
+    const std::wstring ja = PromptText(sources, yours, L"F1", PromptLanguage::Japanese);
+    Check(Has(ja, L"リスク") && Has(ja, L"F1 を押して"), "in Japanese");
+    Check(PromptLanguageFor(MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL)) == PromptLanguage::Chinese &&
+              PromptLanguageFor(MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT)) == PromptLanguage::Japanese &&
+              PromptLanguageFor(MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT)) == PromptLanguage::English,
+          "the language follows Windows', English otherwise");
+    Check(!Has(PromptText(sources, yours, L"", PromptLanguage::English), L"on a menu screen"), "no key, no key line");
+
+    std::vector<std::string> many;
+    for (int i = 0; i < 25; ++i) many.push_back("WEAPON/W" + std::to_string(100 + i) + ".SGO");
+    const std::wstring longer = PromptText({{true, "host", many}}, {}, L"F1", PromptLanguage::English);
+    Check(Has(longer, L"  WEAPON/W119.SGO\n") && !Has(longer, L"W120.SGO") && Has(longer, L"... and 5 more"),
+          "a long list stops at kPromptMaxPaths and counts the rest");
 }
 
 void Transfer() {
@@ -320,6 +358,7 @@ int main() {
     Plan();
     Merge();
     Notices();
+    Prompt();
     Transfer();
     ManyBundles();
     Refusals();

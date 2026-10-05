@@ -9,8 +9,10 @@
 // every member the page it picked (kPageDigestKey), published on its own lobby member (syncmarker.h: the game never
 // reads member attributes). The room's files are those in a fixed order (PlanRoomSources): the owner's Mods, the
 // owner's page, then the other members' pages as the lobby lists them; a file two of them have is the first one's.
-// Every machine works the same order out of the same lobby, fetches what it does not have (Accept=Always: at once;
-// Ask: once AcceptKey is pressed) and is pointed at the result between missions; the menu says so at the front.
+// Every machine works the same order out of the same lobby, fetches what it does not have (unless Accept=Never) and
+// is pointed at the result between missions; the menu says so at the front. Accept=Auto uses what arrived at once;
+// Ask (the default) first asks on a menu screen, naming every file and what either answer risks
+// (hostdataprompt.h). The answer holds for those bundles in this lobby; AcceptKey switches all of them later.
 //
 // The files travel over the P2P link the game already has to every member: the game's own socket, on
 // kHostDataChannel (the game sends on channel 0 and reads any). EOS_P2P_ReceivePacket is wrapped next to EOS, before
@@ -46,7 +48,7 @@ constexpr const char* kPageNone = "none";
 constexpr const char* kHostDataFormat = "1";
 constexpr std::uint8_t kHostDataChannel = 0x48;
 
-enum class HostAccept { Ask, Always, Never };
+enum class HostAccept { Ask, Auto, Never };
 
 // One bundle the room's files come from.
 struct RoomSource {
@@ -73,7 +75,7 @@ struct RoomOverlay {
     std::vector<std::size_t> lost;  // per source: its files an earlier source has too
 };
 // The room's files: each path is the first source's that has it. A null source is one this machine goes without
-// (not here, not wanted, or failed); it takes no place.
+// (not here, not approved, or failed); it takes no place.
 RoomOverlay MergeSources(const std::vector<const SourceFiles*>& sources);
 
 // What the menu says about weapons, at the front of the label.
@@ -84,8 +86,8 @@ struct WeaponsView {
     std::wstring page;               // the one picked, "" for none
     bool inRoom = false;
     std::size_t remote = 0;          // sources in the room this machine does not have of its own
-    HostAccept accept = HostAccept::Always;
-    bool wanted = false;             // the room's files are taken (Ask: after AcceptKey)
+    HostAccept accept = HostAccept::Ask;
+    bool wanted = false;             // the room's files are taken (Ask: once the player said so)
     int percent = -1;                // fetching them: 0..100; -1 not
     std::size_t failed = 0;          // sources that could not be fetched
     bool using_ = false;             // the game is pointed at the room's files
@@ -151,7 +153,7 @@ private:
 
 struct HostDataSettings {
     bool share = true;
-    HostAccept accept = HostAccept::Always;
+    HostAccept accept = HostAccept::Ask;
     const wchar_t* keyName = L"";      // the accept key, for the menu
     const wchar_t* pageKeyName = L"";  // the page key, for the menu
     std::wstring page;                 // the page picked last time ([HostData] Page), "" for none

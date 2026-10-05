@@ -176,7 +176,8 @@ int wmain(int argc, wchar_t** argv) {
     SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     std::vector<Spawned> machines;
     SetEnvironmentVariableA("EDF6NET_MEMBERS", std::to_string(chosen->seats.size()).c_str());
-    for (const char* variable : {gamenet::kDelayVariable, gamenet::kDropVariable, "EDF6NET_CHATTER"})
+    for (const char* variable : {gamenet::kDelayVariable, gamenet::kDropVariable, gamenet::kLobbyDelayVariable,
+                                 "EDF6NET_CHATTER", "EDF6NET_RUSH"})
         SetEnvironmentVariableA(variable, nullptr);
     for (const auto& [variable, value] : chosen->network) SetEnvironmentVariableA(variable.c_str(), value.c_str());
     for (const auto& seat : chosen->seats) {

@@ -175,7 +175,14 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
     room.lobby = entered.lobby;
     Result("lobby", "%s", room.lobby.c_str());
     const std::size_t members = static_cast<std::size_t>(expectedMembers());
-    const bool everyone = TickUntil(machine, 20000, [&] { return AllMarked(LookAtRoom(machine, room.lobby), members); });
+    // EDF6NET_RUSH=1: go on as soon as everyone is in, before their markers can have reached the others (a mission
+    // started right after someone joined).
+    char rush[4]{};
+    GetEnvironmentVariableA("EDF6NET_RUSH", rush, sizeof(rush));
+    const bool everyone = TickUntil(machine, 20000, [&] {
+        const Seen seen = LookAtRoom(machine, room.lobby);
+        return rush[0] == '1' ? seen.members.size() == members : AllMarked(seen, members);
+    });
     const Seen seen = LookAtRoom(machine, room.lobby);
     for (std::size_t i = 0; i < seen.members.size(); ++i)
         Result("member", "%s %s", seen.members[i].c_str(), seen.marked[i] ? "marked" : "unmarked");

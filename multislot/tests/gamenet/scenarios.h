@@ -40,19 +40,22 @@ inline void CheckEosAcceptedAll(const gamenet::Network& network) {
     std::printf("INFO: the largest packet on the wire had %u bytes\n", largest);
 }
 
-inline void CheckRoom(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+inline void CheckRoom(const std::vector<Spawned>& machines, const gamenet::Network& network, bool marked = true) {
     for (const auto& machine : machines) {
-        int marked = 0;
+        int seen = 0;
         for (auto it = machine.results.equal_range("member"); it.first != it.second; ++it.first)
-            marked += it.first->second.find(" marked") != std::string::npos ? 1 : 0;
-        Check(marked == static_cast<int>(machines.size()),
-              machine.user + " sees all " + std::to_string(machines.size()) + " members with the split sync marker");
+            seen += !marked || it.first->second.find(" marked") != std::string::npos ? 1 : 0;
+        Check(seen == static_cast<int>(machines.size()),
+              machine.user + " sees all " + std::to_string(machines.size()) + " members" +
+                  (marked ? " with the split sync marker" : ""));
         Check(machine.results.count("unimplemented-eos") == 0, machine.user +
                                                                    " reached no EOS function the fake only stubs (first: " +
                                                                    Result(machine, "unimplemented-eos") + ")");
     }
     Check(network.lobby.count == machines.size(), "EOS has every machine in the room");
 }
+
+inline void CheckMarkedRoom(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckRoom(m, n); }
 
 // Every packet that crossed the fake EOS, in order.
 struct WirePacket {
@@ -93,11 +96,12 @@ struct MissionExpect {
     bool split;  // records go beside the start message
     bool late;   // they arrive after it, and the guests wait for them
     bool lossy;  // the network lost start messages, and the game resent them
+    bool rushed = false;  // the sync started before the members' markers reached the others
 };
 
 // The mission start sync: everyone ends up with every player's record, byte for byte the same.
 inline void CheckMission(const std::vector<Spawned>& machines, const gamenet::Network& network, MissionExpect expect) {
-    CheckRoom(machines, network);
+    CheckRoom(machines, network, !expect.rushed);
     const int members = static_cast<int>(machines.size());
     for (const auto& machine : machines) {
         Check(Result(machine, "sync").rfind("done", 0) == 0, machine.user + " finished the sync: " + Result(machine, "sync"));
@@ -147,6 +151,9 @@ inline void CheckWholeMission(const std::vector<Spawned>& m, const gamenet::Netw
 inline void CheckSplitMission(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, false}); }
 inline void CheckLateRecords(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, true, false}); }
 inline void CheckLossyMission(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, true}); }
+inline void CheckRushedMission(const std::vector<Spawned>& m, const gamenet::Network& n) {
+    CheckMission(m, n, {true, false, false, true});
+}
 inline void CheckBusyMission(const std::vector<Spawned>& m, const gamenet::Network& n) {
     CheckMission(m, n, {true, false, false});
     Check(m.front().results.count("shared-batch") > 0,
@@ -166,7 +173,7 @@ inline std::vector<Seat> Seats(int count, const std::string& step, const std::st
 
 inline const std::vector<Scenario>& Scenarios() {
     static const std::vector<Scenario> all = {
-        {"room", Seats(2, "room", BaseIni()), 60000, &CheckRoom},
+        {"room", Seats(2, "room", BaseIni()), 60000, &CheckMarkedRoom},
         {"link", Seats(2, "link", BaseIni()), 90000, &CheckLink},
         // Two players, a test budget small enough that the second record goes beside the start message: what two
         // people testing the split by hand ran (SplitSyncBudget).
@@ -185,6 +192,10 @@ inline const std::vector<Scenario>& Scenarios() {
         // Every frame every machine says something else too (an event message of 16 bytes), which shares the
         // controller record with the start message: the room the plugin leaves for it (kBatchedAllowance).
         {"mission8busy", Seats(8, "mission", BaseIni()), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
+        // A mission started the moment the last player is in, while Epic takes 2.5 s to relay each member's lobby
+        // attributes (the split sync marker among them) to the others.
+        {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,
+         {{"EDF6NET_RUSH", "1"}, {"EDF6NET_LOBBY_DELAY", "2500"}}},
     };
     return all;
 }

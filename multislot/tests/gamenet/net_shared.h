@@ -34,12 +34,15 @@ constexpr const char* kDelayVariable = "EDF6NET_DELAY";
 // "<bytes>:<count>" - each machine loses its first <count> unreliable packets of at least <bytes> (EOS delivers
 // unreliable packets at most once; the game resends what it needs).
 constexpr const char* kDropVariable = "EDF6NET_DROP";
+// "<ms>" - a member's attribute reaches the other members that much later (Epic's lobby service relays them).
+constexpr const char* kLobbyDelayVariable = "EDF6NET_LOBBY_DELAY";
 
 struct Attribute {
     char key[kKeyText];
     std::int32_t type;  // 0 none, 1 int64, 4 UTF-8 (EOS_ELobbyAttributeType: 0 bool, 1 int64, 2 double, 3 string)
     std::int64_t number;
     char text[kValueText];
+    std::uint64_t visibleAt;  // GetTickCount64 from which the other members see it (EDF6NET_LOBBY_DELAY)
 };
 
 struct Member {

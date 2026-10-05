@@ -81,6 +81,7 @@ struct Fake {
     ULONGLONG delayMs = 0;
     std::uint32_t dropMinimum = 0;
     int dropsLeft = 0;
+    ULONGLONG lobbyDelayMs = 0;  // EDF6NET_LOBBY_DELAY
 };
 
 Fake& F() {
@@ -116,6 +117,8 @@ bool Open() {
             f.delayMs = ms;
         }
     }
+    if (GetEnvironmentVariableA(gamenet::kLobbyDelayVariable, setting, sizeof(setting)))
+        f.lobbyDelayMs = std::strtoull(setting, nullptr, 10);
     if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
         unsigned bytes = 0, count = 0;
         if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
@@ -776,7 +779,10 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
     gamenet::Lobby& lobby = f.net->lobby;
     gamenet::Member* self = MemberOf(lobby, f.self);
     if (!self) return Complete(callback, clientData, EOS_NotFound, lobby.id);
-    for (const auto& value : modification->member) SetAttribute(*self, value);
+    for (auto value : modification->member) {
+        value.visibleAt = GetTickCount64() + f.lobbyDelayMs;
+        SetAttribute(*self, value);
+    }
     ++lobby.version;
     Complete(callback, clientData, EOS_Success, lobby.id);
 }
@@ -788,7 +794,15 @@ EXPORT EOS_EResult EOS_Lobby_CopyLobbyDetailsHandle(void*, const CopyDetailsOpti
     if (!Open()) return EOS_NoConnection;
     Locked locked(f.netLock);
     if (std::strcmp(options->LobbyId, f.net->lobby.id) || !MemberOf(f.net->lobby, f.self)) return EOS_NotFound;
-    *details = new Details{f.net->lobby};
+    auto* copy = new Details{f.net->lobby};
+    // Another member's attribute only once Epic would have relayed it.
+    const ULONGLONG now = GetTickCount64();
+    for (std::uint32_t i = 0; i < copy->lobby.count; ++i) {
+        if (f.self == copy->lobby.members[i].user) continue;
+        for (auto& attribute : copy->lobby.members[i].attributes)
+            if (attribute.key[0] && attribute.visibleAt > now) attribute = gamenet::Attribute{};
+    }
+    *details = copy;
     return EOS_Success;
 }
 EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<Details*>(details); }

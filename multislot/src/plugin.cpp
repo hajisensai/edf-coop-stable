@@ -600,6 +600,11 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitPacketFit(base);
+    if (const UINT budget = GetPrivateProfileIntW(L"Test", L"SplitSyncBudget", 0, iniPath); budget && mission) {
+        SetSyncBudget(budget);
+        Log("TEST SplitSyncBudget=%u: start messages you host keep at most that many bytes inline and send the "
+            "other loadout records beside them, even in small rooms (0 = normal)", budget);
+    }
     InitWeaponGuard(base);
     InitJoinLog(base);
     InitFinalHello(base);

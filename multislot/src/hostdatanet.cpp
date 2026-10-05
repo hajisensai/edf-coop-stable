@@ -632,8 +632,12 @@ void LoadPagesLocked() {
         }
         Log("Host data: weapon page %ls: %zu file(s), %zu bytes, SHA-256 %s", name.c_str(), paths.size(),
             bundle->bytes.size(), hostdata::DigestHex(bundle->digest).c_str());
-        rt.pages.push_back({name, std::make_shared<const hostdata::Bundle>(std::move(*bundle)),
-                            SourceFiles{std::move(paths), L"./Mods/Variants/" + name + L"/"}});
+        Page page;
+        page.name = name;
+        page.bundle = std::make_shared<const hostdata::Bundle>(std::move(*bundle));
+        page.files.paths = std::move(paths);
+        page.files.folder = L"./Mods/Variants/" + name + L"/";
+        rt.pages.push_back(std::move(page));
     }
     const auto picked = std::find_if(rt.pages.begin(), rt.pages.end(),
                                      [&rt](const Page& p) { return _wcsicmp(p.name.c_str(), rt.settings.page.c_str()) == 0; });

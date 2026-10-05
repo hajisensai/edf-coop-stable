@@ -29,8 +29,8 @@ constexpr std::size_t kMission = 0x48, kDifficulty = 0x4C, kClass = 0x6E90, kMar
 constexpr std::size_t kCoreRoom = 0xC0, kCoreGame = 0xD0, kRoomStays = 0x78;
 constexpr std::size_t kGameLeader = 0x20, kGameUsers = 0x30, kGameSyncs = 0xF0, kGameSize = 0x120;
 constexpr std::size_t kUserSlot = 0x48;
-constexpr std::uint16_t kSynchronizeGate = 4;
-constexpr std::uint16_t kChatterType = 7;  // any other event type: what else the game says in the same frames  // the event type of the sync messages (Event_SynchronizeGate)
+constexpr std::uint16_t kSynchronizeGate = 4;  // the event type of the sync messages (Event_SynchronizeGate)
+constexpr std::uint16_t kChatterType = 7;      // any other: what else the game says in the same frames
 // The packet controller record type the event messages travel in: Transmit::Send's ((sub & 0xF) | id << 4) << 8.
 // Its value only names the record (its header is the same 12 bytes whatever it is).
 constexpr std::uint32_t kEventRecordType = 0x3000;

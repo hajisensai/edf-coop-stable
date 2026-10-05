@@ -280,7 +280,6 @@ struct Runtime {
     std::string lobby;   // the lobby `approved`, `declined` and `failed` are about
     std::set<Digest> approved;           // other members' bundles the game may read (Ask: the player said yes)
     std::set<Digest> declined;           // and those it must not (the player said no, or gave them back)
-    bool fetching = false;               // a bundle not declined is still on its way: the question waits for it
     bool asking = false;                 // the question is on screen
     // What the player answered, for the next menu frame: the window runs on a thread of its own, and acting on the
     // answer may start a fetch, which calls EOS - only ever from the game's thread.
@@ -463,7 +462,6 @@ void DecideLocked() {
         files.push_back(used ? have : nullptr);
     }
     FetchLocked(missing);
-    rt.fetching = missing.has_value();
     rt.waiting = waiting;
     if (rt.waiting) return;
     RoomOverlay merged = MergeSources(files);
@@ -700,13 +698,13 @@ std::vector<RoomSource> RemoteLocked() {
     return remote;
 }
 
-// The game reads (or is about to read) files of another member. Caller holds the lock.
+// The player takes files of another member (some may have failed to arrive: the menu counts those). Caller holds
+// the lock.
 bool TakenLocked() {
     const Runtime& rt = Rt();
     const std::vector<RoomSource> remote = RemoteLocked();
     return std::any_of(remote.begin(), remote.end(), [&rt](const RoomSource& source) {
-        return rt.approved.contains(source.digest) && !rt.declined.contains(source.digest) &&
-               !rt.failed.contains(source.digest);
+        return rt.approved.contains(source.digest) && !rt.declined.contains(source.digest);
     });
 }
 
@@ -743,11 +741,12 @@ void TakeAnswersLocked() {
     rt.answers.clear();
 }
 
-// On a menu frame in a room (Accept=Ask): asks about the bundles nobody answered for yet, once every bundle that is
-// coming has arrived, so one question names them all. Caller holds the lock.
+// On a menu frame in a room (Accept=Ask): asks about the bundles that arrived and nobody answered for yet. It does not
+// wait for the others (one slow member must not hold back the question about the host's files, which are fetched
+// first); those that arrive later get a question of their own. Caller holds the lock.
 void AskLocked() {
     Runtime& rt = Rt();
-    if (rt.settings.accept != HostAccept::Ask || rt.asking || !rt.answers.empty() || rt.fetching || rt.storing) return;
+    if (rt.settings.accept != HostAccept::Ask || rt.asking || !rt.answers.empty()) return;
     std::vector<PromptSource> prompt;
     std::vector<Digest> digests;
     std::size_t files = 0;

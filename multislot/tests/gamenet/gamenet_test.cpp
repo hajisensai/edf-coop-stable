@@ -57,6 +57,11 @@ bool Spawn(Spawned& machine, const std::wstring& exe, const std::wstring& gameFo
     SetEnvironmentVariableA(gamenet::kSectionVariable, section.c_str());
     SetEnvironmentVariableA(gamenet::kUserVariable, machine.user.c_str());
     std::wstring command = L"\"" + exe + L"\" " + Wide(machine.role) + L" \"" + gameFolder + L"\" \"" + work + L"\"";
+    // EDF6NET_DEBUGGER=<path of cdb.exe>: every machine runs under it, and a crash prints its stack.
+    wchar_t debugger[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"EDF6NET_DEBUGGER", debugger, MAX_PATH))
+        command = L"\"" + std::wstring(debugger) +
+                  L"\" -lines -c \"g; kn 40; r; q\" " + command;
     STARTUPINFOW startup{sizeof(startup)};
     startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdOutput = write;

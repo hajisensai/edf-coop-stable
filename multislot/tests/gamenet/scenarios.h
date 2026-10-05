@@ -35,6 +35,44 @@ inline void CheckRoom(const std::vector<Spawned>& machines, const gamenet::Netwo
     Check(network.lobby.count == machines.size(), "EOS has every machine in the room");
 }
 
+// Every packet that crossed the fake EOS, in order.
+struct WirePacket {
+    gamenet::PacketHeader header;
+    std::string data;
+};
+inline std::vector<WirePacket> Wire(const gamenet::Network& network) {
+    std::vector<WirePacket> packets;
+    for (std::uint64_t at = 0; at + sizeof(gamenet::PacketHeader) <= network.wire.used;) {
+        WirePacket packet;
+        std::memcpy(&packet.header, network.wire.bytes + at, sizeof(packet.header));
+        packet.data.assign(reinterpret_cast<const char*>(network.wire.bytes + at + sizeof(packet.header)), packet.header.size);
+        at += sizeof(packet.header) + packet.header.size;
+        packets.push_back(std::move(packet));
+    }
+    return packets;
+}
+
+inline void CheckLink(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    for (const auto& machine : machines) {
+        int received = 0;
+        for (auto it = machine.results.equal_range("received"); it.first != it.second; ++it.first)
+            received += it.first->second.find("PROBE-PLAINTEXT-FROM-") != std::string::npos ? 1 : 0;
+        Check(received == static_cast<int>(machines.size()) - 1,
+              machine.user + " got every other machine's record through the game's controller");
+    }
+    const auto wire = Wire(network);
+    bool plaintext = false, oversize = false;
+    for (const auto& packet : wire) {
+        plaintext = plaintext || packet.data.find("PROBE-PLAINTEXT") != std::string::npos;
+        oversize = oversize || packet.header.size > gamenet::kMaxPacket;
+    }
+    Check(!wire.empty(), std::to_string(wire.size()) + " packets crossed EOS");
+    Check(!plaintext, "no record crossed EOS in plaintext (the game encrypts every datagram)");
+    Check(!oversize && network.refused == 0, "no packet above EOS's 1170 bytes was sent or refused");
+    Check(network.wire.dropped == 0, "the wire log kept every packet");
+}
+
 inline const std::vector<Scenario>& Scenarios() {
     static const std::vector<Scenario> all = {
         {"room",
@@ -42,6 +80,11 @@ inline const std::vector<Scenario>& Scenarios() {
           {"guest000000000000000000000000002", "guest-room", BaseIni()}},
          60000,
          &CheckRoom},
+        {"link",
+         {{"host0000000000000000000000000001", "host-link", BaseIni()},
+          {"guest000000000000000000000000002", "guest-link", BaseIni()}},
+         60000,
+         &CheckLink},
     };
     return all;
 }

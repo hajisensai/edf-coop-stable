@@ -4,6 +4,7 @@
 #include <functional>
 #include <vector>
 
+#include "game.h"
 #include "machine.h"
 #include "net_shared.h"
 
@@ -126,61 +127,107 @@ int expectedMembers() {
     return text[0] ? std::atoi(text) : 2;
 }
 
-// Host: creates the room the way the game does and waits until everyone is in and marked.
-int HostRoom(Machine& machine, std::string& lobby) {
+struct Room {
+    std::string lobby;
+    std::vector<std::string> members;  // in lobby order, as the game adds them
+};
+
+// Creates (host) or joins (guest) the room the way the game does, then waits until every member is in and
+// publishes the split start message marker (EDF6Coop does that on its own, from the game's EOS ticks).
+bool EnterRoom(Machine& machine, bool host, Room& room) {
     Entered entered;
-    CreateOptions options;
-    options.LocalUserId = Self(machine);
-    options.MaxLobbyMembers = 8;
-    Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
-    if (!TickUntil(machine, 5000, [&] { return entered.done; }) || entered.result != 0) {
-        Result("room", "create failed (%d)", entered.result);
-        return 1;
+    if (host) {
+        CreateOptions options;
+        options.LocalUserId = Self(machine);
+        options.MaxLobbyMembers = 8;
+        Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+    } else {
+        void* details = nullptr;
+        const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+        if (!TickUntil(machine, 10000, [&] { return (details = roomDetails()) != nullptr; })) {
+            Result("room", "no room to join");
+            return false;
+        }
+        JoinOptions options;
+        options.LobbyDetailsHandle = details;
+        options.LocalUserId = Self(machine);
+        Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+        if (TickUntil(machine, 5000, [&] { return entered.done; })) FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
     }
-    lobby = entered.lobby;
-    Result("lobby", "%s", lobby.c_str());
+    if (!TickUntil(machine, 5000, [&] { return entered.done; }) || entered.result != 0) {
+        Result("room", "%s failed (%d)", host ? "create" : "join", entered.result);
+        return false;
+    }
+    room.lobby = entered.lobby;
+    Result("lobby", "%s", room.lobby.c_str());
     const std::size_t members = static_cast<std::size_t>(expectedMembers());
-    const bool everyone = TickUntil(machine, 20000, [&] { return AllMarked(LookAtRoom(machine, lobby), members); });
-    const Seen seen = LookAtRoom(machine, lobby);
+    const bool everyone = TickUntil(machine, 20000, [&] { return AllMarked(LookAtRoom(machine, room.lobby), members); });
+    const Seen seen = LookAtRoom(machine, room.lobby);
     for (std::size_t i = 0; i < seen.members.size(); ++i)
         Result("member", "%s %s", seen.members[i].c_str(), seen.marked[i] ? "marked" : "unmarked");
-    return everyone ? 0 : 1;
+    room.members = seen.members;
+    return everyone;
 }
 
-// Guest: waits for the room, joins it the way the game does, and waits until everyone is marked.
-int GuestRoom(Machine& machine, std::string& lobby) {
-    void* details = nullptr;
-    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
-    if (!TickUntil(machine, 10000, [&] { return (details = roomDetails()) != nullptr; })) {
-        Result("room", "no room to join");
-        return 1;
+// Starts the game's packet controller for the room and waits until the game's P2P handshake connected every
+// other member.
+bool Connect(Machine& machine, const Room& room, Transport& transport) {
+    if (!transport.Start(machine, room.lobby, room.members)) {
+        Result("link", "the game's network objects could not be built");
+        return false;
     }
-    Entered entered;
-    JoinOptions options;
-    options.LobbyDetailsHandle = details;
-    options.LocalUserId = Self(machine);
-    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
-    if (!TickUntil(machine, 5000, [&] { return entered.done; }) || entered.result != 0) {
-        Result("room", "join failed (%d)", entered.result);
-        return 1;
-    }
-    FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
-    lobby = entered.lobby;
-    Result("lobby", "%s", lobby.c_str());
-    const std::size_t members = static_cast<std::size_t>(expectedMembers());
-    const bool everyone = TickUntil(machine, 20000, [&] { return AllMarked(LookAtRoom(machine, lobby), members); });
-    const Seen seen = LookAtRoom(machine, lobby);
-    for (std::size_t i = 0; i < seen.members.size(); ++i)
-        Result("member", "%s %s", seen.members[i].c_str(), seen.marked[i] ? "marked" : "unmarked");
-    return everyone ? 0 : 1;
+    const bool connected = TickUntil(machine, 15000, [&] {
+        transport.Tick();
+        for (const auto& member : room.members)
+            if (member != machine.user && !transport.Connected(member)) return false;
+        return true;
+    });
+    for (const auto& member : room.members)
+        Result("network-index", "%s %d%s", member.c_str(), transport.NetworkIndex(member),
+               member == machine.user ? " (self)" : transport.Connected(member) ? " connected" : " NOT connected");
+    return connected;
+}
+
+constexpr std::uint32_t kProbeType = 0x2700;  // a record type nothing in the game subscribes to
+
+// Each machine sends every other one a reliable record through the game's controller and waits for theirs.
+int Link(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    std::vector<std::string> received;
+    transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
+        received.emplace_back(reinterpret_cast<const char*>(data), size);
+        Result("received", "from %d: %.*s", from, static_cast<int>(size), reinterpret_cast<const char*>(data));
+    });
+    const std::string probe = "PROBE-PLAINTEXT-FROM-" + machine.user;
+    for (const auto& member : room.members)
+        if (member != machine.user && !transport.SendReliable(member, kProbeType, probe.data(), probe.size()))
+            Result("send", "SendReliable to %s refused", member.c_str());
+    const std::size_t others = room.members.size() - 1;
+    const bool all = TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return received.size() >= others;
+    });
+    // Keep ticking a little: acknowledgements and resends of the others still need this machine.
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    return all ? 0 : 1;
 }
 
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
-    std::string lobby;
-    if (role == "host-room") return HostRoom(machine, lobby);
-    if (role == "guest-room") return GuestRoom(machine, lobby);
+    const bool host = role.rfind("host-", 0) == 0;
+    const std::string step = role.substr(role.find('-') + 1);
+    if (step == "room") {
+        Room room;
+        return EnterRoom(machine, host, room) ? 0 : 1;
+    }
+    if (step == "link") return Link(machine, host);
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

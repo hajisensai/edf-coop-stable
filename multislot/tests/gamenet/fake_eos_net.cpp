@@ -518,7 +518,13 @@ EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, 
         Locked locked(f.netLock);
         gamenet::Lobby& lobby = f.net->lobby;
         if (lobby.id[0]) return Complete(callback, clientData, EOS_InvalidParameters, "");
-        id = "lobby-" + f.self;
+        // 32 hex digits, as Epic's lobby ids are: the game copies one into the 33-byte P2P socket name (strcpy_s,
+        // p2p::Manager::Initialize), and a longer one ends the process there.
+        std::uint64_t hash = 14695981039346656037ull;
+        for (char c : f.self) hash = (hash ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
+        char text[33]{};
+        std::snprintf(text, sizeof(text), "%016llx%016llx", hash, hash * 0x9E3779B97F4A7C15ull);
+        id = text;
         lobby = gamenet::Lobby{};
         Copy(lobby.id, sizeof(lobby.id), id);
         Copy(lobby.owner, sizeof(lobby.owner), f.self);

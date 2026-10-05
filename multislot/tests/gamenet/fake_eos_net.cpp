@@ -162,7 +162,7 @@ gamenet::Station* MachineOf(const std::string& user) {
 // Moves what arrived in this machine's inbox to `incoming`.
 void Drain() {
     Fake& f = F();
-    if (!Open()) return;
+    if (!Open() || f.slot < 0) return;
     Locked locked(f.netLock);
     gamenet::Ring& inbox = f.net->machines[f.slot].inbox;
     while (inbox.tail - inbox.head >= sizeof(gamenet::PacketHeader)) {

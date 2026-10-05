@@ -123,73 +123,6 @@ constexpr std::size_t kMaxStubsPerPacket = kMaxPlayers;
 
 SplitSyncReaders splitSyncReaders = nullptr;
 std::size_t syncBudget = kMissionSyncBudget;  // [Test] SplitSyncBudget lowers it
-PackedReaders packedReaders = nullptr;
-RoomReadsPacked roomReadsPacked = nullptr;
-
-// --- packing: XPRESS from ntdll ---
-constexpr std::uint8_t kPackMagic[8] = {'M', 'S', 'l', 'o', 't', 'Z', 'i', 'p'};
-static_assert(kPackHeader == sizeof(kPackMagic) + 2, "packed packet layout");
-constexpr USHORT kXpress = 3;  // COMPRESSION_FORMAT_XPRESS, COMPRESSION_ENGINE_STANDARD
-using WorkSpaceSizeFn = LONG(NTAPI*)(USHORT format, PULONG workSpace, PULONG fragmentWorkSpace);
-using CompressFn = LONG(NTAPI*)(USHORT format, PUCHAR in, ULONG inSize, PUCHAR out, ULONG outSize, ULONG chunk,
-                                PULONG written, PVOID workSpace);
-using DecompressFn = LONG(NTAPI*)(USHORT format, PUCHAR out, ULONG outSize, PUCHAR in, ULONG inSize, PULONG written,
-                                  PVOID workSpace);
-struct Packer {
-    CompressFn compress = nullptr;
-    DecompressFn decompress = nullptr;
-    ULONG workSpace = 0;
-};
-const Packer& ThePacker() {
-    static const Packer packer = [] {
-        Packer p;
-        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        const auto size = ntdll ? reinterpret_cast<WorkSpaceSizeFn>(reinterpret_cast<void*>(
-                                      GetProcAddress(ntdll, "RtlGetCompressionWorkSpaceSize")))
-                                : nullptr;
-        ULONG work = 0, fragment = 0;
-        if (!size || size(kXpress, &work, &fragment) < 0) return p;
-        p.compress = reinterpret_cast<CompressFn>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlCompressBuffer")));
-        p.decompress = reinterpret_cast<DecompressFn>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlDecompressBufferEx")));
-        p.workSpace = work > fragment ? work : fragment;
-        return p;
-    }();
-    return packer;
-}
-// A work space per thread: the game sends and receives on more than one.
-std::vector<std::uint8_t>& WorkSpace() {
-    thread_local std::vector<std::uint8_t> work(ThePacker().workSpace);
-    return work;
-}
-
-// What packing did and cost, logged once a minute by whoever sends.
-std::atomic<unsigned long long> packedPackets{0}, packedBefore{0}, packedAfter{0}, packTicks{0}, unpackTicks{0},
-    unpackedPackets{0}, packLoggedAt{0};
-unsigned long long Ticks() {
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-    return static_cast<unsigned long long>(now.QuadPart);
-}
-unsigned long long Microseconds(unsigned long long ticks) {
-    static const unsigned long long frequency = [] {
-        LARGE_INTEGER f{};
-        QueryPerformanceFrequency(&f);
-        return static_cast<unsigned long long>(f.QuadPart ? f.QuadPart : 1);
-    }();
-    return ticks * 1000000ull / frequency;
-}
-void LogPackingMinute() {
-    const unsigned long long now = GetTickCount64();
-    unsigned long long last = packLoggedAt.load();
-    if (now - last < 60000 || !packLoggedAt.compare_exchange_strong(last, now)) return;
-    const unsigned long long packets = packedPackets.exchange(0), before = packedBefore.exchange(0),
-                             after = packedAfter.exchange(0), packUs = Microseconds(packTicks.exchange(0)),
-                             unpacked = unpackedPackets.exchange(0), unpackUs = Microseconds(unpackTicks.exchange(0));
-    if (!last || (!packets && !unpacked)) return;
-    Log("PACK last 60s: %llu packet(s) sent packed, %llu -> %llu bytes (%llu%% saved), packing took %llu us; %llu "
-        "received packed, unpacking took %llu us",
-        packets, before, after, before ? (before - after) * 100 / before : 0, packUs, unpacked, unpackUs);
-}
 
 unsigned long long SystemClock() { return GetTickCount64(); }
 PacketFitClock packetClock = &SystemClock;
@@ -217,7 +150,7 @@ struct HeldPacket {
     EosSocketId socket{};
     std::uint8_t channel = 0;
     std::uint32_t size = 0;
-    std::uint8_t bytes[kGameMaxPacket];  // unpacked: up to what the game sends
+    std::uint8_t bytes[kEosMaxPacket];
 };
 HeldPacket heldPackets[kHeldPackets];
 std::uint64_t heldOrder = 0;
@@ -470,21 +403,6 @@ bool __fastcall RecordWriteHook(void* context, const void* record, void* stream,
     return true;
 }
 
-// Whether the start message with every record inline fits one EOS packet once packed, and may be sent so: everyone
-// in the room unpacks, the game sends it (kGameMaxPacket), and no test budget is set. Caller holds the batch.
-bool FitsPacked(void* stream, std::size_t header, std::size_t full) {
-    if (syncBudget != kMissionSyncBudget || full <= syncBudget || full > kPackedSyncLimit || !roomReadsPacked ||
-        !roomReadsPacked())
-        return false;
-    std::vector<std::uint8_t> message(Bytes(stream) + kStreamData, Bytes(stream) + kStreamData + header);
-    for (std::size_t i = 0; i < batch.count; ++i)
-        message.insert(message.end(), batch.records[i].bytes, batch.records[i].bytes + batch.records[i].size);
-    std::uint8_t packed[kEosMaxPacket];
-    const std::size_t size = PackPacket(message.data(), message.size(), packed, sizeof(packed));
-    // The framing around it is packed too, but counted as it is: what is left is the margin.
-    return size && size + kSessionHeader + kControllerHeader + kMessageHeaders + kBatchedAllowance <= kEosMaxPacket;
-}
-
 void FlushRecords(void* stream) {
     if (!stream || batch.stream != stream || !batch.count) {
         if (batch.count) Log("MISSION sync: %zu records of another sync were dropped", batch.count);
@@ -499,13 +417,7 @@ void FlushRecords(void* stream) {
         refs.push_back({batch.records[i].index, batch.records[i].size});
         full += batch.records[i].size;
     }
-    std::size_t budget = syncBudget;
-    if (FitsPacked(stream, header, full)) {
-        budget = kPackedSyncLimit;
-        Log("MISSION sync: %zu loadout records make the start message %zu bytes; packed it fits one EOS packet, so "
-            "every record stays in it (everyone in the room reads packed packets)", batch.count, full);
-    }
-    const auto inlined = PlanInline(header, refs, budget);
+    const auto inlined = PlanInline(header, refs, syncBudget);
     std::size_t moved = 0;
     for (std::size_t i = 0; i < batch.count; ++i) {
         const Pending& pending = batch.records[i];
@@ -574,53 +486,6 @@ void SetEosFunctions(EosSendFn send, EosReceiveFn receive) {
 
 void SetSplitSyncReaders(SplitSyncReaders readers) { splitSyncReaders = readers; }
 
-void SetPackedReaders(PackedReaders readers, RoomReadsPacked room) {
-    packedReaders = readers;
-    roomReadsPacked = room;
-}
-
-bool PackingAvailable() {
-    const Packer& p = ThePacker();
-    return p.compress && p.decompress && p.workSpace;
-}
-
-std::size_t PackPacket(const std::uint8_t* data, std::size_t size, std::uint8_t* out, std::size_t capacity) {
-    if (!data || !out || size < kPackMinimum || size > kMaxUnpacked || capacity <= kPackHeader || !PackingAvailable())
-        return 0;
-    std::vector<std::uint8_t>& work = WorkSpace();
-    ULONG written = 0;
-    const unsigned long long start = Ticks();
-    const LONG status = ThePacker().compress(kXpress, const_cast<PUCHAR>(data), static_cast<ULONG>(size), out + kPackHeader,
-                                             static_cast<ULONG>(capacity - kPackHeader), 4096, &written, work.data());
-    packTicks += Ticks() - start;
-    const std::size_t packed = kPackHeader + written;
-    const std::size_t saving = packed < size ? size - packed : 0;
-    if (status < 0 || !written || saving < kPackSavingMin || saving * 100 < size * kPackSavingPercent) return 0;
-    std::memcpy(out, kPackMagic, sizeof(kPackMagic));
-    out[8] = static_cast<std::uint8_t>(size);
-    out[9] = static_cast<std::uint8_t>(size >> 8);
-    return packed;
-}
-
-bool IsPackedPacket(const std::uint8_t* data, std::size_t size) {
-    return data && size > kPackHeader && std::memcmp(data, kPackMagic, sizeof(kPackMagic)) == 0;
-}
-
-std::size_t UnpackPacket(const std::uint8_t* data, std::size_t size, std::uint8_t* out, std::size_t capacity) {
-    if (!out || !IsPackedPacket(data, size) || !PackingAvailable()) return 0;
-    const std::size_t original = static_cast<std::size_t>(data[8]) | static_cast<std::size_t>(data[9]) << 8;
-    if (!original || original > kMaxUnpacked || original > capacity) return 0;
-    std::vector<std::uint8_t>& work = WorkSpace();
-    ULONG written = 0;
-    const unsigned long long start = Ticks();
-    const LONG status = ThePacker().decompress(kXpress, out, static_cast<ULONG>(original), const_cast<PUCHAR>(data + kPackHeader),
-                                               static_cast<ULONG>(size - kPackHeader), &written, work.data());
-    unpackTicks += Ticks() - start;
-    if (status < 0 || written != original) return 0;
-    ++unpackedPackets;
-    return original;
-}
-
 void SetSyncBudget(std::size_t budget) { syncBudget = budget && budget < kMissionSyncBudget ? budget : kMissionSyncBudget; }
 
 void SetPacketFitClock(PacketFitClock clock) { packetClock = clock ? clock : &SystemClock; }
@@ -655,24 +520,7 @@ EosResult PacketFitSend(void* handle, const EosSendOptions* options) {
                 side.DataLengthBytes, static_cast<unsigned>(side.Channel), sent);
         }
     }
-    EosResult result;
-    std::uint8_t packed[kEosMaxPacket];
-    const std::size_t packedSize = options && options->Data && packedReaders && packedReaders(options->RemoteUserId)
-                                       ? PackPacket(static_cast<const std::uint8_t*>(options->Data),
-                                                    options->DataLengthBytes, packed, sizeof(packed))
-                                       : 0;
-    if (packedSize) {
-        EosSendOptions copy = *options;
-        copy.Data = packed;
-        copy.DataLengthBytes = static_cast<std::uint32_t>(packedSize);
-        result = eosSend(handle, &copy);
-        ++packedPackets;
-        packedBefore += options->DataLengthBytes;
-        packedAfter += packedSize;
-    } else {
-        result = eosSend(handle, options);
-    }
-    LogPackingMinute();
+    const EosResult result = eosSend(handle, options);
     if (options && options->Data && options->DataLengthBytes >= kStubBytes) {
         StubInfo stubs[kMaxStubsPerPacket];
         if (const std::size_t found = FindStubs(static_cast<const std::uint8_t*>(options->Data), options->DataLengthBytes,
@@ -696,22 +544,6 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
         const EosResult result = eosReceive(handle, options, peer, socket, channel, data, size);
         if (result != 0 || !data || !size) return result;
         const auto* bytes = static_cast<const std::uint8_t*>(data);
-        if (IsPackedPacket(bytes, *size)) {
-            std::uint8_t packed[kEosMaxPacket];
-            if (*size > sizeof(packed)) continue;
-            std::memcpy(packed, bytes, *size);
-            const auto* ask = static_cast<const EosReceiveOptions*>(options);
-            const std::size_t capacity = ask && ask->MaxDataSizeBytes ? ask->MaxDataSizeBytes : kMaxUnpacked;
-            const std::size_t original = UnpackPacket(packed, *size, static_cast<std::uint8_t*>(data), capacity);
-            if (!original) {
-                static std::atomic<bool> told{false};
-                if (!told.exchange(true))
-                    Log("PACK a packed packet (%u bytes) could not be unpacked into %zu bytes; it is dropped", *size,
-                        capacity);
-                continue;
-            }
-            *size = static_cast<std::uint32_t>(original);
-        }
         if (IsSidePacket(bytes, *size)) {
             StubInfo stub;
             const std::uint8_t* record = nullptr;
@@ -729,7 +561,7 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
             Log("MISSION sync: DIAG start message (%u bytes, channel %u) received, %zu record(s) missing", *size,
                 channel ? static_cast<unsigned>(*channel) : 255u, count);
         if (!count) return result;
-        if (*size > kGameMaxPacket) {  // cannot happen (the game sends nothing larger); never hand the game half a sync
+        if (*size > kEosMaxPacket) {  // cannot happen (EOS sends nothing larger); never hand the game half a sync
             Log("MISSION sync: a %u-byte start message without its loadout records was dropped", *size);
             continue;
         }

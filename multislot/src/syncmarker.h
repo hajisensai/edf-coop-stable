@@ -30,15 +30,11 @@ namespace multislot {
 constexpr const char* kSplitSyncKey = "EDF6MS_SPLITSYNC";  // value: the split format, kSplitSyncFormat
 constexpr const char* kSplitSyncSeqKey = "EDF6MS_SEQ";      // bumped on every publish, so EOS sends it to everyone
 constexpr std::int64_t kSplitSyncFormat = 1;
-// The marker's value 2: reads a split start message and packed packets too (packetfit.h). Readers of value 1 take
-// any value from 1 up as the split, so a member publishing 2 still gets split start messages from them.
-constexpr std::int64_t kPackedFormat = 2;
 
 // What the lobby says about one member, read on the EOS tick.
 struct LobbyMember {
     std::string id;     // EOS_ProductUserId as text
     bool marked;        // carries kSplitSyncKey >= kSplitSyncFormat
-    bool packed = false;  // carries kSplitSyncKey >= kPackedFormat
 };
 
 // The lobby state behind PeerReadsSplitSync, without EOS: tests drive it directly. Thread-safe.
@@ -56,10 +52,6 @@ public:
     bool InLobby() const;
     std::string LobbyId() const;
     bool Marked(const std::string& id) const;
-    bool Packed(const std::string& id) const;
-    // Everyone listed since we entered reads packed packets (someone listed and gone counts too: our copy of a
-    // lobby has been seen to lose members for a while, and a start message that one could not read would be refused).
-    bool EveryoneReadsPacked() const;
     // Members listed without the marker, for the log.
     std::vector<std::string> Unmarked() const;
 
@@ -68,7 +60,6 @@ private:
     std::string lobby_;
     std::vector<std::string> members_;  // everyone listed since we entered
     std::vector<std::string> marked_;   // seen with the marker since we entered
-    std::vector<std::string> packed_;   // seen with kPackedFormat since we entered
     std::vector<std::string> refused_;  // logged as unable to read a split message (once each per room)
 
     friend bool PeerReadsSplitSync(const void* remote);
@@ -79,11 +70,6 @@ SplitSyncRoom& SplitSync();
 // PacketFitSend's question about `remote` (an EOS_ProductUserId), see SetSplitSyncReaders. A member without the
 // marker is logged once per room. Thread-safe; asks EOS for the id's text, like the net log does on any thread.
 bool PeerReadsSplitSync(const void* remote);
-// PacketFitSend's question whether `remote` unpacks packed packets (SetPackedReaders). Thread-safe.
-bool PeerReadsPacked(const void* remote);
-// What this machine publishes as its marker: kSplitSyncFormat, or kPackedFormat once packing is available. Before
-// InstallSyncMarker.
-void SetMarkerFormat(std::int64_t format);
 
 // --- text attributes of other features (hostdata), on the same beat ---
 

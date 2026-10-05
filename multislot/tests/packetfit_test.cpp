@@ -459,100 +459,6 @@ std::vector<std::vector<std::uint8_t>> SidesOf(const std::vector<std::uint8_t>& 
     return sides;
 }
 
-// Who unpacks packed packets, and whether the whole room does (syncmarker.cpp in the plugin).
-std::vector<const void*> packers;
-bool roomPacks = false;
-bool FakePackers(const void* remote) { return std::find(packers.begin(), packers.end(), remote) != packers.end(); }
-bool FakeRoomPacks() { return roomPacks; }
-
-// Packed packets: smaller on the wire, the same bytes for the game.
-void TestPacking() {
-    Check(PackingAvailable(), "XPRESS is there (ntdll)");
-    // Like the game's data: runs of the same float bytes with a few changing ones.
-    std::vector<std::uint8_t> data(900);
-    for (std::size_t i = 0; i < data.size(); ++i) data[i] = i % 40 < 24 ? 0x3F : static_cast<std::uint8_t>(i / 40);
-    std::uint8_t packed[kEosMaxPacket];
-    const std::size_t size = PackPacket(data.data(), data.size(), packed, sizeof(packed));
-    Check(size && size < data.size() && IsPackedPacket(packed, size), "a repetitive packet packs smaller");
-    std::vector<std::uint8_t> out(kMaxUnpacked);
-    Check(UnpackPacket(packed, size, out.data(), out.size()) == data.size() &&
-              std::equal(data.begin(), data.end(), out.begin()),
-          "and unpacks to the same bytes");
-    Check(!PackPacket(data.data(), kPackMinimum - 1, packed, sizeof(packed)), "small packets go as they are");
-    std::vector<std::uint8_t> noise(900);
-    std::uint32_t x = 2463534242u;
-    for (auto& byte : noise) {
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        byte = static_cast<std::uint8_t>(x);
-    }
-    Check(!PackPacket(noise.data(), noise.size(), packed, sizeof(packed)), "packing that saves too little is not used");
-    Check(!UnpackPacket(packed, size, out.data(), data.size() - 1), "an original larger than the buffer is refused");
-    Check(!UnpackPacket(packed, size - 5, out.data(), out.size()), "a cut packed packet is refused");
-    std::vector<std::uint8_t> huge(packed, packed + size);
-    huge[8] = huge[9] = 0xFF;
-    Check(!UnpackPacket(huge.data(), huge.size(), out.data(), out.size()), "and one claiming more than the game's buffer");
-    Check(!IsPackedPacket(data.data(), data.size()), "a game packet is no packed packet");
-
-    // Sending: packed to members that unpack, as it is to the others.
-    const int packing = 1, plain = 2;
-    packers = {&packing};
-    SetPackedReaders(&FakePackers, &FakeRoomPacks);
-    sent.clear();
-    auto options = SendTo(&packing, data);
-    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 1 && IsPackedPacket(sent[0].bytes.data(), sent[0].bytes.size()) &&
-              sent[0].bytes.size() < data.size() && sent[0].channel == options.Channel,
-          "a member that unpacks gets it packed, on the game's channel");
-    options = SendTo(&plain, data);
-    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 2 && sent[1].bytes == data, "another gets it as it is");
-
-    // Receiving: unpacked before the game or the split sync gate sees it.
-    incoming.clear();
-    incoming.push_back({sent[0].bytes, nullptr, 0});
-    std::vector<std::uint8_t> buffer(0x1000);
-    std::uint32_t got = 0;
-    std::uint8_t channel = 0;
-    void* from = nullptr;
-    SocketId socket{};
-    const ReceiveOptions any{2, nullptr, 0x1000, nullptr};
-    Check(PacketFitReceive(nullptr, &any, &from, &socket, &channel, buffer.data(), &got) == 0 && got == data.size() &&
-              std::equal(data.begin(), data.end(), buffer.begin()),
-          "a packed packet reaches the game as it was sent");
-    incoming.push_back({huge, nullptr, 0});
-    Check(PacketFitReceive(nullptr, &any, &from, &socket, &channel, buffer.data(), &got) == kNotFound,
-          "a damaged one is dropped, never handed on");
-
-    // The start message: with everyone unpacking, eight players' records stay in it.
-    std::vector<Record> records;
-    for (int i = 0; i < 8; ++i) records.push_back(MakeRecord(i, 143));
-    StubInfo stubs[16];
-    ClearRecords();
-    roomPacks = true;
-    Stream everyone;
-    const auto inlined = HostMessage(records, everyone);
-    Check(FindStubs(inlined.data(), inlined.size(), stubs, 16) == 0 && inlined == DirectMessage(records) &&
-              inlined.size() > kMissionSyncBudget && inlined.size() <= kPackedSyncLimit,
-          "everyone unpacks: the start message keeps all eight records, byte for byte the game's");
-    roomPacks = false;
-    ClearRecords();
-    Stream someone;
-    const auto split = HostMessage(records, someone);
-    Check(FindStubs(split.data(), split.size(), stubs, 16) > 0, "someone does not: records go beside it as before");
-    SetSyncBudget(200);
-    roomPacks = true;
-    ClearRecords();
-    Stream test;
-    const auto tested = HostMessage(records, test);
-    Check(FindStubs(tested.data(), tested.size(), stubs, 16) > 0, "a test budget splits even when everyone unpacks");
-    SetSyncBudget(0);
-    roomPacks = false;
-    SetPackedReaders(nullptr, nullptr);
-    ClearRecords();
-    sent.clear();
-    incoming.clear();
-}
-
 void TestHold() {
     SetPacketFitClock(&FakeClock);
     ClearRecords();
@@ -685,13 +591,10 @@ std::size_t Count(const std::string& text, const char* needle) {
 
 void TestLogLines(const std::wstring& path) {
     const std::string log = ReadLog(path);
-    // Eight players: the round trip, then the gate, hold and packing tests build that sync again (packing: once
-    // for a room where someone does not unpack, once with a test budget that moves more).
-    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 5 &&
-              Count(log, "1 of them are sent beside it") == 4 && Count(log, "12 loadout records") == 1,
+    // Eight players: the round trip, then the gate and hold tests build that sync again.
+    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 3 &&
+              Count(log, "1 of them are sent beside it") == 3 && Count(log, "12 loadout records") == 1,
           "the host logs each sync that sends records beside the message");
-    Check(Count(log, "8 loadout records make the start message") == 1 && Count(log, "packed it fits one EOS packet") == 1,
-          "and the one that keeps every record because everyone unpacks");
     Check(Count(log, "MISSION sync: 7 loadout records") == 0, "a sync that fits logs nothing");
     Check(Count(log, "held until 1 loadout record(s) arrive, the first for player index 7") > 0 &&
               Count(log, "arrived beside the start message") > 0 && Count(log, "handed to the game") > 0,
@@ -737,7 +640,6 @@ int main(int argc, char** argv) {
     TestRoundTrip(12, true);
     TestSendGate();
     TestHold();
-    TestPacking();
     TestOversizeDiagnostic();
     if (!logPath.empty()) TestLogLines(logPath);
     if (failures) {

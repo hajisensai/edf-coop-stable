@@ -98,18 +98,19 @@ void FlushRecords(void* stream);  // after MissionSync_Res's record loop (78D756
 void* PacketFitCallHandler(std::uint32_t rva);
 MidHandler PacketFitHookHandler(std::uint32_t rva);
 
-// EOS P2P transport: side packets go out ahead of every packet that carries a stub (so a resent sync resends
-// them too) and are taken out of what the game receives. A packet whose stubs are not all known yet is held
-// until their records arrive and then handed to the game: the sync goes out reliably (EDF6DirectNet), so it is
-// acknowledged on arrival and dropping it would cost the game a resend about three seconds later. Held packets
-// are bounded (kHeldPackets, oldest dropped) and given up after kHeldPacketMs, longer than the ~26 s over which
-// the game resends a sync (see the top of this file). A held packet reaches the game after packets that arrived
-// behind it; dropping it, as before, reordered the same way.
+// EOS P2P transport. The game encrypts every datagram (AES-CTR with a CRC32C, 12CEA10, before EOS_P2P_SendPacket;
+// decrypted in 12CDF20 after EOS_P2P_ReceivePacket), so a stub is never visible in what passes these wrappers: it
+// only exists in the plaintext message, which FlushRecords and RecordReadHook see. (Until 2026-10-05 the wrappers
+// looked for stubs in the ciphertext, never found one, and no record was ever sent: every split sync left its
+// players out on the members' machines.)
 //
-// A packet with a stub only goes to a member that reads it (SetSplitSyncReaders). Anyone else gets neither it nor
-// its side packets and the game is told EOS_LimitExceeded - what EOS answers for a packet above its limit (the
-// 2026-09-30 DirectNet logs: "EOS SendPacket ... failed: EOS_LimitExceeded"), i.e. what that member got before the
-// split - since a machine without the split reads a stub as garbage (syncmarker.h).
+// So the host remembers the records its last sync moved out (FlushRecords), and the first packet that goes to a
+// member after that carries them ahead of itself as side packets of our own (reliable, kSideChannel, not
+// encrypted by the game): the sync is written before it is sent, so the records go before it. Only members that
+// read a split sync get them (SetSplitSyncReaders). A member takes side packets out of what its game receives. When
+// its game reads a stub whose record is not here yet (they travel apart), RecordReadHook waits for it up to
+// kRecordWaitMs, receiving from EOS itself: side packets are stored, anything else is held (kHeldPackets, oldest
+// dropped) and handed to the game, in order, before anything newer.
 using EosResult = std::int32_t;
 struct EosSendOptions {
     std::int32_t ApiVersion;
@@ -134,7 +135,10 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
                            std::uint32_t* size);
 void SetEosFunctions(EosSendFn send, EosReceiveFn receive);
 constexpr EosResult kEosLimitExceeded = 22;  // EOS_LimitExceeded
-constexpr std::size_t kHeldPackets = 8;
+constexpr std::size_t kHeldPackets = 512;
+constexpr unsigned long long kRecordWaitMs = 1500;
+// How long RecordReadHook waits for a missing record (tests: 0, only what has arrived).
+void SetRecordWait(unsigned long long ms);
 constexpr unsigned long long kHeldPacketMs = 30000;
 // Who reads a split sync (syncmarker.h: PeerReadsSplitSync). Unset: nobody, so no split sync is ever sent.
 using SplitSyncReaders = bool (*)(const void* remote);

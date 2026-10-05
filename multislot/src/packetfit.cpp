@@ -123,10 +123,28 @@ constexpr std::size_t kMaxStubsPerPacket = kMaxPlayers;
 
 SplitSyncReaders splitSyncReaders = nullptr;
 std::size_t syncBudget = kMissionSyncBudget;  // [Test] SplitSyncBudget lowers it
+unsigned long long recordWaitMs = kRecordWaitMs;
+
+// The records the last sync this machine wrote moved out, and the members that got them.
+struct Outgoing {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
+    std::vector<const void*> sentTo;
+    unsigned long long since = 0;
+} outgoing;
+
+// What the game's last receive asked EOS: what RecordReadHook receives with while it waits for a record.
+struct LastReceive {
+    bool known = false;
+    void* handle = nullptr;
+    const void* localUser = nullptr;
+    std::int32_t apiVersion = 2;
+} lastReceive;
 
 unsigned long long SystemClock() { return GetTickCount64(); }
 PacketFitClock packetClock = &SystemClock;
 
+constexpr std::size_t kGameReceiveBuffer = 0x1000;  // what the game receives into (12C8D1D)
 struct EosReceiveOptions {  // EOS_P2P_ReceivePacketOptions
     std::int32_t ApiVersion;
     const void* LocalUserId;
@@ -212,9 +230,8 @@ bool DeliverHeld(const void* options, void** peer, void* socket, std::uint8_t* c
     }
     ReleaseSRWLockExclusive(&heldLock);
     if (expired)
-        Log("MISSION sync: %zu held start message(s) dropped: their loadout records did not arrive within %llu s",
-            expired, kHeldPacketMs / 1000);
-    if (packet) Log("MISSION sync: held start message (%u bytes) handed to the game, its loadout records are here", *size);
+        Log("MISSION sync: %zu held game packet(s) dropped: the game did not read them within %llu s", expired,
+            kHeldPacketMs / 1000);
     return packet != nullptr;
 }
 
@@ -244,7 +261,7 @@ void Hold(void* const* peer, const void* socket, const std::uint8_t* channel, co
     slot.size = size;
     std::memcpy(slot.bytes, data, size);
     ReleaseSRWLockExclusive(&heldLock);
-    if (evicted) Log("MISSION sync: %zu start messages already wait for loadout records; the oldest is dropped", kHeldPackets);
+    if (evicted) Log("MISSION sync: %zu game packets are held already; the oldest is dropped", kHeldPackets);
 }
 
 // --- oversize diagnostic ---
@@ -368,6 +385,10 @@ void ClearRecords() {
     for (auto& entry : entries) entry.used = false;
     nextEntry = 0;
     ReleaseSRWLockExclusive(&storeLock);
+    AcquireSRWLockExclusive(&outgoing.lock);
+    outgoing.records.clear();
+    outgoing.sentTo.clear();
+    ReleaseSRWLockExclusive(&outgoing.lock);
 }
 
 void InitPacketFit(const unsigned char* gameBase) {
@@ -419,6 +440,7 @@ void FlushRecords(void* stream) {
     }
     const auto inlined = PlanInline(header, refs, syncBudget);
     std::size_t moved = 0;
+    std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> moving;
     for (std::size_t i = 0; i < batch.count; ++i) {
         const Pending& pending = batch.records[i];
         if (inlined[i]) {
@@ -430,6 +452,7 @@ void FlushRecords(void* stream) {
         stub.size = pending.size;
         stub.hash = RecordHash(pending.bytes, pending.size);
         StoreRecord(stub, pending.bytes);
+        moving.push_back({stub, std::vector<std::uint8_t>(pending.bytes, pending.bytes + pending.size)});
         std::uint8_t bytes[kStubBytes];
         WriteStub(bytes, stub);
         Append(stream, bytes, sizeof(bytes));
@@ -439,8 +462,56 @@ void FlushRecords(void* stream) {
         Log("MISSION sync: %zu loadout records would make the start message %zu bytes (EOS takes %zu per packet, so "
             "the message may hold %zu); %zu of them are sent beside it, the message is %zu bytes",
             batch.count, full, kEosMaxPacket, syncBudget, moved, StreamSize(stream));
+    if (moved) {
+        AcquireSRWLockExclusive(&outgoing.lock);
+        outgoing.records = std::move(moving);
+        outgoing.sentTo.clear();
+        outgoing.since = packetClock();
+        ReleaseSRWLockExclusive(&outgoing.lock);
+    }
     batch.stream = nullptr;
     batch.count = 0;
+}
+
+// Side packets: what a received one holds goes to the store. True when it was one.
+bool TakeSidePacket(const std::uint8_t* bytes, std::uint32_t size) {
+    if (!IsSidePacket(bytes, size)) return false;
+    StubInfo stub;
+    const std::uint8_t* record = nullptr;
+    if (!ParseSidePacket(bytes, size, stub, record))
+        Log("MISSION sync: a malformed side packet (%u bytes) was dropped", size);
+    else if (StoreRecord(stub, record))
+        Log("MISSION sync: loadout record of player index %d arrived beside the start message", stub.index);
+    return true;
+}
+
+// Waits for the record of `stub` (RecordReadHook, on the game thread): receives from EOS itself, keeps side
+// packets and holds the rest for the game, until the record is here or kRecordWaitMs passed.
+bool WaitForRecord(const StubInfo& stub) {
+    if (!lastReceive.known || !eosReceive) return false;
+    const EosReceiveOptions ask{lastReceive.apiVersion, lastReceive.localUser, static_cast<std::uint32_t>(kGameReceiveBuffer),
+                                nullptr};
+    std::vector<std::uint8_t> buffer(kGameReceiveBuffer);
+    const unsigned long long start = packetClock();
+    std::size_t held = 0;
+    for (;;) {
+        for (;;) {
+            void* peer = nullptr;
+            EosSocketId socket{};
+            std::uint8_t channel = 0;
+            std::uint32_t size = 0;
+            if (eosReceive(lastReceive.handle, &ask, &peer, &socket, &channel, buffer.data(), &size) != 0) break;
+            if (TakeSidePacket(buffer.data(), size)) continue;
+            Hold(&peer, &socket, &channel, buffer.data(), size);
+            ++held;
+        }
+        if (FindRecord(stub, nullptr) || packetClock() - start >= recordWaitMs) break;
+        Sleep(1);
+    }
+    const bool here = FindRecord(stub, nullptr);
+    Log("MISSION sync: waited %llu ms for the loadout record of player index %d: %s (%zu game packet(s) held for the "
+        "game meanwhile)", packetClock() - start, stub.index, here ? "here" : "still missing", held);
+    return here;
 }
 
 bool __fastcall RecordReadHook(void* context, void* record, void* stream) {
@@ -453,14 +524,11 @@ bool __fastcall RecordReadHook(void* context, void* record, void* stream) {
     position += kStubBytes;
     std::memcpy(Bytes(stream) + kStreamPosition, &position, sizeof(position));
     alignas(16) std::uint8_t scratch[kStreamObjectSize] = {};
-    if (!FindRecord(stub, scratch + kStreamData)) {
-        // The packet gate keeps this from happening; the player is left out (a negative index is skipped).
-        std::size_t stored = 0;
-        AcquireSRWLockShared(&storeLock);
-        for (const auto& entry : entries) stored += entry.used ? 1 : 0;
-        ReleaseSRWLockShared(&storeLock);
+    if (!FindRecord(stub, scratch + kStreamData) && !(WaitForRecord(stub) && FindRecord(stub, scratch + kStreamData))) {
+        // The player is left out (a negative index skips the copy; the game still builds that player, from whatever
+        // its record slot held - so this must not happen, and the log says so loudly).
         Log("MISSION sync: the loadout record of player index %d (%zu bytes) never arrived; that player is left out "
-            "(DIAG %zu record(s) here, %zu start message(s) held)", stub.index, stub.size, stored, heldCount.load());
+            "and will look wrong on this machine", stub.index, stub.size);
         const std::int32_t none = -1;
         std::memcpy(record, &none, sizeof(none));
         return true;
@@ -486,88 +554,58 @@ void SetEosFunctions(EosSendFn send, EosReceiveFn receive) {
 
 void SetSplitSyncReaders(SplitSyncReaders readers) { splitSyncReaders = readers; }
 
+void SetRecordWait(unsigned long long ms) { recordWaitMs = ms; }
+
 void SetSyncBudget(std::size_t budget) { syncBudget = budget && budget < kMissionSyncBudget ? budget : kMissionSyncBudget; }
 
 void SetPacketFitClock(PacketFitClock clock) { packetClock = clock ? clock : &SystemClock; }
 
 std::size_t HeldPacketCount() { return heldCount; }
 
+// The records of the last sync go to `options`' member ahead of the first packet to it since: each once.
+void SendRecordsAhead(void* handle, const EosSendOptions& options) {
+    std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
+    AcquireSRWLockExclusive(&outgoing.lock);
+    const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
+                     std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end() &&
+                     splitSyncReaders && splitSyncReaders(options.RemoteUserId);
+    if (due) {
+        outgoing.sentTo.push_back(options.RemoteUserId);
+        records = outgoing.records;
+    }
+    ReleaseSRWLockExclusive(&outgoing.lock);
+    for (const auto& [stub, bytes] : records) {
+        std::uint8_t packet[kSideHeader + kMaxRecordBytes];
+        EosSendOptions side = options;
+        side.Channel = kSideChannel;
+        side.Data = packet;
+        side.DataLengthBytes = static_cast<std::uint32_t>(BuildSidePacket(stub, bytes.data(), packet, sizeof(packet)));
+        side.Reliability = kReliableOrdered;
+        side.AllowDelayedDelivery = 1;
+        const EosResult sent = eosSend(handle, &side);
+        Log("MISSION sync: loadout record of player index %d sent beside the start message: result %d", stub.index, sent);
+    }
+}
+
 EosResult PacketFitSend(void* handle, const EosSendOptions* options) {
-    if (options && options->Data && options->DataLengthBytes >= kStubBytes) {
-        StubInfo stubs[kMaxStubsPerPacket];
-        const std::size_t found = std::min(
-            FindStubs(static_cast<const std::uint8_t*>(options->Data), options->DataLengthBytes, stubs, kMaxStubsPerPacket),
-            kMaxStubsPerPacket);
-        if (found && !(splitSyncReaders && splitSyncReaders(options->RemoteUserId))) {
-            static std::atomic<bool> logged{false};
-            if (!splitSyncReaders && !logged.exchange(true))
-                Log("MISSION sync: nobody is known to read a split start message (the lobby marker is unavailable); "
-                    "a start message too large for one packet is not sent");
-            return kEosLimitExceeded;
-        }
-        for (std::size_t i = 0; i < found; ++i) {
-            std::uint8_t record[kMaxRecordBytes];
-            std::uint8_t packet[kSideHeader + kMaxRecordBytes];
-            if (!FindRecord(stubs[i], record)) continue;  // not ours to send (a member relaying cannot happen)
-            EosSendOptions side = *options;
-            side.Channel = kSideChannel;
-            side.Data = packet;
-            side.DataLengthBytes = static_cast<std::uint32_t>(BuildSidePacket(stubs[i], record, packet, sizeof(packet)));
-            side.Reliability = kReliableOrdered;
-            side.AllowDelayedDelivery = 1;
-            const EosResult sent = eosSend(handle, &side);
-            Log("MISSION sync: DIAG side packet of player index %d (%u bytes, channel %u) sent: result %d", stubs[i].index,
-                side.DataLengthBytes, static_cast<unsigned>(side.Channel), sent);
-        }
-    }
-    const EosResult result = eosSend(handle, options);
-    if (options && options->Data && options->DataLengthBytes >= kStubBytes) {
-        StubInfo stubs[kMaxStubsPerPacket];
-        if (const std::size_t found = FindStubs(static_cast<const std::uint8_t*>(options->Data), options->DataLengthBytes,
-                                                stubs, kMaxStubsPerPacket))
-            Log("MISSION sync: DIAG start message (%u bytes, channel %u, %zu stub(s)) sent: result %d",
-                options->DataLengthBytes, static_cast<unsigned>(options->Channel), found, result);
-    }
-    return result;
+    if (options && options->RemoteUserId) SendRecordsAhead(handle, *options);
+    return eosSend(handle, options);
 }
 
 EosResult PacketFitReceive(void* handle, const void* options, void** peer, void* socket, std::uint8_t* channel, void* data,
                            std::uint32_t* size) {
-    static std::atomic<bool> calledOnce{false};
-    if (!calledOnce.exchange(true)) {
-        const auto* ask = static_cast<const EosReceiveOptions*>(options);
-        Log("MISSION sync: DIAG the game reads packets through the split sync gate (options v%d, channel %s)",
-            ask ? ask->ApiVersion : -1, ask && ask->ApiVersion >= 2 && ask->RequestedChannel ? "asked" : "any");
+    if (const auto* ask = static_cast<const EosReceiveOptions*>(options)) {
+        lastReceive.handle = handle;
+        lastReceive.localUser = ask->LocalUserId;
+        lastReceive.apiVersion = ask->ApiVersion;
+        lastReceive.known = true;
     }
     for (;;) {
         if (data && size && DeliverHeld(options, peer, socket, channel, data, size)) return 0;
         const EosResult result = eosReceive(handle, options, peer, socket, channel, data, size);
         if (result != 0 || !data || !size) return result;
-        const auto* bytes = static_cast<const std::uint8_t*>(data);
-        if (IsSidePacket(bytes, *size)) {
-            StubInfo stub;
-            const std::uint8_t* record = nullptr;
-            if (!ParseSidePacket(bytes, *size, stub, record))
-                Log("MISSION sync: a malformed side packet (%u bytes) was dropped", *size);
-            else if (StoreRecord(stub, record))
-                Log("MISSION sync: loadout record of player index %d arrived beside the start message", stub.index);
-            else
-                Log("MISSION sync: DIAG side packet of player index %d again (already here)", stub.index);
-            continue;  // never the game's; a held packet it completes goes out next
-        }
-        StubInfo missing;
-        const std::size_t count = MissingRecords(bytes, *size, missing);
-        if (StubInfo stubs[kMaxStubsPerPacket]; FindStubs(bytes, *size, stubs, kMaxStubsPerPacket))
-            Log("MISSION sync: DIAG start message (%u bytes, channel %u) received, %zu record(s) missing", *size,
-                channel ? static_cast<unsigned>(*channel) : 255u, count);
-        if (!count) return result;
-        if (*size > kEosMaxPacket) {  // cannot happen (EOS sends nothing larger); never hand the game half a sync
-            Log("MISSION sync: a %u-byte start message without its loadout records was dropped", *size);
-            continue;
-        }
-        Hold(peer, socket, channel, bytes, *size);
-        Log("MISSION sync: start message (%u bytes) held until %zu loadout record(s) arrive, the first for player "
-            "index %d", *size, count, missing.index);
+        if (TakeSidePacket(static_cast<const std::uint8_t*>(data), *size)) continue;  // never the game's
+        return result;
     }
 }
 

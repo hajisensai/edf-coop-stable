@@ -78,18 +78,30 @@ int wmain(int argc, wchar_t** argv) {
     GetEnvironmentVariableA(gamenet::kUserVariable, user, sizeof(user));
     machine.user = user;
 
-    // The game's other DLLs (steam_api64, umbra_sandlot, D3DCompiler) come from the game folder; EOS from here.
-    SetDllDirectoryW(gameFolder.c_str());
+    // The two DLLs of its own EDF.dll imports come from the game folder, loaded by their full paths so that nothing
+    // else does: the folder also holds EDFModLoader's winmm.dll, which EDF.dll's winmm import would otherwise find
+    // there (and which then runs in this process). The system's DLLs come from the system, EOS from next to this
+    // program.
+    for (const wchar_t* own : {L"\\steam_api64.dll", L"\\umbra_sandlot.dll"})
+        if (!LoadLibraryExW((gameFolder + own).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+            std::printf("FAIL: %ls cannot be loaded from the game folder (error %lu)\n", own + 1, GetLastError());
+            return 1;
+        }
     machine.game = LoadLibraryW((gameFolder + L"\\EDF.dll").c_str());
     if (!machine.game) {
         std::printf("FAIL: EDF.dll cannot be loaded from %s (error %lu)\n", Narrow(gameFolder).c_str(), GetLastError());
         return 1;
     }
-    machine.plugin = LoadLibraryW((machine.work + L"\\Mods\\Plugins\\EDF6Coop.dll").c_str());
+    // A seat without EDF6Coop (no DLL in its Mods\Plugins) plays the game as it ships.
+    const std::wstring pluginPath = machine.work + L"\\Mods\\Plugins\\EDF6Coop.dll";
+    const bool plain = GetFileAttributesW(pluginPath.c_str()) == INVALID_FILE_ATTRIBUTES;
+    machine.plugin = plain ? nullptr : LoadLibraryW(pluginPath.c_str());
     using Load = bool(EDFMLAPI*)(PluginInfo*);
     const auto load = machine.plugin ? reinterpret_cast<Load>(GetProcAddress(machine.plugin, "EML6_Load")) : nullptr;
     PluginInfo info{};
-    if (!load || !load(&info)) {
+    if (plain) {
+        gamenet::Result("plugin", "none (the game as it ships)");
+    } else if (!load || !load(&info)) {
         std::printf("FAIL: EDF6Coop did not load (error %lu)\n", GetLastError());
         DumpLog(machine);
         return 1;

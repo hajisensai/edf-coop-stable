@@ -21,7 +21,7 @@ constexpr std::uintptr_t kWriteInt = 0x12B5580, kWriteU8 = 0x12B5790, kWriteU16 
 constexpr std::uintptr_t kReadInt = 0x12B4660, kReadBlock = 0x12B4900;
 constexpr std::size_t kSerializeSize = 0x5F8, kSerializeRead = 0x8, kSerializeLength = 0x5F0;
 // GameDataMgr fields.
-constexpr std::size_t kWeaponEntries = 0x6E68;
+constexpr std::size_t kWeaponEntries = 0x6E68, kWeaponTable = 0x130;
 constexpr std::size_t kMission = 0x48, kDifficulty = 0x4C, kClass = 0x6E90, kMarker = 0x6E94, kWeapons = 0x6E98,
                       kArmor = 0x6F88, kRequestRecords = 0x14FF4, kPlayers = 0x14FF8, kRecords = 0x14C78,
                       kRecordSize = 0xD4;
@@ -280,6 +280,19 @@ bool MissionSync::Build(Transport& transport, const std::vector<std::string>& me
     }
     Put<std::int32_t>(gdm_, kArmor + loadout.soldierClass * 4, loadout.armor);
     Put<std::int32_t>(gdm_, kRequestRecords, 1);
+    // The WEAPONTABLE as far as its row count (E23F0 on GameDataMgr+0x130: the table's SGO document at +0x188,
+    // its node index at +0x190; the node's entry holds the rows at +0x58), which EDF6Coop's weapon guard asks for.
+    auto* rows = static_cast<std::uint8_t*>(game.New(0x60));
+    Put<std::uint32_t>(rows, 0x58, loadout.weaponRows);
+    auto* entry = static_cast<std::uint8_t*>(game.New(40));
+    Put<void*>(entry, 0, rows);
+    auto* index = static_cast<std::uint8_t*>(game.New(4));
+    auto* document = static_cast<std::uint8_t*>(game.New(0x60));
+    Put<void*>(document, 8, index);
+    Put<std::uint64_t>(document, 0x18, 1);
+    Put<void*>(document, 0x28, entry);
+    Put<void*>(gdm_, kWeaponTable + 0x188, document);
+    Put<std::uint32_t>(gdm_, kWeaponTable + 0x190, 0);
     *game.Fn<void**>(kGameDataMgr) = gdm_;
     *game.Fn<void**>(kNetwork) = game.New(kNetworkSize);
 
@@ -358,9 +371,10 @@ std::int32_t MissionSync::Difficulty() const { return *reinterpret_cast<const st
 
 std::vector<std::uint8_t> MissionSync::Record(int slot) const {
     using RecordFn = const std::uint8_t* (*)(int);
-    const auto record = reinterpret_cast<RecordFn>(
-        GetProcAddress(transport_->game().machine->plugin, "EDF6Coop_LoadoutRecord"));
-    const std::uint8_t* at = record ? record(slot) : nullptr;
+    const HMODULE plugin = transport_->game().machine->plugin;
+    const auto record = plugin ? reinterpret_cast<RecordFn>(GetProcAddress(plugin, "EDF6Coop_LoadoutRecord")) : nullptr;
+    // Without EDF6Coop, the game's own four records.
+    const std::uint8_t* at = record ? record(slot) : slot < 4 ? gdm_ + kRecords + slot * kRecordSize : nullptr;
     return at ? std::vector<std::uint8_t>(at, at + kRecordSize) : std::vector<std::uint8_t>();
 }
 

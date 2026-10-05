@@ -42,6 +42,8 @@ bool PrepareMachine(const std::wstring& work, const std::wstring& plugin, const 
     const std::wstring mods = work + L"\\Mods", plugins = mods + L"\\Plugins";
     for (const auto& path : {work, mods, plugins}) CreateDirectoryW(path.c_str(), nullptr);
     DeleteFileW((plugins + L"\\EDF6Coop.log").c_str());
+    if (ini.empty())  // a machine without EDF6Coop
+        return DeleteFileW((plugins + L"\\EDF6Coop.dll").c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
     return CopyFileW(plugin.c_str(), (plugins + L"\\EDF6Coop.dll").c_str(), FALSE) &&
            WriteFileText(plugins + L"\\EDF6Coop.ini", ini);
 }
@@ -187,11 +189,14 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring home = folder + L"\\" + Wide(seat.user);
         Check(PrepareMachine(home, plugin, seat.ini), seat.user + ": work folder prepared");
         machines.push_back(machine);
+        for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), value.c_str());
+        SetEnvironmentVariableA("EDF6NET_SEAT", std::to_string(machines.size() - 1).c_str());
         if (!Spawn(machines.back(), exe, gameFolder, home, section)) {
             std::printf("FAIL: %s cannot be started (error %lu)\n", seat.user.c_str(), GetLastError());
             CloseHandle(job);  // ends the machines started already
             return 1;
         }
+        for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), nullptr);
         AssignProcessToJobObject(job, machines.back().process.hProcess);
         ResumeThread(machines.back().process.hThread);  // started suspended, so it is in the job from its first instruction
     }
@@ -203,6 +208,7 @@ int wmain(int argc, wchar_t** argv) {
         // Its own word (under EDF6NET_DEBUGGER the exit code is the debugger's), and an exit that agrees with it.
         Check(Result(machine, "exit") == "0" && (debugged || machine.exitCode == 0),
               machine.user + " (" + machine.role + ") passed its own checks");
+        if (Result(machine, "plugin").rfind("none", 0) == 0) continue;  // the game alone writes no EDF6Coop.log
         Check(Result(machine, "log").find("bytes") != std::string::npos &&
                   machine.text.find("==== EDF6Coop ") != std::string::npos,
               machine.user + "'s EDF6Coop.log was read");

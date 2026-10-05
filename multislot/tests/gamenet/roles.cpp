@@ -8,6 +8,7 @@
 #include "missionsync.h"
 #include "machine.h"
 #include "net_shared.h"
+#include "../../../src/eos_min.h"
 
 namespace gamenet {
 namespace {
@@ -156,9 +157,17 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
         options.MaxLobbyMembers = 8;
         Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
     } else {
+        // Guests come in one after another, in seat order (EDF6NET_SEAT): seat n joins once n are in.
+        char seatText[8]{};
+        GetEnvironmentVariableA("EDF6NET_SEAT", seatText, sizeof(seatText));
+        const std::uint32_t seat = static_cast<std::uint32_t>(std::atoi(seatText));
         void* details = nullptr;
         const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
-        if (!TickUntil(machine, 10000, [&] { return (details = roomDetails()) != nullptr; })) {
+        const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+        if (!TickUntil(machine, 10000, [&] {
+                if (roomCount() < seat) return false;
+                return (details = roomDetails()) != nullptr;
+            })) {
             Result("room", "no room to join");
             return false;
         }
@@ -212,11 +221,39 @@ bool Connect(Machine& machine, const Room& room, Transport& transport) {
 constexpr std::uint32_t kProbeType = 0x2700;  // a record type nothing in the game subscribes to
 
 // Each machine sends every other one a reliable record through the game's controller and waits for theirs.
-int Link(Machine& machine, bool host) {
+// Side packets as EDF6Coop sends them beside a split start message (packetfit.cpp: kSideMagic, index, size, hash,
+// the record), through EDF.dll's EOS import, to everyone else: a game without EDF6Coop must take no harm from them.
+void SendSidePackets(const Machine& machine, const Room& room, int count) {
+    const auto send = Import<std::int32_t (*)(void*, const EOS_P2P_SendPacketOptions*)>(machine, "EOS_P2P_SendPacket");
+    EOS_P2P_SocketId socket{1, {}};
+    strncpy_s(socket.SocketName, room.lobby.c_str(), _TRUNCATE);  // the game's socket is named after the lobby
+    for (const auto& member : room.members) {
+        if (member == machine.user) continue;
+        for (int i = 0; i < count; ++i) {
+            std::vector<std::uint8_t> packet = {'M', 'S', 'l', 'o', 't', 'S', 'i', 'd', 1, 141, 0};
+            for (int b = 0; b < 8 + 141; ++b) packet.push_back(static_cast<std::uint8_t>(b * 37 + i));
+            EOS_P2P_SendPacketOptions options{};
+            options.ApiVersion = 3;
+            options.LocalUserId = static_cast<EOS_ProductUserId>(const_cast<void*>(Self(machine)));
+            options.RemoteUserId =
+                static_cast<EOS_ProductUserId>(const_cast<void*>(FakeExport<const void* (*)(const char*)>("FakeNet_User")(member.c_str())));
+            options.SocketId = &socket;
+            options.Channel = 0x4D;  // packetfit.h: kSideChannel
+            options.DataLengthBytes = static_cast<std::uint32_t>(packet.size());
+            options.Data = packet.data();
+            options.Reliability = EOS_PR_ReliableOrdered;
+            options.bAllowDelayedDelivery = 1;
+            Result("side-packet", "to %s: result %d", member.c_str(), send(kPlatform, &options));
+        }
+    }
+}
+
+int Link(Machine& machine, bool host, int sidePackets = 0) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
     Transport transport;
     if (!Connect(machine, room, transport)) return 1;
+    if (host && sidePackets) SendSidePackets(machine, room, sidePackets);
     std::vector<std::string> received;
     transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
         received.emplace_back(reinterpret_cast<const char*>(data), size);
@@ -283,7 +320,12 @@ int Mission(Machine& machine, bool host) {
     if (!Connect(machine, room, transport)) return 1;
     int place = 0;
     while (room.members[static_cast<std::size_t>(place)] != machine.user) ++place;
-    const Loadout loadout{place % 4, 500 + place, 1000 + 37 * place, 100 + 37 * place};
+    Loadout loadout{place % 4, 500 + place, 1000 + 37 * place, 100 + 37 * place};
+    // EDF6NET_FIRST_WEAPON / EDF6NET_WEAPON_ROWS: this machine's weapons and its WEAPONTABLE (a mod's, say).
+    char setting[16]{};
+    if (GetEnvironmentVariableA("EDF6NET_FIRST_WEAPON", setting, sizeof(setting))) loadout.firstWeapon = std::atoi(setting);
+    if (GetEnvironmentVariableA("EDF6NET_WEAPON_ROWS", setting, sizeof(setting)))
+        loadout.weaponRows = static_cast<std::uint32_t>(std::atoi(setting));
     MissionSync sync;
     if (!sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) {
         Result("mission", "the sync could not be set up");
@@ -319,7 +361,10 @@ int Mission(Machine& machine, bool host) {
         std::memcpy(&soldierClass, record.data(), 4);
         std::memcpy(&marker, record.data() + 4, 4);
         std::memcpy(&armor, record.data() + 0x20, 4);
-        Result("record", "%d class=%d marker=%d armor=%d fnv=%016llx", slot, soldierClass, marker, armor, Fnv(record));
+        std::int32_t weapons[6]{};
+        std::memcpy(weapons, record.data() + 8, sizeof(weapons));  // the six ids (weaponguard.h: kLoadoutWeapons)
+        Result("record", "%d class=%d marker=%d armor=%d weapons=%d,%d,%d,%d,%d,%d fnv=%016llx", slot, soldierClass, marker,
+               armor, weapons[0], weapons[1], weapons[2], weapons[3], weapons[4], weapons[5], Fnv(record));
     }
     StayUntilEveryoneIsDone(machine, transport, sync, room.members.size());
     return done ? 0 : 1;
@@ -335,6 +380,7 @@ int RunRole(Machine& machine, const std::string& role) {
         return EnterRoom(machine, host, room) ? 0 : 1;
     }
     if (step == "link") return Link(machine, host);
+    if (step == "sidelink") return Link(machine, host, 5);
     if (step == "mission") return Mission(machine, host);
     Result("role", "unknown role %s", role.c_str());
     return 2;

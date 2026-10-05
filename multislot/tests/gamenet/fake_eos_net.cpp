@@ -276,6 +276,14 @@ EXPORT const char* FakeNet_Self() {
     Open();
     return F().self.c_str();
 }
+// How many are in the room.
+EXPORT std::uint32_t FakeNet_RoomCount() {
+    Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    if (!Open()) return 0;
+    Locked locked(f.netLock);
+    return f.net->lobby.count;
+}
 // A details handle for the room, as a room search hands one to the game (EOS_LobbyDetails_Release frees it).
 EXPORT void* FakeNet_RoomDetails() {
     Fake& f = F();

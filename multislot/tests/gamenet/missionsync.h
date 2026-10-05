@@ -24,6 +24,7 @@ struct Loadout {
     std::int32_t marker;        // GameDataMgr+0x6E94, travels in the record (rec+8)
     std::int32_t armor;
     std::int32_t firstWeapon;  // six weapons from it, 11 apart
+    std::uint32_t weaponRows = 1564;  // this machine's WEAPONTABLE (the stock one has 1564)
 };
 
 class MissionSync {

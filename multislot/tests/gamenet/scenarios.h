@@ -5,6 +5,7 @@ struct Seat {
     std::string user;  // EOS ProductUserId text
     std::string role;  // roles.cpp
     std::string ini;   // its EDF6Coop.ini
+    std::vector<std::pair<std::string, std::string>> env = {};  // this machine's own (roles.cpp: EDF6NET_*_WEAPON*)
 };
 
 struct Scenario {
@@ -55,6 +56,8 @@ inline void CheckRoom(const std::vector<Spawned>& machines, const gamenet::Netwo
     Check(network.lobby.count == machines.size(), "EOS has every machine in the room");
 }
 
+inline void CheckLink(const std::vector<Spawned>& machines, const gamenet::Network& network, bool marked);
+inline void CheckMarkedLink(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckLink(m, n, true); }
 inline void CheckMarkedRoom(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckRoom(m, n); }
 
 // Every packet that crossed the fake EOS, in order.
@@ -75,8 +78,8 @@ inline std::vector<WirePacket> Wire(const gamenet::Network& network) {
     return packets;
 }
 
-inline void CheckLink(const std::vector<Spawned>& machines, const gamenet::Network& network) {
-    CheckRoom(machines, network);
+inline void CheckLink(const std::vector<Spawned>& machines, const gamenet::Network& network, bool marked = true) {
+    CheckRoom(machines, network, marked);
     for (const auto& machine : machines) {
         int received = 0;
         for (auto it = machine.results.equal_range("received"); it.first != it.second; ++it.first)
@@ -154,13 +157,51 @@ inline void CheckLossyMission(const std::vector<Spawned>& m, const gamenet::Netw
 inline void CheckRushedMission(const std::vector<Spawned>& m, const gamenet::Network& n) {
     CheckMission(m, n, {true, false, false, true});
 }
+// A member without EDF6Coop gets side packets as EDF6Coop sends them beside a split start message (it gets them
+// since the fix of mission8rushed: they go to everyone). Its game must drop them and run on. (A start message that
+// is split is another matter: the game without EDF6Coop cannot read one and writes past its player records, which
+// is why a room of five or more needs EDF6Coop, and why [Test] SplitSyncBudget is for rooms where everyone runs it.)
+inline void CheckPlainSidePackets(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckLink(machines, network, false);
+    const auto& host = machines.front();
+    int sent = 0;
+    for (auto it = host.results.equal_range("side-packet"); it.first != it.second; ++it.first)
+        sent += it.first->second.find("result 0") != std::string::npos ? 1 : 0;
+    Check(sent == 5, std::to_string(sent) + " side packets went to the guest without EDF6Coop");
+    Check(Result(machines.back(), "plugin").rfind("none", 0) == 0, "the guest runs the game without EDF6Coop");
+}
+
+// Player 4 has a mod's longer weapon table and two weapons past the stock one: its own machine keeps them, every
+// other machine replaces them with its own weapon of that class and slot (EDF6Coop's weapon guard, weaponguard.h),
+// before the game builds that soldier.
+inline void CheckModWeapons(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEosAcceptedAll(network);
+    for (std::size_t i = 0; i < machines.size(); ++i) {
+        const auto& machine = machines[i];
+        Check(Result(machine, "sync").rfind("done", 0) == 0, machine.user + " finished the sync: " + Result(machine, "sync"));
+        std::string record;
+        for (auto it = machine.results.equal_range("record"); it.first != it.second; ++it.first)
+            if (it.first->second.rfind("3 ", 0) == 0) record = it.first->second;
+        const bool own = i == 3;
+        const std::string weapons = own ? "weapons=1530,1541,1552,1563,1574,1585 " : "weapons=1530,1541,1552,1563,0,0 ";
+        Check(record.find(weapons) != std::string::npos,
+              machine.user + (own ? " keeps its own mod weapons" : " replaced player 4's two unknown weapons") + " (" +
+                  record + ")");
+        const bool logged = machine.text.find("names weapon 1574 (slot 5)") != std::string::npos &&
+                            machine.text.find("names weapon 1585 (slot 6)") != std::string::npos;
+        Check(logged != own, machine.user + (own ? " replaced none of its own" : " logged both replacements"));
+    }
+}
+
 inline void CheckBusyMission(const std::vector<Spawned>& m, const gamenet::Network& n) {
     CheckMission(m, n, {true, false, false});
     Check(m.front().results.count("shared-batch") > 0,
           "the start message shared a controller record with a background message (" + Result(m.front(), "shared-batch") + ")");
 }
 
-// host0...01 hosts; guest...02 and on join, in that order.
+// host0...01 hosts; guest...02 and on join one after another, in that order (roles.cpp: EDF6NET_SEAT), so seat n
+// is player n+1.
 inline std::vector<Seat> Seats(int count, const std::string& step, const std::string& ini) {
     std::vector<Seat> seats;
     for (int i = 0; i < count; ++i) {
@@ -174,7 +215,7 @@ inline std::vector<Seat> Seats(int count, const std::string& step, const std::st
 inline const std::vector<Scenario>& Scenarios() {
     static const std::vector<Scenario> all = {
         {"room", Seats(2, "room", BaseIni()), 60000, &CheckMarkedRoom},
-        {"link", Seats(2, "link", BaseIni()), 90000, &CheckLink},
+        {"link", Seats(2, "link", BaseIni()), 90000, &CheckMarkedLink},
         // Two players, a test budget small enough that the second record goes beside the start message: what two
         // people testing the split by hand ran (SplitSyncBudget).
         {"mission2", Seats(2, "mission", BaseIni("[Test]\r\nSplitSyncBudget=200\r\n")), 150000, &CheckSplitMission},
@@ -192,6 +233,15 @@ inline const std::vector<Scenario>& Scenarios() {
         // Every frame every machine says something else too (an event message of 16 bytes), which shares the
         // controller record with the start message: the room the plugin leaves for it (kBatchedAllowance).
         {"mission8busy", Seats(8, "mission", BaseIni()), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
+        {"sidelink", {Seats(2, "sidelink", BaseIni()).front(), Seats(2, "sidelink", "")[1]}, 90000,
+         &CheckPlainSidePackets, {{"EDF6NET_RUSH", "1"}}},
+        {"mission4modweapon",
+         [] {
+             auto seats = Seats(4, "mission", BaseIni());
+             seats[3].env = {{"EDF6NET_FIRST_WEAPON", "1530"}, {"EDF6NET_WEAPON_ROWS", "1590"}};
+             return seats;
+         }(),
+         150000, &CheckModWeapons},
         // A mission started the moment the last player is in, while Epic takes 2.5 s to relay each member's lobby
         // attributes (the split sync marker among them) to the others.
         {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,

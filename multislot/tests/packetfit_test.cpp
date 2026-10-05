@@ -434,25 +434,41 @@ EosSendOptions SendTo(const void* remote, const std::vector<std::uint8_t>& packe
     return options;
 }
 
-void TestSendGate() {
+// The records of a split sync go to every member ahead of the first packet to it, marker or not: the sync reaches
+// them anyway (it is encrypted), so holding records back only left a member waiting for them.
+int askedReaders = 0;
+bool CountingReaders(const void* remote) {
+    ++askedReaders;
+    return FakeReaders(remote);
+}
+
+void TestSendToEveryMember() {
     ClearRecords();
     const auto packet = SplitPacket();
     const int marked = 1, unmarked = 2;
     readers = {&marked};
+    SetSplitSyncReaders(&CountingReaders);
+    askedReaders = 0;
     sent.clear();
     auto options = SendTo(&unmarked, packet);
-    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 1 && sent[0].bytes == packet,
-          "a member without the split gets the game's packets, never side packets");
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 2 && sent[0].channel == kSideChannel &&
+              sent[1].bytes == packet,
+          "a member without the marker gets the side packet, then the game's packet");
     options = SendTo(&marked, packet);
-    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 3 && sent.back().bytes == packet &&
-              sent[1].channel == kSideChannel,
-          "a member with the split gets the side packet, then the game's packet");
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 4 && sent[2].channel == kSideChannel &&
+              sent[3].bytes == packet,
+          "so does a member with it");
+    Check(askedReaders == 2, "the marker is asked about each member, for the log only");
+    options = SendTo(&marked, packet);
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 5 && sent[4].bytes == packet,
+          "each member gets the records once");
     sent.clear();
     SetSplitSyncReaders(nullptr);
     ClearRecords();
     const auto again = SplitPacket();
     options = SendTo(&marked, again);
-    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 1, "without the lobby marker nobody gets side packets");
+    Check(PacketFitSend(nullptr, &options) == 0 && sent.size() == 2 && sent[0].channel == kSideChannel,
+          "without the lobby marker the records go all the same");
     SetSplitSyncReaders(&FakeReaders);
     sent.clear();
     ClearRecords();
@@ -602,11 +618,10 @@ std::size_t Count(const std::string& text, const char* needle) {
 
 void TestLogLines(const std::wstring& path) {
     const std::string log = ReadLog(path);
-    // Eight players: the round trip, then the gate (twice) and hold tests build that sync again. The log folds the
-    // last two identical lines into "(repeated 1 more times: ...)", cut before "1 of them".
+    // Eight players: the round trip, then the send (twice) and hold tests build that sync again; records sent in
+    // between keep the log from folding any of them.
     Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 4 &&
-              Count(log, "1 of them are sent beside it") == 3 && Count(log, "repeated 1 more times: MISSION sync: 8") == 1 &&
-              Count(log, "12 loadout records") == 1,
+              Count(log, "1 of them are sent beside it") == 4 && Count(log, "12 loadout records") == 1,
           "the host logs each sync that sends records beside the message");
     Check(Count(log, "MISSION sync: 7 loadout records") == 0, "a sync that fits logs nothing");
     Check(Count(log, "loadout record of player index 7 sent beside the start message: result 0") > 0,
@@ -654,7 +669,7 @@ int main(int argc, char** argv) {
     TestRoundTrip(8, true);
     TestRoundTrip(10, true);
     TestRoundTrip(12, true);
-    TestSendGate();
+    TestSendToEveryMember();
     TestHold();
     TestOversizeDiagnostic();
     if (!logPath.empty()) TestLogLines(logPath);

@@ -67,8 +67,8 @@ private:
 
 SplitSyncRoom& SplitSync();
 
-// PacketFitSend's question about `remote` (an EOS_ProductUserId), see SetSplitSyncReaders. A member without the
-// marker is logged once per room. Thread-safe; asks EOS for the id's text, like the net log does on any thread.
+// Whether `remote` (an EOS_ProductUserId) shows the marker, for the log when a split sync's records go to it (see
+// SetSplitSyncReaders). A member without the marker is logged once per room. Thread-safe; asks EOS for the id's text, like the net log does on any thread.
 bool PeerReadsSplitSync(const void* remote);
 
 // --- text attributes of other features (hostdata), on the same beat ---

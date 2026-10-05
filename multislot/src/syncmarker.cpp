@@ -415,8 +415,7 @@ bool SplitSyncRoom::Observe(const std::vector<LobbyMember>& members) {
     }
     ReleaseSRWLockExclusive(&lock_);
     for (const std::string& id : late)
-        Log("MISSION sync: EOS %s now shows that it reads a split start message; the game's next resend reaches it",
-            id.c_str());
+        Log("MISSION sync: EOS %s now shows that it reads a split start message", id.c_str());
     return newcomer;
 }
 
@@ -465,9 +464,10 @@ bool PeerReadsSplitSync(const void* remote) {
     if (first) room.refused_.push_back(id);
     ReleaseSRWLockExclusive(&room.lock_);
     if (first)
-        Log("MISSION sync: no marker seen yet from EOS %s that it reads a split start message, so it is not sent one. "
-            "If it joined in the last few seconds its marker may still be on its way (a line follows when it shows "
-            "up); otherwise it runs no MultiSlot 1.5.15 or later and cannot start this mission",
+        Log("MISSION sync: no marker seen yet from EOS %s that it reads a split start message; its loadout records go "
+            "to it all the same. If it joined in the last few seconds its marker may still be on its way (a line "
+            "follows when it shows up); otherwise it runs no MultiSlot 1.5.15 or later, cannot read this start "
+            "message and starts the mission without the other players' loadouts",
             id);
     return marked;
 }

@@ -52,9 +52,9 @@ void DumpLog(const gamenet::Machine& machine) {
         gamenet::Result("log", "missing (error %lu)", GetLastError());
         return;
     }
-    LARGE_INTEGER size{};
-    GetFileSizeEx(file, &size);
-    std::vector<char> text(static_cast<std::size_t>(size.QuadPart) + 1);
+    BY_HANDLE_FILE_INFORMATION about{};
+    GetFileInformationByHandle(file, &about);
+    std::vector<char> text((static_cast<std::size_t>(about.nFileSizeHigh) << 32 | about.nFileSizeLow) + 1);
     DWORD read = 0;
     ReadFile(file, text.data(), static_cast<DWORD>(text.size() - 1), &read, nullptr);
     CloseHandle(file);

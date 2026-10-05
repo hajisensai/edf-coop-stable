@@ -54,7 +54,7 @@ struct State {
     MissionSync* sync = nullptr;
     std::vector<std::string> members;
     int self = -1;  // network index
-    std::vector<std::shared_ptr<Event>> events;
+    std::vector<Event*> events;  // kept for the life of the machine
     std::int32_t nextId = 1;
     std::map<std::string, std::uint8_t*> batches;  // the event controller's per-peer builders
     std::map<std::string, bool> chatterWaiting;    // a builder holds a background message
@@ -70,15 +70,25 @@ std::uint8_t* NewSerialize() {
     return stream;
 }
 
+// A control block as std::shared_ptr's (_Ref_count_base: its two virtuals, then the use and weak counts), with the
+// event after it, as make_shared lays them out. This machine holds the first use for good, so the counts the game
+// moves never reach zero and the virtuals are never called.
+struct EventBlock {
+    virtual void Destroy() noexcept {}
+    virtual void DeleteThis() noexcept {}
+    std::int32_t uses = 1;
+    std::int32_t weaks = 1;
+    Event event{};
+};
+static_assert(offsetof(EventBlock, uses) == 8 && offsetof(EventBlock, weaks) == 0xC, "the control block's layout");
+
 Event* NewEvent(std::int32_t owner, std::int32_t id, std::uint16_t type) {
-    auto shared = std::make_shared<Event>();
-    Event* event = shared.get();
-    std::memset(event, 0, sizeof(Event));
-    Shared self{};
-    std::memcpy(&self, &shared, sizeof(self));  // std::shared_ptr is {object, control block}
+    auto* block = new EventBlock;
+    Event* event = &block->event;
+    const Shared self{event, block};
     std::memcpy(event->game + 0x28, &self, sizeof(self));  // enable_shared_from_this's weak_ptr
-    _InterlockedIncrement(reinterpret_cast<volatile long*>(static_cast<std::uint8_t*>(self.control) + 0xC));
-    state.events.push_back(std::move(shared));
+    ++block->weaks;
+    state.events.push_back(event);
     event->owner = owner;
     event->id = id;
     std::memcpy(event->game + 0x10, &type, sizeof(type));
@@ -87,8 +97,8 @@ Event* NewEvent(std::int32_t owner, std::int32_t id, std::uint16_t type) {
 }
 
 Event* FindEvent(std::int32_t owner, std::int32_t id) {
-    for (const auto& event : state.events)
-        if (event->owner == owner && event->id == id) return event.get();
+    for (Event* event : state.events)
+        if (event->owner == owner && event->id == id) return event;
     return nullptr;
 }
 
@@ -125,7 +135,7 @@ void SendFramed(const Event& event, const void* data, std::size_t size, const st
     G().Fn<bool (*)(void*, int)>(kWriteInt)(batch, -event.id);
     G().Fn<bool (*)(void*, int)>(kWriteU8)(batch, static_cast<std::uint8_t>(counter));
     G().Fn<bool (*)(void*, const void*, std::size_t)>(kWriteBytes)(batch, data, size);
-    const std::size_t length = *reinterpret_cast<std::size_t*>(batch + kSerializeLength);
+    const std::size_t length = Get<std::size_t>(batch, kSerializeLength);
     if (type == kChatterType) state.chatterWaiting[to] = true;
     else if (state.chatterWaiting[to] && size > kBatchSendAbove)
         Result("shared-batch", "%zu bytes to %s: a %zu-byte sync message after a background one", length, to.c_str(), size);
@@ -135,7 +145,7 @@ void SendFramed(const Event& event, const void* data, std::size_t size, const st
 // Sends to an event: the creator's message reaches everyone it was broadcast to (`only`: one of them), anyone
 // else's its creator.
 void SendToEvent(Event& event, const void* data, std::size_t size, int only = -1) {
-    ++*reinterpret_cast<std::uint32_t*>(event.game + 0xC);
+    Put<std::uint32_t>(event.game, 0xC, Get<std::uint32_t>(event.game, 0xC) + 1);
     if (event.owner != state.self) return SendFramed(event, data, size, MemberAt(event.owner));
     for (const auto& member : state.members) {
         const int index = state.transport->NetworkIndex(member);
@@ -169,7 +179,7 @@ Shared* __fastcall HookBroadcastEvent(void*, Shared* out, std::int32_t type, con
 void OnEventRecord(int from, const std::uint8_t* data, std::size_t size) {
     std::uint8_t* stream = static_cast<std::uint8_t*>(G().New(kSerializeSize));
     G().Fn<void (*)(void*, const void*, std::size_t)>(kSerializeFrom)(stream, data, size);
-    const auto position = [&] { return *reinterpret_cast<std::size_t*>(stream + kSerializeRead); };
+    const auto position = [&] { return Get<std::size_t>(stream, kSerializeRead); };
     while (position() < size) {
         const auto type = static_cast<std::uint16_t>(G().Fn<std::int64_t (*)(void*)>(kReadInt)(stream));
         std::int32_t id = static_cast<std::int32_t>(G().Fn<std::int64_t (*)(void*)>(kReadInt)(stream));
@@ -213,14 +223,14 @@ void __fastcall UnexpectedVirtual() {
 }
 
 void* const kGameImplVtable[] = {
-    reinterpret_cast<void*>(&UnexpectedVirtual<0>),  reinterpret_cast<void*>(&GetUsers),
-    reinterpret_cast<void*>(&UnexpectedVirtual<2>),  reinterpret_cast<void*>(&UnexpectedVirtual<3>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<4>),  reinterpret_cast<void*>(&UnexpectedVirtual<5>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<6>),  reinterpret_cast<void*>(&UnexpectedVirtual<7>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<8>),  reinterpret_cast<void*>(&UnexpectedVirtual<9>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<10>), reinterpret_cast<void*>(&UnexpectedVirtual<11>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<12>), reinterpret_cast<void*>(&UnexpectedVirtual<13>),
-    reinterpret_cast<void*>(&UnexpectedVirtual<14>), reinterpret_cast<void*>(&UnexpectedVirtual<15>),
+    Address(&UnexpectedVirtual<0>),  Address(&GetUsers),
+    Address(&UnexpectedVirtual<2>),  Address(&UnexpectedVirtual<3>),
+    Address(&UnexpectedVirtual<4>),  Address(&UnexpectedVirtual<5>),
+    Address(&UnexpectedVirtual<6>),  Address(&UnexpectedVirtual<7>),
+    Address(&UnexpectedVirtual<8>),  Address(&UnexpectedVirtual<9>),
+    Address(&UnexpectedVirtual<10>), Address(&UnexpectedVirtual<11>),
+    Address(&UnexpectedVirtual<12>), Address(&UnexpectedVirtual<13>),
+    Address(&UnexpectedVirtual<14>), Address(&UnexpectedVirtual<15>),
 };
 
 // Points the function at `rva` to `target` (an absolute jump over its first 14 bytes).
@@ -234,11 +244,6 @@ bool Redirect(const Game& game, std::uintptr_t rva, void* target) {
     VirtualProtect(code, 14, old, &old);
     FlushInstructionCache(GetCurrentProcess(), code, 14);
     return true;
-}
-
-template <typename T>
-void Put(std::uint8_t* base, std::size_t offset, T value) {
-    std::memcpy(base + offset, &value, sizeof(value));
 }
 
 }  // namespace
@@ -321,35 +326,35 @@ bool MissionSync::Build(Transport& transport, const std::vector<std::string>& me
     *game.Fn<void**>(kEosCore) = core + 0x98;
 
     transport.Subscribe(kEventRecordType, &OnEventRecord);
-    return Redirect(game, kSendToEvent, reinterpret_cast<void*>(&HookSendToEvent)) &&
-           Redirect(game, kBroadcastEvent, reinterpret_cast<void*>(&HookBroadcastEvent));
+    return Redirect(game, kSendToEvent, Address(&HookSendToEvent)) &&
+           Redirect(game, kBroadcastEvent, Address(&HookBroadcastEvent));
 }
 
 void MissionSync::Dump() const {
     for (const auto& member : state.members) {
         const auto* user = static_cast<const std::uint8_t*>(transport_->User(member));
-        Result("dump", "user %s flags=%x index=%d slot=%d", member.c_str(), *reinterpret_cast<const std::uint32_t*>(user + 0x10),
-               *reinterpret_cast<const std::int32_t*>(user + 0x40), *reinterpret_cast<const std::int32_t*>(user + 0x48));
+        Result("dump", "user %s flags=%x index=%d slot=%d", member.c_str(), Get<std::uint32_t>(user, 0x10),
+               Get<std::int32_t>(user, 0x40), Get<std::int32_t>(user, 0x48));
     }
-    auto* head = *reinterpret_cast<std::uint8_t**>(gameImpl_ + kGameSyncs);
-    const std::uint64_t count = *reinterpret_cast<std::uint64_t*>(gameImpl_ + kGameSyncs + 8);
+    auto* head = Get<std::uint8_t*>(gameImpl_, kGameSyncs);
+    const std::uint64_t count = Get<std::uint64_t>(gameImpl_, kGameSyncs + 8);
     Result("dump", "%llu sync object(s)", count);
-    std::uint8_t* node = *reinterpret_cast<std::uint8_t**>(head + 8);  // the root
+    std::uint8_t* node = Get<std::uint8_t*>(head, 8);  // the root
     if (node == head) return;
     std::int64_t key = 0;
     std::memcpy(&key, node + 0x20, 8);
-    auto* object = *reinterpret_cast<std::uint8_t**>(node + 0x28);
+    auto* object = Get<std::uint8_t*>(node, 0x28);
     Result("dump", "object key=%llx done=%d replyEvent=%p isHost=%d request=%p response=%p", key, object[0x10],
-           *reinterpret_cast<void**>(object + 0x18), object[0x68], *reinterpret_cast<void**>(object + 0x38),
-           *reinterpret_cast<void**>(object + 0x48));
-    auto* list = *reinterpret_cast<std::uint8_t**>(object + 0x28);
-    for (auto* n = *reinterpret_cast<std::uint8_t**>(list); n != list; n = *reinterpret_cast<std::uint8_t**>(n))
-        Result("dump", "node key=%d serialize=%p", *reinterpret_cast<std::int32_t*>(n + 0x10), *reinterpret_cast<void**>(n + 0x18));
+           Get<void*>(object, 0x18), object[0x68], Get<void*>(object, 0x38),
+           Get<void*>(object, 0x48));
+    auto* list = Get<std::uint8_t*>(object, 0x28);
+    for (auto* n = Get<std::uint8_t*>(list, 0); n != list; n = Get<std::uint8_t*>(n, 0))
+        Result("dump", "node key=%d serialize=%p", Get<std::int32_t>(n, 0x10), Get<void*>(n, 0x18));
 }
 
 void MissionSync::EndFrame() const {
     for (auto& [to, batch] : state.batches)
-        if (batch && *reinterpret_cast<std::size_t*>(batch + kSerializeLength)) FlushBatch(to, batch);
+        if (batch && Get<std::size_t>(batch, kSerializeLength)) FlushBatch(to, batch);
 }
 
 void MissionSync::Chatter(std::size_t bytes) const {
@@ -365,9 +370,9 @@ std::int32_t MissionSync::Update(std::int32_t id) const {
     return transport_->game().Fn<std::int32_t (*)(std::int32_t, bool*)>(kUpdate)(id, &flag);
 }
 
-std::int32_t MissionSync::Players() const { return *reinterpret_cast<const std::int32_t*>(gdm_ + kPlayers); }
-std::int32_t MissionSync::Mission() const { return *reinterpret_cast<const std::int32_t*>(gdm_ + kMission); }
-std::int32_t MissionSync::Difficulty() const { return *reinterpret_cast<const std::int32_t*>(gdm_ + kDifficulty); }
+std::int32_t MissionSync::Players() const { return Get<std::int32_t>(gdm_, kPlayers); }
+std::int32_t MissionSync::Mission() const { return Get<std::int32_t>(gdm_, kMission); }
+std::int32_t MissionSync::Difficulty() const { return Get<std::int32_t>(gdm_, kDifficulty); }
 
 std::vector<std::uint8_t> MissionSync::Record(int slot) const {
     using RecordFn = const std::uint8_t* (*)(int);

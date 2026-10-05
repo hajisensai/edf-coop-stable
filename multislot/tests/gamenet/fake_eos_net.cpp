@@ -36,7 +36,10 @@ struct User {
 };
 
 struct Fake {
-    std::recursive_mutex lock;  // the game's threads and the plugin's may all call in
+    // The game's threads and the plugin's may all call in: every export takes `lock` once, and what it calls runs
+    // under it (Open, Drain, the notices). Completions run after it is let go. `usersLock` guards `users` alone.
+    std::mutex lock;
+    std::mutex usersLock;
     bool opened = false;
     HANDLE section = nullptr;
     HANDLE netLock = nullptr;
@@ -90,7 +93,7 @@ Fake& F() {
 }
 
 const User* Handle(const std::string& id) {
-    std::lock_guard<std::recursive_mutex> guard(F().lock);
+    const std::scoped_lock guard(F().usersLock);
     auto& user = F().users[id];
     if (!user) {
         user = std::make_unique<User>();
@@ -104,10 +107,10 @@ std::string Text(const void* user) { return user ? static_cast<const User*>(user
 void Copy(char* out, std::size_t size, const std::string& text) { strncpy_s(out, size, text.c_str(), _TRUNCATE); }
 
 // Maps the network and takes this machine's slot (from the environment the driver set).
+// Under `lock`.
 bool Open() {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
-    if (f.opened) return f.net != nullptr;
+    if (f.opened) return f.net != nullptr && f.slot >= 0;  // a machine that found no free slot stays offline
     f.opened = true;
     char setting[64]{};
     if (GetEnvironmentVariableA(gamenet::kDelayVariable, setting, sizeof(setting))) {
@@ -150,6 +153,7 @@ bool Open() {
 }
 
 gamenet::Station* MachineOf(const std::string& user) {
+    if (!F().net) return nullptr;
     for (auto& machine : F().net->machines)
         if (machine.present && user == machine.user) return &machine;
     return nullptr;
@@ -223,21 +227,61 @@ void SetAttribute(gamenet::Member& member, const gamenet::Attribute& value) {
     if (free) *free = value;
 }
 
-Attribute* NewAttribute(const gamenet::Attribute& from) {
-    auto* data = new AttributeData{};
-    data->ApiVersion = 1;
-    char* key = new char[std::strlen(from.key) + 1];
-    std::memcpy(key, from.key, std::strlen(from.key) + 1);
-    data->Key = key;
-    data->ValueType = from.type == 4 ? kString : kInt64;
-    if (from.type == 4) {
-        char* text = new char[std::strlen(from.text) + 1];
-        std::memcpy(text, from.text, std::strlen(from.text) + 1);
-        data->Value.AsUtf8 = text;
-    } else {
-        data->Value.AsInt64 = from.number;
+// What this fake hands out by pointer until the matching Release (lobby details, modifications, attributes,
+// lobby infos), as EOS does: owned here, under the pointer the caller holds.
+template <typename Key, typename T>
+class Handed {
+public:
+    const Key* Give(std::unique_ptr<T> item, const Key* key) {
+        const std::scoped_lock guard(lock_);
+        items_[key] = std::move(item);
+        return key;
     }
-    return new Attribute{1, data, 0};
+    void Take(const Key* key) {
+        const std::scoped_lock guard(lock_);
+        items_.erase(key);
+    }
+
+private:
+    std::mutex lock_;
+    std::map<const Key*, std::unique_ptr<T>> items_;
+};
+
+struct OwnedAttribute {
+    Attribute api{};
+    AttributeData data{};
+    std::string key;
+    std::string text;
+};
+Handed<Attribute, OwnedAttribute>& Attributes() {
+    static Handed<Attribute, OwnedAttribute> handed;
+    return handed;
+}
+
+Attribute* NewAttribute(const gamenet::Attribute& from) {
+    auto owned = std::make_unique<OwnedAttribute>();
+    owned->key = from.key;
+    owned->text = from.text;
+    owned->data.ApiVersion = 1;
+    owned->data.Key = owned->key.c_str();
+    owned->data.ValueType = from.type == 4 ? kString : kInt64;
+    if (from.type == 4) owned->data.Value.AsUtf8 = owned->text.c_str();
+    else owned->data.Value.AsInt64 = from.number;
+    owned->api = Attribute{1, &owned->data, 0};
+    Attribute* api = &owned->api;
+    Attributes().Give(std::move(owned), api);
+    return api;
+}
+
+Handed<Details, Details>& DetailsHanded() {
+    static Handed<Details, Details> handed;
+    return handed;
+}
+void* GiveDetails(const gamenet::Lobby& lobby) {
+    auto details = std::make_unique<Details>(Details{lobby});
+    Details* key = details.get();
+    DetailsHanded().Give(std::move(details), key);
+    return key;
 }
 
 using LobbyIdCallback = void (*)(const EOS_Lobby_LobbyIdCallbackInfo*);
@@ -252,7 +296,7 @@ void Complete(void* callback, void* clientData, EOS_EResult result, const std::s
 
 void Unimplemented(const char* name) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     for (const auto& seen : f.unimplemented)
         if (seen == name) return;
     f.unimplemented.emplace_back(name);
@@ -264,7 +308,7 @@ void Unimplemented(const char* name) {
 // The EOS functions the game or the plugin called that this fake only stubs, one per line.
 EXPORT std::size_t FakeNet_Unimplemented(char* out, std::size_t size) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     std::string all;
     for (const auto& name : f.unimplemented) all += name + "\n";
     if (out && size) Copy(out, size, all);
@@ -272,14 +316,14 @@ EXPORT std::size_t FakeNet_Unimplemented(char* out, std::size_t size) {
 }
 EXPORT const void* FakeNet_User(const char* id) { return Handle(id); }
 EXPORT const char* FakeNet_Self() {
-    std::lock_guard<std::recursive_mutex> guard(F().lock);
+    const std::scoped_lock guard(F().lock);
     Open();
     return F().self.c_str();
 }
 // How many are in the room.
 EXPORT std::uint32_t FakeNet_RoomCount() {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open()) return 0;
     Locked locked(f.netLock);
     return f.net->lobby.count;
@@ -287,18 +331,18 @@ EXPORT std::uint32_t FakeNet_RoomCount() {
 // A details handle for the room, as a room search hands one to the game (EOS_LobbyDetails_Release frees it).
 EXPORT void* FakeNet_RoomDetails() {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open()) return nullptr;
     Locked locked(f.netLock);
     if (!f.net->lobby.id[0]) return nullptr;
-    return new Details{f.net->lobby};
+    return GiveDetails(f.net->lobby);
 }
 
 // Counts this machine as done (`finish` 1) and returns how many are: machines keep the room's network running
 // until everyone is done, as players stay in the room.
 EXPORT std::uint32_t FakeNet_Finish(int finish) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open()) return 0;
     Locked locked(f.netLock);
     if (finish) ++f.net->finished;
@@ -425,7 +469,7 @@ EXPORT void EOS_Platform_Tick(void*) {
     Fake& f = F();
     std::deque<std::function<void()>> run;
     {
-        std::lock_guard<std::recursive_mutex> guard(f.lock);
+        const std::scoped_lock guard(f.lock);
         Drain();
         // A connection request for every peer that sent on a socket this machine has not accepted.
         for (const auto& packet : f.incoming) {
@@ -471,7 +515,7 @@ EXPORT EOS_EResult EOS_P2P_SendPacket(EOS_HP2P, const EOS_P2P_SendPacketOptions*
     Fake& f = F();
     if (!options || !options->RemoteUserId || !options->SocketId || (!options->Data && options->DataLengthBytes))
         return EOS_InvalidParameters;
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open()) return EOS_NoConnection;
     const std::string to = Text(options->RemoteUserId), socket = options->SocketId->SocketName;
     Locked locked(f.netLock);
@@ -510,7 +554,7 @@ EXPORT EOS_EResult EOS_P2P_ReceivePacket(EOS_HP2P, const EOS_P2P_ReceivePacketOp
                                          std::uint32_t* size) {
     Fake& f = F();
     if (!options || !peer || !socket || !channel || !data || !size) return EOS_InvalidParameters;
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     Drain();
     const ULONGLONG now = GetTickCount64();
     for (auto it = f.incoming.begin(); it != f.incoming.end(); ++it) {
@@ -534,7 +578,7 @@ EXPORT EOS_EResult EOS_P2P_GetNextReceivedPacketSize(EOS_HP2P, const EOS_P2P_Rec
                                                      std::uint32_t* size) {
     Fake& f = F();
     if (!options || !size) return EOS_InvalidParameters;
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     Drain();
     const ULONGLONG now = GetTickCount64();
     for (const auto& packet : f.incoming) {
@@ -550,14 +594,14 @@ namespace {
 std::uint64_t AddNotify(std::vector<Fake::Notify>& list, const EOS_P2P_AddNotifyOptions* options, void* clientData,
                         void* callback) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     const std::string socket = options && options->SocketId ? options->SocketId->SocketName : "";
     list.push_back({f.nextNotify, socket, clientData, callback});
     return f.nextNotify++;
 }
 void RemoveNotify(std::vector<Fake::Notify>& list, std::uint64_t id) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     for (auto it = list.begin(); it != list.end(); ++it)
         if (it->id == id) {
             list.erase(it);
@@ -589,14 +633,14 @@ EXPORT std::uint64_t EOS_P2P_AddNotifyIncomingPacketQueueFull(EOS_HP2P, const vo
 EXPORT EOS_EResult EOS_P2P_AcceptConnection(EOS_HP2P, const EOS_P2P_PeerConnectionOptions* options) {
     if (!options || !options->RemoteUserId || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     f.accepted.insert({Text(options->RemoteUserId), options->SocketId->SocketName});
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_P2P_CloseConnection(EOS_HP2P, const EOS_P2P_PeerConnectionOptions* options) {
     if (!options || !options->RemoteUserId || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     f.accepted.erase({Text(options->RemoteUserId), options->SocketId->SocketName});
     f.requested.erase({Text(options->RemoteUserId), options->SocketId->SocketName});
     return EOS_Success;
@@ -604,7 +648,7 @@ EXPORT EOS_EResult EOS_P2P_CloseConnection(EOS_HP2P, const EOS_P2P_PeerConnectio
 EXPORT EOS_EResult EOS_P2P_CloseConnections(EOS_HP2P, const EOS_P2P_CloseConnectionsOptions* options) {
     if (!options || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     const std::string socket = options->SocketId->SocketName;
     for (auto it = f.accepted.begin(); it != f.accepted.end();) it = it->second == socket ? f.accepted.erase(it) : ++it;
     for (auto it = f.requested.begin(); it != f.requested.end();) it = it->second == socket ? f.requested.erase(it) : ++it;
@@ -673,7 +717,7 @@ struct LobbyDetailsInfo {
 
 EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, void* clientData, void* callback) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open() || !options) return Complete(callback, clientData, EOS_InvalidParameters, "");
     std::string id;
     {
@@ -700,7 +744,7 @@ EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, 
 
 EXPORT void EOS_Lobby_JoinLobby(void*, const EOS_Lobby_JoinLobbyOptionsHead* options, void* clientData, void* callback) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open() || !options || !options->LobbyDetailsHandle) return Complete(callback, clientData, EOS_InvalidParameters, "");
     const std::string wanted = reinterpret_cast<Details*>(options->LobbyDetailsHandle)->lobby.id;
     Locked locked(f.netLock);
@@ -720,7 +764,7 @@ EXPORT void EOS_Lobby_JoinLobby(void*, const EOS_Lobby_JoinLobbyOptionsHead* opt
 namespace {
 void Leave(const LeaveOptions* options, void* clientData, void* callback, bool destroy) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open() || !options || !options->LobbyId) return Complete(callback, clientData, EOS_InvalidParameters, "");
     const std::string id = options->LobbyId;
     Locked locked(f.netLock);
@@ -750,9 +794,18 @@ EXPORT void EOS_Lobby_DestroyLobby(void*, const LeaveOptions* options, void* cli
     Leave(options, clientData, callback, true);
 }
 
+namespace {
+Handed<Modification, Modification>& Modifications() {
+    static Handed<Modification, Modification> handed;
+    return handed;
+}
+}  // namespace
+
 EXPORT EOS_EResult EOS_Lobby_UpdateLobbyModification(void*, const void*, void** modification) {
     if (!modification) return EOS_InvalidParameters;
-    *modification = new Modification;
+    auto owned = std::make_unique<Modification>();
+    *modification = owned.get();
+    Modifications().Give(std::move(owned), static_cast<Modification*>(*modification));
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_LobbyModification_AddMemberAttribute(void* handle, const AddAttributeOptions* options) {
@@ -776,10 +829,10 @@ EXPORT EOS_EResult EOS_LobbyModification_AddAttribute(void* handle, const AddAtt
 EXPORT EOS_EResult EOS_LobbyModification_SetMaxMembers(void*, const void*) { return EOS_Success; }
 EXPORT EOS_EResult EOS_LobbyModification_SetPermissionLevel(void*, const void*) { return EOS_Success; }
 EXPORT EOS_EResult EOS_LobbyModification_SetInvitesAllowed(void*, const void*) { return EOS_Success; }
-EXPORT void EOS_LobbyModification_Release(void* handle) { delete static_cast<Modification*>(handle); }
+EXPORT void EOS_LobbyModification_Release(void* handle) { Modifications().Take(static_cast<Modification*>(handle)); }
 EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void* clientData, void* callback) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open() || !options || !options->LobbyModificationHandle)
         return Complete(callback, clientData, EOS_InvalidParameters, "");
     const auto* modification = static_cast<const Modification*>(options->LobbyModificationHandle);
@@ -798,11 +851,11 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
 EXPORT EOS_EResult EOS_Lobby_CopyLobbyDetailsHandle(void*, const CopyDetailsOptions* options, void** details) {
     Fake& f = F();
     if (!options || !options->LobbyId || !details) return EOS_InvalidParameters;
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!Open()) return EOS_NoConnection;
     Locked locked(f.netLock);
     if (std::strcmp(options->LobbyId, f.net->lobby.id) || !MemberOf(f.net->lobby, f.self)) return EOS_NotFound;
-    auto* copy = new Details{f.net->lobby};
+    auto* copy = static_cast<Details*>(GiveDetails(f.net->lobby));
     // Another member's attribute only once Epic would have relayed it.
     const ULONGLONG now = GetTickCount64();
     for (std::uint32_t i = 0; i < copy->lobby.count; ++i) {
@@ -813,7 +866,7 @@ EXPORT EOS_EResult EOS_Lobby_CopyLobbyDetailsHandle(void*, const CopyDetailsOpti
     *details = copy;
     return EOS_Success;
 }
-EXPORT void EOS_LobbyDetails_Release(void* details) { delete static_cast<Details*>(details); }
+EXPORT void EOS_LobbyDetails_Release(void* details) { DetailsHanded().Take(static_cast<Details*>(details)); }
 EXPORT std::uint32_t EOS_LobbyDetails_GetMemberCount(void* details, const void*) {
     return details ? static_cast<Details*>(details)->lobby.count : 0;
 }
@@ -861,39 +914,41 @@ EXPORT EOS_EResult EOS_LobbyDetails_CopyMemberAttributeByIndex(void* details, co
 EXPORT std::uint32_t EOS_LobbyDetails_GetAttributeCount(void*, const void*) { return 0; }
 EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByIndex(void*, const void*, Attribute**) { return EOS_NotFound; }
 EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByKey(void*, const void*, Attribute**) { return EOS_NotFound; }
+namespace {
+struct OwnedInfo {
+    LobbyDetailsInfo api{};
+    std::string id;
+};
+Handed<LobbyDetailsInfo, OwnedInfo>& Infos() {
+    static Handed<LobbyDetailsInfo, OwnedInfo> handed;
+    return handed;
+}
+}  // namespace
+
 EXPORT EOS_EResult EOS_LobbyDetails_CopyInfo(void* details, const void*, LobbyDetailsInfo** out) {
     if (!details || !out) return EOS_InvalidParameters;
     const gamenet::Lobby& lobby = static_cast<Details*>(details)->lobby;
-    char* id = new char[std::strlen(lobby.id) + 1];
-    std::memcpy(id, lobby.id, std::strlen(lobby.id) + 1);
-    *out = new LobbyDetailsInfo{1, id, Handle(lobby.owner), 0, lobby.maxMembers - lobby.count, lobby.maxMembers};
+    auto owned = std::make_unique<OwnedInfo>();
+    owned->id = lobby.id;
+    owned->api = LobbyDetailsInfo{1, owned->id.c_str(), Handle(lobby.owner), 0, lobby.maxMembers - lobby.count,
+                                  lobby.maxMembers};
+    *out = &owned->api;
+    Infos().Give(std::move(owned), *out);
     return EOS_Success;
 }
-EXPORT void EOS_LobbyDetails_Info_Release(LobbyDetailsInfo* info) {
-    if (!info) return;
-    delete[] info->LobbyId;
-    delete info;
-}
-EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {
-    if (!attribute) return;
-    if (attribute->Data) {
-        delete[] attribute->Data->Key;
-        if (attribute->Data->ValueType == kString) delete[] attribute->Data->Value.AsUtf8;
-        delete attribute->Data;
-    }
-    delete attribute;
-}
+EXPORT void EOS_LobbyDetails_Info_Release(LobbyDetailsInfo* info) { Infos().Take(info); }
+EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) { Attributes().Take(attribute); }
 namespace {
 std::uint64_t AddLobbyNotify(int kind, void* clientData, void* callback) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     if (!callback) return 0;
     f.lobbyNotifies.push_back({f.nextNotify, kind, clientData, callback});
     return f.nextNotify++;
 }
 void RemoveLobbyNotify(std::uint64_t id) {
     Fake& f = F();
-    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    const std::scoped_lock guard(f.lock);
     for (auto it = f.lobbyNotifies.begin(); it != f.lobbyNotifies.end(); ++it)
         if (it->id == id) {
             f.lobbyNotifies.erase(it);

@@ -8,6 +8,7 @@
 // The harness is built like the game (MSVC, /MD, no iterator debugging): the std types handed to the game
 // (std::string, std::wstring, std::vector, std::function, the shared_ptr layout) have the game's layout.
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -16,6 +17,23 @@
 #include "machine.h"
 
 namespace gamenet {
+
+// A field of one of the game's objects, which are raw memory to this harness: read and written by value.
+template <typename T>
+T Get(const void* base, std::size_t offset) {
+    T value{};
+    std::memcpy(&value, static_cast<const std::uint8_t*>(base) + offset, sizeof(value));
+    return value;
+}
+template <typename T>
+void Put(void* base, std::size_t offset, T value) {
+    std::memcpy(static_cast<std::uint8_t*>(base) + offset, &value, sizeof(value));
+}
+// A function of this harness as the game stores one (in a vtable, behind a jump).
+template <typename F>
+void* Address(F function) {
+    return reinterpret_cast<void*>(function);
+}
 
 // std::shared_ptr's layout: what the game passes and stores. Reference counts live in the control block
 // (uses at +8, weaks at +0xC).

@@ -4,11 +4,15 @@
 //  - a packet above 1170 bytes is refused with EOS_LimitExceeded and goes nowhere;
 //  - a packet from a peer this machine has not accepted (EOS_P2P_AcceptConnection, or a packet of its own to that
 //    peer on that socket) waits, and the connection request is announced on the next EOS_Platform_Tick;
-//  - completions and notifications run inside EOS_Platform_Tick.
+//  - completions and notifications run inside EOS_Platform_Tick: connection requests and establishments, and the
+//    room's member joins, leaves and updates;
+//  - order is kept per channel only; with EDF6NET_DELAY one channel arrives later, with EDF6NET_DROP unreliable
+//    packets get lost (net_shared.h).
 // Everything else EDF.dll imports is exported too, as a stub that returns 0 and is reported (FakeNet_Unimplemented),
 // so a test can tell when the game reached a part of EOS this fake does not model.
 #include "net_shared.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <deque>
 #include <functional>
@@ -48,6 +52,7 @@ struct Fake {
         std::string socket;
         std::uint8_t channel;
         std::vector<std::uint8_t> data;
+        ULONGLONG due;  // receivable from (EDF6NET_DELAY)
     };
     std::deque<Incoming> incoming;                         // taken out of the inbox, not yet received
     std::set<std::pair<std::string, std::string>> accepted;  // (peer, socket)
@@ -59,8 +64,23 @@ struct Fake {
         void* callback;
     };
     std::vector<Notify> connectionRequests, connectionsClosed, connectionsEstablished;
+    std::set<std::pair<std::string, std::string>> established;  // announced (peer, socket)
+    struct LobbyNotify {
+        std::uint64_t id;
+        int kind;  // 0 member status, 1 member update, 2 lobby update
+        void* clientData;
+        void* callback;
+    };
+    std::vector<LobbyNotify> lobbyNotifies;
     std::uint64_t nextNotify = 1;
     std::uint32_t lobbyVersionSeen = 0;
+    std::vector<std::string> membersSeen;  // the room's members at the last tick (status notifications)
+    std::string lobbySeen;
+    // EDF6NET_DELAY / EDF6NET_DROP
+    int delayedChannel = -1;
+    ULONGLONG delayMs = 0;
+    std::uint32_t dropMinimum = 0;
+    int dropsLeft = 0;
 };
 
 Fake& F() {
@@ -69,6 +89,7 @@ Fake& F() {
 }
 
 const User* Handle(const std::string& id) {
+    std::lock_guard<std::recursive_mutex> guard(F().lock);
     auto& user = F().users[id];
     if (!user) {
         user = std::make_unique<User>();
@@ -84,8 +105,24 @@ void Copy(char* out, std::size_t size, const std::string& text) { strncpy_s(out,
 // Maps the network and takes this machine's slot (from the environment the driver set).
 bool Open() {
     Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
     if (f.opened) return f.net != nullptr;
     f.opened = true;
+    char setting[64]{};
+    if (GetEnvironmentVariableA(gamenet::kDelayVariable, setting, sizeof(setting))) {
+        unsigned channel = 0, ms = 0;
+        if (sscanf_s(setting, "%u:%u", &channel, &ms) == 2) {
+            f.delayedChannel = static_cast<int>(channel);
+            f.delayMs = ms;
+        }
+    }
+    if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
+        unsigned bytes = 0, count = 0;
+        if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
+            f.dropMinimum = bytes;
+            f.dropsLeft = static_cast<int>(count);
+        }
+    }
     char name[128]{}, user[64]{};
     if (!GetEnvironmentVariableA(gamenet::kSectionVariable, name, sizeof(name)) ||
         !GetEnvironmentVariableA(gamenet::kUserVariable, user, sizeof(user))) {
@@ -124,7 +161,9 @@ void Drain() {
     while (inbox.tail - inbox.head >= sizeof(gamenet::PacketHeader)) {
         gamenet::PacketHeader header{};
         gamenet::RingPeek(inbox, inbox.head, &header, sizeof(header));
-        Fake::Incoming packet{header.from, header.socket, header.channel, std::vector<std::uint8_t>(header.size)};
+        if (inbox.tail - inbox.head < sizeof(header) + header.size) break;  // not all written (yet)
+        const ULONGLONG due = GetTickCount64() + (header.channel == f.delayedChannel ? f.delayMs : 0);
+        Fake::Incoming packet{header.from, header.socket, header.channel, std::vector<std::uint8_t>(header.size), due};
         gamenet::RingPeek(inbox, inbox.head + sizeof(header), packet.data.data(), header.size);
         inbox.head += sizeof(header) + header.size;
         f.incoming.push_back(std::move(packet));
@@ -230,12 +269,14 @@ EXPORT std::size_t FakeNet_Unimplemented(char* out, std::size_t size) {
 }
 EXPORT const void* FakeNet_User(const char* id) { return Handle(id); }
 EXPORT const char* FakeNet_Self() {
+    std::lock_guard<std::recursive_mutex> guard(F().lock);
     Open();
     return F().self.c_str();
 }
 // A details handle for the room, as a room search hands one to the game (EOS_LobbyDetails_Release frees it).
 EXPORT void* FakeNet_RoomDetails() {
     Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
     if (!Open()) return nullptr;
     Locked locked(f.netLock);
     if (!f.net->lobby.id[0]) return nullptr;
@@ -246,6 +287,7 @@ EXPORT void* FakeNet_RoomDetails() {
 // until everyone is done, as players stay in the room.
 EXPORT std::uint32_t FakeNet_Finish(int finish) {
     Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
     if (!Open()) return 0;
     Locked locked(f.netLock);
     if (finish) ++f.net->finished;
@@ -282,6 +324,92 @@ struct ConnectionRequestInfo {
     std::int32_t ConnectionType;
 };
 
+namespace {
+struct MemberStatusInfo {
+    void* ClientData;
+    const char* LobbyId;
+    const void* TargetUserId;
+    std::int32_t CurrentStatus;  // 0 joined, 1 left
+};
+struct MemberUpdateInfo {
+    void* ClientData;
+    const char* LobbyId;
+    const void* TargetUserId;
+};
+struct LobbyUpdateInfo {
+    void* ClientData;
+    const char* LobbyId;
+};
+
+// What changed in the room since the last tick, as EOS tells a member: others joining or leaving (not the members
+// that were there when this machine came in), and updates of members and the lobby.
+void NoticeRoomChanges() {
+    Fake& f = F();
+    if (!f.net) return;
+    gamenet::Lobby lobby;
+    {
+        Locked locked(f.netLock);
+        if (f.net->lobby.version == f.lobbyVersionSeen) return;
+        lobby = f.net->lobby;
+    }
+    f.lobbyVersionSeen = lobby.version;
+    std::vector<std::string> members;
+    for (std::uint32_t i = 0; i < lobby.count; ++i) members.emplace_back(lobby.members[i].user);
+    const bool in = std::find(members.begin(), members.end(), f.self) != members.end();
+    const std::string id = lobby.id;
+    if (!in || id != f.lobbySeen) {
+        f.membersSeen = in ? members : std::vector<std::string>();
+        f.lobbySeen = in ? id : std::string();
+        return;
+    }
+    const auto queue = [&](int kind, const std::string& member, std::int32_t status) {
+        for (const auto& notify : f.lobbyNotifies) {
+            if (notify.kind != kind) continue;
+            const auto n = notify;
+            f.completions.push_back([=]() {
+                const void* user = member.empty() ? nullptr : Handle(member);
+                if (kind == 0) {
+                    MemberStatusInfo info{n.clientData, id.c_str(), user, status};
+                    reinterpret_cast<void (*)(const MemberStatusInfo*)>(n.callback)(&info);
+                } else if (kind == 1) {
+                    MemberUpdateInfo info{n.clientData, id.c_str(), user};
+                    reinterpret_cast<void (*)(const MemberUpdateInfo*)>(n.callback)(&info);
+                } else {
+                    LobbyUpdateInfo info{n.clientData, id.c_str()};
+                    reinterpret_cast<void (*)(const LobbyUpdateInfo*)>(n.callback)(&info);
+                }
+            });
+        }
+    };
+    for (const auto& member : members)
+        if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
+    for (const auto& member : f.membersSeen)
+        if (std::find(members.begin(), members.end(), member) == members.end()) queue(0, member, 1);
+    for (const auto& member : members) queue(1, member, 0);
+    queue(2, std::string(), 0);
+    f.membersSeen = members;
+}
+
+// A connection is established the first time a packet of the peer is received on an accepted socket.
+void NoticeEstablished(const std::string& peer, const std::string& socket) {
+    Fake& f = F();
+    if (!f.established.insert({peer, socket}).second) return;
+    for (const auto& notify : f.connectionsEstablished) {
+        if (!notify.socket.empty() && notify.socket != socket) continue;
+        const auto n = notify;
+        const std::string self = f.self;
+        f.completions.push_back([=]() {
+            EOS_P2P_SocketId id{1, {}};
+            Copy(id.SocketName, sizeof(id.SocketName), socket);
+            const EOS_P2P_OnPeerConnectionEstablishedInfo info{n.clientData, (EOS_ProductUserId)Handle(self),
+                                                               (EOS_ProductUserId)Handle(peer), &id, 0,
+                                                               EOS_NCT_DirectConnection};
+            reinterpret_cast<void (*)(const EOS_P2P_OnPeerConnectionEstablishedInfo*)>(n.callback)(&info);
+        });
+    }
+}
+}  // namespace
+
 EXPORT void EOS_Platform_Tick(void*) {
     Fake& f = F();
     std::deque<std::function<void()>> run;
@@ -306,6 +434,7 @@ EXPORT void EOS_Platform_Tick(void*) {
                 });
             }
         }
+        NoticeRoomChanges();
         run.swap(f.completions);
     }
     for (auto& completion : run) completion();
@@ -342,6 +471,12 @@ EXPORT EOS_EResult EOS_P2P_SendPacket(EOS_HP2P, const EOS_P2P_SendPacketOptions*
     gamenet::Station* machine = MachineOf(to);
     if (!machine) return EOS_NoConnection;
     if (!options->bDisableAutoAcceptConnection) f.accepted.insert({to, socket});
+    if (options->Reliability == EOS_PR_UnreliableUnordered && f.dropsLeft > 0 &&
+        options->DataLengthBytes >= f.dropMinimum) {
+        --f.dropsLeft;
+        ++f.net->dropped;
+        return EOS_Success;  // gone on the way, as unreliable packets may be
+    }
     gamenet::PacketHeader header{};
     Copy(header.from, sizeof(header.from), f.self);
     Copy(header.to, sizeof(header.to), to);
@@ -349,7 +484,10 @@ EXPORT EOS_EResult EOS_P2P_SendPacket(EOS_HP2P, const EOS_P2P_SendPacketOptions*
     header.channel = options->Channel;
     header.reliability = static_cast<std::uint8_t>(options->Reliability);
     header.size = options->DataLengthBytes;
-    if (gamenet::RingFree(machine->inbox) < sizeof(header) + header.size) return EOS_LimitExceeded;
+    if (gamenet::RingFree(machine->inbox) < sizeof(header) + header.size) {
+        ++f.net->overflowed;
+        return EOS_LimitExceeded;
+    }
     gamenet::RingWrite(machine->inbox, &header, sizeof(header));
     gamenet::RingWrite(machine->inbox, options->Data, header.size);
     gamenet::LogWire(f.net->wire, header, options->Data);
@@ -363,10 +501,12 @@ EXPORT EOS_EResult EOS_P2P_ReceivePacket(EOS_HP2P, const EOS_P2P_ReceivePacketOp
     if (!options || !peer || !socket || !channel || !data || !size) return EOS_InvalidParameters;
     std::lock_guard<std::recursive_mutex> guard(f.lock);
     Drain();
+    const ULONGLONG now = GetTickCount64();
     for (auto it = f.incoming.begin(); it != f.incoming.end(); ++it) {
-        if (!Accepted(it->from, it->socket)) continue;
+        if (!Accepted(it->from, it->socket) || it->due > now) continue;
         if (options->RequestedChannel && *options->RequestedChannel != it->channel) continue;
         if (it->data.size() > options->MaxDataSizeBytes) return EOS_LimitExceeded;
+        NoticeEstablished(it->from, it->socket);
         *peer = (EOS_ProductUserId)Handle(it->from);
         socket->ApiVersion = 1;
         Copy(socket->SocketName, sizeof(socket->SocketName), it->socket);
@@ -385,8 +525,9 @@ EXPORT EOS_EResult EOS_P2P_GetNextReceivedPacketSize(EOS_HP2P, const EOS_P2P_Rec
     if (!options || !size) return EOS_InvalidParameters;
     std::lock_guard<std::recursive_mutex> guard(f.lock);
     Drain();
+    const ULONGLONG now = GetTickCount64();
     for (const auto& packet : f.incoming) {
-        if (!Accepted(packet.from, packet.socket)) continue;
+        if (!Accepted(packet.from, packet.socket) || packet.due > now) continue;
         if (options->RequestedChannel && *options->RequestedChannel != packet.channel) continue;
         *size = static_cast<std::uint32_t>(packet.data.size());
         return EOS_Success;
@@ -555,7 +696,8 @@ EXPORT void EOS_Lobby_JoinLobby(void*, const EOS_Lobby_JoinLobbyOptionsHead* opt
     gamenet::Lobby& lobby = f.net->lobby;
     if (wanted != lobby.id) return Complete(callback, clientData, EOS_NotFound, wanted);
     if (!MemberOf(lobby, f.self)) {
-        if (lobby.count >= gamenet::kMaxMachines) return Complete(callback, clientData, EOS_LimitExceeded, wanted);
+        if (lobby.count >= lobby.maxMembers || lobby.count >= gamenet::kMaxMachines)
+            return Complete(callback, clientData, EOS_LimitExceeded, wanted);
         gamenet::Member& member = lobby.members[lobby.count++];
         member = gamenet::Member{};
         Copy(member.user, sizeof(member.user), f.self);
@@ -719,16 +861,37 @@ EXPORT void EOS_Lobby_Attribute_Release(Attribute* attribute) {
     }
     delete attribute;
 }
-EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyUpdateReceived(void*, const void*, void*, void*) { return F().nextNotify++; }
-EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyMemberUpdateReceived(void*, const void*, void*, void*) {
-    return F().nextNotify++;
+namespace {
+std::uint64_t AddLobbyNotify(int kind, void* clientData, void* callback) {
+    Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    if (!callback) return 0;
+    f.lobbyNotifies.push_back({f.nextNotify, kind, clientData, callback});
+    return f.nextNotify++;
 }
-EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyMemberStatusReceived(void*, const void*, void*, void*) {
-    return F().nextNotify++;
+void RemoveLobbyNotify(std::uint64_t id) {
+    Fake& f = F();
+    std::lock_guard<std::recursive_mutex> guard(f.lock);
+    for (auto it = f.lobbyNotifies.begin(); it != f.lobbyNotifies.end(); ++it)
+        if (it->id == id) {
+            f.lobbyNotifies.erase(it);
+            return;
+        }
 }
-EXPORT void EOS_Lobby_RemoveNotifyLobbyUpdateReceived(void*, std::uint64_t) {}
-EXPORT void EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived(void*, std::uint64_t) {}
-EXPORT void EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived(void*, std::uint64_t) {}
+}  // namespace
+
+EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyMemberStatusReceived(void*, const void*, void* clientData, void* callback) {
+    return AddLobbyNotify(0, clientData, callback);
+}
+EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyMemberUpdateReceived(void*, const void*, void* clientData, void* callback) {
+    return AddLobbyNotify(1, clientData, callback);
+}
+EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyUpdateReceived(void*, const void*, void* clientData, void* callback) {
+    return AddLobbyNotify(2, clientData, callback);
+}
+EXPORT void EOS_Lobby_RemoveNotifyLobbyUpdateReceived(void*, std::uint64_t id) { RemoveLobbyNotify(id); }
+EXPORT void EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived(void*, std::uint64_t id) { RemoveLobbyNotify(id); }
+EXPORT void EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived(void*, std::uint64_t id) { RemoveLobbyNotify(id); }
 
 // --- everything else EDF.dll imports: reported, answers 0 ---
 #define STUB(name)                       \

@@ -161,7 +161,7 @@ set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 set(GAME_TEST_SKIPPED 77)
 if(NOT EXISTS "${EDF_DLL}")
     message(WARNING "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): the tests against the game's code "
-                    "(PatchTablesMatchEDF, PluginLoad_*) will be reported as skipped")
+                    "(PatchTablesMatchEDF, PluginLoad_*, GameNet_*) will be reported as skipped")
 endif()
 
 add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
@@ -272,7 +272,7 @@ add_dependencies(GameMachine GameNetEos)
 add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
-foreach(scenario room link mission2 mission4 mission8)
+foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

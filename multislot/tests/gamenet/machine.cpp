@@ -48,11 +48,17 @@ std::string Narrow(const std::wstring& text) {
 void DumpLog(const gamenet::Machine& machine) {
     const HANDLE file = CreateFileW(machine.LogPath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                     OPEN_EXISTING, 0, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    std::vector<char> text(1 << 20);
+    if (file == INVALID_HANDLE_VALUE) {
+        gamenet::Result("log", "missing (error %lu)", GetLastError());
+        return;
+    }
+    LARGE_INTEGER size{};
+    GetFileSizeEx(file, &size);
+    std::vector<char> text(static_cast<std::size_t>(size.QuadPart) + 1);
     DWORD read = 0;
     ReadFile(file, text.data(), static_cast<DWORD>(text.size() - 1), &read, nullptr);
     CloseHandle(file);
+    gamenet::Result("log", "%lu bytes", read);
     std::printf("---- %s: EDF6Coop.log ----\n%.*s---- end of log ----\n", machine.user.c_str(), static_cast<int>(read),
                 text.data());
 }
@@ -107,6 +113,8 @@ int wmain(int argc, wchar_t** argv) {
     if (unimplemented && unimplemented(names, sizeof(names)))
         for (char *next = nullptr, *line = strtok_s(names, "\n", &next); line; line = strtok_s(nullptr, "\n", &next))
             gamenet::Result("unimplemented-eos", "%s", line);
+    // The driver goes by this, not by the exit code alone: under a debugger the exit code is the debugger's.
+    gamenet::Result("exit", "%d", code);
     std::fflush(stdout);
     // The game's static objects are not made to be torn down outside the game; neither is the plugin.
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));

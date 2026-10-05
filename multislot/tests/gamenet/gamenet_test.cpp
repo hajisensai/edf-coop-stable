@@ -67,7 +67,7 @@ bool Spawn(Spawned& machine, const std::wstring& exe, const std::wstring& gameFo
     startup.hStdOutput = write;
     startup.hStdError = write;
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    const BOOL ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+    const BOOL ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
                                    work.c_str(), &startup, &machine.process);
     CloseHandle(write);
     machine.output = read;
@@ -169,8 +169,16 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring folder = work + L"\\" + Wide(scenario);
     CreateDirectoryW(folder.c_str(), nullptr);
 
+    // Every machine lives in this job: when the test ends, however it ends, so do they.
+    const HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     std::vector<Spawned> machines;
     SetEnvironmentVariableA("EDF6NET_MEMBERS", std::to_string(chosen->seats.size()).c_str());
+    for (const char* variable : {gamenet::kDelayVariable, gamenet::kDropVariable, "EDF6NET_CHATTER"})
+        SetEnvironmentVariableA(variable, nullptr);
+    for (const auto& [variable, value] : chosen->network) SetEnvironmentVariableA(variable.c_str(), value.c_str());
     for (const auto& seat : chosen->seats) {
         Spawned machine;
         machine.user = seat.user;
@@ -180,16 +188,26 @@ int wmain(int argc, wchar_t** argv) {
         machines.push_back(machine);
         if (!Spawn(machines.back(), exe, gameFolder, home, section)) {
             std::printf("FAIL: %s cannot be started (error %lu)\n", seat.user.c_str(), GetLastError());
+            CloseHandle(job);  // ends the machines started already
             return 1;
         }
+        AssignProcessToJobObject(job, machines.back().process.hProcess);
+        ResumeThread(machines.back().process.hThread);  // started suspended, so it is in the job from its first instruction
     }
     Collect(machines, chosen->timeoutMs);
+    const bool debugged = GetEnvironmentVariableW(L"EDF6NET_DEBUGGER", nullptr, 0) != 0;
     for (const auto& machine : machines) {
         std::printf("==== %s (%s) exited %lu ====\n%s\n", machine.user.c_str(), machine.role.c_str(), machine.exitCode,
                     machine.text.c_str());
-        Check(machine.exitCode == 0, machine.user + " (" + machine.role + ") passed its own checks");
+        // Its own word (under EDF6NET_DEBUGGER the exit code is the debugger's), and an exit that agrees with it.
+        Check(Result(machine, "exit") == "0" && (debugged || machine.exitCode == 0),
+              machine.user + " (" + machine.role + ") passed its own checks");
+        Check(Result(machine, "log").find("bytes") != std::string::npos &&
+                  machine.text.find("==== EDF6Coop ") != std::string::npos,
+              machine.user + "'s EDF6Coop.log was read");
     }
     chosen->check(machines, *network);
+    CloseHandle(job);
     std::printf(failures ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }

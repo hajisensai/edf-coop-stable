@@ -1,7 +1,10 @@
 #include "missionsync.h"
 
 #include <cstring>
+#include <map>
 #include <memory>
+
+#include "net_shared.h"
 
 namespace gamenet {
 namespace {
@@ -26,7 +29,8 @@ constexpr std::size_t kMission = 0x48, kDifficulty = 0x4C, kClass = 0x6E90, kMar
 constexpr std::size_t kCoreRoom = 0xC0, kCoreGame = 0xD0, kRoomStays = 0x78;
 constexpr std::size_t kGameLeader = 0x20, kGameUsers = 0x30, kGameSyncs = 0xF0, kGameSize = 0x120;
 constexpr std::size_t kUserSlot = 0x48;
-constexpr std::uint16_t kSynchronizeGate = 4;  // the event type of the sync messages (Event_SynchronizeGate)
+constexpr std::uint16_t kSynchronizeGate = 4;
+constexpr std::uint16_t kChatterType = 7;  // any other event type: what else the game says in the same frames  // the event type of the sync messages (Event_SynchronizeGate)
 // The packet controller record type the event messages travel in: Transmit::Send's ((sub & 0xF) | id << 4) << 8.
 // Its value only names the record (its header is the same 12 bytes whatever it is).
 constexpr std::uint32_t kEventRecordType = 0x3000;
@@ -52,6 +56,9 @@ struct State {
     int self = -1;  // network index
     std::vector<std::shared_ptr<Event>> events;
     std::int32_t nextId = 1;
+    std::map<std::string, std::uint8_t*> batches;  // the event controller's per-peer builders
+    std::map<std::string, bool> chatterWaiting;    // a builder holds a background message
+    Event* chatter = nullptr;
     std::uint8_t* gameImpl = nullptr;
 } state;
 
@@ -91,33 +98,49 @@ std::string MemberAt(int index) {
     return {};
 }
 
-// 750380's framing of one message to an event, sent through the game's controller to `to`.
-void SendFramed(const Event& event, const void* data, std::size_t size, const std::string& to) {
-    Result("trace", "event %d of %d: %zu bytes to %s", event.id, event.owner, size, to.c_str());
-    std::uint8_t* stream = NewSerialize();
-    std::uint16_t type = 0;
-    std::int32_t id = 0;
-    std::uint32_t counter = 0;
-    std::memcpy(&type, event.game + 0x10, sizeof(type));
-    std::memcpy(&id, event.game + 0x14, sizeof(id));
-    std::memcpy(&counter, event.game + 0xC, sizeof(counter));
-    G().Fn<bool (*)(void*, int)>(kWriteU16)(stream, type);
-    G().Fn<bool (*)(void*, int)>(kWriteInt)(stream, -(id < 0 ? -id : id));
-    G().Fn<bool (*)(void*, int)>(kWriteU8)(stream, static_cast<std::uint8_t>(counter));
-    G().Fn<bool (*)(void*, const void*, std::size_t)>(kWriteBytes)(stream, data, size);
+// The per-peer builder of the event controller (761E60): messages to a member are appended to its batch, which
+// goes to the packet controller as one record once it holds more than 250 bytes, and at the end of the frame.
+constexpr std::size_t kBatchSendAbove = 0xFA;  // 74ED6D
+
+void FlushBatch(const std::string& to, std::uint8_t*& batch) {
     const void* bytes = nullptr;
     std::size_t length = 0;
-    G().Fn<bool (*)(void*, const void**, std::size_t*)>(kSerializeData)(stream, &bytes, &length);
-    if (!state.transport->SendReliable(to, kEventRecordType, bytes, length))
+    G().Fn<bool (*)(void*, const void**, std::size_t*)>(kSerializeData)(batch, &bytes, &length);
+    if (length && !state.transport->SendReliable(to, kEventRecordType, bytes, length))
         Result("event-send", "the controller refused %zu bytes to %s", length, to.c_str());
+    batch = NewSerialize();
+    state.chatterWaiting[to] = false;
 }
 
-// Sends to an event: the creator's message reaches everyone it was broadcast to, anyone else's its creator.
-void SendToEvent(Event& event, const void* data, std::size_t size) {
+// 750380's framing of one message to an event, appended to the batch for `to`.
+void SendFramed(const Event& event, const void* data, std::size_t size, const std::string& to) {
+    std::uint16_t type = 0;
+    std::uint32_t counter = 0;
+    std::memcpy(&type, event.game + 0x10, sizeof(type));
+    std::memcpy(&counter, event.game + 0xC, sizeof(counter));
+    if (type == kSynchronizeGate) Result("trace", "event %d: %zu bytes to %s", event.id, size, to.c_str());
+    std::uint8_t*& batch = state.batches[to];
+    if (!batch) batch = NewSerialize();
+    G().Fn<bool (*)(void*, int)>(kWriteU16)(batch, type);
+    G().Fn<bool (*)(void*, int)>(kWriteInt)(batch, -event.id);
+    G().Fn<bool (*)(void*, int)>(kWriteU8)(batch, static_cast<std::uint8_t>(counter));
+    G().Fn<bool (*)(void*, const void*, std::size_t)>(kWriteBytes)(batch, data, size);
+    const std::size_t length = *reinterpret_cast<std::size_t*>(batch + kSerializeLength);
+    if (type == kChatterType) state.chatterWaiting[to] = true;
+    else if (state.chatterWaiting[to] && size > kBatchSendAbove)
+        Result("shared-batch", "%zu bytes to %s: a %zu-byte sync message after a background one", length, to.c_str(), size);
+    if (length > kBatchSendAbove) FlushBatch(to, batch);
+}
+
+// Sends to an event: the creator's message reaches everyone it was broadcast to (`only`: one of them), anyone
+// else's its creator.
+void SendToEvent(Event& event, const void* data, std::size_t size, int only = -1) {
     ++*reinterpret_cast<std::uint32_t*>(event.game + 0xC);
     if (event.owner != state.self) return SendFramed(event, data, size, MemberAt(event.owner));
-    for (const auto& member : state.members)
-        if (state.transport->NetworkIndex(member) != state.self) SendFramed(event, data, size, member);
+    for (const auto& member : state.members) {
+        const int index = state.transport->NetworkIndex(member);
+        if (index != state.self && (only < 0 || only == index)) SendFramed(event, data, size, member);
+    }
 }
 
 // 74E1B0: one message to an event.
@@ -126,11 +149,15 @@ bool __fastcall HookSendToEvent(void* event, const void* data, std::size_t size)
     return true;
 }
 
-// 750130: a new event of `type`, broadcast to the room, with its first message.
+// Event ids name their creator: id % kMaxMachines is its network index (the game's own numbering is not known;
+// only that both ends of an event agree on it).
+std::int32_t NextId() { return state.nextId++ * gamenet::kMaxMachines + state.self; }
+
+// 750130: a new event of `type`, broadcast to `to` (index -1: the whole room), with its first message.
 Shared* __fastcall HookBroadcastEvent(void*, Shared* out, std::int32_t type, const void* data, std::size_t size,
-                                      const IndexKey*) {
-    Event* event = NewEvent(state.self, state.nextId++, static_cast<std::uint16_t>(type));
-    SendToEvent(*event, data, size);
+                                      const IndexKey* to) {
+    Event* event = NewEvent(state.self, NextId(), static_cast<std::uint16_t>(type));
+    SendToEvent(*event, data, size, to ? to->index : -1);
     Shared self{};
     std::memcpy(&self, event->game + 0x28, sizeof(self));
     *out = AddRef(self);  // the caller lets go of it
@@ -153,12 +180,11 @@ void OnEventRecord(int from, const std::uint8_t* data, std::size_t size) {
             return;
         }
         id = id < 0 ? -id : id;
-        const bool ours = FindEvent(state.self, id) != nullptr;
-        const std::int32_t owner = ours ? state.self : from;
+        if (type != kSynchronizeGate) continue;  // background messages (Chatter)
+        const std::int32_t owner = id % gamenet::kMaxMachines;
         Event* event = FindEvent(owner, id);
         if (!event) event = NewEvent(owner, id, type);
-        Result("trace", "event %d of %d: message type %u from %d", id, owner, type, from);
-        if (type != kSynchronizeGate) continue;
+        Result("trace", "event %d: a message from %d", id, from);
         IndexKey sender{from, 0};
         G().Fn<void (*)(void*, IndexKey*, void*, void*)>(kReceive)(state.gameImpl + kGameSyncs, &sender, event, envelope);
     }
@@ -306,6 +332,17 @@ void MissionSync::Dump() const {
     auto* list = *reinterpret_cast<std::uint8_t**>(object + 0x28);
     for (auto* n = *reinterpret_cast<std::uint8_t**>(list); n != list; n = *reinterpret_cast<std::uint8_t**>(n))
         Result("dump", "node key=%d serialize=%p", *reinterpret_cast<std::int32_t*>(n + 0x10), *reinterpret_cast<void**>(n + 0x18));
+}
+
+void MissionSync::EndFrame() const {
+    for (auto& [to, batch] : state.batches)
+        if (batch && *reinterpret_cast<std::size_t*>(batch + kSerializeLength)) FlushBatch(to, batch);
+}
+
+void MissionSync::Chatter(std::size_t bytes) const {
+    if (!state.chatter) state.chatter = NewEvent(state.self, NextId(), kChatterType);
+    const std::vector<std::uint8_t> payload(bytes, 0x5C);
+    SendToEvent(*state.chatter, payload.data(), payload.size());
 }
 
 void MissionSync::Begin(std::int32_t id) const { transport_->game().Fn<std::int32_t (*)(std::int32_t)>(kBegin)(id); }

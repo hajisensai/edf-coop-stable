@@ -27,6 +27,13 @@ constexpr std::uint32_t kMaxPacket = 1170;  // EOS_P2P_MAX_PACKET_SIZE: EOS refu
 // Environment variables the driver hands each machine.
 constexpr const char* kSectionVariable = "EDF6NET_SECTION";  // the section's name
 constexpr const char* kUserVariable = "EDF6NET_USER";        // this machine's EOS ProductUserId text
+// Imperfections of the network, as a scenario asks for them:
+// "<channel>:<ms>" - packets of that channel reach their receiver that much later than the others (EOS keeps the
+// order of packets only within a channel);
+constexpr const char* kDelayVariable = "EDF6NET_DELAY";
+// "<bytes>:<count>" - each machine loses its first <count> unreliable packets of at least <bytes> (EOS delivers
+// unreliable packets at most once; the game resends what it needs).
+constexpr const char* kDropVariable = "EDF6NET_DROP";
 
 struct Attribute {
     char key[kKeyText];
@@ -79,7 +86,9 @@ struct WireLog {
 
 struct Network {
     std::uint32_t magic;
-    std::uint32_t refused;  // packets EOS refused (above kMaxPacket)
+    std::uint32_t refused;   // packets EOS refused for their size (above kMaxPacket)
+    std::uint32_t overflowed;  // packets refused because their receiver's inbox was full
+    std::uint32_t dropped;   // unreliable packets the network lost on purpose (EDF6NET_DROP)
     std::uint32_t finished;  // machines done with their part (FakeNet_Finish)
     Lobby lobby;
     Station machines[kMaxMachines];

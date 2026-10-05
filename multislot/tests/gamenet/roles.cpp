@@ -104,9 +104,22 @@ Seen LookAtRoom(const Machine& machine, const std::string& lobby) {
             const void* TargetUserId;
             const char* AttrKey;
         } byKey{1, member, kSplitSyncKey};
-        void* attribute = nullptr;
-        const bool marked = FakeExport<std::int32_t (*)(void*, const void*, void**)>(
-                                "EOS_LobbyDetails_CopyMemberAttributeByKey")(details, &byKey, &attribute) == 0;
+        // As the plugin reads it (syncmarker.cpp): an int64 of kSplitSyncFormat (1) or more.
+        struct AttributeData {
+            std::int32_t ApiVersion;
+            const char* Key;
+            std::int64_t AsInt64;
+            std::int32_t ValueType;
+        };
+        struct Attribute {
+            std::int32_t ApiVersion;
+            const AttributeData* Data;
+            std::int32_t Visibility;
+        };
+        Attribute* attribute = nullptr;
+        const bool marked = FakeExport<std::int32_t (*)(void*, const void*, Attribute**)>(
+                                "EOS_LobbyDetails_CopyMemberAttributeByKey")(details, &byKey, &attribute) == 0 &&
+                            attribute && attribute->Data && attribute->Data->ValueType == 1 && attribute->Data->AsInt64 >= 1;
         if (attribute) FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
         seen.members.push_back(text);
         seen.marked.push_back(marked);
@@ -229,18 +242,29 @@ std::uint64_t Fnv(const std::vector<std::uint8_t>& bytes) {
     return hash;
 }
 
-// Keeps the room's network going until every machine is done (or `timeoutMs`), as players stay in the room.
-void StayUntilEveryoneIsDone(Machine& machine, Transport& transport, std::size_t members) {
+// Keeps the room's network going until every machine is done, as players stay in the room.
+void StayUntilEveryoneIsDone(Machine& machine, Transport& transport, const MissionSync& sync, std::size_t members) {
     const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
     finish(1);
-    TickUntil(machine, 15000, [&] {
+    const auto frame = [&] {
         transport.Tick();
+        sync.EndFrame();
+    };
+    TickUntil(machine, 15000, [&] {
+        frame();
         return finish(0) >= members;
     });
     TickUntil(machine, 300, [&] {
-        transport.Tick();
+        frame();
         return false;
     });
+}
+
+// EDF6NET_CHATTER=<bytes>: every frame, every machine also sends an event message of that size to everyone.
+std::size_t ChatterBytes() {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_CHATTER", text, sizeof(text));
+    return static_cast<std::size_t>(std::atoi(text));
 }
 
 // The mission start sync: every machine runs MissionSync_Begin and then MissionSync_Update until it answers 0,
@@ -259,12 +283,17 @@ int Mission(Machine& machine, bool host) {
         return 1;
     }
     Result("loadout", "%d class=%d marker=%d armor=%d", place, loadout.soldierClass, loadout.marker, loadout.armor);
+    const std::size_t chatter = ChatterBytes();
+    // A frame of the game: other messages, the network, the mission script, then the event builders go out.
     sync.Begin(kSyncId);
+    sync.EndFrame();
     std::int32_t answer = 1;
     const ULONGLONG start = GetTickCount64();
-    const bool done = TickUntil(machine, 20000, [&] {
+    const bool done = TickUntil(machine, 30000, [&] {
+        if (chatter) sync.Chatter(chatter);
         transport.Tick();
         answer = sync.Update(kSyncId);
+        sync.EndFrame();
         return answer == 0;
     });
     Result("sync", "%s after %llu ms (MissionSync_Update answered %d)", done ? "done" : "NOT done",
@@ -285,7 +314,7 @@ int Mission(Machine& machine, bool host) {
         std::memcpy(&armor, record.data() + 0x20, 4);
         Result("record", "%d class=%d marker=%d armor=%d fnv=%016llx", slot, soldierClass, marker, armor, Fnv(record));
     }
-    StayUntilEveryoneIsDone(machine, transport, room.members.size());
+    StayUntilEveryoneIsDone(machine, transport, sync, room.members.size());
     return done ? 0 : 1;
 }
 

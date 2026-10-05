@@ -31,6 +31,11 @@ public:
     // `members` in lobby order (each one's player slot); `hostMission`/`hostDifficulty` only matter on the host.
     bool Build(Transport& transport, const std::vector<std::string>& members, const Loadout& loadout,
                std::int32_t mission, std::int32_t difficulty);
+    // The end of a frame: the event controller sends what its builders hold.
+    void EndFrame() const;
+    // Another event message of `bytes` to every member, as the game sends others in the same frames (it shares the
+    // builder, and so the controller record, with the start message).
+    void Chatter(std::size_t bytes) const;
     void Begin(std::int32_t id) const;           // MissionSync_Begin
     std::int32_t Update(std::int32_t id) const;  // MissionSync_Update: 0 when done
     // What this machine's game holds after the sync: the player count and each player's 0xD4-byte record.

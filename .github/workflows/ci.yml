@@ -3,7 +3,7 @@ name: CI
 # Builds EDF6Coop.dll (one build for every room size) and runs every test that needs no game. CI has neither the game's
 # menu layout (multislot/assets/LYT_MAINFRAME.SGO, made from Root.cpk) nor EDF.dll: build.ps1 -CI
 # (MULTISLOT_CI=ON) embeds a placeholder layout that package.ps1 and the release workflow refuse, and the
-# tests against the game's code (PatchTablesMatchEDF, PluginLoad_*) report themselves skipped, which ctest
+# tests against the game's code (PatchTablesMatchEDF, PluginLoad_*, GameNet_*) report themselves skipped, which ctest
 # lists at the end of its output. Release packages are built with the game by release.ps1.
 on:
   push:
@@ -58,6 +58,6 @@ jobs:
         shell: pwsh
         run: |
           $listed = & ctest --test-dir multislot/build --show-only=json-v1 | ConvertFrom-Json
-          $game = $listed.tests | Where-Object { $_.name -like 'PatchTablesMatchEDF' -or $_.name -like 'PluginLoad_*' }
+          $game = $listed.tests | Where-Object { $_.name -like 'PatchTablesMatchEDF' -or $_.name -like 'PluginLoad_*' -or $_.name -like 'GameNet_*' }
           $names = ($game | ForEach-Object { $_.name }) -join ', '
           Write-Output "::warning title=Game tests skipped::No EDF.dll in CI, so these ran as skipped: $names. Run build.ps1 -Test on a machine with the game to cover them."

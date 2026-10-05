@@ -17,7 +17,7 @@ struct Scenario {
 // What every machine runs with: the room part on, no update checks, no direct link (the game's own EOS P2P).
 inline std::string BaseIni(const std::string& extra = "") {
     return "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
-           "[DirectNet]\r\nEnabled=0\r\n"
+           "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\n"
            "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n" +
            extra;
 }

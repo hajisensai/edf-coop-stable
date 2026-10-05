@@ -108,13 +108,17 @@ HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey, int* pageKey) 
     static wchar_t keyName[16]{}, pageKeyName[16]{};
     HostDataSettings settings;
     settings.share = GetPrivateProfileIntW(L"HostData", L"Share", 1, ini) != 0;
-    const auto accept = IniText(ini, L"HostData", L"Accept", L"Always");
-    if (_wcsicmp(accept.c_str(), L"Ask") == 0)
-        settings.accept = HostAccept::Ask;
+    const auto accept = IniText(ini, L"HostData", L"Accept", L"Ask");
+    if (_wcsicmp(accept.c_str(), L"Auto") == 0)
+        settings.accept = HostAccept::Auto;
     else if (_wcsicmp(accept.c_str(), L"Never") == 0)
         settings.accept = HostAccept::Never;
-    else if (_wcsicmp(accept.c_str(), L"Always") != 0)
-        Log("[HostData] Accept=%ls is not Always, Ask or Never; using Always", accept.c_str());
+    else if (_wcsicmp(accept.c_str(), L"Always") == 0)
+        // 2.4.1 wrote Always into every new INI: it was never a choice, and a player is now asked first. Auto is
+        // the choice to take the room's files without being asked.
+        Log("[HostData] Accept=Always is read as Ask (asked first, naming the files); Auto takes them without asking");
+    else if (_wcsicmp(accept.c_str(), L"Ask") != 0)
+        Log("[HostData] Accept=%ls is not Ask, Auto or Never; using Ask", accept.c_str());
     *acceptKey = HostDataKey(ini, L"AcceptKey", L"F1", VK_F1, keyName);
     *pageKey = HostDataKey(ini, L"WeaponPageKey", L"F6", VK_F6, pageKeyName);
     settings.keyName = keyName;
@@ -758,7 +762,7 @@ bool LoadRooms(const wchar_t* iniPath) {
             Log("Host data: on; Share=%d, Accept=%ls, AcceptKey=%ls, WeaponPageKey=%ls (weapon and vehicle files only, "
                 "checked against the SHA-256 their member published, kept in Mods\\Plugins\\EDF6Coop.hostdata)",
                 settings.share ? 1 : 0,
-                settings.accept == HostAccept::Ask ? L"Ask" : settings.accept == HostAccept::Always ? L"Always" : L"Never",
+                settings.accept == HostAccept::Ask ? L"Ask" : settings.accept == HostAccept::Auto ? L"Auto" : L"Never",
                 settings.keyName, settings.pageKeyName);
         } else {
             Log("Host data: UNAVAILABLE - the host's files cannot be fetched in rooms");

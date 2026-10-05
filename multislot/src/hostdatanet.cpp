@@ -6,6 +6,7 @@
 #include <set>
 
 #include "hostdataopen.h"
+#include "hostdataprompt.h"
 #include "identity.h"
 #include "log.h"
 
@@ -281,8 +282,19 @@ struct Runtime {
     std::vector<Page> pages;
     int page = -1;       // the page picked, -1 none
     LobbyView view;      // the lobby as last read; no lobby outside a room
-    std::string lobby;   // the lobby `wanted` and `failed` are about
-    bool wanted = false;
+    std::string lobby;   // the lobby `approved`, `declined` and `failed` are about
+    std::set<Digest> approved;           // other members' bundles the game may read (Ask: the player said yes)
+    std::set<Digest> declined;           // and those it must not (the player said no, or gave them back)
+    bool fetching = false;               // a bundle not declined is still on its way: the question waits for it
+    bool asking = false;                 // the question is on screen
+    // What the player answered, for the next menu frame: the window runs on a thread of its own, and acting on the
+    // answer may start a fetch, which calls EOS - only ever from the game's thread.
+    struct Answer {
+        std::string lobby;
+        std::vector<Digest> digests;
+        bool use = false;
+    };
+    std::vector<Answer> answers;
     std::map<Digest, SourceFiles> have;  // other members' bundles here and checked
     std::set<Digest> failed;             // those that could not be fetched in this lobby
     std::vector<RoomSource> sources;     // the room's sources as last worked out
@@ -394,6 +406,16 @@ std::vector<RoomSource> SourcesLocked() {
     return PlanRoomSources(rt.view, mods, page);
 }
 
+// Another member's bundle as this machine has it (fetched in this run, or kept from an earlier one), or null.
+// Caller holds the lock.
+const SourceFiles* HaveLocked(const Digest& digest) {
+    Runtime& rt = Rt();
+    if (!rt.have.contains(digest))
+        if (auto kept = CachedLocked(digest)) rt.have.emplace(digest, std::move(*kept));
+    const auto have = rt.have.find(digest);
+    return have == rt.have.end() ? nullptr : &have->second;
+}
+
 // Starts or keeps the fetch of `missing`, or stops one nothing needs. Caller holds the lock.
 void FetchLocked(const std::optional<RoomSource>& missing) {
     Runtime& rt = Rt();
@@ -413,9 +435,10 @@ void FetchLocked(const std::optional<RoomSource>& missing) {
 // what is still fetched. Caller holds the lock.
 void DecideLocked() {
     Runtime& rt = Rt();
-    if (rt.view.lobbyId != rt.lobby) {  // another lobby, or none: what was taken or failed was about the last one
+    if (rt.view.lobbyId != rt.lobby) {  // another lobby, or none: what was answered or failed was about the last one
         rt.lobby = rt.view.lobbyId;
-        rt.wanted = rt.settings.accept == HostAccept::Always;
+        rt.approved.clear();
+        rt.declined.clear();
         rt.failed.clear();
     }
     const std::vector<RoomSource> sources = SourcesLocked();
@@ -426,6 +449,7 @@ void DecideLocked() {
     rt.remote = 0;
     std::vector<const SourceFiles*> files;
     std::optional<RoomSource> missing;
+    bool waiting = false;  // a bundle the game is to read has not arrived
     for (const RoomSource& source : rt.sources) {
         const SourceFiles* here = OwnFilesLocked(source.digest);
         if (here) {
@@ -433,18 +457,19 @@ void DecideLocked() {
             continue;
         }
         ++rt.remote;
-        if (!rt.wanted || rt.failed.contains(source.digest)) {
-            files.push_back(nullptr);
-            continue;
-        }
-        if (!rt.have.contains(source.digest))
-            if (auto kept = CachedLocked(source.digest)) rt.have.emplace(source.digest, std::move(*kept));
-        const auto have = rt.have.find(source.digest);
-        files.push_back(have == rt.have.end() ? nullptr : &have->second);
-        if (have == rt.have.end() && !missing) missing = source;
+        // Fetched before anyone is asked, so the question can name the files; read only once approved.
+        const bool skip = rt.settings.accept == HostAccept::Never || rt.failed.contains(source.digest) ||
+                          rt.declined.contains(source.digest);
+        if (!skip && rt.settings.accept == HostAccept::Auto) rt.approved.insert(source.digest);
+        const SourceFiles* have = skip ? nullptr : HaveLocked(source.digest);
+        if (!skip && !have && !missing) missing = source;
+        const bool used = !skip && rt.approved.contains(source.digest);
+        waiting = waiting || (used && !have);
+        files.push_back(used ? have : nullptr);
     }
     FetchLocked(missing);
-    rt.waiting = missing.has_value();
+    rt.fetching = missing.has_value();
+    rt.waiting = waiting;
     if (rt.waiting) return;
     RoomOverlay merged = MergeSources(files);
     rt.lost = 0;
@@ -671,6 +696,98 @@ void LoadModsLocked() {
     rt.mods = std::make_shared<const hostdata::Bundle>(std::move(*bundle));
 }
 
+// Other members' bundles in the room, in the room's order.
+std::vector<RoomSource> RemoteLocked() {
+    Runtime& rt = Rt();
+    std::vector<RoomSource> remote;
+    for (const RoomSource& source : rt.sources)
+        if (!OwnFilesLocked(source.digest)) remote.push_back(source);
+    return remote;
+}
+
+// The game reads (or is about to read) files of another member. Caller holds the lock.
+bool TakenLocked() {
+    const Runtime& rt = Rt();
+    const std::vector<RoomSource> remote = RemoteLocked();
+    return std::any_of(remote.begin(), remote.end(), [&rt](const RoomSource& source) {
+        return rt.approved.contains(source.digest) && !rt.declined.contains(source.digest) &&
+               !rt.failed.contains(source.digest);
+    });
+}
+
+// `use` (or not) the bundles `digests`, for as long as this machine stays in the lobby. Caller holds the lock.
+void AnswerLocked(const std::vector<Digest>& digests, bool use) {
+    Runtime& rt = Rt();
+    for (const Digest& digest : digests) {
+        (use ? rt.approved : rt.declined).insert(digest);
+        (use ? rt.declined : rt.approved).erase(digest);
+    }
+    DecideLocked();
+}
+
+// On the window's thread.
+void Answered(const std::string& lobby, const std::vector<Digest>& digests, bool use) {
+    Runtime& rt = Rt();
+    std::scoped_lock lock(rt.lock);
+    rt.asking = false;
+    rt.answers.push_back({lobby, digests, use});
+}
+
+// The answers given since the last menu frame. Caller holds the lock.
+void TakeAnswersLocked() {
+    Runtime& rt = Rt();
+    for (const Runtime::Answer& answer : rt.answers) {
+        if (answer.lobby != rt.lobby) {
+            Log("Host data: the question was answered after leaving that room; nothing changes");
+            continue;
+        }
+        Log("Host data: the player %s the room's files (%zu bundle(s)); %ls switches", answer.use ? "takes" : "declines",
+            answer.digests.size(), rt.settings.keyName);
+        AnswerLocked(answer.digests, answer.use);
+    }
+    rt.answers.clear();
+}
+
+// On a menu frame in a room (Accept=Ask): asks about the bundles nobody answered for yet, once every bundle that is
+// coming has arrived, so one question names them all. Caller holds the lock.
+void AskLocked() {
+    Runtime& rt = Rt();
+    if (rt.settings.accept != HostAccept::Ask || rt.asking || !rt.answers.empty() || rt.fetching || rt.storing) return;
+    std::vector<PromptSource> prompt;
+    std::vector<Digest> digests;
+    std::size_t files = 0;
+    for (const RoomSource& source : RemoteLocked()) {
+        const auto have = rt.have.find(source.digest);
+        if (have == rt.have.end() || rt.approved.contains(source.digest) || rt.declined.contains(source.digest) ||
+            rt.failed.contains(source.digest))
+            continue;
+        prompt.push_back({source.mods, source.member, have->second.paths});
+        digests.push_back(source.digest);
+        files += have->second.paths.size();
+    }
+    if (digests.empty()) return;
+    std::vector<std::string> yours = rt.own.paths;
+    std::sort(yours.begin(), yours.end());
+    const PromptLanguage language = PromptLanguageFor(GetUserDefaultUILanguage());
+    rt.asking = AskInWindow(PromptTitle(language), PromptText(prompt, yours, rt.settings.keyName, language),
+                            [lobby = rt.lobby, digests](bool use) { Answered(lobby, digests, use); });
+    if (rt.asking) {
+        Log("Host data: asking the player about %zu bundle(s) of other members, %zu file(s)", digests.size(), files);
+        return;
+    }
+    Log("Host data: keeping this machine's own files; %ls takes the room's", rt.settings.keyName);
+    AnswerLocked(digests, false);
+}
+
+// AcceptKey: gives back what is taken, or takes every bundle of the room. Caller holds the lock.
+void SwitchLocked() {
+    std::vector<Digest> digests;
+    for (const RoomSource& source : RemoteLocked()) digests.push_back(source.digest);
+    const bool take = !TakenLocked();
+    Log("Host data: %ls - %s the room's weapon files", Rt().settings.keyName, take ? "taking" : "giving back");
+    AnswerLocked(digests, take);
+}
+
 }  // namespace
 
 bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings& settings) {
@@ -713,11 +830,9 @@ std::wstring HostDataMenuFrame(bool inRoom, bool acceptPressed, bool pagePressed
     Runtime& rt = Rt();
     std::scoped_lock lock(rt.lock);
     if (pagePressed) NextPageLocked();
-    if (acceptPressed && inRoom && rt.remote && rt.settings.accept == HostAccept::Ask) {
-        rt.wanted = !rt.wanted;
-        Log("Host data: %ls - %s the room's weapon files", rt.settings.keyName, rt.wanted ? "taking" : "giving back");
-        DecideLocked();
-    }
+    TakeAnswersLocked();
+    if (acceptPressed && inRoom && rt.remote && rt.settings.accept == HostAccept::Ask) SwitchLocked();
+    if (inRoom && !rt.view.lobbyId.empty()) AskLocked();
     // Between missions: this is the menu, so the game is not in the middle of reading a mission's files.
     ApplyLocked();
     WeaponsView view;
@@ -730,7 +845,7 @@ std::wstring HostDataMenuFrame(bool inRoom, bool acceptPressed, bool pagePressed
     view.inRoom = inRoom && !rt.view.lobbyId.empty();
     view.remote = rt.remote;
     view.accept = rt.settings.accept;
-    view.wanted = rt.wanted;
+    view.wanted = TakenLocked();
     // While a fetched bundle is written the link holds nothing any more (its bytes were taken): all of it came.
     if (rt.waiting) view.percent = rt.storing ? 100 : rt.link.Percent();
     view.failed = static_cast<std::size_t>(std::count_if(

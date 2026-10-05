@@ -480,6 +480,10 @@ void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer) {
 }
 
 void PublishMemberText(const std::string& key, const std::string& value) {
+    if (value.empty()) {
+        Log("MISSION sync: not publishing an empty %s (EOS would refuse our whole lobby member update)", key.c_str());
+        return;
+    }
     const std::string text = value.substr(0, kMaxTextLength);
     AcquireSRWLockExclusive(&local.lock);
     std::string& published = local.texts[key];

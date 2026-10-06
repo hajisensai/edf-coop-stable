@@ -36,15 +36,22 @@ struct LobbyFacts {
     std::uint32_t maxMembers = 0;
     bool hasSearchType = false;
     std::int64_t searchType = 0;
+    // The room's own size (kRoomSizeKey, patches.h), which MultiSlot rooms publish since EOS holds 64 members at most
+    // and a room of two to four has a MaxMembers a normal room could have. 0: not published.
+    std::uint32_t roomSize = 0;
 };
 // SEARCH_TYPE decides: this build's mirrored family is MultiSlot, 0x90..0x9F normal. Without one (a lobby just
-// created, before its first update) MaxMembers above four is MultiSlot.
+// created, before its first update) a published room size, then MaxMembers above four, is MultiSlot.
 LobbyKind KindOf(const LobbyFacts& facts);
 // SEARCH_TYPE alone: this build's mirrored family MultiSlot, 0x90..0x9F normal, anything else Unknown (an earlier
 // MultiSlot version's room, which this build cannot join).
 LobbyKind SearchTypeKind(std::int64_t value);
-// The capacity an update keeps in a MultiSlot lobby: its own MaxMembers, at most kMaxPlayers.
+// The capacity an update keeps in a MultiSlot lobby: its published room size, else its own MaxMembers (2..kMaxPlayers),
+// else kMaxPlayers. What goes into the lobby's MaxMembers is that, at most kEosLobbyMembers (hostmode.h).
 int CapacityToKeep(const LobbyFacts& facts);
+// Whether the room update this machine makes publishes kRoomSizeKey: in a MultiSlot lobby it owns (EOS refuses a
+// lobby attribute from anyone else, and with it the whole update - members' own attributes included).
+bool PublishesRoomSize(LobbyKind kind, bool owner);
 
 // What the room update (749AD0, the room object in r13) publishes.
 struct RoomUpdate {
@@ -62,9 +69,12 @@ int CurrentLobbyCapacity();
 // This machine created the lobby the game is in now (the game's IsRoomHost can turn false while it stays in it).
 bool CreatedCurrentLobby();
 
-// The game entered `lobbyId`: created here for createdCapacity players, or joined (0). Test seam; the
-// CreateLobby/JoinLobby completions call it.
-void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::uint32_t createdCapacity);
+// The game entered `lobbyId`: created here with MaxLobbyMembers createdCapacity, or joined (0). createdRoomSize: what
+// this machine created it as (hostmode.h CreatedRoomSize: 0 a normal room, n a MultiSlot room for n), -1 when not
+// known (then a capacity above four is a MultiSlot room of that size). Test seam; the CreateLobby/JoinLobby
+// completions call it.
+void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::uint32_t createdCapacity,
+                      int createdRoomSize = -1);
 void NoteLobbyLeft();
 
 // Redirects EOS_Lobby_LeaveLobby, EOS_Lobby_DestroyLobby, EOS_Lobby_UpdateLobby, EOS_Platform_Tick,

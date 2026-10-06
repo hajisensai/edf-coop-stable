@@ -158,7 +158,7 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
     if (host) {
         CreateOptions options;
         options.LocalUserId = Self(machine);
-        options.MaxLobbyMembers = 8;
+        options.MaxLobbyMembers = gamenet::kMaxMachines;
         Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
     } else {
         // Guests come in one after another, in seat order (EDF6NET_SEAT): seat n joins once n are in.

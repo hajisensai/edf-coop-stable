@@ -289,7 +289,7 @@ void Poll(void* room) {
 std::uint64_t PagedCall(void* room, RoomFunction original) {
     const MemberVector* members = Members(room);
     if (members->size <= kPanelsPerPage) return original(room);  // the vanilla case
-    if (members->size > 64 || !members->data) return original(room);  // not a member vector
+    if (members->size > static_cast<std::size_t>(kMaxPlayers) || !members->data) return original(room);  // not a member vector
     const PageSlice slice = SliceForPage(members->size, room == currentRoom ? currentPage : 0);
     if (room == currentRoom) currentPage = slice.page;
     return CallWithMembers(original, room, members->data + slice.first, slice.count);
@@ -480,7 +480,7 @@ void SetPage(void* room, int page) {
 void NoteRoomUpdate(void* room, std::uint64_t now) {
     const std::size_t limit = static_cast<std::size_t>(kMaxPlayers);
     std::size_t shown = Members(room)->size;  // fake members are part of the game's own list (fakemembers.h)
-    if (shown > limit) shown = shown > 64 ? 0 : limit;  // not a member vector: show no page hint
+    if (shown > limit) shown = 0;  // the member list is cut to kMaxPlayers: anything longer is not one, show no page hint
     lastShown = shown;
     lastUpdate = now ? now : 1;
 }

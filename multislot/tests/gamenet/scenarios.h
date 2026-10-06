@@ -261,6 +261,10 @@ inline const std::vector<Scenario>& Scenarios() {
         {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,
          {{"EDF6NET_RUSH", "1"}, {"EDF6NET_LOBBY_DELAY", "2500"}}},
         {"playersync", Seats(2, "playersync", BaseIni()), 90000, &CheckPlayerSync},
+        // Rooms past eight (docs/net-re/roomsize.md): 16 and 32 players, each record beside the start message but
+        // the few that fit, every machine with every player's bytes.
+        {"mission16", Seats(16, "mission", BaseIni()), 240000, &CheckSplitMission},
+        {"mission32", Seats(32, "mission", BaseIni()), 400000, &CheckSplitMission},
     };
     return all;
 }

@@ -163,8 +163,20 @@ void TestKinds() {
     Check(KindOf({static_cast<std::uint32_t>(kRoomSize), true, 0x93}) == LobbyKind::Normal,
           "a vanilla SEARCH_TYPE is a normal room");
     Check(CapacityToKeep({10, false, 0}) == (kMaxPlayers >= 10 ? 10 : kMaxPlayers) &&
-              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored)}) == kMaxPlayers,
-          "a MultiSlot lobby keeps its own size, at most this build's");
+              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored)}) == 4 &&
+              CapacityToKeep({0, true, static_cast<std::int64_t>(kMirrored)}) == kMaxPlayers,
+          "a MultiSlot lobby keeps its own size (a room of four is one), at most this build's");
+    // Rooms larger than an EOS lobby, and rooms of two to four, publish their size (kRoomSizeKey).
+    Check(CapacityToKeep({static_cast<std::uint32_t>(kEosLobbyMembers), true, static_cast<std::int64_t>(kMirrored), 1024}) == 1024 &&
+              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored), 3}) == 3 &&
+              CapacityToKeep({64, true, static_cast<std::int64_t>(kMirrored), 5000}) == 64,
+          "the published room size is kept over MaxMembers, within 2..kMaxPlayers");
+    Check(KindOf({3, false, 0, 3}) == LobbyKind::MultiSlot && KindOf({3, false, 0, 0}) == LobbyKind::Normal,
+          "a room of three that published its size is MultiSlot before its first SEARCH_TYPE");
+    Check(KindOf({64, true, 0x93, 1024}) == LobbyKind::Normal, "SEARCH_TYPE still decides over a room size");
+    Check(PublishesRoomSize(LobbyKind::MultiSlot, true) && !PublishesRoomSize(LobbyKind::MultiSlot, false) &&
+              !PublishesRoomSize(LobbyKind::Normal, true) && !PublishesRoomSize(LobbyKind::Unknown, true),
+          "only the owner of a MultiSlot lobby adds its size to an update");
 }
 
 void TestLobby(const wchar_t* fakePath, const std::wstring& log) {

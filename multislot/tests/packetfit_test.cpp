@@ -332,7 +332,7 @@ void TestStubsAndSidePackets() {
     std::vector<std::uint8_t> copy(bytes.size());
     Check(FindRecord(stub, copy.data()) && copy == bytes, "a stored record is found by its stub");
     for (std::size_t i = 0; i < kRecordStoreEntries; ++i) {
-        std::uint8_t other[8] = {static_cast<std::uint8_t>(i), 1, 2, 3, 4, 5, 6, 7};
+        std::uint8_t other[8] = {static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(i >> 8), 2, 3, 4, 5, 6, 7};
         StubInfo filler{static_cast<int>(i & 0x0F), sizeof(other), RecordHash(other, sizeof(other))};
         StoreRecord(filler, other);
     }

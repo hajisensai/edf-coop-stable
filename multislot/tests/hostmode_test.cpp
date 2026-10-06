@@ -161,11 +161,18 @@ int main() {
 
     // F2 steps through the sizes and back to OFF; a size from the INI between two steps goes on to the next one.
     Check(NextRoomSize(0) == 8 && NextRoomSize(8) == 10 && NextRoomSize(10) == 12 && NextRoomSize(12) == 16 &&
-              NextRoomSize(16) == 24 && NextRoomSize(24) == 32 && NextRoomSize(32) == 0 && NextRoomSize(20) == 24,
-          "F2 steps OFF/8/10/12/16/24/32");
-    Check(ValidRoomSize(0) && ValidRoomSize(8) && ValidRoomSize(12) && ValidRoomSize(kMaxPlayers) && !ValidRoomSize(4) &&
-              !ValidRoomSize(5) && !ValidRoomSize(9) && !ValidRoomSize(kMaxPlayers + 1) && !ValidRoomSize(-1),
-          "the INI may hold OFF or one of F2's sizes");
+              NextRoomSize(16) == 24 && NextRoomSize(24) == 32 && NextRoomSize(32) == 48 && NextRoomSize(48) == 64 &&
+              NextRoomSize(64) == 128 && NextRoomSize(128) == 256 && NextRoomSize(256) == 512 &&
+              NextRoomSize(512) == 1024 && NextRoomSize(1024) == 0 && NextRoomSize(20) == 24 && NextRoomSize(3) == 8,
+          "F2 steps OFF/8/10/12/16/24/32/48/64/128/256/512/1024");
+    Check(ValidRoomSize(0) && ValidRoomSize(2) && ValidRoomSize(3) && ValidRoomSize(4) && ValidRoomSize(5) &&
+              ValidRoomSize(9) && ValidRoomSize(100) && ValidRoomSize(kMaxPlayers) && !ValidRoomSize(1) &&
+              !ValidRoomSize(kMaxPlayers + 1) && !ValidRoomSize(-1),
+          "the INI may hold OFF or any size of 2..1024");
+    Check(EosLobbyCapacity(0) == 4 && EosLobbyCapacity(3) == 3 && EosLobbyCapacity(64) == 64 && EosLobbyCapacity(65) == 64 &&
+              EosLobbyCapacity(1024) == 64 && SteamLobbyCapacity(0) == 4 && SteamLobbyCapacity(200) == 200 &&
+              SteamLobbyCapacity(1024) == 250,
+          "lobby capacities: the room size, at most what EOS (64) and Steam (250) hold");
     InitHostMode(image, nullptr, kMaxPlayers + 1, VK_F2, 0xB0, L"F2/LS");
     Check(HostRoomSize() == 0, "a size no room can have hosts normal rooms");
 
@@ -206,14 +213,18 @@ int main() {
               "OFF: the room search lists normal and MultiSlot rooms of the kind");
     }
 
-    // ON at every size: that many slots in both lobbies, and the one search range of the 32-slot family.
-    for (const int size : kRoomSizes) {
+    // ON at every size: that many slots in both lobbies (at most what each holds), and the one search range of the
+    // 1024-slot family.
+    std::vector<int> sizes(std::begin(kRoomSizes), std::end(kRoomSizes));
+    sizes.insert(sizes.end(), {2, 3, 4, 5, 63, 65, 251});
+    for (const int size : sizes) {
         InitHostMode(image, nullptr, size, VK_F2, 0xB0, L"F2/LS");
         steam.r8 = 0xDEAD;
         HostModeHookHandler(0x7435F7)(&steam);
-        Check(steam.r8 == static_cast<std::uint64_t>(size) && CreatedRoomSize() == size, "ON: Steam lobby created for the room size");
+        Check(steam.r8 == static_cast<std::uint64_t>(size < 250 ? size : 250) && CreatedRoomSize() == size,
+              "ON: Steam lobby created for the room size");
         HostModeHookHandler(0x742A9D)(&create);
-        Check(Stack64(frameMemory + 0x20) == static_cast<std::uint64_t>(size) && CreatedRoomSize() == size,
+        Check(Stack64(frameMemory + 0x20) == static_cast<std::uint64_t>(size < 64 ? size : 64) && CreatedRoomSize() == size,
               "ON: EOS lobby created for the room size");
         // The voice chat setting on: bEnableRTCRoom [rbp-0x44] = 1, LocalRTCOptions [rbp-0x40] set.
         const std::int32_t rtcOn = 1;

@@ -5,6 +5,7 @@
 #include <Windows.h>
 
 #include <bit>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -258,7 +259,7 @@ int main(int argc, char** argv) {
     // Room tables: each patch turns one operand 4 into 8 (or 4 records into 8 records) in the three constructors that
     // size a table per room member.
     const auto sessions = SessionPatches();
-    Check(sessions.size() == 11, "session patch table size");
+    Check(sessions.size() == 7, "session patch table size");
     for (const auto& patch : sessions) {
         Check(Matches(image.At(patch.rva, patch.original.size()), patch), patch.name, patch.rva);
         Check(patch.original.size() == patch.replacement.size() && patch.original != patch.replacement, "session patch changes bytes in place", patch.rva);
@@ -267,14 +268,11 @@ int main(int argc, char** argv) {
                   "the voice chat HUD allocates eight 0x50-byte records", patch.rva);
             continue;
         }
-        int changed = 0;
-        bool fourToEight = true;
-        for (std::size_t i = 0; fourToEight && i < patch.original.size(); ++i) {
-            if (patch.original[i] == patch.replacement[i]) continue;
-            ++changed;
-            fourToEight = patch.original[i] == kVanillaPlayers && patch.replacement[i] == kMaxPlayers;
-        }
-        Check(fourToEight && changed == 1, "session patch changes a 4 into 8 and nothing else", patch.rva);
+        // Every other one is an imm32 that ends the instruction: 4 becomes the room size, the opcode stays.
+        const std::size_t at = patch.original.size() - 4;
+        Check(Operand(patch.original, at, 4) == kVanillaPlayers && Operand(patch.replacement, at, 4) == kMaxPlayers &&
+                  std::equal(patch.original.begin(), patch.original.begin() + at, patch.replacement.begin()),
+              "session patch changes an imm32 4 into the room size and nothing else", patch.rva);
         Check((patch.rva > 0x12B77E0 && patch.rva < 0x12B79A3) || (patch.rva > 0x12CB5F0 && patch.rva < 0x12CBA54) ||
                   (patch.rva > 0x9605E0 && patch.rva < 0x960844),
               "session patch lies in the Users, packet Controller or UiVoiceChat_Notify constructor", patch.rva);
@@ -314,7 +312,53 @@ int main(int argc, char** argv) {
         Check(hook.original.size() >= 5 && hook.displacedOffset + hook.displacedSize <= hook.original.size(), "hook covers a jump", hook.rva);
     }
     for (const auto& call : missionCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
-    Check(missionPatches.size() == 27 && missionHooks.size() == 24 && missionCalls.size() == 5, "mission table sizes");
+    Check(missionPatches.size() == 16 && missionHooks.size() == 25 && missionCalls.size() == 5, "mission table sizes");
+    // The script VM's player table: four 0x18-byte entries built at +0x168 by its constructor (eh vector constructor
+    // 12D8D44 with size 0x18, count 4), and the four unbounded readers BvmPlayerTableHooks bound.
+    const std::uint8_t bvmTable[] = {0x48, 0x8D, 0x8F, 0x68, 0x01, 0x00, 0x00};  // 20DCAC lea rcx, [rdi+0x168]
+    const std::uint8_t bvmShape[] = {0x8D, 0x56, 0x18, 0x44, 0x8D, 0x46, 0x04};  // 20DCCB lea edx, [rsi+0x18]; lea r8d, [rsi+4]
+    Check(std::memcmp(image.At(0x20DCAC, 7), bvmTable, 7) == 0 && std::memcmp(image.At(0x20DCCB, 7), bvmShape, 7) == 0 &&
+              CallTargets(image.At(0x20DCD2, 5), 0x20DCD2, 0x12D8D44),
+          "the script VM builds its player table of four 0x18-byte entries at +0x168", 0x20DCAC);
+    const std::uint8_t bvmCount[] = {0x8B, 0x80, 0xF8, 0x4F, 0x01, 0x00};  // 2252B9 mov eax, [rax+0x14FF8]
+    Check(std::memcmp(image.At(0x2252B9, 6), bvmCount, 6) == 0 && CallTargets(image.At(0x21F3B2, 5), 0x21F3B2, 0x225290) &&
+              CallTargets(image.At(0x21F8CA, 5), 0x21F8CA, 0x225290),
+          "21F380 loops over the online player count (225290)", 0x21F3B2);
+    const std::uint8_t indexed[] = {0x48, 0x63, 0xC2};  // movsxd rax, edx
+    for (const std::uint32_t entry : {0x22274Fu, 0x228ADDu, 0x22A671u})
+        Check(std::memcmp(image.At(entry, 3), indexed, 3) == 0, "a BVM entry reader takes its index in edx", entry);
+    for (const auto& hook : BvmPlayerTableHooks()) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(BvmPlayerTableHandler(hook.rva) != nullptr, "every BVM table site has a handler", hook.rva);
+    }
+    // The bounds an imm8 could not hold (widecmp.h): each is the game's `cmp, 4` and the jcc after it.
+    const auto compares = [] {
+        auto all = SessionCompares();
+        const auto mission = MissionCompares();
+        all.insert(all.end(), mission.begin(), mission.end());
+        return all;
+    }();
+    for (const auto& site : compares) {
+        const Patch verify{site.name, site.rva, site.original, site.original};
+        Check(Matches(image.At(site.rva, site.original.size()), verify), site.name, site.rva);
+        Check(site.original.size() >= 5, "a widened compare covers a jump", site.rva);
+    }
+    // FindPlayerIndex: the "not found" `lea eax, [rbp-5]` is reached only by the loop's fall-through, and the
+    // epilogue after it reads no flags, so `or eax, -1` stands for it at any count.
+    Check(image.At(0x1DA405, 2)[0] == 0xEB && image.At(0x1DA405, 2)[1] == 0x03,
+          "FindPlayerIndex jumps from its not-found value to the epilogue", 0x1DA405);
+    {
+        const auto* code = IMAGE_FIRST_SECTION(image.nt);
+        const std::uint8_t* text = image.At(code->VirtualAddress, code->SizeOfRawData);
+        int into = 0;
+        // Short and near jumps inside FindPlayerIndex (1DA340..1DA429) that land on 1DA402.
+        for (std::uint32_t rva = 0x1DA340; text && rva < 0x1DA429; ++rva) {
+            const std::uint8_t* at = image.At(rva, 6);
+            if ((at[0] & 0xF0) == 0x70 || at[0] == 0xEB) into += rva + 2 + static_cast<std::int8_t>(at[1]) == 0x1DA402;
+        }
+        Check(into == 0, "nothing in FindPlayerIndex jumps to its not-found value", 0x1DA402);
+    }
     // The ninth remote flag would land on the user vector CreatePlayers keeps at rsp+0x30 and re-reads
     // every pass of the loop that writes the flags (mission.cpp, RemoteFlagHandler).
     const std::uint8_t vectorBegin[] = {0x48, 0x8B, 0x7C, 0x24, 0x30};  // 1D98E9 mov rdi, [rsp+0x30]
@@ -736,6 +780,14 @@ int main(int argc, char** argv) {
     Check(CapacityFromInfo(3, 3, 5) == 0, "capacity: members + available != max is rejected");
     Check(CapacityFromInfo(0, 0, 0) == 0, "capacity: zero max is rejected");
     Check(CapacityFromInfo(1, 70, 71) == 0, "capacity: more than EOS's 64 is rejected");
+    // Rooms larger than an EOS lobby (kRoomSizeKey): a full-sized lobby stands for the room's published size.
+    Check(CapacityFromInfo(64, 0, 64, 1024) == 1024 && CapacityFromInfo(10, 54, 64, 200) == 200,
+          "capacity: a 64-member lobby with a larger published room size is that room");
+    Check(CapacityFromInfo(3, 2, 5, 1024) == 5, "capacity: a published size counts only for a full-sized lobby");
+    Check(CapacityFromInfo(64, 0, 64, 0) == 64 && CapacityFromInfo(64, 0, 64, 32) == 64 &&
+              CapacityFromInfo(64, 0, 64, kMaxPlayers + 1) == 64,
+          "capacity: a published size below the lobby's, or past this build's, is ignored");
+    Check(CapacityFromInfo(1, 70, 71, 1024) == 0, "capacity: an inconsistent lobby stays rejected with a room size");
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

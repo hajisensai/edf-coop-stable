@@ -103,7 +103,8 @@ add_library(EDF6Coop SHARED
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
-    src/networld.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp)
+    src/networld.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp
+    src/widecmp.cpp src/interest.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -191,6 +192,16 @@ add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp 
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
 
+# Room size (docs/net-re/roomsize.md): widened compares run in-process.
+add_executable(WideCompareTests tests/widecmp_test.cpp src/widecmp.cpp src/code.cpp src/patches.cpp)
+target_compile_options(WideCompareTests PRIVATE ${WARNINGS})
+add_test(NAME WideCompares COMMAND WideCompareTests)
+
+# Interest management for large rooms (src/interest.h): bandwidth-driven priority accumulation.
+add_executable(InterestTests tests/interest_test.cpp src/interest.cpp)
+target_compile_options(InterestTests PRIVATE ${WARNINGS})
+add_test(NAME InterestManagement COMMAND InterestTests)
+
 add_executable(MissionTests tests/mission_test.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(MissionTests PRIVATE ${WARNINGS})
 add_test(NAME MissionSlots COMMAND MissionTests)
@@ -277,7 +288,7 @@ target_compile_options(RefusalTests PRIVATE ${WARNINGS})
 add_dependencies(RefusalTests EDF6Coop)
 add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6Coop>" "${CMAKE_BINARY_DIR}/refusaltest")
 
-add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
+add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp src/widecmp.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6Coop)
@@ -304,7 +315,8 @@ add_dependencies(GameMachine GameNetEos)
 add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
-foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon playersync)
+foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon
+        playersync mission16 mission32)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

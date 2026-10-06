@@ -57,6 +57,11 @@ void Observe(const LobbyView& seen) {
     const std::vector<NetRoom::Member> mismatched = NetGate().Observe(view);
     if (view.lobbyId.empty()) return;
     const bool owner = !view.owner.empty() && view.owner == view.self;
+    if (owner) {  // what the whole room runs, for everyone else's gate (kNetRoomCapsKey); never empty: "0" says none
+        char caps[16];
+        std::snprintf(caps, sizeof(caps), "%X", NetGate().ActiveMask());
+        PublishLobbyText(kNetRoomCapsKey, caps);
+    }
     // Having read the host's protocol (and logged above what it means), say so: only then may a host of another
     // protocol refuse us (kNetSeenKey).
     struct SeenAfter {
@@ -141,6 +146,8 @@ std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
     lobby_ = view.lobbyId;
     self_ = view.self;
     owner_ = view.owner;
+    const auto roomCaps = view.lobbyTexts.find(kNetRoomCapsKey);
+    hostCaps_ = roomCaps == view.lobbyTexts.end() ? 0u : ParseCaps(roomCaps->second);
     members_.clear();
     for (const LobbyView::Member& seen : view.members) {
         Member m;
@@ -168,6 +175,9 @@ std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
 void NetRoom::UpdateActiveLocked() {
     std::uint32_t mask = lobby_.empty() || !Find(members_, self_) ? 0u : ~0u;
     for (const Member& m : members_) mask &= m.published && m.protocol == settings.protocol ? m.caps : 0u;
+    // Not the host: only what the host says the whole room runs (members beyond the lobby included), and nothing until
+    // it said it.
+    if (self_ != owner_) mask &= hostCaps_;
     active_ = mask;
 }
 
@@ -188,6 +198,9 @@ std::string NetRoom::WhyOff(std::uint32_t caps) const {
         if (!why.empty()) break;
     }
     if (why.empty() && !Find(members_, self_)) why = "our own lobby entry is not listed yet";
+    if (why.empty() && self_ != owner_ && (hostCaps_ & caps) != caps)
+        why = "the room's host has not said that the whole room runs them (members beyond Epic's lobby without them, or its "
+              "word has not reached us yet)";
     ReleaseSRWLockShared(&lock_);
     return why;
 }
@@ -355,6 +368,7 @@ bool StartNetFeature(bool lobbyGlue) {
     std::snprintf(caps, sizeof(caps), "%X", settings.caps);
     PublishMemberText(kNetCapsKey, caps);
     WatchMemberTexts({kNetProtocolKey, kNetCapsKey, kNetSeenKey}, &Observe);
+    WatchLobbyTexts({kNetRoomCapsKey});
     // The direct link says the same in every hello; a host refuses another protocol there too (members beyond
     // Epic's lobby, whose lobby entry nobody can read).
     dn::setNetcodeIdentity(static_cast<std::uint32_t>(settings.protocol), settings.caps, settings.rejectMismatched);

@@ -113,6 +113,12 @@ struct KickMemberOptions {  // EOS_Lobby_KickMemberOptions
 };
 using KickMemberFn = void (*)(void* lobby, const KickMemberOptions*, void* clientData, LobbyIdCallback);
 using IdFromStringFn = const void* (*)(const char*);
+struct CopyLobbyAttributeOptions {  // EOS_LobbyDetails_CopyAttributeByKeyOptions
+    std::int32_t ApiVersion;
+    const char* AttrKey;
+};
+struct Attribute;
+using CopyLobbyAttributeFn = EosResult (*)(void* details, const CopyLobbyAttributeOptions*, Attribute** out);
 
 struct Api {
     UpdateModificationFn updateModification = nullptr;
@@ -129,6 +135,7 @@ struct Api {
     IsCompleteFn isComplete = nullptr;
     KickMemberFn kickMember = nullptr;      // optional: KickLobbyMember
     AddMemberAttributeFn addLobbyAttribute = nullptr;  // optional: PublishLobbyText (same signature, the lobby's own)
+    CopyLobbyAttributeFn copyLobbyAttribute = nullptr;  // optional: WatchLobbyTexts
     IdFromStringFn idFromString = nullptr;  // optional: KickLobbyMember
     // What the game's imports pointed at before us (EOS, or another plugin's hook in front of it).
     CreateLobbyFn createLobby = nullptr;
@@ -157,6 +164,7 @@ struct Local {
     bool splitReader = false;  // kSplitSyncKey is ours to publish
     bool owner = false;        // we own this lobby (the beat read it): lobbyTexts are ours to publish
     std::map<std::string, std::string, std::less<>> lobbyTexts;  // PublishLobbyText
+    std::vector<std::string> lobbyWatched;                         // WatchLobbyTexts
     std::map<std::string, std::string, std::less<>> texts;  // PublishMemberText
     std::vector<std::string> watched;                       // WatchMemberTexts: every watcher's keys
     // The watched texts each member of this lobby has shown. Our copy of the lobby drops a member's attributes when
@@ -294,6 +302,14 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members, LobbyView& view) {
     view.lobbyId = local.lobbyId;
     view.self = UserText(local.user);
     view.owner = UserText(api.lobbyOwner(details, &ownerOptions));
+    for (const std::string& key : local.lobbyWatched) {
+        const CopyLobbyAttributeOptions o{1, key.c_str()};
+        Attribute* attribute = nullptr;
+        if (api.copyLobbyAttribute && api.copyLobbyAttribute(details, &o, &attribute) == kEosSuccess && attribute &&
+            attribute->Data && attribute->Data->ValueType == kUtf8 && attribute->Data->Value.AsUtf8)
+            view.lobbyTexts[key] = std::string(attribute->Data->Value.AsUtf8, strnlen(attribute->Data->Value.AsUtf8, kMaxTextLength));
+        if (attribute) api.releaseAttribute(attribute);
+    }
     const GetMemberCountOptions countOptions{1};
     const std::uint32_t count = std::min(api.memberCount(details, &countOptions), kMaxMembersRead);
     decltype(local.seen) present;  // only members still in the lobby are remembered
@@ -327,7 +343,6 @@ bool BeatLocked(LobbyView& view) {
         local.owner = owner;
     }
     if (read && SplitSync().Observe(members)) local.dirty = true;  // a newcomer needs them again
-    if (local.dirty) PublishLocked();
     return read;
 }
 
@@ -336,9 +351,10 @@ void TickHook(void* platform) {
     AcquireSRWLockExclusive(&local.lock);
     const ULONGLONG now = GetTickCount64();
     LobbyView view;
-    bool beat = false;
+    bool beat = false, due = false;
     if (!local.lobbyId.empty() && now >= local.nextBeat) {
         local.nextBeat = now + kObserveIntervalMs;
+        due = true;
         beat = BeatLocked(view);
     }
     const std::vector<LobbyObserver> observers = beat ? local.observers : std::vector<LobbyObserver>();
@@ -346,6 +362,12 @@ void TickHook(void* platform) {
     ReleaseSRWLockExclusive(&local.lock);
     for (const LobbyObserver& observer : observers) observer(view);
     for (const auto& listener : listeners) listener(platform);
+    // Published at the end of the beat, after the observers: what they decided from this beat's reading (the netcode
+    // gate's EDF6NET_SEEN and EDF6NET_ROOMCAPS among it) goes out on this beat, not one later.
+    if (!due) return;
+    AcquireSRWLockExclusive(&local.lock);
+    if (local.dirty && !local.lobbyId.empty()) PublishLocked();
+    ReleaseSRWLockExclusive(&local.lock);
 }
 
 void Entered(const LobbyCall& call, const char* lobbyId) {
@@ -528,6 +550,14 @@ void PublishMemberText(const std::string& key, const std::string& value) {
     ReleaseSRWLockExclusive(&local.lock);
 }
 
+void WatchLobbyTexts(std::vector<std::string> keys) {
+    AcquireSRWLockExclusive(&local.lock);
+    for (std::string& key : keys)
+        if (std::find(local.lobbyWatched.begin(), local.lobbyWatched.end(), key) == local.lobbyWatched.end())
+            local.lobbyWatched.push_back(std::move(key));
+    ReleaseSRWLockExclusive(&local.lock);
+}
+
 void PublishLobbyText(const std::string& key, const std::string& value) {
     if (value.empty()) return;
     const std::string text = value.substr(0, kMaxTextLength);
@@ -587,6 +617,8 @@ bool InstallSyncMarker(HMODULE game, ImportRedirect redirect, bool splitReader) 
     api.kickMember = reinterpret_cast<KickMemberFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_Lobby_KickMember")));
     api.addLobbyAttribute = reinterpret_cast<AddMemberAttributeFn>(
         reinterpret_cast<void*>(GetProcAddress(eos, "EOS_LobbyModification_AddAttribute")));
+    api.copyLobbyAttribute = reinterpret_cast<CopyLobbyAttributeFn>(
+        reinterpret_cast<void*>(GetProcAddress(eos, "EOS_LobbyDetails_CopyAttributeByKey")));
     api.idFromString =
         reinterpret_cast<IdFromStringFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_ProductUserId_FromString")));
     AcquireSRWLockExclusive(&local.lock);

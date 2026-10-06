@@ -42,6 +42,10 @@ constexpr const char* kNetCapsKey = "EDF6NET_CAPS";
 // member of another protocol only once it shows this: the refused member has said why on its own side first (both
 // beat once a second, and without this the host could remove it before it ever read the host's entry).
 constexpr const char* kNetSeenKey = "EDF6NET_SEEN";
+// The room's host publishes on the lobby itself what the whole room runs (hex, the features every member has on, the
+// members beyond Epic's lobby included - only the host knows those, by their hellos). Everyone else's gate is its own
+// reading of the lobby AND this: every machine decides on the same set of members.
+constexpr const char* kNetRoomCapsKey = "EDF6NET_ROOMCAPS";
 
 enum class NetFeature : std::uint32_t {
     // W1, the transport (src/netcode.h).
@@ -78,6 +82,7 @@ public:
     // (until then they are not returned, and come again); for anyone else to log.
     std::vector<Member> Observe(const LobbyView& view);
     bool Active(std::uint32_t caps) const;  // every listed member publishes kNetProtocol and has all of `caps`
+    std::uint32_t ActiveMask() const { return active_.load(); }
     bool InRoom() const;
     bool Owner() const;  // we own the room
     std::vector<Member> Members() const;
@@ -92,6 +97,7 @@ private:
     // What Active answers, worked out when the room changes (Observe): the features every member has on, or 0. Read
     // on every datagram (NetFeatureActive is on the send path), so it is one atomic load.
     std::atomic<std::uint32_t> active_{0};
+    std::uint32_t hostCaps_ = 0;  // kNetRoomCapsKey as the host published it
     void UpdateActiveLocked();
 };
 

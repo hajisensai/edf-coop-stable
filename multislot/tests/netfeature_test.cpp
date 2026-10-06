@@ -37,18 +37,34 @@ LobbyView::Member Member(const std::string& id, const char* protocol, const char
     return m;
 }
 
-LobbyView View(const std::string& self, std::vector<LobbyView::Member> members) {
+LobbyView View(const std::string& self, std::vector<LobbyView::Member> members, const char* roomCaps = "FFFFFFFF") {
     LobbyView view;
     view.lobbyId = "lobby1";
     view.self = self;
     view.owner = kHost;
     view.members = std::move(members);
+    if (roomCaps) view.lobbyTexts[kNetRoomCapsKey] = roomCaps;  // what the host says the whole room runs
     return view;
 }
+
 
 const std::uint32_t kMesh = static_cast<std::uint32_t>(NetFeature::Mesh);
 const std::uint32_t kFragments = static_cast<std::uint32_t>(NetFeature::Fragments);
 const std::string kProto = std::to_string(kNetProtocol);
+
+// Everyone decides on one set of members: a guest takes only what the host says the whole room runs (the host counts
+// the members beyond Epic's lobby, which nobody else can see).
+void TestHostSaysWhatTheRoomRuns() {
+    NetRoom room;
+    const auto members = std::vector<LobbyView::Member>{Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7")};
+    room.Observe(View(kGuest, members, nullptr));
+    Check(!room.Active(kMesh), "until the host said what the room runs, a guest runs nothing");
+    room.Observe(View(kGuest, members, "5"));  // a member beyond the lobby lacks Mesh
+    Check(!room.Active(kMesh) && room.Active(kFragments), "a feature the host says the room lacks is off at the guest too");
+    Check(room.WhyOff(kMesh).find("the room's host has not said") != std::string::npos, "and the log says why");
+    room.Observe(View(kHost, members, nullptr));  // the host itself goes by what it sees
+    Check(room.Active(kMesh) && room.ActiveMask() == 7, "the host decides on what it sees");
+}
 
 void TestRoomAgrees() {
     NetRoom room;
@@ -149,6 +165,7 @@ void TestPacking() {
 
 int main() {
     TestPacking();
+    TestHostSaysWhatTheRoomRuns();
     TestRoomAgrees();
     TestUnpublishedMember();
     TestMismatchedProtocol();

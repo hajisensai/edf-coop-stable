@@ -34,7 +34,25 @@ const NetRoom::Member* Find(const std::vector<NetRoom::Member>& members, const s
 }
 
 // The lobby beat: what everyone publishes. The owner refuses a member of another netcode protocol.
-void Observe(const LobbyView& view) {
+void Observe(const LobbyView& seen) {
+    // A room host also counts the members beyond Epic's lobby, by what their direct-link hellos said.
+    LobbyView view = seen;
+    if (!view.lobbyId.empty() && !view.owner.empty() && view.owner == view.self) {
+        for (const auto& [id, netcode] : dn::directMemberNetcode()) {
+            bool listed = false;
+            for (const auto& m : view.members) listed = listed || m.id == id;
+            if (listed) continue;
+            LobbyView::Member m;
+            m.id = id;
+            if (netcode.first) {
+                m.texts[kNetProtocolKey] = std::to_string(netcode.first);
+                char caps[16];
+                std::snprintf(caps, sizeof(caps), "%X", netcode.second);
+                m.texts[kNetCapsKey] = caps;
+            }
+            view.members.push_back(std::move(m));
+        }
+    }
     const std::vector<NetRoom::Member> mismatched = NetGate().Observe(view);
     if (view.lobbyId.empty()) return;
     const bool owner = !view.owner.empty() && view.owner == view.self;
@@ -293,6 +311,10 @@ void InitNetFeature(const wchar_t* iniPath) {
     options.statsIntervalMs = 1000u * GetPrivateProfileIntW(L"Netcode", L"StatsSeconds", 60, iniPath);
     dn::setNetcodeOptions(options);
     bulkEcho = GetPrivateProfileIntW(L"Test", L"BulkEcho", 0, iniPath) != 0;
+    if (GetPrivateProfileIntW(L"Test", L"LoopbackHosts", 0, iniPath)) {
+        dn::setTestLoopbackHosts(true);
+        Log("TEST LoopbackHosts=1: a room host may advertise a loopback address");
+    }
     dn::setBulkHandler(&DispatchBulk);
     const UINT blockAfter = GetPrivateProfileIntW(L"Test", L"PeerBlockAfterMs", UINT_MAX, iniPath);
     if (blockAfter != UINT_MAX) {
@@ -316,6 +338,18 @@ bool StartNetFeature(bool lobbyGlue) {
     std::snprintf(caps, sizeof(caps), "%X", settings.caps);
     PublishMemberText(kNetCapsKey, caps);
     WatchMemberTexts({kNetProtocolKey, kNetCapsKey}, &Observe);
+    // The direct link says the same in every hello; a host refuses another protocol there too (members beyond
+    // Epic's lobby, whose lobby entry nobody can read).
+    dn::setNetcodeIdentity(static_cast<std::uint32_t>(settings.protocol), settings.caps, settings.rejectMismatched);
+    // Rooms above Epic's 64: the host puts its direct-link address and identity on the lobby, where a player Epic
+    // turns away finds them (src/netcode.h kHostAddressKey).
+    ListenToTicks([](void*) {
+        std::string address, identity;
+        if (dn::hostAdvertisement(address, identity)) {
+            PublishLobbyText(dn::kHostAddressKey, address);
+            PublishLobbyText(dn::kHostIdentityKey, identity);
+        }
+    });
     dn::setRoomCapQuery(&RoomCap);
     started = true;
     return true;

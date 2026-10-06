@@ -770,6 +770,13 @@ bool LoadRooms(const wchar_t* iniPath) {
     // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
     // datagrams follow interest management within each path's budget (netaoi.h).
     dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });
+    // [Test] RoomCapacity: the room's size where the test network's lobby cannot say it (gamenet joinfull).
+    if (const UINT testCapacity = GetPrivateProfileIntW(L"Test", L"RoomCapacity", 0, iniPath)) {
+        static UINT capacity = 0;
+        capacity = testCapacity;
+        dn::setRoomCapacitySource([]() -> std::uint32_t { return capacity; });
+        Log("TEST RoomCapacity=%u: the room holds that many whatever its lobby says", testCapacity);
+    }
     InstallNetInterest(GetPrivateProfileIntW(L"Netcode", L"Interest", 1, iniPath) != 0);
     // I1: a start message too large even for stubs sends every record in bulk while the room reads fragments.
     SetBulkRecords([] { return NetFeatureActive(NetFeature::Fragments); },

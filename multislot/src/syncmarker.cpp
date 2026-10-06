@@ -128,6 +128,7 @@ struct Api {
     ReleaseAttributeFn releaseAttribute = nullptr;
     IsCompleteFn isComplete = nullptr;
     KickMemberFn kickMember = nullptr;      // optional: KickLobbyMember
+    AddMemberAttributeFn addLobbyAttribute = nullptr;  // optional: PublishLobbyText (same signature, the lobby's own)
     IdFromStringFn idFromString = nullptr;  // optional: KickLobbyMember
     // What the game's imports pointed at before us (EOS, or another plugin's hook in front of it).
     CreateLobbyFn createLobby = nullptr;
@@ -154,6 +155,8 @@ struct Local {
     ULONGLONG nextBeat = 0;
     bool failureLogged = false;  // in this lobby
     bool splitReader = false;  // kSplitSyncKey is ours to publish
+    bool owner = false;        // we own this lobby (the beat read it): lobbyTexts are ours to publish
+    std::map<std::string, std::string, std::less<>> lobbyTexts;  // PublishLobbyText
     std::map<std::string, std::string, std::less<>> texts;  // PublishMemberText
     std::vector<std::string> watched;                       // WatchMemberTexts: every watcher's keys
     // The watched texts each member of this lobby has shown. Our copy of the lobby drops a member's attributes when
@@ -232,6 +235,19 @@ void PublishLocked() {
         result = api.addMemberAttribute(modification, &add);
         if (result != kEosSuccess) break;
     }
+    // The lobby's own texts, only by its owner: EOS refuses a lobby attribute from anyone else, and the whole update.
+    if (result == kEosSuccess && local.owner && api.addLobbyAttribute) {
+        for (const auto& [key, value] : local.lobbyTexts) {
+            AttributeData text{};
+            text.ApiVersion = 1;
+            text.Key = key.c_str();
+            text.Value.AsUtf8 = value.c_str();
+            text.ValueType = kUtf8;
+            const AddMemberAttributeOptions add{2, &text, 0};
+            result = api.addLobbyAttribute(modification, &add);
+            if (result != kEosSuccess) break;
+        }
+    }
     if (result == kEosSuccess) {
         const UpdateLobbyOptions update{1, modification};
         api.updateLobby(local.lobby, &update, nullptr, &Published);  // EOS copies the modification
@@ -305,6 +321,11 @@ bool ReadMembersLocked(std::vector<LobbyMember>& members, LobbyView& view) {
 bool BeatLocked(LobbyView& view) {
     std::vector<LobbyMember> members;
     const bool read = ReadMembersLocked(members, view);
+    if (read) {
+        const bool owner = !view.owner.empty() && view.owner == view.self;
+        if (owner && !local.owner && !local.lobbyTexts.empty()) local.dirty = true;  // ours to publish now
+        local.owner = owner;
+    }
     if (read && SplitSync().Observe(members)) local.dirty = true;  // a newcomer needs them again
     if (local.dirty) PublishLocked();
     return read;
@@ -507,6 +528,18 @@ void PublishMemberText(const std::string& key, const std::string& value) {
     ReleaseSRWLockExclusive(&local.lock);
 }
 
+void PublishLobbyText(const std::string& key, const std::string& value) {
+    if (value.empty()) return;
+    const std::string text = value.substr(0, kMaxTextLength);
+    AcquireSRWLockExclusive(&local.lock);
+    std::string& published = local.lobbyTexts[key];
+    if (published != text) {
+        published = text;
+        local.dirty = local.dirty || (!local.lobbyId.empty() && local.owner);
+    }
+    ReleaseSRWLockExclusive(&local.lock);
+}
+
 void ListenToTicks(std::function<void(void* platform)> listener) {
     AcquireSRWLockExclusive(&local.lock);
     local.tickListeners.push_back(std::move(listener));
@@ -552,6 +585,8 @@ bool InstallSyncMarker(HMODULE game, ImportRedirect redirect, bool splitReader) 
     if (!ok) return false;
     // Only KickLobbyMember needs these; without them it reports false.
     api.kickMember = reinterpret_cast<KickMemberFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_Lobby_KickMember")));
+    api.addLobbyAttribute = reinterpret_cast<AddMemberAttributeFn>(
+        reinterpret_cast<void*>(GetProcAddress(eos, "EOS_LobbyModification_AddAttribute")));
     api.idFromString =
         reinterpret_cast<IdFromStringFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_ProductUserId_FromString")));
     AcquireSRWLockExclusive(&local.lock);

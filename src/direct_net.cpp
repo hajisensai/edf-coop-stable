@@ -304,6 +304,9 @@ bool DirectNet::start(const DirectOptions& options) {
     testUplinkTokens_ = 0;
     testUplinkMs_ = 0;
     memberIds_ = opt_.memberIds;
+    netProtocol_ = opt_.netProtocol;
+    netCaps_ = opt_.netCaps;
+    refuseOtherProtocols_ = opt_.refuseOtherProtocols;
     roomOwner_ = opt_.roomOwner;
     roomOwnerId_ = opt_.roomOwnerIdentity;
     identity_ = opt_.identity ? opt_.identity : processIdentity();
@@ -448,6 +451,30 @@ void DirectNet::setMesh(bool on) {
         logf("DIRECT links to other joiners closed: mesh off; the host relays");
     }
     intros_.clear();
+}
+
+void DirectNet::setNetcode(uint32_t protocol, uint32_t caps, bool refuseOthers) {
+    std::lock_guard<std::mutex> lock(mu_);
+    netProtocol_ = protocol;
+    netCaps_ = caps;
+    refuseOtherProtocols_ = refuseOthers;
+}
+
+void DirectNet::setAdmitUnlisted(bool on) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (on != admitUnlisted_)
+        logf("DIRECT %s", on ? "the room holds more than Epic's lobby: members outside it come in over the direct link"
+                             : "only members Epic's lobby lists come in over the direct link");
+    admitUnlisted_ = on;
+}
+
+std::map<std::string, DirectNet::MemberNetcode> DirectNet::clientNetcode() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::map<std::string, MemberNetcode> out;
+    for (const auto& [id, link] : clients_)
+        if (link.up)
+            if (auto it = clientNetcode_.find(id); it != clientNetcode_.end()) out[id] = it->second;
+    return out;
 }
 
 void DirectNet::setShedState(bool on) {
@@ -660,6 +687,8 @@ void DirectNet::setActive(bool active) {
     dials_.clear();
     intros_.clear();
     introduced_.clear();
+    unlistedIds_.clear();
+    clientNetcode_.clear();
     rosterPages_ = {};
     roomPages_ = {};
     // Unread game packets and their diagnostics belong to the room just left, not the next one.
@@ -984,7 +1013,22 @@ std::optional<Cookie> DirectNet::cookieFor(const HelloMsg& h, const sockaddr_sto
 
 // Why a hello with a valid cookie does not prove the EOS id it claims, or nullptr when it does.
 const char* DirectNet::identityRefusal(const HelloMsg& h) {
+    if (refuseOtherProtocols_ && netProtocol_ && h.netProtocol != netProtocol_)
+        return "it runs another EDF6Coop netcode protocol (another version); the room host refuses it";
     auto member = memberIds_.find(h.puid);
+    if (member == memberIds_.end() && admitUnlisted_ && opt_.mode == Mode::Host) {
+        // A member beyond Epic's lobby: it proves the key it brings, which stays its key in this room.
+        const std::string commitment = identityCommitment(h.publicKey);
+        auto [known, fresh] = unlistedIds_.try_emplace(h.puid, commitment);
+        if (!fresh && known->second != commitment)
+            return "it is not signed by the key that member used before in this room (someone else claiming to be it?)";
+        auto digest = helloDigest(h);
+        if (!digest || !verifySignature(h.publicKey, *digest, h.signature)) {
+            if (fresh) unlistedIds_.erase(known);
+            return "its signature does not verify";
+        }
+        return nullptr;
+    }
     if (member == memberIds_.end())
         return "that player published no direct-link identity in this room (a game without the plugin, "
                "EDF6DirectNet 0.3.6 or older, or its room info has not reached us yet); it stays on EOS";
@@ -1027,7 +1071,8 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
                        addrToString(from, fromLen).c_str(), why);
         return;
     }
-    const std::string commitment = memberIds_[id];
+    const auto listed = memberIds_.find(id);
+    const std::string commitment = listed != memberIds_.end() ? listed->second : unlistedIds_[id];
     auto it = clients_.find(id);
     bool sameSession = it != clients_.end() && it->second.session == h.session && it->second.peerNonce == h.nonce &&
                        it->second.peerEcdh == h.ecdh;
@@ -1071,6 +1116,7 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
         }
         clients_[id] = std::move(link);
         seen_[id] = Seen{commitment, h.session};
+        clientNetcode_[id] = MemberNetcode{h.netProtocol, h.netCaps};
         if (wasUp) rosterChanged();  // the old session's link is gone
     }
     Link& link = clients_[id];
@@ -1699,6 +1745,8 @@ void DirectNet::sendPeerHello(const std::string& puid, Dial& d, uint64_t now) {
     h.hello.nonce = d.nonce;
     h.hello.session = d.session;
     h.hello.puid = localPuid_;
+    h.hello.netProtocol = netProtocol_;
+    h.hello.netCaps = netCaps_;
     if (d.cookie && identity_ && d.ecdh) {
         h.hello.cookie = *d.cookie;
         h.hello.publicKey = identity_->publicKey();
@@ -1860,6 +1908,8 @@ void DirectNet::sendHello(uint64_t now) {
     h.hello.nonce = localNonce_;
     h.hello.session = localSession_;
     h.hello.puid = localPuid_;
+    h.hello.netProtocol = netProtocol_;
+    h.hello.netCaps = netCaps_;
     if (cookie_ && identity_ && localEcdh_) {
         h.hello.cookie = *cookie_;
         h.hello.publicKey = identity_->publicKey();

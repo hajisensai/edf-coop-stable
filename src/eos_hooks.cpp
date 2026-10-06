@@ -238,6 +238,9 @@ struct State {
     std::atomic<StateSendFilter> stateFilter{nullptr};
     std::atomic<BulkHandler> bulkHandler{nullptr};
     std::atomic<RoomCapacitySource> roomCapacity{nullptr};
+    std::atomic<bool> testLoopbackHosts{false};
+    std::atomic<uint32_t> netProtocol{0}, netCaps{0};
+    std::atomic<bool> refuseOtherProtocols{false};
     // A game packet that came twice (over two paths, or the direct link and EOS) reaches the game once.
     DuplicateFilter duplicates;
     // Fragments (fragment.h): ours going out get ids from here, theirs come together here (receive thread only).
@@ -1392,9 +1395,13 @@ uint32_t roomCapacity() {
         a.releaseDetails(details);
     }
     // A MultiSlot room's real size (up to 1024) is the room part's: Epic's lobby holds at most 64.
+    const uint32_t epic = capacity;
     if (RoomCapacitySource source = g.roomCapacity.load()) {
         if (const uint32_t real = source()) capacity = real;
     }
+    // Members beyond Epic's lobby come in over the direct link only (they cannot publish an identity in it).
+    if (std::shared_ptr<DirectNet> base = g.baseNet.load(); base && g.config.direct.mode == Mode::Host)
+        base->setAdmitUnlisted(epic && capacity > epic);
     std::lock_guard<std::mutex> lock(g.viewMutex);
     if (capacity) g.viewCapacity = capacity;
     return g.viewCapacity;
@@ -1663,7 +1670,7 @@ bool startVirtualAttemptLocked(uint64_t now) {
     o.mode = Mode::Join;
     o.listenPort = 0;
     o.hostAddress = v.candidates[v.next++ % v.candidates.size()];
-    o.advertisedHost = true;  // the room's host advertised it, not this player
+    o.advertisedHost = !g.testLoopbackHosts;  // the room's host advertised it, not this player
     o.roomOwner = v.room.host;
     o.roomOwnerIdentity = v.room.hostIdentity;  // only that host may answer on it
     auto net = std::make_shared<DirectNet>();
@@ -1682,9 +1689,16 @@ bool startVirtualAttemptLocked(uint64_t now) {
 
 // The game joins the room it was last in, from the entry the room list got for it: over the direct link to
 // its host, whose game lets us in (hostRoomTick). The join completes once the host lists us in its room.
+void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
+                          EOS_Lobby_OnLobbyIdCallback callback);
+
 void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* clientData,
                       EOS_Lobby_OnLobbyIdCallback callback) {
-    const LastRoom room = rememberedRoom();
+    startVirtualJoinRoom(rememberedRoom(), user, roomId, clientData, callback);
+}
+
+void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
+                          EOS_Lobby_OnLobbyIdCallback callback) {
     const uint64_t now = GetTickCount64();
     std::lock_guard<std::mutex> lock(g.virtualMutex);
     VirtualRoom& v = g.virtualRoom;
@@ -1703,6 +1717,8 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
     v.joining = true;
     v.room = room;
     v.candidates = orderHostCandidates(room.hostAddress);
+    if (g.testLoopbackHosts && v.candidates.empty() && !room.hostAddress.empty())
+        v.candidates.push_back(room.hostAddress.substr(0, room.hostAddress.find(' ')));  // tests: a loopback host
     v.user = user;
     v.startMs = now;
     v.callback = callback;
@@ -2251,11 +2267,83 @@ void hookSearchRelease(EOS_HLobbySearch search) {
     g.outer.releaseSearch(search);
 }
 
+// A room Epic lists, read for coming in over the direct link when its lobby is full (rooms above 64): its owner,
+// the address and identity the owner put on the lobby, its members, size and attributes. Not usable (roomId empty
+// or no address) for any other room.
+LastRoom fullRoomFrom(EOS_HLobbyDetails details) {
+    LastRoom r;
+    const Outer& o = g.outer;
+    if (!details || !o.owner || !o.attributeCount || !o.copyAttribute || !o.releaseAttribute || !o.copyInfo ||
+        !o.releaseInfo)
+        return r;
+    EOS_LobbyDetails_CopyInfoOptions io{1};
+    EOS_LobbyDetails_Info* info = nullptr;
+    if (o.copyInfo(details, &io, &info) != EOS_Success || !info) return r;
+    r.roomId = info->LobbyId ? info->LobbyId : "";
+    r.maxMembers = info->MaxMembers;
+    o.releaseInfo(info);
+    EOS_LobbyDetails_GetLobbyOwnerOptions oo{1};
+    r.host = idString(o.owner(details, &oo));
+    EOS_LobbyDetails_GetAttributeCountOptions co{1};
+    const uint32_t count = o.attributeCount(details, &co);
+    for (uint32_t i = 0; i < count; ++i) {
+        EOS_LobbyDetails_CopyAttributeByIndexOptions ai{1, i};
+        EOS_Lobby_Attribute* attribute = nullptr;
+        if (o.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data) {
+            LobbyAttribute a = ownAttribute(*attribute);
+            if (a.key == kHostAddressKey) r.hostAddress = a.text;
+            if (a.key == kHostIdentityKey) r.hostIdentity = a.text;
+            r.attributes.push_back(std::move(a));
+        }
+        if (attribute) o.releaseAttribute(attribute);
+    }
+    return r;
+}
+
+// The game's JoinLobby of a room Epic lists. Epic turns a player away from a lobby holding its 64: when the room's
+// owner put its direct-link address and identity on the lobby, the join goes on over the direct link to it instead
+// (the same way back into a room as REJOIN), and the room's host lets the player in by its own member list.
+struct EpicJoin {
+    EOS_Lobby_OnLobbyIdCallback callback;
+    void* clientData;
+    EOS_ProductUserId user;
+    LastRoom room;
+    bool full;  // the lobby listed as many members as it holds
+};
+
+void epicJoined(const EOS_Lobby_LobbyIdCallbackInfo* i) {
+    auto* call = static_cast<EpicJoin*>(i->ClientData);
+    const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
+    // Epic's code for a full lobby is not one this plugin can rely on: a lobby that listed its 64 when the game found
+    // it, or EOS_LimitExceeded, is taken as full.
+    const bool full = i->ResultCode != EOS_Success && (call->full || i->ResultCode == EOS_LimitExceeded);
+    if (final && full && !g_shutdown && call->room.usable()) {
+        logf("REJOIN Epic's lobby of room %s is full (%s): coming in over the direct link to its host %s",
+             call->room.roomId.c_str(), resultName(i->ResultCode), shortId(call->room.host).c_str());
+        startVirtualJoinRoom(call->room, call->user, call->room.roomId, call->clientData, call->callback);
+        delete call;
+        return;
+    }
+    EOS_Lobby_LobbyIdCallbackInfo copy = *i;
+    copy.ClientData = call->clientData;
+    EOS_Lobby_OnLobbyIdCallback cb = call->callback;
+    if (final) delete call;
+    cb(&copy);
+}
+
 void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* clientData,
                      EOS_Lobby_OnLobbyIdCallback cb) {
     FakeDetails d;
-    if (g_shutdown || !o || !cb || !g.fakes.lookup(o->LobbyDetailsHandle, &d)) return g.outer.join(h, o, clientData, cb);
-    startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    if (g_shutdown || !o || !cb) return g.outer.join(h, o, clientData, cb);
+    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    LastRoom room = fullRoomFrom(o->LobbyDetailsHandle);
+    if (!room.usable()) return g.outer.join(h, o, clientData, cb);
+    bool full = false;
+    if (g.outer.memberCount) {
+        EOS_LobbyDetails_GetMemberCountOptions mc{1};
+        full = room.maxMembers && g.outer.memberCount(o->LobbyDetailsHandle, &mc) >= room.maxMembers;
+    }
+    g.outer.join(h, o, new EpicJoin{cb, clientData, o->LocalUserId, std::move(room), full}, epicJoined);
 }
 
 struct LeaveOptionsHead {  // EOS_Lobby_LeaveLobbyOptions and EOS_Lobby_DestroyLobbyOptions, ApiVersion 1
@@ -2419,9 +2507,11 @@ void eosHooksShutdown() { g_shutdown = true; }
 
 bool installVirtualRoomHooks(HMODULE game) {
     const Api& a = g.api;
-    // Needs the direct transport, the lobby tracking and the tick that completes our answers (installEosHooks),
-    // and what a room snapshot reads.
-    if (!g.baseNet.load() || !g.lobbyTracked || !g.ticking || !a.copyDetails || !a.attributeCount ||
+    // Needs the direct link (a Mode=host/join transport, or AutoJoin: the virtual room dials a link of its own), the
+    // lobby tracking and the tick that completes our answers (installEosHooks), and what a room snapshot reads.
+    // Players on the defaults (Mode=off, AutoJoin=1) have no base transport: they come back into a room, or into one
+    // whose Epic lobby is full, the same way.
+    if (!(g.baseNet.load() || g.autoJoinOn) || !g.lobbyTracked || !g.ticking || !a.copyDetails || !a.attributeCount ||
         !a.copyAttribute || !a.copyInfo || !a.releaseInfo || !a.releaseAttribute || !a.releaseDetails) {
         logf("REJOIN unavailable: needs the direct link, the EOS tick and EOS's lobby functions");
         return false;
@@ -2585,6 +2675,9 @@ void setNetcodeOptions(const NetcodeOptions& options) {
 // whole room runs it (meshTick).
 DirectOptions withNetcode(DirectOptions o) {
     const NetcodeOptions n = netcodeOptions();
+    o.netProtocol = g.netProtocol;
+    o.netCaps = g.netCaps;
+    o.refuseOtherProtocols = g.refuseOtherProtocols;
     o.shedState = n.shedState;
     o.mesh = false;
     return o;
@@ -2621,6 +2714,31 @@ void setStateSendFilter(StateSendFilter filter) {
 void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source; }
 
 uint64_t bulkUndelivered() { return g.bulkLost.load(); }
+
+bool hostAdvertisement(std::string& address, std::string& identity) {
+    if (g.config.direct.mode != Mode::Host) return false;
+    address = g.marker.ownAddress();
+    identity = g.marker.ownIdentity();
+    return !address.empty() && !identity.empty();
+}
+
+void setNetcodeIdentity(uint32_t protocol, uint32_t caps, bool refuseOthers) {
+    g.netProtocol = protocol;
+    g.netCaps = caps;
+    g.refuseOtherProtocols = refuseOthers;
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net) net->setNetcode(protocol, caps, refuseOthers);
+}
+
+std::map<std::string, std::pair<uint32_t, uint32_t>> directMemberNetcode() {
+    std::map<std::string, std::pair<uint32_t, uint32_t>> out;
+    std::shared_ptr<DirectNet> base = g.baseNet.load();
+    if (!base || g.config.direct.mode != Mode::Host) return out;
+    for (const auto& [id, n] : base->clientNetcode()) out[id] = {n.protocol, n.caps};
+    return out;
+}
+
+void setTestLoopbackHosts(bool on) { g.testLoopbackHosts = on; }
 void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
 
 void setTestPeerBlock(uint32_t afterMs, uint32_t forMs) {

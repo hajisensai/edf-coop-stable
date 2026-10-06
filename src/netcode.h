@@ -3,7 +3,9 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 
 namespace dn {
 
@@ -62,6 +64,20 @@ void setBulkHandler(BulkHandler handler);
 // A bulk message goes again until its receiver acknowledges it (5 tries, the wait doubling); this many were given up
 // since start (each logged).
 uint64_t bulkUndelivered();
+
+// --- Rooms above Epic's 64 (I1) ---
+// What a room owner puts on the lobby itself (not a member: a searcher reads the lobby's attributes only) so that a
+// player Epic turns away from a full lobby can come in over the direct link: the address list it hosts on and its
+// identity commitment. False when this machine hosts no direct link.
+constexpr const char* kHostAddressKey = "EDF6DN_HOSTADDR";
+constexpr const char* kHostIdentityKey = "EDF6DN_HOSTID";
+bool hostAdvertisement(std::string& address, std::string& identity);
+// Our netcode protocol and features, said in every direct-link hello; a host refuses another protocol when
+// `refuseOthers`. The host's view of what each member beyond Epic's lobby runs (for the version gate).
+void setNetcodeIdentity(uint32_t protocol, uint32_t caps, bool refuseOthers);
+std::map<std::string, std::pair<uint32_t, uint32_t>> directMemberNetcode();  // EOS id -> (protocol, caps)
+// Tests only ([Test] LoopbackHosts): a room host may advertise a loopback address (gamenet runs on one machine).
+void setTestLoopbackHosts(bool on);
 
 // Tests only ([Test] PeerBlockAfterMs / PeerBlockForMs): the links between joiners lose everything from `afterMs`
 // from now for `forMs` (UINT32_MAX: for good), as when the NAT between them stops letting it through.

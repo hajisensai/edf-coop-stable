@@ -548,6 +548,37 @@ inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamen
         }
 }
 
+
+// Epic's lobby full (EDF6NET_LOBBY_CAP=2 stands for its 64), the room larger (8): the host puts its direct-link address
+// and identity on the lobby, the third player is turned away by Epic and comes in over the direct link instead, and the
+// host lets it in by its own member list.
+inline void CheckJoinFull(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    const auto& host = machines.front();
+    const auto& late = machines.back();
+    Check(network.lobby.count == 2, "Epic's lobby holds its 2 (" + std::to_string(network.lobby.count) + ")");
+    Check(Result(late, "fulljoin") == "completed 0", late.user + " is in the room: " + Result(late, "fulljoin"));
+    Check(late.text.find("is full") != std::string::npos && late.text.find("coming in over the direct link") != std::string::npos,
+          late.user + " was turned away by Epic and came in over the direct link");
+    Check(host.text.find("members outside it come in over the direct link") != std::string::npos,
+          "the host admits members beyond Epic's lobby");
+    Check(host.text.find("DIRECT client " + late.user.substr(0, 8) + " connected") != std::string::npos,
+          "the host linked the third player");
+    Check(host.text.find("ROOM " + late.user.substr(0, 8) + " -> JOINED for the game") != std::string::npos,
+          "the host's game was told the third player joined");
+}
+
+inline std::vector<Seat> JoinFullSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(3, "fullroom", "");
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n"
+                            "PublicAddress=127.0.0.1:@PORT@\r\n";
+    seats[1].ini = common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    seats[2].ini = seats[1].ini;
+    seats[2].role = "guest-fulljoin";
+    return seats;
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
@@ -572,6 +603,8 @@ inline const std::vector<Scenario>& NetScenarios() {
              return seats;
          }(),
          90000, &CheckNetStatsMixed, {{"EDF6NET_SECONDS", "8"}}},
+        {"joinfull", JoinFullSeats(), 120000, &CheckJoinFull,
+         {{"EDF6NET_LOBBY_CAP", "2"}, {"EDF6NET_EPIC_MEMBERS", "2"}, {"EDF6NET_SECONDS", "12"}}},
         {"meshoff", DirectSeats(3, "netstats", "", "Mesh=0\r\n"), 120000, &CheckMeshOff, {{"EDF6NET_SECONDS", "6"}}},
         // 32 players once the room shows that everyone reads fragments: the start message carries a bulk marker only,
         // every record goes in one bulk message.

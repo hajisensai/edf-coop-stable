@@ -80,6 +80,10 @@ struct HelloMsg {
     PublicKey publicKey{};
     PublicKey ecdh{};  // the client's ephemeral key for this session
     Signature signature{};  // over helloDigest()
+    // The sender's netcode protocol and features (multislot netfeature.h): what a host checks of a member that is
+    // not in Epic's lobby (rooms above its 64), whose lobby entry nobody can read. 0: not said.
+    uint32_t netProtocol = 0;
+    uint32_t netCaps = 0;
 };
 
 struct ChallengeMsg {

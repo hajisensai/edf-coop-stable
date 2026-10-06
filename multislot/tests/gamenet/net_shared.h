@@ -38,6 +38,8 @@ constexpr const char* kDelayVariable = "EDF6NET_DELAY";
 constexpr const char* kDropVariable = "EDF6NET_DROP";
 // "<ms>" - a member's attribute reaches the other members that much later (Epic's lobby service relays them).
 constexpr const char* kLobbyDelayVariable = "EDF6NET_LOBBY_DELAY";
+// "<n>" - Epic's lobby holds at most n members whatever the room asks for (rooms above Epic's 64, played small).
+constexpr const char* kLobbyCapVariable = "EDF6NET_LOBBY_CAP";
 
 struct Attribute {
     char key[kKeyText];
@@ -59,6 +61,7 @@ struct Lobby {
     std::uint32_t count;
     Member members[kMaxMachines];
     std::uint32_t version;  // bumped on every change
+    Attribute attributes[kMaxAttributes];  // the lobby's own (its owner sets them), what a search result shows
 };
 
 // One packet as it travels: a header, then `size` bytes.

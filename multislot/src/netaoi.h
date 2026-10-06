@@ -84,6 +84,8 @@ private:
 // Where members are, for relevance (W2's player sync, or anything that knows). Any thread.
 void NoteMember(const std::string& member, const MemberPlace& place);
 void ForgetMembers();
+// One member whose player is gone: back to the medium-relevance default.
+void ForgetMember(const std::string& member);
 // Puts the gate between the game and the wire: interest::SetLinkBudgetSource reads W1's path budgets, and every
 // state datagram (our own and those a host relays) asks the gate first ([Netcode] Interest=1, the default; it acts
 // only while the room runs the traffic classes).

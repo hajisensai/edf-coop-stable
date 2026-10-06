@@ -7,11 +7,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "../src/netfeature.h"
+#include "../src/netaoi.h"
 #include "../src/netplayer.h"
+#include "../src/netplayer_members.h"
 
 using namespace multislot;
 
@@ -299,6 +302,96 @@ void TestConverge() {
     }
 }
 
+// Interest management's inputs (netplayer_members.h): player object -> eos::User -> member id -> place, fed to the
+// gate, which then sends a near guest's state more often than a far one's under a tight budget, and keeps a member it
+// knows nothing about at medium relevance.
+struct alignas(16) FakePlayer {
+    unsigned char bytes[0x2000]{};
+    void SetUser(const void* user) { std::memcpy(bytes + kPlayerUserOffset, &user, sizeof(user)); }
+};
+struct alignas(16) FakeUser {
+    unsigned char bytes[0x80]{};
+    void SetId(const void* id) { std::memcpy(bytes + kUserProductIdField, &id, sizeof(id)); }
+};
+
+void TestMemberPlaces() {
+    static const int idA = 1, idB = 2, idNameless = 3;
+    FakeUser userA, userB, nameless;
+    userA.SetId(&idA);
+    userB.SetId(&idB);
+    nameless.SetId(&idNameless);
+    FakePlayer local, remote, ghost;
+    local.SetUser(userA.bytes);
+    remote.SetUser(userB.bytes);
+    Check(PlayerUser(local.bytes) == userA.bytes && PlayerUser(remote.bytes) == userB.bytes, "player -> its eos::User");
+    Check(PlayerUser(ghost.bytes) == nullptr && PlayerUser(nullptr) == nullptr, "no user: no member");
+    Check(UserProductId(userA.bytes) == &idA, "user -> ProductUserId");
+
+    std::map<std::string, PlayerPlace> fed;
+    std::vector<std::string> forgotten;
+    int named = 0;
+    MemberPlaces places(
+        [&](const void* id) {
+            ++named;
+            if (id == &idA) return std::string("0002aaaa");
+            if (id == &idB) return std::string("0002bbbb");
+            return std::string();
+        },
+        [&](const std::string& member, const PlayerPlace& place) { fed[member] = place; },
+        [&](const std::string& member) { forgotten.push_back(member); });
+    Check(places.Observe(PlayerUser(local.bytes), {1, 2, 3}, {}, 0.0), "local player fed");
+    Check(places.Observe(PlayerUser(remote.bytes), {100, 0, 0}, {0, 0, -6}, 0.0), "remote player fed");
+    Check(fed.size() == 2 && fed["0002aaaa"].position.y == 2.0f && fed["0002bbbb"].position.x == 100.0f,
+          "each member gets its own player's place");
+    Check(fed["0002bbbb"].facing.z == -1.0f, "facing follows the motion");
+    Check(!places.Observe(PlayerUser(ghost.bytes), {}, {}, 0.0), "an object without a user feeds nothing");
+    Check(!places.Observe(nameless.bytes, {}, {}, 0.0) && !fed.count(""), "a user without a readable id feeds nothing");
+    Check(!places.Observe(userA.bytes, {5, 0, 0}, {}, 50.0) && fed["0002aaaa"].position.x == 1.0f,
+          "at most every 100 ms per member");
+    Check(places.Observe(userA.bytes, {5, 0, 0}, {}, 100.0) && fed["0002aaaa"].position.x == 5.0f, "then the new place");
+    Check(fed["0002bbbb"].facing.z == -1.0f, "a standing player keeps its facing");
+    const int namedBefore = named;
+    places.Observe(userA.bytes, {6, 0, 0}, {}, 300.0);
+    Check(named == namedBefore, "the id is read once per user");
+    places.Observe(userA.bytes, {6, 0, 0}, {}, 2200.0);
+    Check(places.Expire(2200.0) == 2 && forgotten.size() == 1 && forgotten[0] == "0002bbbb",
+          "a member not seen for 2 s is forgotten (the nameless user too, silently)");
+
+    // Fed into the gate: two guests 20 m and 600 m from the observer, a third nobody knows, a budget for about half.
+    std::map<std::string, MemberPlace> where;
+    MemberPlaces feed(
+        [](const void* id) {
+            return id == &idA ? std::string("observer") : id == &idB ? std::string("near") : std::string("far");
+        },
+        [&](const std::string& member, const PlayerPlace& p) {
+            MemberPlace m;
+            m.position = {p.position.x, p.position.y, p.position.z};
+            where[member] = m;
+        },
+        nullptr);
+    static const int idFar = 4;
+    FakeUser userFar;
+    userFar.SetId(&idFar);
+    feed.Observe(userA.bytes, {0, 0, 0}, {}, 0.0);
+    feed.Observe(userB.bytes, {0, 0, 20}, {}, 0.0);
+    feed.Observe(userFar.bytes, {0, 0, 600}, {}, 0.0);
+    InterestGate gate([](const std::string&) { return 3000u; },
+                      [&](const std::string& m) -> std::optional<MemberPlace> {
+                          auto it = where.find(m);
+                          if (it == where.end()) return std::nullopt;
+                          return it->second;
+                      });
+    std::map<std::string, int> sent;
+    const std::vector<std::string> subjects = {"near", "far", "unknown"};
+    for (std::uint64_t t = 0; t < 6000; t += 10)
+        for (std::size_t i = 0; i < subjects.size(); ++i)
+            if ((t / 10 + i * 3) % 9 == 0 && gate.Allow("observer", subjects[i], 120, 0, t)) ++sent[subjects[i]];
+    std::printf("INFO: gate sends near=%d far=%d unknown=%d in 6 s\n", sent["near"], sent["far"], sent["unknown"]);
+    Check(sent["near"] > sent["far"], "the near guest goes more often than the far one");
+    Check(sent["unknown"] >= sent["far"], "a member without a place is not ranked below the far one (medium default)");
+    Check(sent["far"] >= 5, "the far guest still goes at least about once a second");
+}
+
 // Review fixes (2026-10-07).
 void TestReviewFixes() {
     // 1. The flush interval follows this machine's own PlayerSync switch.
@@ -370,6 +463,7 @@ int main() {
     TestEstimate();
     TestConverge();
     TestReviewFixes();
+    TestMemberPlaces();
     TestFeature();
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

@@ -552,34 +552,48 @@ void DestroyLobbyHook(void* lobby, const void* options, void* clientData, LobbyI
     api.destroyLobby(lobby, options, call, &GameDestroyed);
 }
 
+std::atomic<RoomMemberCountFn> roomMemberCount{nullptr};
+
+bool AddCount(void* modification, const char* key, std::int64_t value) {
+    AttributeData data{};
+    data.ApiVersion = 1;
+    data.Key = key;
+    data.Value.AsInt64 = value;
+    data.ValueType = kInt64;
+    const AddAttributeOptions add{2, &data, 0};
+    const EosResult result = api.addAttribute(modification, &add);
+    static std::atomic<int> logged{0};
+    if (result != kEosSuccess && logged.fetch_add(1) < 4)
+        Log("LOBBY UpdateLobby: %s=%lld could not be added to the update (result %d)", key, static_cast<long long>(value), result);
+    return result == kEosSuccess;
+}
+
 // A MultiSlot room's own size in an update its owner makes (kRoomSizeKey): EOS holds 64 members at most, and a room
-// of two to four has a capacity a normal room could have.
-void AddRoomSize(const void* options) {
+// of two to four has a capacity a normal room could have. A room larger than an EOS lobby also publishes how many its
+// game has (kRoomMembersKey): Epic's lobby lists 64 at most, the room list shows this instead.
+void AddRoomSize(void* lobby, const void* options) {
     const auto* update = static_cast<const UpdateLobbyOptions*>(options);
     if (!api.addAttribute || !update || !update->LobbyModificationHandle) return;
     AcquireSRWLockShared(&current.lock);
     const LobbyKind kind = current.kind;
     const int capacity = current.capacity;
     const bool owner = current.owner.empty() ? current.createdCapacity != 0 : current.owner == UserText(current.user);
+    const void* user = current.user;
+    const std::string id = current.id;
     ReleaseSRWLockShared(&current.lock);
     if (!PublishesRoomSize(kind, owner) || capacity <= 0) return;
-    AttributeData data{};
-    data.ApiVersion = 1;
-    data.Key = kRoomSizeKey;
-    data.Value.AsInt64 = capacity;
-    data.ValueType = kInt64;
-    const AddAttributeOptions add{2, &data, 0};
-    const EosResult result = api.addAttribute(update->LobbyModificationHandle, &add);
-    static std::atomic<int> logged{0};
-    if (result != kEosSuccess && logged.fetch_add(1) < 4)
-        Log("LOBBY UpdateLobby: the room size %d could not be added to the update (result %d)", capacity, result);
+    AddCount(update->LobbyModificationHandle, kRoomSizeKey, capacity);
+    if (capacity <= kEosLobbyMembers) return;
+    const RoomMemberCountFn count = roomMemberCount.load();
+    const std::uint32_t members = count ? count(lobby, user, id.c_str()) : 0;
+    if (members) AddCount(update->LobbyModificationHandle, kRoomMembersKey, members);
 }
 
 void UpdateLobbyHook(void* lobby, const void* options, void* clientData, LobbyIdCallback callback) {
     AcquireSRWLockShared(&current.lock);
     const std::string id = current.id.empty() ? std::string("?") : current.id;
     ReleaseSRWLockShared(&current.lock);
-    AddRoomSize(options);
+    AddRoomSize(lobby, options);
     api.updateLobby(lobby, options, new GameCall{callback, clientData, lobby, nullptr, id, 0}, &GameUpdated);
 }
 
@@ -808,6 +822,8 @@ void NoteLobbyLeft() {
     createdCurrent.store(false);
     ReleaseSRWLockExclusive(&current.lock);
 }
+
+void SetRoomMemberCountSource(RoomMemberCountFn source) { roomMemberCount = source; }
 
 bool InstallLobbyState(HMODULE game, ImportRedirect redirect) {
     const HMODULE eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");

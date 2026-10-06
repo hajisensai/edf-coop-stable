@@ -3059,6 +3059,24 @@ void testRoomView() {
     CHECK(!v.banned(kB));  // a ban is for one room
     v.clear();
     CHECK((!v.active() && v.followHost().empty() && v.hostJoins({{kA, 1}}, 8).empty()));
+
+    printf("room view: members in the order the game added them, joins in the host's order\n");
+    v.reset(kB, {kHost, kB});
+    CHECK((v.members() == std::vector<std::string>{kHost, kB}));
+    v.heardHost({kHost, kB, kC, kA});  // the host's order, not the ids' (kA sorts before kC)
+    auto ordered = v.followHost();
+    CHECK((ordered == std::vector<dn::StatusChange>{{kC, dn::kJoined}, {kA, dn::kJoined}}));
+    for (const auto& c : ordered) v.admit(c.target, c.status);
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC, kA}));
+    v.admit(kC, dn::kLeft);
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kA}));
+    v.reset(kC, {kHost, kB, kC, kA});  // entering with the host's list keeps its order
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC, kA}));
+
+    printf("room order: Epic's members in Epic's order, then the others in the game's\n");
+    CHECK((dn::roomOrder({kHost, kB}, {kHost, kC, kB, kA}) == std::vector<std::string>{kHost, kB, kC, kA}));
+    CHECK((dn::roomOrder({kHost, kB, kA}, {kHost, kB}) == std::vector<std::string>{kHost, kB}));  // A not in yet
+    CHECK((dn::roomOrder({}, {kB, kHost}) == std::vector<std::string>{kB, kHost}));
 }
 
 void testRoomWire() {
@@ -3128,11 +3146,16 @@ void testRoomFollowsHost() {
     host.setRoomMembers({kHost, kA, kB});
     CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kA, kB}); }, 5000));
     CHECK(version > before);
+    CHECK((a.hostRoom(&version) == std::vector<std::string>{kHost, kA, kB}));  // in the host's order
     const uint64_t same = version;
-    host.setRoomMembers({kB, kA, kHost});  // the same room in another order: not a change
+    host.setRoomMembers({kHost, kA, kB});  // the same list again: not a change
     host.setRoomMembers({kHost, kB});
-    CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kB}); }, 5000));
+    CHECK(waitFor([&] { return a.hostRoom(&version) == std::vector<std::string>{kHost, kB}; }, 5000));
     CHECK(version == same + 1);
+    // Another order is another room to the games (they number the members by it, room_view.h roomOrder).
+    host.setRoomMembers({kB, kHost});
+    CHECK(waitFor([&] { return a.hostRoom(&version) == std::vector<std::string>{kB, kHost}; }, 5000));
+    CHECK(version == same + 2);
     CHECK(host.linkId(kA) != 0 && host.linkId(kB) == 0 && a.linkId(kHost) != 0);
     a.setActive(false);  // our game left the room: what the host said no longer applies
     CHECK(a.hostRoom(&version).empty());

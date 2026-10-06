@@ -92,8 +92,8 @@ void* GameImport(const char* function) {
     });
 }
 
-// The room size the lobby publishes (kRoomSizeKey), 0 when it publishes none or it cannot be read.
-std::uint32_t PublishedRoomSize(void* handle) {
+// The positive int64 the lobby publishes under `key`, up to kMaxPlayers; 0 when it publishes none or it cannot be read.
+std::uint32_t PublishedCount(void* handle, const char* key) {
     const auto count = reinterpret_cast<AttributeCountFn>(GameImport("EOS_LobbyDetails_GetAttributeCount"));
     const auto copy = reinterpret_cast<CopyAttributeFn>(GameImport("EOS_LobbyDetails_CopyAttributeByIndex"));
     const auto release = reinterpret_cast<ReleaseAttributeFn>(GameImport("EOS_Lobby_Attribute_Release"));
@@ -106,7 +106,7 @@ std::uint32_t PublishedRoomSize(void* handle) {
         LobbyAttribute* attribute = nullptr;
         if (copy(handle, &options, &attribute) != 0 || !attribute) continue;
         const AttributeData* data = attribute->Data;
-        if (data && data->Key && std::strcmp(data->Key, kRoomSizeKey) == 0 && data->ValueType == 1 &&
+        if (data && data->Key && std::strcmp(data->Key, key) == 0 && data->ValueType == 1 &&
             data->Value.AsInt64 > 0 && data->Value.AsInt64 <= kMaxPlayers)
             size = static_cast<std::uint32_t>(data->Value.AsInt64);
         release(attribute);
@@ -129,9 +129,9 @@ void* HandleOf(void* holder) {
     });
 }
 
-// The lobby's capacity from EOS, or the vanilla 4 when EOS cannot tell.
-std::uint32_t Capacity(void* holder, std::uint32_t members) {
-    std::uint32_t capacity = 0;
+// The room's members and capacity from EOS; the vanilla capacity of 4 (members as counted) when EOS cannot tell.
+RoomCount Count(void* holder, std::uint32_t members) {
+    RoomCount count{members, 0};
     void* handle = HandleOf(holder);
     LobbyDetailsInfo* info = nullptr;
     const CopyInfoOptions options{1};
@@ -141,27 +141,68 @@ std::uint32_t Capacity(void* holder, std::uint32_t members) {
         const std::uint32_t maxMembers = info->MaxMembers, available = info->AvailableSlots;
         release(info);
         // Only a full-sized EOS lobby can stand for a larger room.
-        const std::uint32_t roomSize = maxMembers == kEosMaxLobbyMembers ? PublishedRoomSize(handle) : 0;
-        capacity = CapacityFromInfo(members, available, maxMembers, roomSize);
+        const std::uint32_t roomSize = maxMembers == kEosMaxLobbyMembers ? PublishedCount(handle, kRoomSizeKey) : 0;
+        const std::uint32_t published = roomSize > maxMembers ? PublishedCount(handle, kRoomMembersKey) : 0;
+        const RoomCount decided = RoomCountFromInfo(members, available, maxMembers, roomSize, published);
+        if (decided.capacity) count = decided;
         if (DetailLog() && reports.fetch_add(1) < 40)
-            Log("ROOM members=%u available=%u max=%u room size %u -> capacity %u%s", members, available, maxMembers,
-                roomSize, capacity ? capacity : kVanillaPlayers, capacity ? "" : " (inconsistent, vanilla fallback)");
+            Log("ROOM members=%u available=%u max=%u room size %u published members %u -> %u/%u%s", members, available,
+                maxMembers, roomSize, published, count.members, decided.capacity ? decided.capacity : kVanillaPlayers,
+                decided.capacity ? "" : " (inconsistent, vanilla fallback)");
     }
-    return capacity ? capacity : static_cast<std::uint32_t>(kVanillaPlayers);
+    if (!count.capacity) count.capacity = static_cast<std::uint32_t>(kVanillaPlayers);
+    return count;
 }
 
 }  // namespace
 
+RoomCount RoomCountFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers,
+                            std::uint32_t roomSize, std::uint32_t publishedMembers) {
+    // AvailableSlots is MaxMembers minus Epic's members in the same snapshot; anything else means the struct is not
+    // laid out as expected, so trust nothing from it.
+    if (maxMembers < 1 || maxMembers > kEosMaxLobbyMembers || availableSlots > maxMembers) return {members, 0};
+    const std::uint32_t epic = maxMembers - availableSlots;
+    // A room larger than an EOS lobby: its lobby is full-sized and the size is the room's own. Its members are
+    // Epic's and those beyond Epic's lobby: as many as the game reads (for the room this machine is in, the
+    // direct-link part lists them) or as its owner publishes, whichever is more, and never fewer than Epic's.
+    if (maxMembers == kEosMaxLobbyMembers && roomSize > maxMembers && roomSize <= static_cast<std::uint32_t>(kMaxPlayers)) {
+        if (members < epic) return {members, 0};
+        std::uint32_t count = members;
+        if (publishedMembers > count && publishedMembers <= roomSize) count = publishedMembers;
+        return {count, roomSize};
+    }
+    if (members != epic) return {members, 0};
+    return {members, maxMembers};
+}
+
 std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers,
                                std::uint32_t roomSize) {
-    // AvailableSlots is MaxMembers minus the members in the same snapshot; anything else means the
-    // struct is not laid out as expected, so trust nothing from it.
-    if (maxMembers < 1 || maxMembers > kEosMaxLobbyMembers || availableSlots > maxMembers) return 0;
-    if (members + availableSlots != maxMembers) return 0;
-    // A room larger than an EOS lobby: its lobby is full-sized, and the size is the room's own.
-    if (maxMembers == kEosMaxLobbyMembers && roomSize > maxMembers && roomSize <= static_cast<std::uint32_t>(kMaxPlayers))
-        return roomSize;
-    return maxMembers;
+    return RoomCountFromInfo(members, availableSlots, maxMembers, roomSize).capacity;
+}
+
+std::uint32_t GameRoomMemberCount(void* lobbyInterface, const void* user, const char* lobbyId) {
+    struct CopyDetailsOptions {
+        std::int32_t ApiVersion;
+        const char* LobbyId;
+        const void* LocalUserId;
+    };
+    struct CountOptions {
+        std::int32_t ApiVersion;
+    };
+    using CopyFn = std::int32_t (*)(void*, const CopyDetailsOptions*, void**);
+    using CountFn = std::uint32_t (*)(void*, const CountOptions*);
+    using ReleaseFn = void (*)(void*);
+    const auto copy = reinterpret_cast<CopyFn>(GameImport("EOS_Lobby_CopyLobbyDetailsHandle"));
+    const auto count = reinterpret_cast<CountFn>(GameImport("EOS_LobbyDetails_GetMemberCount"));
+    const auto release = reinterpret_cast<ReleaseFn>(GameImport("EOS_LobbyDetails_Release"));
+    if (!lobbyInterface || !user || !lobbyId || !*lobbyId || !copy || !count || !release) return 0;
+    const CopyDetailsOptions options{1, lobbyId, user};
+    void* details = nullptr;
+    if (copy(lobbyInterface, &options, &details) != 0 || !details) return 0;
+    const CountOptions countOptions{1};
+    const std::uint32_t members = count(details, &countOptions);
+    release(details);
+    return members;
 }
 
 void InitRooms(const unsigned char* gameBase) {
@@ -179,13 +220,13 @@ void RouteLobbyInfo(LobbyInfoCopyFn copy, LobbyInfoReleaseFn release) {
 }
 
 std::uint64_t RoomCountAndCapacity(void* holder) {
-    const std::uint32_t members = memberCount(holder);
-    return (static_cast<std::uint64_t>(Capacity(holder, members)) << 32) | members;
+    const RoomCount count = Count(holder, memberCount(holder));
+    return (static_cast<std::uint64_t>(count.capacity) << 32) | count.members;
 }
 
 std::uint32_t RoomFullCount(void* holder) {
-    const std::uint32_t members = memberCount(holder);
-    return members >= Capacity(holder, members) ? 4u : 0u;
+    const RoomCount count = Count(holder, memberCount(holder));
+    return count.members >= count.capacity ? 4u : 0u;
 }
 
 }  // namespace multislot

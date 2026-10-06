@@ -1121,7 +1121,7 @@ void startAutoJoinAttemptLocked(uint64_t now) {
     o.mode = Mode::Join;
     o.listenPort = 0;
     o.hostAddress = a.candidates[a.next++];
-    o.advertisedHost = true;  // the room host chose it, not this player
+    o.advertisedHost = !g.testLoopbackHosts;  // the room host chose it, not this player
     std::tie(o.roomOwner, o.roomOwnerIdentity) = roomOwnerIdentity();  // who may answer on it
     auto net = std::make_shared<DirectNet>();
     if (!net->start(o)) {
@@ -1170,6 +1170,8 @@ void autoJoinTick(uint64_t now) {
     if (advertised != a.advertised) {  // new room, or the host's address list changed
         a.advertised = advertised;
         a.candidates = orderHostCandidates(advertised);
+        if (g.testLoopbackHosts && a.candidates.empty())
+            a.candidates.push_back(advertised.substr(0, advertised.find(' ')));  // tests: a loopback host
         a.next = 0;
         a.retryAtMs = 0;
         a.hostPuid = idString(owner);
@@ -1447,7 +1449,8 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
-        members = g.view.members();
+        // The order every member adds them in (roomOrder): Epic's members as Epic lists them, then the others.
+        members = known ? roomOrder(epic, g.view.members()) : g.view.members();
     }
     base->setRoomMembers(std::move(members));
 }

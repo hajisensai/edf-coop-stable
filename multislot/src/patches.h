@@ -28,6 +28,9 @@ constexpr int kEosLobbyMembers = 64;
 constexpr int kSteamLobbyMembers = 250;
 // The lobby attribute (int64) a MultiSlot room's size is published in.
 constexpr const char* kRoomSizeKey = "MS_ROOMSIZE";
+// The lobby attribute (int64) a room larger than an EOS lobby publishes its members in: the room's game has them all
+// (Epic's lobby members, then those that came in over the direct link), Epic's lobby counts only its own.
+constexpr const char* kRoomMembersKey = "MS_MEMBERS";
 
 // The online HUD's per-player colour tables (HudColourPatches): one entry per colour of hudcolours.h, and the index
 // they are read with wraps around them, so player 33 shares player 1's colour. Their operands are imm8, so this

@@ -140,6 +140,7 @@ SearchFake& Searches() {
 struct Modification {
     std::map<std::string, std::int64_t> attributes;
     std::map<std::string, std::string> texts;
+    std::map<std::string, std::int64_t> lobby;  // the lobby's own attributes (EOS_LobbyModification_AddAttribute)
 };
 
 const User* Handle(const std::string& id) {
@@ -236,6 +237,10 @@ EXPORT int FakeEos_IsMember(const char* id) { return IsMember(id); }
 EXPORT void FakeEos_SetOwner(const char* id) { owner = id; }
 EXPORT void FakeEos_SetMaxMembers(std::uint32_t count) { maxMembers = count; }
 EXPORT void FakeEos_SetLobbyAttribute(const char* key, std::int64_t value) { lobbyAttributes[key] = value; }
+EXPORT std::int64_t FakeEos_LobbyAttribute(const char* key) {
+    const auto it = lobbyAttributes.find(key);
+    return it == lobbyAttributes.end() ? -1 : it->second;
+}
 EXPORT void FakeEos_SetLeaveResult(std::int32_t result) { leaveResult = result; }
 EXPORT void FakeEos_SetDestroyResult(std::int32_t result) { destroyResult = result; }
 // This machine is in `id`, owned by `ownerId`, as EOS sees it, whatever the game thinks.
@@ -347,6 +352,11 @@ EXPORT std::int32_t EOS_LobbyModification_AddMemberAttribute(void* modification,
     changes->attributes[options->Attribute->Key] = options->Attribute->Value.AsInt64;
     return 0;
 }
+EXPORT std::int32_t EOS_LobbyModification_AddAttribute(void* modification, const AddMemberAttributeOptions* options) {
+    if (!options->Attribute || options->Attribute->ValueType != 1) return 10;
+    static_cast<Modification*>(modification)->lobby[options->Attribute->Key] = options->Attribute->Value.AsInt64;
+    return 0;
+}
 EXPORT void EOS_LobbyModification_Release(void* modification) { delete static_cast<Modification*>(modification); }
 EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void* clientData, LobbyIdCallback callback) {
     ++updates;
@@ -361,6 +371,7 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
         }
         for (const auto& [key, value] : copy.attributes) attributes[self][key] = value;
         for (const auto& [key, value] : copy.texts) texts[self][key] = value;
+        for (const auto& [key, value] : copy.lobby) lobbyAttributes[key] = value;
         LobbyIdCallbackInfo info{result, clientData, lobby.c_str()};
         callback(&info);
     });

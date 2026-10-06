@@ -581,6 +581,34 @@ inline void CheckJoinFull(const std::vector<Spawned>& machines, const gamenet::N
           "the host linked the third player");
     Check(host.text.find("ROOM " + late.user.substr(0, 8) + " -> JOINED for the game") != std::string::npos,
           "the host's game was told the third player joined");
+    // Every game has all three in its room, in one order (the network index each adds them with), and the start
+    // sync gives each of them every player's own record.
+    std::string order;
+    for (const auto& machine : machines) order += " " + machine.user;
+    const std::string everyone = std::to_string(machines.size()) + order;
+    for (std::size_t i = 0; i < machines.size(); ++i) {
+        const auto& machine = machines[i];
+        Check(Result(machine, "game-members") == everyone,
+              machine.user + "'s game has everyone in the room in the host's order (" + Result(machine, "game-members") + ")");
+        if (i + 1 < machines.size()) {
+            bool told = false;
+            for (auto it = machine.results.equal_range("member-status"); it.first != it.second; ++it.first)
+                told = told || it.first->second == late.user + " 0";
+            Check(told, machine.user + "'s game was told " + late.user + " joined");
+        }
+        Check(Result(machine, "sync").rfind("done", 0) == 0, machine.user + " finished the start sync: " + Result(machine, "sync"));
+        Check(Result(machine, "players") == std::to_string(machines.size()),
+              machine.user + " has " + std::to_string(machines.size()) + " players (has " + Result(machine, "players") + ")");
+        for (std::size_t slot = 0; slot < machines.size(); ++slot) {
+            const std::string expected = std::to_string(slot) + " class=" + std::to_string(slot % 4) +
+                                         " marker=" + std::to_string(500 + slot) + " armor=" + std::to_string(1000 + 37 * slot);
+            std::string record;
+            for (auto it = machine.results.equal_range("record"); it.first != it.second; ++it.first)
+                if (it.first->second.rfind(std::to_string(slot) + " ", 0) == 0) record = it.first->second;
+            Check(record.rfind(expected + " ", 0) == 0,
+                  machine.user + " has player " + std::to_string(slot + 1) + "'s own loadout (" + record + ")");
+        }
+    }
 }
 
 inline std::vector<Seat> JoinFullSeats() {

@@ -816,6 +816,23 @@ int main(int argc, char** argv) {
               CapacityFromInfo(64, 0, 64, kMaxPlayers + 1) == 64,
           "capacity: a published size below the lobby's, or past this build's, is ignored");
     Check(CapacityFromInfo(1, 70, 71, 1024) == 0, "capacity: an inconsistent lobby stays rejected with a room size");
+    // Members beyond Epic's lobby (docs/net-re/roomsize.md §4): the room this machine is in reads them through the
+    // game's member count; a room list entry has its owner's published count.
+    const auto same = [](RoomCount a, std::uint32_t members, std::uint32_t capacity) {
+        return a.members == members && a.capacity == capacity;
+    };
+    Check(same(RoomCountFromInfo(70, 0, 64, 200), 70, 200) && same(RoomCountFromInfo(63, 4, 64, 200), 63, 200),
+          "count: our own room counts its members beyond Epic's lobby, full or not");
+    Check(same(RoomCountFromInfo(64, 0, 64, 200, 150), 150, 200) && same(RoomCountFromInfo(70, 0, 64, 200, 65), 70, 200),
+          "count: a room list entry shows the owner's published members, never fewer than are read");
+    Check(same(RoomCountFromInfo(64, 0, 64, 200, 500), 64, 200), "count: a published count past the room's size is ignored");
+    Check(RoomCountFromInfo(60, 0, 64, 200).capacity == 0, "count: fewer than Epic lists is inconsistent");
+    Check(RoomCountFromInfo(9, 0, 8).capacity == 0 && same(RoomCountFromInfo(8, 0, 8, 0, 20), 8, 8),
+          "count: a room EOS holds whole counts exactly Epic's members, published counts aside");
+    // The host's HIDDEN check: a room of 200 with 70 in it is not full, one of 200 with 200 is.
+    Check(RoomCountFromInfo(70, 0, 64, 200).members < RoomCountFromInfo(70, 0, 64, 200).capacity &&
+              RoomCountFromInfo(200, 0, 64, 200).members >= RoomCountFromInfo(200, 0, 64, 200).capacity,
+          "count: a room beyond Epic's lobby is full at its own size");
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

@@ -711,7 +711,7 @@ std::vector<std::string> DirectNet::directMembers() {
 }
 
 void DirectNet::setRoomMembers(std::vector<std::string> members) {
-    std::sort(members.begin(), members.end());  // a set: another order is the same room
+    // In the order every member's game adds them (room_view.h roomOrder): it numbers them by it.
     std::lock_guard<std::mutex> lock(mu_);
     if (roomSet_ && members == roomMembers_) return;
     roomMembers_ = std::move(members);

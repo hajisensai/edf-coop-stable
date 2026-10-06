@@ -289,8 +289,6 @@ private:
     void onPeerHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onPeerWelcome(const std::string& puid, Dial& dial, const WelcomeMsg& w, uint64_t now);
     void sendPeerHello(const std::string& puid, Dial& dial, uint64_t now);
-    // A datagram for one of our joiner-to-joiner links; false when it is for none of them.
-    bool onPeerDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void tickPeers(uint64_t now);
     void dropPeer(const std::string& puid, const char* why);
     // Takes a page of a member list; true (and the list in `out`) once every page of a newer version is in.
@@ -307,6 +305,8 @@ private:
         const Message& msg;
     };
 
+    // A datagram for one of our joiner-to-joiner links; false when it is for none of them.
+    bool onPeerDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);

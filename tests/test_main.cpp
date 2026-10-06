@@ -1175,14 +1175,14 @@ void testReplayedHelloIgnored() {
 
 void testOlderProtocolStaysOnEos(uint8_t protocol) {
     printf("direct: peers speaking protocol %u (%s) are ignored both ways, nothing breaks\n", protocol,
-           protocol == 2 ? "0.3.6" : protocol == 3 ? "0.4.0" : "0.4.1");
+           protocol == 2 ? "0.3.6" : protocol == 3 ? "0.4.0" : protocol == 4 ? "0.4.1" : "EDF6Coop 2.4");
     // An old hello: header with the old protocol, nonce, (protocol 3: session,) id.
     std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, protocol, 0, 7, 0, 0, 0};
     if (protocol == 3) old.insert(old.end(), 8, 1);
     old.push_back(static_cast<uint8_t>(kA.size()));
     old.insert(old.end(), kA.begin(), kA.end());
     if (protocol == 3) old.insert(old.end(), 8 + 64 + 64, 0);  // cookie, public key, signature
-    if (protocol == 4) {  // the handshake of 0.4.1 is ours; only the version differs
+    if (protocol >= 4) {  // the handshake of 0.4.1 (and EDF6Coop 2.4's) is ours; only the version differs
         dn::Message hello = sampleMessages()[0];
         old = dn::encode(hello, "");
         old[6] = protocol;
@@ -1233,7 +1233,7 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
         // 0.3.6 answers a hello it understood with a Welcome, 0.4.0 with a Challenge; send one anyway.
         std::vector<uint8_t> answer = {0x45, 0x44, 0x4E, 0x31, 2, 0, protocol, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
         if (protocol == 3) answer = {0x45, 0x44, 0x4E, 0x31, 9, 0, 3, 0, 7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-        if (protocol == 4) {  // a Challenge for this very hello, as 0.4.1 answers it
+        if (protocol >= 4) {  // a Challenge for this very hello, as 0.4.1 answers it
             dn::Message hello = *dn::decode(buf, static_cast<size_t>(got), "", nullptr);
             dn::Message c;
             c.type = dn::MsgType::Challenge;
@@ -1249,7 +1249,7 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
 }
 
 void testOlderPluginStaysOnEos() {
-    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}, uint8_t{4}}) testOlderProtocolStaysOnEos(protocol);
+    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{6}}) testOlderProtocolStaysOnEos(protocol);
 }
 
 void testRetiredInstanceIsFreed() {

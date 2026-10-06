@@ -17,14 +17,18 @@ namespace multislot {
 // The message: a block after the small-int type kRngSyncTag, through the object's own NetworkObject (+0x80), as
 // the game's HP messages travel (docs/net-re/damage.md section 3).
 constexpr std::int8_t kRngSyncTag = 14;  // GameObjectBase takes 0-3, VehicleBase 4-5, hit authority 13
-constexpr std::uint8_t kRngSyncMagic0 = 'R', kRngSyncMagic1 = 'S', kRngSyncVersion = 1;
-constexpr std::size_t kRngSyncBytes = 3 + 4 + 8 + 8;
+constexpr std::uint8_t kRngSyncMagic0 = 'R', kRngSyncMagic1 = 'S', kRngSyncVersion = 2;
+constexpr std::size_t kRngSyncBytes = 3 + 8 + 4 + 8 + 8;
 
 struct RngSync {
-    std::uint32_t seq = 0;     // per sending machine, one more for every message
+    std::uint64_t sender = 0;  // the sending process, random at its start (RngSenderId), never 0
+    std::uint32_t seq = 0;     // per sending process, one more for every message
     std::uint64_t state = 0;   // object +0x490
     std::uint64_t state2 = 0;  // object +0x3E8
 };
+
+// This process's sender id: random, fixed for the process, never 0.
+std::uint64_t RngSenderId();
 
 // Little endian; returns the bytes written (kRngSyncBytes) or 0 when `capacity` is too small.
 std::size_t WriteRngSync(const RngSync& sync, std::uint8_t* out, std::size_t capacity);
@@ -67,13 +71,16 @@ private:
 class RngReceiver {
 public:
     static constexpr std::uint64_t kForgetMs = 30000;
-    // True (and noted) when `seq` is newer than the last one taken for `object` (sequences compared by signed
-    // difference, so they may wrap); the first message for an object is always taken.
-    bool Accept(std::uint64_t object, std::uint32_t seq, std::uint64_t nowMs);
+    // True (and noted) when `seq` is newer than the last one taken for `object` from the same `sender` (signed
+    // difference, so sequences may wrap). The first message for an object, and the first from another sender (its
+    // owner changed, or a new process took it over), is always taken and starts that object over. A refused message
+    // does not count as seeing the object, so an object only refused messages for kForgetMs is forgotten.
+    bool Accept(std::uint64_t object, std::uint64_t sender, std::uint32_t seq, std::uint64_t nowMs);
     std::size_t size() const { return last_.size(); }
 
 private:
     struct Entry {
+        std::uint64_t sender;
         std::uint32_t seq;
         std::uint64_t at;
     };

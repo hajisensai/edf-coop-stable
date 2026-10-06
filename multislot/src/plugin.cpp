@@ -795,9 +795,10 @@ bool LoadRooms(const wchar_t* iniPath) {
                        if (dropRecordsBulk) return true;  // [Test]: "sent", and lost
                        return remote && *ProductUserIdText(remote, id, sizeof(id)) && SendBulk(id, tag, data, size);
                    },
-                   [](const void* peer) {
+                   [](const void* peer, std::size_t* total) -> std::uint64_t {
                        char id[40]{};
-                       return peer && *ProductUserIdText(peer, id, sizeof(id)) && dn::bulkIncoming(id, kRecordsBulkTag);
+                       return peer && *ProductUserIdText(peer, id, sizeof(id)) ? dn::bulkIncoming(id, kRecordsBulkTag, total)
+                                                                               : 0;
                    });
     SetBulkHandlerForTag(kRecordsBulkTag, [](const std::string&, std::uint16_t, const std::uint8_t* data, std::size_t size) {
         TakeRecordsBulk(data, size);

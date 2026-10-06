@@ -77,7 +77,7 @@ void Reassembler::drop(Map::iterator it) {
 void Reassembler::expire(uint64_t nowMs) {
     for (auto it = partial_.begin(); it != partial_.end();) {
         auto next = std::next(it);
-        if (nowMs - it->second.firstMs > kTimeoutMs) drop(it);
+        if (nowMs - it->second.lastMs > kTimeoutMs) drop(it);
         it = next;
     }
 }
@@ -132,6 +132,7 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
         p.total = total;
         p.count = count;
         p.firstMs = nowMs;
+        p.lastMs = nowMs;
         p.got.assign(count, false);
         p.bytes.assign(total, 0);
         buffered_ += total;
@@ -145,6 +146,7 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
     if (p.got[index]) return std::nullopt;  // a copy (resent, or sent over two paths)
     p.got[index] = true;
     ++p.have;
+    p.lastMs = nowMs;
     memcpy(p.bytes.data() + size_t{index} * kFragmentPayload, data + kFragmentHeader, n);
     if (p.have < p.count) return std::nullopt;
     FragmentMessage done{p.flags, p.tag, std::move(p.bytes)};
@@ -155,10 +157,16 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
     return done;
 }
 
-bool Reassembler::pending(const std::string& src, uint8_t flags, uint16_t tag) const {
+uint64_t Reassembler::pending(const std::string& src, uint8_t flags, uint16_t tag, uint64_t nowMs, size_t* total) {
+    expire(nowMs);
+    auto oldest = partial_.end();
     for (auto it = partial_.lower_bound({src, 0}); it != partial_.end() && it->first.first == src; ++it)
-        if (it->second.flags == flags && it->second.tag == tag) return true;
-    return false;
+        if (it->second.flags == flags && it->second.tag == tag &&
+            (oldest == partial_.end() || it->second.firstMs < oldest->second.firstMs))
+            oldest = it;
+    if (oldest == partial_.end()) return 0;
+    if (total) *total = oldest->second.total;
+    return oldest->first.second;
 }
 
 void Reassembler::clear() {

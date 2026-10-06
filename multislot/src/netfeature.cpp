@@ -353,6 +353,12 @@ void InitNetFeature(const wchar_t* iniPath) {
         Log("TEST PeerBlockAfterMs=%u PeerBlockForMs=%u: direct links to other joiners lose everything then", blockAfter,
             blockFor);
     }
+    const UINT bulkCut = GetPrivateProfileIntW(L"Test", L"BulkFragmentsSent", 0, iniPath);
+    if (bulkCut) {
+        dn::setTestBulkFragmentsSent(bulkCut);
+        Log("TEST BulkFragmentsSent=%u: of every bulk message (and every resend of it) only that many fragments go out",
+            bulkCut);
+    }
     Log("NETCODE protocol %lld, features on in the INI: %s; RejectMismatched=%d, ShedState=%d", static_cast<long long>(settings.protocol),
         FormatCaps(caps).c_str(), settings.rejectMismatched ? 1 : 0, options.shedState ? 1 : 0);
 }

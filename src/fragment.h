@@ -59,6 +59,9 @@ class Reassembler {
 public:
     static constexpr size_t kMaxPartialPerSender = 16;
     static constexpr size_t kMaxBuffered = 32u << 20;
+    // A message that has made no progress (no fragment it lacked) for this long is let go: its sender gave up, or
+    // went. Counted from the last new fragment, not the first, so a large message that keeps arriving (a host sending
+    // its bulk to many members at once shares its upload between them) is never cut off midway.
     static constexpr uint64_t kTimeoutMs = 15000;
     // A fragment from `src`; the message once it is complete, exactly once: a fragment of a message completed in the
     // last kCompletedMs (resent, or a copy) gives nothing, and sets `*again` (its sender may need telling again that
@@ -70,8 +73,10 @@ public:
     // The id of a fragment (0 for anything else).
     static uint64_t idOf(const uint8_t* data, size_t size);
     void clear();
-    // Whether a message of `flags`/`tag` from `src` is partly here (on its way).
-    bool pending(const std::string& src, uint8_t flags, uint16_t tag) const;
+    // The id of the oldest message of `flags`/`tag` from `src` that is partly here (on its way), 0 for none; `total`
+    // gets its size. Messages past kTimeoutMs without progress are let go first, here and not only when the next
+    // fragment arrives: a sender that gave up sends nothing more, and its message must stop counting as on its way.
+    uint64_t pending(const std::string& src, uint8_t flags, uint16_t tag, uint64_t nowMs, size_t* total = nullptr);
     uint64_t dropped() const { return dropped_; }
     uint64_t malformed() const { return malformed_; }
     size_t buffered() const { return buffered_; }
@@ -84,6 +89,7 @@ private:
         uint16_t count = 0;
         uint16_t have = 0;
         uint64_t firstMs = 0;
+        uint64_t lastMs = 0;  // the last fragment it lacked
         std::vector<bool> got;
         std::vector<uint8_t> bytes;
     };

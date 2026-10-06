@@ -656,6 +656,39 @@ inline void CheckBulkLost(const std::vector<Spawned>& machines, const gamenet::N
     }
 }
 
+// Only the first fragment of the host's bulk of records ever leaves ([Test] BulkFragmentsSent=1, every resend the
+// same): each guest holds the host's game packets behind the bulk (packetfit.h BulkIncoming) for at most BulkHoldMs,
+// then lets the bulk go - once, not again when a resend starts it over - and every packet it held reaches its game
+// in order (EOS acknowledged them; one thrown away would be gone for good).
+inline std::size_t Occurrences(const std::string& text, const std::string& what) {
+    std::size_t n = 0;
+    for (std::size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+    return n;
+}
+
+inline void CheckBulkCut(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    Check(machines.front().text.find("resending a bulk message") != std::string::npos,
+          "the host resent the bulk its guests never acknowledged");
+    for (std::size_t i = 1; i < machines.size(); ++i) {
+        const std::string& log = machines[i].text;
+        const std::string& user = machines[i].user;
+        Check(Occurrences(log, "its game packets wait behind it") == 1, user + " held the host's packets behind the bulk once");
+        Check(log.find("they waited as long as the bulk takes at 32 KiB/s") != std::string::npos,
+              user + " let the bulk go after BulkHoldMs");
+        unsigned long long heldN = 0, deliveredN = 0;
+        const std::size_t at = log.rfind("every held game packet reached the game (");
+        if (at != std::string::npos)
+            sscanf_s(log.c_str() + at, "every held game packet reached the game (%llu held, %llu delivered", &heldN, &deliveredN);
+        Check(at != std::string::npos && heldN > 0 && heldN == deliveredN,
+              user + " handed every held packet to the game (" + std::to_string(heldN) + " held, " +
+                  std::to_string(deliveredN) + " delivered)");
+        Check(Occurrences(log, "loadout records in bulk: still missing") == 1, user + " waited for the cut bulk once");
+        Check(Result(machines[i], "sync").rfind("done", 0) == 0, user + " finished the sync: " + Result(machines[i], "sync"));
+        Check(Result(machines[i], "mission") == "7 3", user + " read the host's start message (" + Result(machines[i], "mission") + ")");
+    }
+}
+
 // Member slots (multislot userslots.h): Epic's lobby of 3 (EDF6NET_LOBBY_CAP stands for its 64), a room of 8. A and B
 // join through Epic, D comes in over the direct link (Epic's lobby full), A leaves and X takes its place in Epic's
 // lobby. The host's game gave A slot 1, D slot 3; A's slot is empty after it left and X takes it - so X, which reads
@@ -752,6 +785,13 @@ inline const std::vector<Scenario>& NetScenarios() {
              return seats;
          }(),
          150000, &CheckBulkLost, {{"EDF6NET_SETTLE", "2500"}}},
+        {"mission8bulkcut",
+         [] {
+             auto seats = Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n"));
+             seats[0].ini = BaseIni("[Netcode]\r\nStatsSeconds=1\r\n[Test]\r\nBulkFragmentsSent=1\r\n");
+             return seats;
+         }(),
+         150000, &CheckBulkCut, {{"EDF6NET_SETTLE", "2500"}}},
         {"mission8xpress", Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 150000,
          &CheckXpressMission, {{"EDF6NET_CHATTER", "16"}, {"EDF6NET_SETTLE", "2500"}}},
     };

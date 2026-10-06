@@ -102,6 +102,8 @@ void SetStateSendFilter(dn::StateSendFilter filter);
 // or there is no path yet. Call it on the game's thread (it sends through EOS).
 bool SendBulk(const std::string& remote, std::uint16_t tag, const void* data, std::size_t size);
 void SetBulkHandler(dn::BulkHandler handler);
+// The handler of one tag (several parts receive bulk messages; the one dn handler dispatches by tag).
+void SetBulkHandlerForTag(std::uint16_t tag, dn::BulkHandler handler);
 
 // Reads [Netcode] (the features this machine has on, RejectMismatched, StatsSeconds, ...) and hands the
 // transport its options (src/netcode.h). Before StartNetFeature.

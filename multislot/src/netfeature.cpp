@@ -1,6 +1,7 @@
 #include "netfeature.h"
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,11 @@ void Observe(const LobbyView& view) {
 }
 
 bool RoomCap(std::uint32_t cap) { return NetFeatureActive(static_cast<NetFeature>(cap)); }
+
+// Bulk messages by tag (SetBulkHandlerForTag); a tag nobody handles is logged with [Test] BulkEcho=1.
+SRWLOCK bulkLock = SRWLOCK_INIT;
+std::map<std::uint16_t, dn::BulkHandler> bulkHandlers;
+bool bulkEcho = false;
 
 // [Test] BulkEcho=1: what arrives in bulk is logged (GameNet_bulk).
 void LogBulk(const std::string& src, std::uint16_t tag, const std::uint8_t* data, std::size_t size) {
@@ -235,6 +241,24 @@ bool SendBulk(const std::string& remote, std::uint16_t tag, const void* data, st
 }
 void SetBulkHandler(dn::BulkHandler handler) { dn::setBulkHandler(handler); }
 
+namespace {
+void DispatchBulk(const std::string& src, std::uint16_t tag, const std::uint8_t* data, std::size_t size) {
+    AcquireSRWLockShared(&bulkLock);
+    const auto it = bulkHandlers.find(tag);
+    const dn::BulkHandler handler = it == bulkHandlers.end() ? nullptr : it->second;
+    ReleaseSRWLockShared(&bulkLock);
+    if (handler) handler(src, tag, data, size);
+    else if (bulkEcho) LogBulk(src, tag, data, size);
+}
+}  // namespace
+
+void SetBulkHandlerForTag(std::uint16_t tag, dn::BulkHandler handler) {
+    AcquireSRWLockExclusive(&bulkLock);
+    bulkHandlers[tag] = handler;
+    ReleaseSRWLockExclusive(&bulkLock);
+    dn::setBulkHandler(&DispatchBulk);
+}
+
 void InitNetFeature(const wchar_t* iniPath) {
     const auto flag = [&](const wchar_t* key, int fallback) {
         return GetPrivateProfileIntW(L"Netcode", key, fallback, iniPath) != 0;
@@ -260,7 +284,8 @@ void InitNetFeature(const wchar_t* iniPath) {
     options.shedState = flag(L"ShedState", 1);
     options.statsIntervalMs = 1000u * GetPrivateProfileIntW(L"Netcode", L"StatsSeconds", 60, iniPath);
     dn::setNetcodeOptions(options);
-    if (GetPrivateProfileIntW(L"Test", L"BulkEcho", 0, iniPath)) dn::setBulkHandler(&LogBulk);
+    bulkEcho = GetPrivateProfileIntW(L"Test", L"BulkEcho", 0, iniPath) != 0;
+    dn::setBulkHandler(&DispatchBulk);
     const UINT blockAfter = GetPrivateProfileIntW(L"Test", L"PeerBlockAfterMs", UINT_MAX, iniPath);
     if (blockAfter != UINT_MAX) {
         const UINT blockFor = GetPrivateProfileIntW(L"Test", L"PeerBlockForMs", UINT_MAX, iniPath);

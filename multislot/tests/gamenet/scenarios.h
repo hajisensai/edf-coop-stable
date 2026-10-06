@@ -100,6 +100,7 @@ struct MissionExpect {
     bool late;   // they arrive after it, and the guests wait for them
     bool lossy;  // the network lost start messages, and the game resent them
     bool rushed = false;  // the sync started before the members' markers reached the others
+    bool bulk = false;    // every record went in one bulk message (the room reads fragments, packetfit.h)
 };
 
 // The mission start sync: everyone ends up with every player's record, byte for byte the same.
@@ -132,14 +133,17 @@ inline void CheckMission(const std::vector<Spawned>& machines, const gamenet::Ne
     CheckEosAcceptedAll(network);
     const auto& host = machines.front();
     const bool sentBeside = host.text.find("sent beside the start message: result 0") != std::string::npos;
-    Check(sentBeside == expect.split, expect.split ? "the host sent loadout records beside the start message"
-                                                   : "the start message fit: nothing was sent beside it");
+    const bool sentBulk = host.text.find("sent in bulk ahead of the start message: sent") != std::string::npos;
+    Check(sentBulk == expect.bulk, expect.bulk ? "the host sent every loadout record in bulk" : "nothing went in bulk");
+    Check(sentBeside == (expect.split && !expect.bulk), expect.split && !expect.bulk ? "the host sent loadout records beside the start message"
+                                                   : "nothing was sent beside the start message");
     int waited = 0;
     for (std::size_t i = 1; i < machines.size(); ++i) {
         const std::string& log = machines[i].text;
         const bool arrived = log.find("arrived beside the start message") != std::string::npos;
-        Check(arrived == expect.split,
-              machines[i].user + (expect.split ? " got records beside the start message" : " needed no records beside it"));
+        Check(arrived == (expect.split && !expect.bulk),
+              machines[i].user + (expect.split && !expect.bulk ? " got records beside the start message" : " needed no records beside it"));
+        if (expect.bulk) Check(log.find("loadout records arrived in bulk") != std::string::npos, machines[i].user + " got the records in bulk");
         Check(log.find("never arrived") == std::string::npos, machines[i].user + " missed no record");
         const std::size_t wait = log.find("MISSION sync: waited ");
         waited += wait != std::string::npos && log.find(": here", wait) != std::string::npos ? 1 : 0;
@@ -232,21 +236,21 @@ inline const std::vector<Scenario>& Scenarios() {
         {"link", Seats(2, "link", BaseIni()), 90000, &CheckMarkedLink},
         // Two players, a test budget small enough that the second record goes beside the start message: what two
         // people testing the split by hand ran (SplitSyncBudget).
-        {"mission2", Seats(2, "mission", BaseIni("[Test]\r\nSplitSyncBudget=200\r\n")), 150000, &CheckSplitMission},
+        {"mission2", Seats(2, "mission", BaseIni("[Test]\r\nSplitSyncBudget=200\r\n[Netcode]\r\nFragments=0\r\n")), 150000, &CheckSplitMission},
         // Four players: the start message fits and is the game's own.
         {"mission4", Seats(4, "mission", BaseIni()), 150000, &CheckWholeMission},
         // Eight players: their records make the start message 1132 bytes, above the 1100 it may have, so one goes
         // beside it.
-        {"mission8", Seats(8, "mission", BaseIni()), 150000, &CheckSplitMission},
+        {"mission8", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckSplitMission},
         // The records travel on a channel of their own, and EOS keeps no order between channels: here they come
         // 400 ms after the start message, which every guest reads first and has to wait at.
-        {"mission8late", Seats(8, "mission", BaseIni()), 150000, &CheckLateRecords, {{"EDF6NET_DELAY", "77:400"}}},
+        {"mission8late", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckLateRecords, {{"EDF6NET_DELAY", "77:400"}}},
         // Without the direct link's reliable layer the game's datagrams are unreliable: the network loses the first
         // start message, and the game's own resend has to bring it.
         {"mission8lossy", Seats(8, "mission", BaseIni("", false)), 150000, &CheckLossyMission, {{"EDF6NET_DROP", "900:1"}}},
         // Every frame every machine says something else too (an event message of 16 bytes), which shares the
         // controller record with the start message: the room the plugin leaves for it (kBatchedAllowance).
-        {"mission8busy", Seats(8, "mission", BaseIni()), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
+        {"mission8busy", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
         {"sidelink", {Seats(2, "sidelink", BaseIni()).front(), Seats(2, "sidelink", "")[1]}, 90000,
          &CheckPlainSidePackets, {{"EDF6NET_RUSH", "1"}}},
         {"mission4modweapon",
@@ -258,13 +262,13 @@ inline const std::vector<Scenario>& Scenarios() {
          150000, &CheckModWeapons},
         // A mission started the moment the last player is in, while Epic takes 2.5 s to relay each member's lobby
         // attributes (the split sync marker among them) to the others.
-        {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,
+        {"mission8rushed", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckRushedMission,
          {{"EDF6NET_RUSH", "1"}, {"EDF6NET_LOBBY_DELAY", "2500"}}},
         {"playersync", Seats(2, "playersync", BaseIni()), 90000, &CheckPlayerSync},
         // Rooms past eight (docs/net-re/roomsize.md): 16 and 32 players, each record beside the start message but
         // the few that fit, every machine with every player's bytes.
-        {"mission16", Seats(16, "mission", BaseIni()), 240000, &CheckSplitMission},
-        {"mission32", Seats(32, "mission", BaseIni()), 400000, &CheckSplitMission},
+        {"mission16", Seats(16, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 240000, &CheckSplitMission},
+        {"mission32", Seats(32, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 400000, &CheckSplitMission},
     };
     return all;
 }
@@ -488,7 +492,7 @@ inline std::vector<Seat> DirectSeats(int count, const std::string& step, const s
 // 16-byte event every frame (more would not fit beside the start message, kBatchedAllowance). Datagrams are packed once the room shows that everyone unpacks them, and
 // the start sync and every record still arrive as sent.
 inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamenet::Network& network) {
-    CheckMission(machines, network, {true, false, false});
+    CheckMission(machines, network, {true, false, false, false, true});
     std::size_t packing = 0, unpacking = 0;
     for (const auto& machine : machines) {
         const std::string line = LastLine(machine.text, "NETCODE XPRESS: ");
@@ -517,6 +521,11 @@ inline const std::vector<Scenario>& NetScenarios() {
          {{"EDF6NET_SECONDS", "8"}}},
         {"meshflap", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=7000\r\nPeerBlockForMs=1500\r\n"), 120000,
          &CheckMeshFlap, {{"EDF6NET_SECONDS", "10"}}},
+        // 32 players once the room shows that everyone reads fragments: the start message carries a bulk marker only,
+        // every record goes in one bulk message.
+        {"mission32bulk", Seats(32, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 400000,
+         [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, false, false, true}); },
+         {{"EDF6NET_SETTLE", "4000"}}},
         {"mission8xpress", Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 150000,
          &CheckXpressMission, {{"EDF6NET_CHATTER", "16"}, {"EDF6NET_SETTLE", "2500"}}},
     };

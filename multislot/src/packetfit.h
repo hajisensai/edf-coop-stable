@@ -156,6 +156,32 @@ using ImportRedirect = bool (*)(HMODULE game, const char* dll, const char* funct
 // net log's wrappers (which need the game as their caller) sit in front.
 int InstallPacketFit(HMODULE game, ImportRedirect redirect);
 
+// --- every record in bulk (I1: rooms of up to 1024) ---
+// About 50 players fill the start message with stubs alone (21 bytes each), and the game's stream (0x5E0 bytes) the
+// same way. When the whole room reads fragments (src/netcode.h, NetFeature::Fragments) and the records do not fit,
+// the message keeps none of them: one bulk marker (kStubBytes, laid out as a stub with kBulkMagic, index 0xFF, then
+// the record count and the bulk's id) stands for all, and every record goes to every member as one bulk message
+// (SendBulk, tag kRecordsBulkTag: 1024 records are about 140 KiB). Everyone's MissionSync_Update reads the marker
+// back as each record in turn (RecordReadHook stays on it until the last), waiting for the bulk up to kRecordWaitMs
+// plus kBulkWaitMsPerKiB per KiB. A room that does not read fragments keeps the stubs and side packets above.
+constexpr std::uint16_t kRecordsBulkTag = 0x5352;
+constexpr unsigned long long kBulkWaitMsPerKiB = 30;  // 32 KiB/s, half the game's own budget for a member
+// Whether the room reads bulk messages now, and how one goes to `remote` (an EOS_ProductUserId): the room part wires
+// them to netfeature.h. Unset: never bulk.
+using BulkReady = bool (*)();
+using BulkSend = bool (*)(const void* remote, std::uint16_t tag, const void* data, std::size_t size);
+void SetBulkRecords(BulkReady ready, BulkSend send);
+// The receiver's side: a bulk message of tag kRecordsBulkTag arrived.
+void TakeRecordsBulk(const std::uint8_t* data, std::size_t size);
+struct BulkRecord {
+    int index;
+    std::vector<std::uint8_t> bytes;
+};
+std::vector<std::uint8_t> BuildRecordsBulk(std::uint64_t id, const std::vector<BulkRecord>& records);
+bool ParseRecordsBulk(const std::uint8_t* data, std::size_t size, std::uint64_t& id, std::vector<BulkRecord>& records);
+void WriteBulkMarker(std::uint8_t* out, std::size_t count, std::uint64_t id);  // kStubBytes
+bool ParseBulkMarker(const std::uint8_t* at, std::size_t available, std::size_t& count, std::uint64_t& id);
+
 // Diagnostic: one line per kind (caller, channel, packet type) of game packet above kEosMaxPacket.
 bool FirstOversize(std::uintptr_t caller, std::uint8_t channel, const std::uint8_t* data, std::size_t size);
 void DescribeBytes(const std::uint8_t* data, std::size_t size, char* out, std::size_t capacity);

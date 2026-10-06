@@ -46,6 +46,11 @@ constexpr const char* kLobbyCapVariable = "EDF6NET_LOBBY_CAP";
 // "<status>[,<status>...]:<ms>" - this machine hears those member statuses (EOS_ELobbyMemberStatus: 0 joined, 1 left,
 // 4 promoted, ...) that much later than they happen (Epic's lobby service late with one member's notifications).
 constexpr const char* kStatusDelayVariable = "EDF6NET_STATUS_DELAY";
+// "1" - a member's LEFT reaches this machine only together with the next member's JOINED, in the same tick (slotchurn:
+// the host's game then frees a slot and fills it in one tick, and its next room message has both).
+constexpr const char* kStatusPairVariable = "EDF6NET_STATUS_PAIR";
+// "<n>" - EDF6NET_STATUS_DELAY applies only once this machine has seen the room hold n members (the room fills as usual).
+constexpr const char* kStatusDelayAfterVariable = "EDF6NET_STATUS_DELAY_AFTER";
 
 struct Attribute {
     char key[kKeyText];

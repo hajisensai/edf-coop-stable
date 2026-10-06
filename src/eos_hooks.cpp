@@ -1603,6 +1603,16 @@ void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
         if (entryParked()) return;  // the game is not in the room yet: it enters with the host's members
         due = g.view.settle(g.view.followHost(), now, delay);
     }
+    // One round that frees a slot and fills it: the departures go first (followHost), so the newcomer finds its
+    // slot empty. Logged so a test can tell such a round happened.
+    const size_t joins = static_cast<size_t>(
+        std::count_if(due.begin(), due.end(), [](const StatusChange& c) { return c.status == kJoined; }));
+    if (joins && joins < due.size()) {
+        std::string order;
+        for (const StatusChange& c : due) order += std::string(order.empty() ? "" : ", ") + statusName(c.status) + " " + shortId(c.target);
+        logf("ROOM following the host: %zu departure(s) and %zu join(s) in one round (%s)", due.size() - joins, joins,
+             order.c_str());
+    }
     for (const StatusChange& c : due)
         tellGame(room, c.target, c.status,
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");

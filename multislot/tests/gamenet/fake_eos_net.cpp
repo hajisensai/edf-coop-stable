@@ -90,6 +90,10 @@ struct Fake {
     std::uint32_t lobbyCap = 0;  // EDF6NET_LOBBY_CAP (0: none)
     std::set<std::int32_t> delayedStatuses;  // EDF6NET_STATUS_DELAY
     ULONGLONG statusDelayMs = 0;
+    bool pairStatuses = false;                       // EDF6NET_STATUS_PAIR
+    std::size_t delayAfter = 0;                      // EDF6NET_STATUS_DELAY_AFTER
+    std::size_t mostSeen = 0;                        // the most members this machine saw in its room
+    std::vector<std::function<void()>> heldLeaves;   // LEFTs waiting for the next JOINED
     std::deque<std::pair<ULONGLONG, std::function<void()>>> later;  // delayed status notifications, by due time
     std::string ownerSeen;  // the room's owner at the last tick (PROMOTED)
 };
@@ -146,6 +150,9 @@ bool Open() {
                 if (*at >= '0' && *at <= '9') f.delayedStatuses.insert(*at - '0');
         }
     }
+    if (GetEnvironmentVariableA(gamenet::kStatusPairVariable, setting, sizeof(setting))) f.pairStatuses = setting[0] == '1';
+    if (GetEnvironmentVariableA(gamenet::kStatusDelayAfterVariable, setting, sizeof(setting)))
+        f.delayAfter = static_cast<std::size_t>(std::strtoul(setting, nullptr, 10));
     if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
         unsigned bytes = 0, count = 0;
         if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
@@ -450,17 +457,27 @@ void NoticeRoomChanges() {
     const std::string id = lobby.id;
     if (!in || id != f.lobbySeen) {
         f.membersSeen = in ? members : std::vector<std::string>();
+        f.mostSeen = in ? members.size() : 0;
         f.lobbySeen = in ? id : std::string();
         f.ownerSeen = in ? lobby.owner : "";
         return;
     }
+    // Whether the room had filled before this change (EDF6NET_STATUS_DELAY_AFTER): the change that fills it is on time.
+    const bool delaying = f.mostSeen >= f.delayAfter;
+    f.mostSeen = std::max(f.mostSeen, members.size());
     const auto queue = [&](int kind, const std::string& member, std::int32_t status) {
         for (const auto& notify : f.lobbyNotifies) {
             if (notify.kind != kind) continue;
             const auto n = notify;
-            const bool late = kind == 0 && f.delayedStatuses.count(status) != 0;
-            auto& target = late ? f.later.emplace_back(GetTickCount64() + f.statusDelayMs, nullptr).second
-                                : f.completions.emplace_back();
+            const bool late = kind == 0 && delaying && f.delayedStatuses.count(status) != 0;
+            const bool held = f.pairStatuses && kind == 0 && status == 1;
+            if (f.pairStatuses && kind == 0 && status == 0 && !f.heldLeaves.empty()) {
+                for (auto& leave : f.heldLeaves) f.completions.push_back(std::move(leave));
+                f.heldLeaves.clear();
+            }
+            auto& target = held   ? f.heldLeaves.emplace_back()
+                           : late ? f.later.emplace_back(GetTickCount64() + f.statusDelayMs, nullptr).second
+                                  : f.completions.emplace_back();
             target = ([=]() {
                 const void* user = member.empty() ? nullptr : Handle(member);
                 if (kind == 0) {
@@ -476,10 +493,12 @@ void NoticeRoomChanges() {
             });
         }
     };
-    for (const auto& member : members)
-        if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
+    // Departures before arrivals: Epic tells each change as it happens, and a member that came while another left
+    // (between two of our ticks) could only have taken the seat that one freed.
     for (const auto& member : f.membersSeen)
         if (std::find(members.begin(), members.end(), member) == members.end()) queue(0, member, 1);
+    for (const auto& member : members)
+        if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
     // Epic makes another member the owner when the owner leaves (PROMOTED, after its LEFT).
     if (lobby.owner[0] && f.ownerSeen != lobby.owner) queue(0, lobby.owner, 4);
     f.ownerSeen = lobby.owner;

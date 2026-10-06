@@ -102,7 +102,8 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
+    src/netfeature.cpp src/netplayer.cpp src/netplayer_game.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -189,6 +190,10 @@ target_link_libraries(HostModeTests PRIVATE winhttp)
 target_compile_options(HostModeTests PRIVATE ${WARNINGS})
 add_test(NAME HostModeAndMenuLabel COMMAND HostModeTests)
 
+# W2 player sync: block format, the game's bin element, sender velocity, extrapolation and convergence.
+add_executable(NetPlayerTests tests/netplayer_test.cpp src/netplayer.cpp src/netfeature.cpp)
+target_compile_options(NetPlayerTests PRIVATE ${WARNINGS})
+add_test(NAME NetPlayerSync COMMAND NetPlayerTests)
 add_executable(WeaponGuardTests tests/weaponguard_test.cpp src/weaponguard.cpp src/log.cpp)
 target_compile_options(WeaponGuardTests PRIVATE ${WARNINGS})
 add_test(NAME WeaponGuard COMMAND WeaponGuardTests)
@@ -264,7 +269,7 @@ set_target_properties(GameNetEos PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping RU
     ARCHIVE_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_compile_options(GameNetEos PRIVATE ${WARNINGS})
 add_executable(GameMachine tests/gamenet/machine.cpp tests/gamenet/roles.cpp tests/gamenet/game.cpp
-    tests/gamenet/missionsync.cpp)
+    tests/gamenet/missionsync.cpp tests/gamenet/playersync.cpp src/netplayer.cpp)
 set_target_properties(GameMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_include_directories(GameMachine PRIVATE ${MODLOADER_INCLUDE})
 target_compile_options(GameMachine PRIVATE ${WARNINGS})
@@ -272,7 +277,7 @@ add_dependencies(GameMachine GameNetEos)
 add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
-foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon)
+foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon playersync)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

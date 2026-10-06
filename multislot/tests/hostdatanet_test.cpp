@@ -50,12 +50,13 @@ struct Net {
     std::deque<Sent> wire;
     std::map<std::string, HostDataLink*> links;
     std::map<std::string, bool> refuses;  // sends from this machine fail (EOS not learnt yet)
+    std::map<std::string, bool> refusesTo;  // one peer is unreachable while the others still work
     int sends = 0;
     bool lose = false;
 
     HostDataLink::Send SenderFor(const std::string& from) {
         return [this, from](const std::string& to, const std::vector<std::uint8_t>& packet) {
-            if (refuses[from]) return false;
+            if (refuses[from] || refusesTo[to]) return false;
             ++sends;
             if (!lose) wire.push_back({from, to, packet});
             return true;
@@ -307,11 +308,33 @@ void ManyAskers() {
     net.lose = true;
     host.Tick(0);
     Check(net.sends == static_cast<int>(HostDataLink::kPartsPerTick), "one tick sends kPartsPerTick parts in all");
-    // A refused send stops the tick: the same part goes next time.
+    // Refused sends retain their place: the same parts go next time.
     net.refuses["host"] = true;
     const int before = net.sends;
     host.Tick(16);
     Check(net.sends == before && host.Serving() == HostDataLink::kMaxServed, "nothing is lost to a refused send");
+}
+
+void UnreachableAskerDoesNotBlockOthers() {
+    Net net;
+    HostDataLink host(net.SenderFor("host")), absent(net.SenderFor("absent")), guest(net.SenderFor("guest"));
+    net.links = {{"host", &host}, {"absent", &absent}, {"guest", &guest}};
+    const auto bundle = std::make_shared<const Bundle>(Make(10));
+    host.Share(bundle);
+    std::uint64_t now = 0;
+    absent.Fetch("host", bundle->digest, now);  // the first asker becomes unreachable
+    guest.Fetch("host", bundle->digest, now);
+    net.Deliver(now);
+    net.refusesTo["absent"] = true;
+    net.Run(now, 20);
+    Check(guest.State() == HostDataLink::Fetching::Done && guest.TakeBundle() == bundle->bytes,
+          "an unreachable first asker cannot block another member's weapon files");
+    Check(host.Serving() == 1, "only the unreachable asker's transfer remains queued");
+    net.refusesTo["absent"] = false;
+    net.Run(now, 20);
+    Check(absent.State() == HostDataLink::Fetching::Done && absent.TakeBundle() == bundle->bytes,
+          "the refused transfer resumes from its unsent part when the peer becomes reachable");
+    Check(host.Serving() == 0, "both transfers finish without a re-ask");
 }
 
 }  // namespace
@@ -326,6 +349,7 @@ int main() {
     Forged();
     Stalls();
     ManyAskers();
+    UnreachableAskerDoesNotBlockOthers();
     if (failures) {
         std::printf("%d host data link check(s) failed\n", failures);
         return 1;

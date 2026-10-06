@@ -188,14 +188,19 @@ void HostDataLink::Tick(std::uint64_t now) {
         else
             Ask(now);
     }
-    // Round robin over what is being sent, one part each, until the budget is spent or a send is refused.
+    // Round robin over what is being sent, one part each. A peer whose send is refused waits until the
+    // next tick; the other peers must still get their files. Retry each refused peer at most once per tick.
     const auto done = [](const Served& s) { return s.next >= hostdata::PartCount(s.bundle->bytes.size()); };
+    std::set<std::string> blocked;
     std::size_t budget = kPartsPerTick;
     while (budget && !served_.empty()) {
         bool sent = false;
         for (Served& served : served_) {
-            if (!budget || done(served)) continue;
-            if (!send_(served.peer, hostdata::EncodePart(*served.bundle, served.next))) return;
+            if (!budget || done(served) || blocked.count(served.peer)) continue;
+            if (!send_(served.peer, hostdata::EncodePart(*served.bundle, served.next))) {
+                blocked.insert(served.peer);
+                continue;
+            }
             ++served.next;
             --budget;
             sent = true;

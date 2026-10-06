@@ -37,6 +37,7 @@ void Check(bool condition, const std::string& what) {
 DamageEvent SampleEvent() {
     DamageEvent e;
     e.seq = 41;
+    e.sender = 0x0123456789ABCDEFull;
     e.attackerRef = 0x1234;
     e.targetRef = -1;
     e.kind = 3;
@@ -55,7 +56,7 @@ DamageEvent SampleEvent() {
 }
 
 bool Same(const DamageEvent& a, const DamageEvent& b) {
-    return a.seq == b.seq && a.attackerRef == b.attackerRef && a.targetRef == b.targetRef && a.kind == b.kind &&
+    return a.seq == b.seq && a.sender == b.sender && a.attackerRef == b.attackerRef && a.targetRef == b.targetRef && a.kind == b.kind &&
            a.team == b.team && !std::memcmp(a.point, b.point, sizeof(a.point)) &&
            !std::memcmp(a.impulse, b.impulse, sizeof(a.impulse)) && a.damage == b.damage && a.size == b.size &&
            a.radius == b.radius && a.extra5C == b.extra5C && a.flags == b.flags && a.extra64 == b.extra64 &&
@@ -101,7 +102,8 @@ void TestVehicleShooter() {
 
 void TestDecision() {
     HitInput in;
-    in.active = true;
+    in.forwarding = true;
+    in.dropping = true;
     in.damage = 10.0f;
     in.attacker = NetOwner::Local;
     in.target = NetOwner::Local;
@@ -113,8 +115,22 @@ void TestDecision() {
     in.target = NetOwner::Local;
     Check(DecideHit(in) == HitVerdict::Drop, "a copy of someone else's shot at our object is dropped (its machine sends)");
     HitInput off = in;
-    off.active = false;
+    off.forwarding = off.dropping = false;
     Check(DecideHit(off) == HitVerdict::Vanilla, "off: the game's rule");
+    // The two halves of the rule apart (HitRuleClock).
+    HitInput h = in;
+    h.dropping = false;
+    h.attacker = NetOwner::Remote;
+    h.target = NetOwner::Local;
+    Check(DecideHit(h) == HitVerdict::Vanilla, "not dropping: a remote shot at our object keeps the game's rule");
+    h.attacker = NetOwner::Local;
+    h.target = NetOwner::Remote;
+    Check(DecideHit(h) == HitVerdict::Forward, "not dropping, forwarding: our shot still goes to its owner");
+    h.forwarding = false;
+    h.dropping = true;
+    Check(DecideHit(h) == HitVerdict::Vanilla, "not forwarding: our shot at another's object keeps the game's rule");
+    h.attacker = NetOwner::Remote;
+    Check(DecideHit(h) == HitVerdict::Drop, "dropping: a remote shot is dropped");
     HitInput net = in;
     net.fromNetwork = true;
     Check(DecideHit(net) == HitVerdict::Vanilla, "the game's kill message keeps the game's rule");
@@ -137,10 +153,120 @@ void TestDecision() {
     Check(DecideHit(replay) == HitVerdict::Deal, "an event being dealt by its owner is dealt");
 }
 
+void TestRuleClock() {
+    HitRuleClock c(5000, 5000, 1000);
+    Check(!c.Forwarding(0) && !c.Dropping(0), "nothing observed: neither");
+    std::uint64_t t = 1000;
+    c.Observe(true, t);
+    Check(c.Forwarding(t) && !c.Dropping(t), "gate on: forwarding at once, not dropping yet");
+    for (; t < 1000 + 5000; t += 250) c.Observe(true, t);
+    Check(!c.Dropping(t - 250), "on for under 5 s: not dropping");
+    c.Observe(true, t);
+    Check(c.Dropping(t), "on for 5 s without a break: dropping");
+    t += 250;
+    c.Observe(false, t);
+    Check(!c.Dropping(t), "gate off: dropping stops at once");
+    Check(c.Forwarding(t), "and forwarding goes on");
+    for (std::uint64_t end = t + 4500; t < end;) c.Observe(false, t += 250);
+    Check(c.Forwarding(t), "4.75 s after the last on sample: still forwarding");
+    c.Observe(false, t += 250);
+    Check(!c.Forwarding(t), "5 s after: no longer");
+    // A stalled sampler breaks the run: nothing is known of the gap.
+    HitRuleClock g(5000, 5000, 1000);
+    t = 0;
+    for (; t <= 3000; t += 250) g.Observe(true, t);
+    g.Observe(true, t = 6000);
+    Check(!g.Dropping(t), "a gap of 3 s between samples starts the run again");
+    Check(!g.Dropping(t + 2000), "and a stale last sample drops nothing");
+    for (std::uint64_t end = t + 5000; t < end;) g.Observe(true, t += 250);
+    Check(g.Dropping(t), "5 s after the gap: dropping");
+    // A blink of the gate starts the run again.
+    g.Observe(false, t += 250);
+    g.Observe(true, t += 250);
+    Check(!g.Dropping(t), "off for one sample: the run starts over");
+}
+
+void TestOwnerTakesEvent() {
+    Check(OwnerTakesEvent(true, true), "dropping: an event for our player or vehicle is the hit");
+    Check(OwnerTakesEvent(true, false), "dropping: an event for anything else is the hit");
+    Check(!OwnerTakesEvent(false, true), "not dropping: our player or vehicle took the copy of the hit already");
+    Check(OwnerTakesEvent(false, false), "not dropping: an enemy takes no remote hit itself, the event is its way in");
+}
+
+// How often one shot of machine S at an object of machine R is dealt, with S's and R's rule as given:
+// S's hit on its copy of the target, and R's hit from its copy of S's bullet.
+int TimesDealt(bool sForwarding, bool sDropping, bool rForwarding, bool rDropping, bool ownerDecides) {
+    int dealt = 0;
+    HitInput s;
+    s.forwarding = sForwarding;
+    s.dropping = sDropping;
+    s.damage = 10.0f;
+    s.attacker = NetOwner::Local;
+    s.target = NetOwner::Remote;
+    switch (DecideHit(s)) {
+        case HitVerdict::Forward: dealt += OwnerTakesEvent(rDropping, ownerDecides); break;
+        case HitVerdict::Vanilla:
+        case HitVerdict::Deal: dealt += ownerDecides ? 0 : 1; break;  // slot 34 on S's copy: players/vehicles no
+        case HitVerdict::Drop: break;
+    }
+    HitInput r;
+    r.forwarding = rForwarding;
+    r.dropping = rDropping;
+    r.damage = 10.0f;
+    r.attacker = NetOwner::Remote;
+    r.target = NetOwner::Local;
+    switch (DecideHit(r)) {
+        case HitVerdict::Vanilla:
+        case HitVerdict::Deal: dealt += ownerDecides ? 1 : 0; break;  // slot 34 on R: its own player yes, else no
+        default: break;
+    }
+    return dealt;
+}
+
+// The review's two windows, and every state the clock allows (dropping implies forwarding on the other side).
+void TestSwitchWindow() {
+    for (bool od : {true, false}) {
+        const char* what = od ? " (a player or vehicle)" : " (an enemy)";
+        // a: the shooter switched on, the owner's gate is still off: it deals the event.
+        Check(TimesDealt(true, false, false, false, od) == 1, std::string("a: shooter on, owner off: once") + what);
+        // b: the shooter is off, the owner on but not settled: the owner keeps the game's rule.
+        Check(TimesDealt(false, false, true, false, od) == 1, std::string("b: shooter off, owner on: once") + what);
+        Check(TimesDealt(true, true, true, true, od) == 1, std::string("both settled: once") + what);
+        Check(TimesDealt(false, false, false, false, od) == 1, std::string("both off: once (the game)") + what);
+        Check(TimesDealt(true, false, true, true, od) == 1, std::string("shooter in its grace, owner dropping: once") + what);
+    }
+    Check(TimesDealt(false, false, true, true, true) == 0,
+          "the one state to avoid: owner dropping while the shooter plays the game's rule (the clock rules it out)");
+
+    // Two machines, the gate seen 2 s apart both ways round: a join turns it off, the joiner's entry turns it on.
+    for (int lag : {2000, -2000}) {
+        HitRuleClock s, r;
+        auto gate = [](std::uint64_t t, std::uint64_t shift) {
+            const std::uint64_t at = t - shift;  // this machine sees the room `shift` ms late
+            return (at >= 1000 && at < 20000) || at >= 21500;  // on, a join at 20 s, on again 1.5 s later
+        };
+        const std::uint64_t sShift = lag > 0 ? 2000 : 0, rShift = lag > 0 ? 0 : 2000;
+        bool once = true, sawDrop = false;
+        for (std::uint64_t t = 5000; t < 40000; t += 50) {
+            if (t % 250 == 0) {
+                s.Observe(gate(t, sShift), t);
+                r.Observe(gate(t, rShift), t);
+            }
+            sawDrop = sawDrop || r.Dropping(t);
+            for (bool od : {true, false})
+                once = once && TimesDealt(s.Forwarding(t), s.Dropping(t), r.Forwarding(t), r.Dropping(t), od) == 1 &&
+                       TimesDealt(r.Forwarding(t), r.Dropping(t), s.Forwarding(t), s.Dropping(t), od) == 1;
+        }
+        Check(sawDrop, "the owner does drop once settled");
+        Check(once, lag > 0 ? "every shot dealt once while the shooter's view lags 2 s"
+                            : "every shot dealt once while the owner's view lags 2 s");
+    }
+}
+
 void TestSerialization() {
     const DamageEvent e = SampleEvent();
     std::uint8_t bytes[kDamageEventBytes + 8]{};
-    Check(kDamageEventBytes == 86, "the event is 86 bytes");
+    Check(kDamageEventBytes == 94, "the event is 94 bytes");
     const std::size_t n = WriteDamageEvent(e, bytes, sizeof(bytes));
     Check(n == kDamageEventBytes, "the whole event is written");
     Check(WriteDamageEvent(e, bytes, kDamageEventBytes - 1) == 0, "no room: nothing written");
@@ -180,6 +306,7 @@ void TestGdi() {
     Check(w == 1.0f, "the hit point's w is 1");
     DamageEvent back;
     back.seq = e.seq;
+    back.sender = e.sender;
     back.attackerRef = e.attackerRef;
     std::memcpy(back.attackerPos, e.attackerPos, sizeof(back.attackerPos));
     GdiToEvent(gdi, back);
@@ -255,6 +382,13 @@ void TestGate() {
     Check(wrap.Admit(e, v, now) == HitReject::None, "wraps to 0");
     e.seq = 0xFFFFFFFFu;
     Check(wrap.Admit(e, v, now) == HitReject::Duplicate, "and the one before the wrap is remembered");
+    // Senders are apart: the same reference id on another machine (another mission, another NPC vehicle).
+    DamageEvent elsewhere = SampleEvent();
+    elsewhere.sender = 0x42;
+    elsewhere.seq = 100;
+    Check(gate.Admit(elsewhere, v, now) == HitReject::None, "the same attacker id from another sender is not a duplicate");
+    elsewhere.seq = 101;
+    Check(gate.Admit(elsewhere, v, now) == HitReject::None, "and its sequence goes on from its own");
     // Attackers are apart.
     DamageEvent other = SampleEvent();
     other.attackerRef = 0x999;
@@ -456,7 +590,7 @@ void TestGameCode() {
           "a tagged block that is not an event is malformed");
 
     // The receive hook on a copy that is not the owner: counted, not dealt (nothing of the game's is touched).
-    SetNetFeatureForTest(NetFeature::HitAuthority, true);
+    SetHitRuleForTest(true, true);
     alignas(16) std::uint8_t object[0x800]{};
     const std::uint32_t remote = 1;
     std::memcpy(object + 0x128, &remote, 4);
@@ -474,36 +608,96 @@ void TestGameCode() {
     ToReader(junk, hooked);
     HitObjectReceiveHandler(&ctx);
     Check(HitAuthorityCounters().malformed == after.malformed + 1, "a malformed event is counted");
-    SetNetFeatureForTest(NetFeature::HitAuthority, false);
-    ToReader(written, hooked);
-    HitObjectReceiveHandler(&ctx);
-    Check(HitAuthorityCounters().inactive == after.inactive + 1, "with the feature off an event is not dealt");
+
+    // At the owner, whatever its own gate says: an event for a target that takes no remote hit itself (54F8D0) is
+    // dealt; one for our player or vehicle (6347C0) only while dropping, else that copy of the hit was dealt already.
+    // The event carries an impossible damage so that it stops at the owner's checks, before the game is called.
+    DamageEvent probe = SampleEvent();
+    probe.attackerRef = -1;
+    probe.damage = 1.0e9f;
+    Stream probeWritten;
+    Fn<void*(__fastcall*)(void*, int)>(kStreamConstruct)(probeWritten.bytes, 0x40);
+    WriteHitEventMessage(probeWritten.bytes, probe);
+    struct ReceiveCase {
+        const char* what;
+        std::uint32_t slot34;
+        bool dropping;
+        bool reachesChecks;
+    };
+    const ReceiveCase receives[] = {
+        {"owner not dropping, an enemy: the event reaches the owner's checks", 0x54F8D0, false, true},
+        {"owner not dropping, its vehicle: left to its own copy of the hit", 0x6347C0, false, false},
+        {"owner dropping, its vehicle: the event reaches the owner's checks", 0x6347C0, true, true},
+        {"owner dropping, an enemy: the event reaches the owner's checks", 0x54F8D0, true, true},
+    };
+    for (const auto& c : receives) {
+        SetHitRuleForTest(false, c.dropping);
+        std::uint64_t table[40]{};
+        table[34] = reinterpret_cast<std::uint64_t>(base + c.slot34);
+        alignas(16) std::uint8_t owned[0x800]{};
+        const void* tablePtr = table;
+        std::memcpy(owned, &tablePtr, 8);
+        const std::uint32_t mine = 2;
+        std::memcpy(owned + 0x128, &mine, 4);
+        Stream in;
+        ToReader(probeWritten, in);
+        CpuContext rc{};
+        rc.rcx = reinterpret_cast<std::uint64_t>(owned + 0x120);
+        rc.rdx = reinterpret_cast<std::uint64_t>(in.bytes);
+        const HitCounters b = HitAuthorityCounters();
+        HitObjectReceiveHandler(&rc);
+        const HitCounters a = HitAuthorityCounters();
+        const bool checked = a.refused == b.refused + 1 && a.ownerRule == b.ownerRule;
+        const bool held = a.ownerRule == b.ownerRule + 1 && a.refused == b.refused;
+        Check(c.reachesChecks ? checked : held, c.what);
+    }
+    ClearHitRuleForTest();
+}
+
+// The send the forward goes through (NetworkObject +0x80), faked: its answer is the test's.
+bool fakeSendResult = false;
+int fakeSends = 0;
+bool __fastcall FakeSend(void*, void*) {
+    ++fakeSends;
+    return fakeSendResult;
 }
 
 // The pre-filter's decisions on fake objects (the forward itself needs a game session: gamenet/real machine).
 void TestPreFilter() {
-    SetNetFeatureForTest(NetFeature::HitAuthority, true);
     struct Case {
         const char* what;
         std::uint32_t targetFlags;
         bool attackerRemote;
         float damage;
         std::uint16_t flags;
-        bool active;
+        bool forwarding, dropping;
+        bool sendWorks;
         std::uint32_t expect;
     };
     const Case cases[] = {
-        {"someone else's shot at our player: dropped", 2, true, 50.0f, 0, true, kDroppedMessage},
-        {"someone else's shot at a third machine's object: dropped", 1, true, 50.0f, 0, true, kDroppedMessage},
-        {"our shot at our object: the game deals it", 2, false, 50.0f, 0, true, kDamageMessage},
-        {"the game's kill message: untouched", 1, true, 50.0f, kGdiFromNetwork, true, kDamageMessage},
-        {"a heal: untouched", 2, true, -50.0f, 0, true, kDamageMessage},
-        {"a target without network identity: untouched", 0, true, 50.0f, 0, true, kDamageMessage},
-        {"feature off: untouched", 2, true, 50.0f, 0, false, kDamageMessage},
+        {"someone else's shot at our player: dropped", 2, true, 50.0f, 0, true, true, true, kDroppedMessage},
+        {"someone else's shot at a third machine's object: dropped", 1, true, 50.0f, 0, true, true, true,
+         kDroppedMessage},
+        {"not yet dropping: someone else's shot at our player is the game's", 2, true, 50.0f, 0, true, false, true,
+         kDamageMessage},
+        {"our shot at our object: the game deals it", 2, false, 50.0f, 0, true, true, true, kDamageMessage},
+        {"our shot at another's object, sent: dropped here", 1, false, 50.0f, 0, true, false, true, kDroppedMessage},
+        {"our shot at another's object, not sent: the game's", 1, false, 50.0f, 0, true, true, false, kDamageMessage},
+        {"not forwarding: our shot at another's object is the game's", 1, false, 50.0f, 0, false, true, true,
+         kDamageMessage},
+        {"the game's kill message: untouched", 1, true, 50.0f, kGdiFromNetwork, true, true, true, kDamageMessage},
+        {"a heal: untouched", 2, true, -50.0f, 0, true, true, true, kDamageMessage},
+        {"a target without network identity: untouched", 0, true, 50.0f, 0, true, true, true, kDamageMessage},
+        {"feature off: untouched", 2, true, 50.0f, 0, false, false, true, kDamageMessage},
     };
+    std::uint64_t netTable[20]{};
+    netTable[0x80 / 8] = reinterpret_cast<std::uint64_t>(&FakeSend);
     for (const auto& c : cases) {
-        SetNetFeatureForTest(NetFeature::HitAuthority, c.active);
+        SetHitRuleForTest(c.forwarding, c.dropping);
+        fakeSendResult = c.sendWorks;
         alignas(16) std::uint8_t object[0x800]{};
+        const void* netTablePtr = netTable;
+        std::memcpy(object + 0x120, &netTablePtr, 8);  // its NetworkObject's vtable: the send
         std::memcpy(object + 0x128, &c.targetFlags, 4);
         alignas(16) std::uint8_t gdi[kGdiBytes]{};
         gdi[kGdiOverride] = 1;  // the attacker as the override says: no game object needed
@@ -529,10 +723,13 @@ void TestPreFilter() {
     ctx.rcx = reinterpret_cast<std::uint64_t>(object);
     ctx.rdx = reinterpret_cast<std::uint64_t>(&message);
     ctx.r8 = reinterpret_cast<std::uint64_t>(&payload);
-    SetNetFeatureForTest(NetFeature::HitAuthority, true);
+    SetHitRuleForTest(true, true);
     HitPreFilterHandler(&ctx);
     Check(message == 0x10000007, "a message that is not damage passes");
-    SetNetFeatureForTest(NetFeature::HitAuthority, false);
+    Check(fakeSends == 2, "the two forwards went through the object's send");
+    const HitCounters counters = HitAuthorityCounters();
+    Check(counters.forwardFailed >= 1, "the send that failed is counted");
+    ClearHitRuleForTest();
 }
 
 }  // namespace
@@ -541,6 +738,9 @@ int main(int argc, char** argv) {
     TestOwner();
     TestVehicleShooter();
     TestDecision();
+    TestRuleClock();
+    TestOwnerTakesEvent();
+    TestSwitchWindow();
     TestSerialization();
     TestGdi();
     TestCheck();

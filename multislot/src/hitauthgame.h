@@ -42,7 +42,8 @@ HitMessage PeekHitEventMessage(void* stream, DamageEvent& out);
 
 // What the hooks did since load (the 30-second summary line says the same).
 struct HitCounters {
-    std::uint64_t forwarded = 0, forwardFailed = 0, dropped = 0, received = 0, dealt = 0, malformed = 0, inactive = 0;
+    std::uint64_t forwarded = 0, forwardFailed = 0, dropped = 0, received = 0, dealt = 0, malformed = 0;
+    std::uint64_t ownerRule = 0;  // events for a target this machine still deals remote hits on itself (OwnerTakesEvent)
     std::uint64_t refused = 0;  // events the owner refused (not counting the copies that are not the owner)
     std::uint64_t notOwner = 0;
 };
@@ -52,5 +53,10 @@ HitCounters HitAuthorityCounters();
 void HitPreFilterHandler(CpuContext* context);
 void HitObjectReceiveHandler(CpuContext* context);
 void InitHitAuthority(const unsigned char* base);
+// This process's sender id in its events (random, non-zero; set by InitHitAuthority).
+std::uint64_t HitSenderId();
+// Tests only: the rule as given, whatever the room runs (no sampler runs in the tests), until ClearHitRuleForTest.
+void SetHitRuleForTest(bool forwarding, bool dropping);
+void ClearHitRuleForTest();
 
 }  // namespace multislot

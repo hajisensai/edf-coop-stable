@@ -55,7 +55,8 @@ enum class NetOwner : std::uint8_t { Unregistered, Local, Remote };
 NetOwner OwnerOf(std::uint32_t networkFlags);
 
 struct HitInput {
-    bool active = false;      // the room runs hit authority (netfeature.h)
+    bool forwarding = false;  // this machine sends its hits on others' objects as events (HitRuleClock)
+    bool dropping = false;    // this machine leaves others' hits on its objects to their machines (HitRuleClock)
     bool replaying = false;   // this is a damage event being dealt by its target's owner
     bool fromNetwork = false;  // GDI+0x60 & 0x40
     float damage = 0.0f;
@@ -70,6 +71,35 @@ enum class HitVerdict : std::uint8_t {
 };
 HitVerdict DecideHit(const HitInput& input);
 
+// The rule over time on this machine (docs/net-re/damage.md section 6.6). The room's gate (netfeature.h) flips on
+// every machine at its own moment: a member joins and each machine sees it on its own lobby beat, 1-2 s apart. A
+// sender that forwards while the target's owner still plays the game's rule is harmless (the owner takes no event
+// for a target it deals itself, OwnerTakesEvent); an owner that drops a remote hit while its sender plays the
+// game's rule loses the hit. So dropping must imply that every sender forwards: the owner drops only after the gate
+// has been on without a break for `settleMs`, and a sender keeps forwarding for `graceMs` after its gate went off.
+// Both are longer than the spread of the machines' views of the room. Fed by Observe (a sampler, every 250 ms);
+// samples more than `maxGapMs` apart break the run (the sampler stalled: nothing is known of the gap).
+class HitRuleClock {
+public:
+    explicit HitRuleClock(std::uint64_t settleMs = 5000, std::uint64_t graceMs = 5000, std::uint64_t maxGapMs = 1000)
+        : settleMs_(settleMs), graceMs_(graceMs), maxGapMs_(maxGapMs) {}
+    void Observe(bool gateOn, std::uint64_t nowMs);
+    bool Forwarding(std::uint64_t nowMs) const;
+    bool Dropping(std::uint64_t nowMs) const;
+
+private:
+    std::uint64_t settleMs_, graceMs_, maxGapMs_;
+    bool any_ = false, on_ = false, everOn_ = false;
+    std::uint64_t lastMs_ = 0, onSinceMs_ = 0, lastOnMs_ = 0;
+};
+
+// Whether the target's owner deals a damage event. `ownerDecides`: the game takes another machine's hits on this
+// target itself (its slot 34 says yes to a remote attacker, not from the network: players and vehicles). While this
+// machine does not drop, it deals such a target's hits from the bullet copies, as the game does; the sender's event
+// would be the same hit a second time. Every other target takes no remote hit in the game's rule: the event is its
+// only way in, whatever this machine's own gate says.
+constexpr bool OwnerTakesEvent(bool dropping, bool ownerDecides) { return dropping || !ownerDecides; }
+
 // Whose a registered vehicle's shots are (docs/net-re/damage.md section 9; the same rule as all-forces'
 // online::Authority). `npcSeat0`: seat 0 holds a live rider with no network identity (RideAi's DummyVehicleRider, an
 // NPC a script or the plugin seated): every machine that seated one would count as running the vehicle, so only the
@@ -79,6 +109,7 @@ NetOwner VehicleShooter(bool npcSeat0, bool host, int runner);
 // The damage event, as it travels (little-endian, fixed layout behind a magic and a version).
 struct DamageEvent {
     std::uint32_t seq = 0;          // the sender's, increasing
+    std::uint64_t sender = 0;       // the sending process, random at its start (HitSenderId): dedup and rate key
     std::int32_t attackerRef = -1;  // the game's object reference id (785050) of the attacker, -1 none
     std::int32_t targetRef = -1;    // reserved (-1): the event is addressed by the target's own NetworkObject
     std::uint32_t kind = 0;
@@ -94,8 +125,8 @@ struct DamageEvent {
     float extra68 = 1.0f;
     float attackerPos[3]{};  // where the attacker was on the sender's machine
 };
-constexpr std::uint8_t kDamageEventMagic0 = 'H', kDamageEventMagic1 = 'A', kDamageEventVersion = 1;
-constexpr std::size_t kDamageEventBytes = 4 + 4 + 4 + 4 + 4 + 4 + 12 + 12 + 4 * 4 + 2 + 4 + 4 + 12;
+constexpr std::uint8_t kDamageEventMagic0 = 'H', kDamageEventMagic1 = 'A', kDamageEventVersion = 2;
+constexpr std::size_t kDamageEventBytes = 4 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 12 + 4 * 4 + 2 + 4 + 4 + 12;
 // Returns the bytes written, 0 when `capacity` is too small.
 std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::size_t capacity);
 // False for anything that is not a whole event of this version.
@@ -131,8 +162,10 @@ struct HitView {
     float attackerPos[3]{};
 };
 
-// Checks one event: its numbers and geometry, then duplicates (each attacker's sequence, a window of 64 behind the
-// newest), then the attacker's rate. Only an event that passes is remembered and counted against the rate.
+// Checks one event: its numbers and geometry, then duplicates (a window of 64 behind the newest sequence), then the
+// rate. Both per (sender, attacker): an attacker's reference id is only unique on one machine and for one mission
+// (a vehicle's driver changes machine, a mission restarts, every machine has its own NPC-driven vehicle), while the
+// sequence is the sender's alone. Only an event that passes is remembered and counted against the rate.
 class HitGate {
 public:
     explicit HitGate(const HitLimits& limits = HitLimits{}) : limits_(limits) {}
@@ -147,9 +180,19 @@ private:
         std::uint64_t lastMs = 0;
         bool any = false;
     };
+    struct Key {
+        std::uint64_t sender;
+        std::int32_t attacker;
+        bool operator==(const Key& o) const { return sender == o.sender && attacker == o.attacker; }
+    };
+    struct KeyHash {
+        std::size_t operator()(const Key& k) const {
+            return static_cast<std::size_t>(k.sender * 0x9E3779B97F4A7C15ull ^ static_cast<std::uint32_t>(k.attacker));
+        }
+    };
     void Forget(std::uint64_t nowMs);
     HitLimits limits_;
-    std::unordered_map<std::int32_t, Attacker> attackers_;
+    std::unordered_map<Key, Attacker, KeyHash> attackers_;
     std::uint64_t lastSweepMs_ = 0;
 };
 // The geometry and numbers part of Admit, on its own.

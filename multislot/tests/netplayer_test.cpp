@@ -299,6 +299,54 @@ void TestConverge() {
     }
 }
 
+// Review fixes (2026-10-07).
+void TestReviewFixes() {
+    // 1. The flush interval follows this machine's own PlayerSync switch.
+    Check(EffectiveFlushIntervalMs(45, false) == 0, "PlayerSync off locally: the game's 90 ms flush stays");
+    Check(EffectiveFlushIntervalMs(45, true) == 45, "PlayerSync on: 45 ms");
+    Check(EffectiveFlushIntervalMs(0, true) == 0 && EffectiveFlushIntervalMs(90, true) == 0, "0 or 90: leave it");
+    Check(EffectiveFlushIntervalMs(5, true) == 16 && EffectiveFlushIntervalMs(200, true) == 90, "clamped to 16..90");
+    // 2. Samples stop arriving while the player ran at 5 m/s: once the estimate stops at the extrapolation limit,
+    //    the copy must stop there too, not run on by the old velocity and get pulled back.
+    {
+        NetPlayerParams p;
+        RemoteTrack t;
+        PlayerSample s;
+        s.seq = 1;
+        s.velocity = {5, 0, 0};
+        AcceptSample(t, s, 0.0, p);
+        Vec3 copy{};
+        float furthest = 0.0f;
+        for (double now = 0.0; now < p.staleMs; now += 1000.0 / 60.0) {
+            const RemoteStep step = StepRemote(t, copy, now, p);
+            copy = copy + step.add;  // the copy has no motion of its own
+            furthest = (std::max)(furthest, copy.x);
+        }
+        const float limit = 5.0f * p.maxExtrapolateMs / 1000.0f;
+        Check(furthest <= limit + 0.02f, "no overshoot past the extrapolation limit (" + std::to_string(furthest) +
+                                             " m, estimate stops at " + std::to_string(limit) + " m)");
+        Check(std::fabs(copy.x - limit) <= p.deadband + 0.01f, "and it settles on the stopped estimate");
+    }
+    // 3. The warp threshold grows with speed: a 40 m/s boost may be 9 m off for a moment without a warp.
+    {
+        NetPlayerParams p;
+        RemoteTrack t;
+        PlayerSample s;
+        s.seq = 1;
+        AcceptSample(t, s, 0.0, p);
+        Check(WarpDistance(t, p) == p.snapDistance, "standing: warp above snapDistance");
+        Check(StepRemote(t, {9, 0, 0}, 0.0, p).warp, "standing, 9 m off: warp");
+        RemoteTrack fast;
+        s.velocity = {40, 0, 0};
+        AcceptSample(fast, s, 0.0, p);
+        Check(std::fabs(WarpDistance(fast, p) - 10.0f) < 1e-4f, "40 m/s: warp above 10 m");
+        Check(!StepRemote(fast, {-9, 0, 0}, 0.0, p).warp, "40 m/s, 9 m off: no warp");
+        RemoteTrack fast2;
+        AcceptSample(fast2, s, 0.0, p);
+        Check(StepRemote(fast2, {-11, 0, 0}, 0.0, p).warp, "40 m/s, 11 m off: warp");
+    }
+}
+
 void TestFeature() {
     // An INI without [Netcode]: every switch at its default.
     InitNetFeature(L"Z:\\no-such-folder\\netplayer_test.ini");
@@ -321,6 +369,7 @@ int main() {
     TestAcceptAndClock();
     TestEstimate();
     TestConverge();
+    TestReviewFixes();
     TestFeature();
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

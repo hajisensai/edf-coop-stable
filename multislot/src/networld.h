@@ -61,4 +61,41 @@ std::vector<MidSite> VerifiedWorldHooks(const unsigned char* base);
 std::uint64_t KeptTargets();
 std::uint64_t LocalChoices();
 
+// --- Random state of enemies (worldrng.h): changes what is sent, so only with NetFeatureActive(WorldAuthority) ---
+// The owner sends from the retarget site above (its choice frames, at most every EnemyRngSyncMs); the copies take
+// it at 54D79E, inside GameObjectBase NetworkObject slot 17 (54D770) after the game read the message type and
+// found it is not 0 or 1: `mov [rsp+0x30], rsi` (displaced), r8d = type - 1 there, rbx the NetworkObject, rdi
+// the stream. A type the game does not know goes on to `cmp r8d, 1; jne 54D86F` (return), as without the hook.
+constexpr std::uint32_t kRngReceiveSite = 0x54D79E;
+constexpr std::uint32_t kObjectRandom = 0x490;   // u64 LCG state (x * 0x5D588B656C078965 + 0x269EC3)
+constexpr std::uint32_t kObjectRandom2 = 0x3E8;  // u64, seeded with it (545B85)
+constexpr std::uint32_t kObjectTeam = 0x314;
+constexpr std::uint32_t kObjectNetwork = 0x120;
+constexpr std::uint32_t kDefaultRngSyncMs = 2000;
+
+// --- Insect pose interval (docs/net-re/world.md section 2.2) ---
+// InsectBase NetworkObject slot 5 (40C510) sends the pose every 40 frames (`mov eax, 0x28` at 40C558, the
+// +0x2011 clear case) or 90 (`mov ecx, 0x5A` at 40C55F) when nothing faster applies. [Netcode] InsectPoseFrames
+// = N (3..90) makes both at most N; 0 or 90 leaves the game's. Only what this machine sends changes.
+constexpr std::uint32_t kInsectPoseFast = 0x40C558;
+constexpr std::uint32_t kInsectPoseSlow = 0x40C55F;
+constexpr int kDefaultInsectPoseFrames = 30;
+// The two patches for `frames` (empty when the game's values stay: 0, 90 or outside 3..90).
+std::vector<Patch> InsectPosePatches(int frames);
+
+// Reads [Netcode] EnemyRngSyncMs and InsectPoseFrames and applies the insect pose patches (their bytes checked
+// first; a mismatch is logged and leaves the game's). Before the hooks are installed.
+void InitWorld(unsigned char* base, const wchar_t* iniPath);
+std::uint32_t RngSyncIntervalMs();
+void SetRngSyncIntervalMs(std::uint32_t ms);  // tests
+
+// What the random state sync did since load.
+struct RngCounters {
+    std::uint64_t sent = 0, sendFailed = 0, applied = 0, stale = 0, malformed = 0, notRemote = 0, inactive = 0;
+};
+RngCounters RngSyncCounters();
+// The copies' side, for the tests: whether the hook at kRngReceiveSite takes this message (type and feature
+// checks happen before the stream is touched).
+bool RngMessageType(std::uint64_t r8);
+
 }  // namespace multislot

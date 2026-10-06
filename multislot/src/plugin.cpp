@@ -661,6 +661,8 @@ bool LoadRooms(const wchar_t* iniPath) {
             "other loadout records beside them, even in small rooms (0 = normal)", budget);
     }
     InitWeaponGuard(base);
+    // Netcode W4 (networld.h): enemy random state interval and the insect pose interval (two immediate operands).
+    InitWorld(base, iniPath);
     InitJoinLog(base);
     InitFinalHello(base);
     InitPeerTimeout(base);

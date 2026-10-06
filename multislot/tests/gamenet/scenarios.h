@@ -158,6 +158,15 @@ inline void CheckWholeMission(const std::vector<Spawned>& m, const gamenet::Netw
 inline void CheckSplitMission(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, false}); }
 inline void CheckLateRecords(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, true, false}); }
 inline void CheckLossyMission(const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, true}); }
+// Player 2's packets from player 4 come 1.5 s late, so its P2P handshake with player 4 ends late, while the host is
+// done with its own handshakes and sends its sync message at once: player 2's controller hands that message over
+// (and acknowledges it, so the host never sends it again) while player 2 still waits for player 4.
+inline void CheckSlowPeerMission(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckMission(machines, network, {false, false, false});
+    const std::string early = Result(machines[1], "early-messages");
+    Check(std::atoi(early.c_str()) > 0, machines[1].user + " got a sync message while its handshake with player 4 still ran (" +
+                                            early + ")");
+}
 inline void CheckRushedMission(const std::vector<Spawned>& m, const gamenet::Network& n) {
     CheckMission(m, n, {true, false, false, true});
 }
@@ -260,6 +269,13 @@ inline const std::vector<Scenario>& Scenarios() {
              return seats;
          }(),
          150000, &CheckModWeapons},
+        {"mission4slowpeer",
+         [] {
+             auto seats = Seats(4, "mission", BaseIni());
+             seats[1].env = {{"EDF6NET_DELAY_FROM", seats[3].user + ":1500"}};
+             return seats;
+         }(),
+         150000, &CheckSlowPeerMission},
         // A mission started the moment the last player is in, while Epic takes 2.5 s to relay each member's lobby
         // attributes (the split sync marker among them) to the others.
         {"mission8rushed", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckRushedMission,

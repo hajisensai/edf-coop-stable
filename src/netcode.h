@@ -31,11 +31,17 @@ NetcodeOptions netcodeOptions();
 using RoomCapQuery = bool (*)(uint32_t cap);
 void setRoomCapQuery(RoomCapQuery query);
 
-// Interest management (W6) decides per (observer, subject) whether a state datagram goes now. `observer`: the
-// member it would go to; `subject`: whose state it carries (this machine's EOS id: the game's state datagrams
-// carry what this machine owns). Unset: always.
-using StateSendFilter = bool (*)(const std::string& observer, const std::string& subject, uint64_t nowMs);
+// Interest management (W6) decides per (observer, subject) whether a state datagram of `bytes` goes now.
+// `observer`: the member it would go to; `subject`: whose state it carries - the sender's own (this machine's EOS id)
+// when this machine sends it, the original sender's when a room host relays it between two joiners. Asked on the
+// game's thread for our own datagrams and on the direct link's thread for relayed ones. Unset: always.
+using StateSendFilter = bool (*)(const std::string& observer, const std::string& subject, uint32_t bytes, uint64_t nowMs);
 void setStateSendFilter(StateSendFilter filter);
+
+// The room's real size (up to 1024; multislot lobbystate.h CurrentLobbyCapacity) where Epic's lobby holds at most 64:
+// a host lets that many in over the direct link. Returns 0 when the room part does not know (then Epic's MaxMembers).
+using RoomCapacitySource = uint32_t (*)();
+void setRoomCapacitySource(RoomCapacitySource source);
 
 // Bytes per second the path to `peer` carries now, from its congestion controller (direct link: the path in
 // use; EOS only: the game's own budget, as nobody measures Epic's path). 0: `peer` is not known.

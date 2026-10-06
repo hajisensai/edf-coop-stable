@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -31,6 +32,7 @@
 #include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
+#include "netaoi.h"
 #include "netcompress.h"
 #include "netfeature.h"
 #include "netplayer_game.h"
@@ -764,6 +766,10 @@ bool LoadRooms(const wchar_t* iniPath) {
     const bool marker = imports == 2 && lobbyGlue;
     // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
     StartNetFeature(lobbyGlue);
+    // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
+    // datagrams follow interest management within each path's budget (netaoi.h).
+    dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });
+    InstallNetInterest(GetPrivateProfileIntW(L"Netcode", L"Interest", 1, iniPath) != 0);
     if (marker) SetSplitSyncReaders(&ReadsSplitSync);
     if (mission) {
         if (imports == 2)

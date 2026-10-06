@@ -232,6 +232,7 @@ struct State {
     std::atomic<RoomCapQuery> roomCaps{nullptr};
     std::atomic<StateSendFilter> stateFilter{nullptr};
     std::atomic<BulkHandler> bulkHandler{nullptr};
+    std::atomic<RoomCapacitySource> roomCapacity{nullptr};
     // A game packet that came twice (over two paths, or the direct link and EOS) reaches the game once.
     DuplicateFilter duplicates;
     // Fragments (fragment.h): ours going out get ids from here, theirs come together here (receive thread only).
@@ -1344,6 +1345,10 @@ uint32_t roomCapacity() {
         }
         a.releaseDetails(details);
     }
+    // A MultiSlot room's real size (up to 1024) is the room part's: Epic's lobby holds at most 64.
+    if (RoomCapacitySource source = g.roomCapacity.load()) {
+        if (const uint32_t real = source()) capacity = real;
+    }
     std::lock_guard<std::mutex> lock(g.viewMutex);
     if (capacity) g.viewCapacity = capacity;
     return g.viewCapacity;
@@ -1846,7 +1851,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     // Interest management (W6) may hold a state datagram back: the next one replaces it.
     if (cls == TrafficClass::State) {
         StateSendFilter filter = g.stateFilter.load();
-        if (filter && !filter(remote, idString(o->LocalUserId), GetTickCount64())) {
+        if (filter && !filter(remote, idString(o->LocalUserId), o->DataLengthBytes, GetTickCount64())) {
             ++g.aoiSkipped;
             return EOS_Success;
         }
@@ -2456,7 +2461,19 @@ NetcodeOptions netcodeOptions() {
 }
 
 void setRoomCapQuery(RoomCapQuery query) { g.roomCaps = query; }
-void setStateSendFilter(StateSendFilter filter) { g.stateFilter = filter; }
+// The host relays joiners' state too: the same filter decides there (observer = receiver, subject = sender).
+bool relayFilter(const std::string& observer, const std::string& subject, uint32_t bytes, uint64_t nowMs) {
+    StateSendFilter filter = g.stateFilter.load();
+    return !filter || filter(observer, subject, bytes, nowMs);
+}
+
+void setStateSendFilter(StateSendFilter filter) {
+    g.stateFilter = filter;
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net) net->setRelayStateFilter(filter ? &relayFilter : nullptr);
+}
+
+void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source; }
 void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
 
 void setTestPeerBlock(uint32_t afterMs, uint32_t forMs) {

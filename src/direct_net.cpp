@@ -737,6 +737,7 @@ std::string DirectNet::statusLine() {
     if (uint64_t n = sendFailures_) s += " send-refused=" + std::to_string(n);
     if (uint64_t n = stateShed_) s += " state-over-budget=" + std::to_string(n);
     if (uint64_t n = relayShed_) s += " relay-over-budget=" + std::to_string(n);
+    if (uint64_t n = relayFiltered_) s += " relay-held-by-interest=" + std::to_string(n);
     if (uint64_t n = retransmitBudget_ ? retransmitBudget_->refusals() : 0) s += " shared-retx-cap-hit=" + std::to_string(n);
     return s;
 }
@@ -846,6 +847,12 @@ void DirectNet::routeData(DataMsg msg) {
     }
     const uint64_t now = nowMs();
     if (msg.cls == kState && msg.reliability == 0) {
+        // Interest management decides for the receiver, as for a datagram of our own (the subject is its sender).
+        if (RelayStateFilter filter = relayFilter_.load();
+            filter && !filter(msg.dst, msg.src, static_cast<uint32_t>(msg.payload.size()), static_cast<uint64_t>(GetTickCount64()))) {
+            ++relayFiltered_;
+            return;
+        }
         // The host's uplink pays for what it relays: state beyond the relay budget is dropped (the next replaces it).
         const double rate = static_cast<double>(opt_.relayBytesPerSecond);
         if (relayTokensMs_ == 0) relayTokens_ = rate / 4;

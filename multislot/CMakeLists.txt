@@ -342,7 +342,7 @@ target_compile_options(NetTransportTests PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(NetTransportTests PRIVATE DirectNetCore)
 add_test(NAME NetTransport COMMAND NetTransportTests)
 target_sources(EDF6Coop PRIVATE src/nettraffic.cpp)
-target_sources(EDF6Coop PRIVATE src/netfeature.cpp src/netcompress.cpp)
+target_sources(EDF6Coop PRIVATE src/netfeature.cpp src/netcompress.cpp src/netaoi.cpp)
 add_executable(NetFeatureTests tests/netfeature_test.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp
     src/identity.cpp src/log.cpp)
 target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
@@ -354,3 +354,10 @@ foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpr
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 endforeach()
+add_executable(NetInterestTests tests/netaoi_test.cpp src/netaoi.cpp src/interest.cpp src/netfeature.cpp src/netcompress.cpp
+    src/lobbystate.cpp src/hostmode.cpp src/roomview.cpp src/mission.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/patches.cpp
+    src/joinlog.cpp src/updatecheck.cpp src/widecmp.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
+target_include_directories(NetInterestTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetInterestTests PRIVATE ${WARNINGS})
+target_link_libraries(NetInterestTests PRIVATE DirectNetPart winhttp)
+add_test(NAME NetInterestOnTheWire COMMAND NetInterestTests)

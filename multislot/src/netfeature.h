@@ -38,6 +38,10 @@ namespace multislot {
 constexpr std::int64_t kNetProtocol = 1;
 constexpr const char* kNetProtocolKey = "EDF6NET_PROTO";
 constexpr const char* kNetCapsKey = "EDF6NET_CAPS";
+// A member publishes the room host's protocol as it read it, after it logged what it read. The host refuses a
+// member of another protocol only once it shows this: the refused member has said why on its own side first (both
+// beat once a second, and without this the host could remove it before it ever read the host's entry).
+constexpr const char* kNetSeenKey = "EDF6NET_SEEN";
 
 enum class NetFeature : std::uint32_t {
     // W1, the transport (src/netcode.h).
@@ -67,9 +71,11 @@ public:
         bool published = false;  // shows EDF6NET_PROTO
         std::int64_t protocol = 0;
         std::uint32_t caps = 0;
+        bool seenHost = false;  // shows kNetSeenKey: it has read (and logged) the host's protocol
     };
     // What the lobby beat read (an empty view: we left). Returns the members whose protocol differs from ours and
-    // that are new since the last call (each once per room), for the owner to refuse.
+    // that are new since the last call (each once per room): for the owner to refuse, once they show kNetSeenKey
+    // (until then they are not returned, and come again); for anyone else to log.
     std::vector<Member> Observe(const LobbyView& view);
     bool Active(std::uint32_t caps) const;  // every listed member publishes kNetProtocol and has all of `caps`
     bool InRoom() const;

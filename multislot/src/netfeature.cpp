@@ -45,6 +45,7 @@ void Observe(const LobbyView& seen) {
             LobbyView::Member m;
             m.id = id;
             if (netcode.first) {
+                m.texts[kNetSeenKey] = "hello";  // it said its protocol to us itself: the host refuses at the hello
                 m.texts[kNetProtocolKey] = std::to_string(netcode.first);
                 char caps[16];
                 std::snprintf(caps, sizeof(caps), "%X", netcode.second);
@@ -56,6 +57,19 @@ void Observe(const LobbyView& seen) {
     const std::vector<NetRoom::Member> mismatched = NetGate().Observe(view);
     if (view.lobbyId.empty()) return;
     const bool owner = !view.owner.empty() && view.owner == view.self;
+    // Having read the host's protocol (and logged above what it means), say so: only then may a host of another
+    // protocol refuse us (kNetSeenKey).
+    struct SeenAfter {
+        std::string value;
+        ~SeenAfter() {
+            if (!value.empty()) PublishMemberText(kNetSeenKey, value);
+        }
+    } seenAfter;
+    if (!owner)
+        for (const auto& member : view.members)
+            if (member.id == view.owner)
+                if (const auto proto = member.texts.find(kNetProtocolKey); proto != member.texts.end())
+                    seenAfter.value = proto->second;
     for (const NetRoom::Member& m : mismatched) {
         if (m.id == view.owner) {
             Log("NETCODE the room's host %s runs netcode protocol %lld, this machine %lld (another EDF6Coop "
@@ -136,7 +150,10 @@ std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
         if (proto != seen.texts.end()) m.protocol = ParseInt(proto->second, ok);
         m.published = ok;
         if (const auto caps = seen.texts.find(kNetCapsKey); caps != seen.texts.end()) m.caps = ParseCaps(caps->second);
-        if (m.published && m.protocol != settings.protocol && m.id != self_ &&
+        m.seenHost = seen.texts.count(kNetSeenKey) != 0;
+        // The owner acts on a member only once it has read the owner's protocol (kNetSeenKey).
+        const bool due = self_ != owner_ || m.id == owner_ || m.seenHost;
+        if (m.published && m.protocol != settings.protocol && m.id != self_ && due &&
             std::find(reported_.begin(), reported_.end(), m.id) == reported_.end()) {
             reported_.push_back(m.id);
             fresh.push_back(m);
@@ -337,7 +354,7 @@ bool StartNetFeature(bool lobbyGlue) {
     char caps[16];
     std::snprintf(caps, sizeof(caps), "%X", settings.caps);
     PublishMemberText(kNetCapsKey, caps);
-    WatchMemberTexts({kNetProtocolKey, kNetCapsKey}, &Observe);
+    WatchMemberTexts({kNetProtocolKey, kNetCapsKey, kNetSeenKey}, &Observe);
     // The direct link says the same in every hello; a host refuses another protocol there too (members beyond
     // Epic's lobby, whose lobby entry nobody can read).
     dn::setNetcodeIdentity(static_cast<std::uint32_t>(settings.protocol), settings.caps, settings.rejectMismatched);

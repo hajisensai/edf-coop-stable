@@ -77,14 +77,18 @@ void TestUnpublishedMember() {
 void TestMismatchedProtocol() {
     NetRoom room;
     const std::string other = std::to_string(kNetProtocol + 1);
+    // Not yet: it has not shown that it read our protocol (and said why on its side) - the host waits for that.
     auto fresh = room.Observe(View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7"),
                                            Member(kOther, other.c_str(), "7")}));
+    Check(fresh.empty() && !room.Active(kMesh), "a member of another protocol is refused only once it read ours");
+    auto seenOther = Member(kOther, other.c_str(), "7");
+    seenOther.texts[kNetSeenKey] = kProto;
+    fresh = room.Observe(View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7"), seenOther}));
     Check(room.Owner(), "the host owns the room");
     Check(fresh.size() == 1 && fresh[0].id == kOther && fresh[0].protocol == kNetProtocol + 1,
           "a member of another protocol is reported to refuse");
     Check(!room.Active(kMesh), "while it is in the room nothing is on");
-    fresh = room.Observe(View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7"),
-                                      Member(kOther, other.c_str(), "7")}));
+    fresh = room.Observe(View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7"), seenOther}));
     Check(fresh.empty(), "reported once per room");
     // It was removed: on again.
     room.Observe(View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kGuest, kProto.c_str(), "7")}));
@@ -92,7 +96,7 @@ void TestMismatchedProtocol() {
     // Left the room: off, and a new room reports again.
     room.Observe(LobbyView{});
     Check(!room.InRoom() && !room.Active(kMesh), "out of the room: off");
-    auto view = View(kHost, {Member(kHost, kProto.c_str(), "7"), Member(kOther, other.c_str(), "7")});
+    auto view = View(kHost, {Member(kHost, kProto.c_str(), "7"), seenOther});
     view.lobbyId = "lobby2";
     Check(room.Observe(view).size() == 1, "another room reports it again");
 }

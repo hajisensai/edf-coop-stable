@@ -213,6 +213,23 @@ void PlayerTagIndexHandler(CpuContext* context) {
         LogOnce(14, "MISSION HUD colour of player index %lld shares one of the colours the HUD tables have", index);
 }
 
+// `mov rdx, [entry+0x178]` of the script VM's player table: index in `Index`, the entry's address computed by `Entry`.
+template <std::uint64_t CpuContext::*Index, std::uint64_t CpuContext::*Base, std::uint64_t Scale>
+void BvmEntryHandler(CpuContext* context) {
+    const auto index = static_cast<std::int64_t>(context->*Index);
+    const std::uint64_t entry = context->*Base + Scale * 8 + 0x178;
+    context->rdx = BvmPlayerEntry(index, entry);
+    if (index < 0 || index >= kBvmPlayerEntries)
+        LogOnce(15, "MISSION the script VM's four-entry player table was read for player index %lld: an empty entry", index);
+}
+// 21F3CF: [r15 + r8*8 + 0x178] with r8 = r12*3, the loop index r12.
+void BvmLoopHandler(CpuContext* context) {
+    const auto index = static_cast<std::int64_t>(context->r12);
+    context->rdx = BvmPlayerEntry(index, context->r15 + context->r8 * 8 + 0x178);
+    if (index >= kBvmPlayerEntries)
+        LogOnce(15, "MISSION the script VM's four-entry player table was read for player index %lld: an empty entry", index);
+}
+
 // MissionContext destructor: `mov edx, 0x10; lea r8d, [rdx-0xC]` - the entry size and the count of the moved array.
 void DestroyCountHandler(CpuContext* context) {
     context->rdx = kPlayerEntrySize;
@@ -352,6 +369,24 @@ void SetGhostPlayers(int count) {
 int NextGhostCount(int count) {
     if (count < kVanillaPlayers) return kVanillaPlayers;         // off -> five players
     return count + 1 > kMaxPlayers - 1 ? 0 : count + 1;          // five .. the largest room, then off
+}
+
+std::uint64_t BvmPlayerEntry(std::int64_t index, std::uint64_t entry) {
+    if (index < 0 || index >= kBvmPlayerEntries) return 0;
+    std::uint64_t value = 0;
+    std::memcpy(&value, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entry)), sizeof(value));
+    return value;
+}
+
+MidHandler BvmPlayerTableHandler(std::uint32_t rva) {
+    using C = CpuContext;
+    switch (rva) {
+        case 0x21F3CF: return &BvmLoopHandler;
+        case 0x222761: return &BvmEntryHandler<&C::rax, &C::r8, 0>;
+        case 0x228AED: return &BvmEntryHandler<&C::rax, &C::r9, 0>;
+        case 0x22A685: return &BvmEntryHandler<&C::rax, &C::r10, 0>;
+        default: return nullptr;
+    }
 }
 
 std::int32_t WrapHudIndex(std::int32_t index, int tableSize) {

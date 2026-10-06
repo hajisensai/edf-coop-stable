@@ -313,6 +313,25 @@ int main(int argc, char** argv) {
     }
     for (const auto& call : missionCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
     Check(missionPatches.size() == 16 && missionHooks.size() == 25 && missionCalls.size() == 5, "mission table sizes");
+    // The script VM's player table: four 0x18-byte entries built at +0x168 by its constructor (eh vector constructor
+    // 12D8D44 with size 0x18, count 4), and the four unbounded readers BvmPlayerTableHooks bound.
+    const std::uint8_t bvmTable[] = {0x48, 0x8D, 0x8F, 0x68, 0x01, 0x00, 0x00};  // 20DCAC lea rcx, [rdi+0x168]
+    const std::uint8_t bvmShape[] = {0x8D, 0x56, 0x18, 0x44, 0x8D, 0x46, 0x04};  // 20DCCB lea edx, [rsi+0x18]; lea r8d, [rsi+4]
+    Check(std::memcmp(image.At(0x20DCAC, 7), bvmTable, 7) == 0 && std::memcmp(image.At(0x20DCCB, 7), bvmShape, 7) == 0 &&
+              CallTargets(image.At(0x20DCD2, 5), 0x20DCD2, 0x12D8D44),
+          "the script VM builds its player table of four 0x18-byte entries at +0x168", 0x20DCAC);
+    const std::uint8_t bvmCount[] = {0x8B, 0x80, 0xF8, 0x4F, 0x01, 0x00};  // 2252B9 mov eax, [rax+0x14FF8]
+    Check(std::memcmp(image.At(0x2252B9, 6), bvmCount, 6) == 0 && CallTargets(image.At(0x21F3B2, 5), 0x21F3B2, 0x225290) &&
+              CallTargets(image.At(0x21F8CA, 5), 0x21F8CA, 0x225290),
+          "21F380 loops over the online player count (225290)", 0x21F3B2);
+    const std::uint8_t indexed[] = {0x48, 0x63, 0xC2};  // movsxd rax, edx
+    for (const std::uint32_t entry : {0x22274Fu, 0x228ADDu, 0x22A671u})
+        Check(std::memcmp(image.At(entry, 3), indexed, 3) == 0, "a BVM entry reader takes its index in edx", entry);
+    for (const auto& hook : BvmPlayerTableHooks()) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(BvmPlayerTableHandler(hook.rva) != nullptr, "every BVM table site has a handler", hook.rva);
+    }
     // The bounds an imm8 could not hold (widecmp.h): each is the game's `cmp, 4` and the jcc after it.
     const auto compares = [] {
         auto all = SessionCompares();

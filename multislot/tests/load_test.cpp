@@ -356,6 +356,7 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : PacketFitCalls()) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
         for (const auto& hook : PacketFitHooks()) untouched = untouched && SiteUntouched(base, hook);
         for (const auto& site : MissionCompares()) untouched = untouched && CompareUntouched(base, site);
+        for (const auto& hook : BvmPlayerTableHooks()) untouched = untouched && SiteUntouched(base, hook);
         return untouched;
     };
 
@@ -580,6 +581,7 @@ int wmain(int argc, wchar_t** argv) {
             Check(Applied(base, missionPatches) == static_cast<int>(missionPatches.size()), "every mission patch is written");
             for (const auto& hook : missionHooks) Check(HookedInto(base, hook, plugin), hook.name);
             for (const auto& site : MissionCompares()) Check(WidenedInto(base, site), site.name);
+            for (const auto& hook : BvmPlayerTableHooks()) Check(HookedInto(base, hook, plugin), hook.name);
             for (const auto& call : missionCalls) Check(RedirectedInto(base + call.rva, plugin), call.name);
             for (const auto& slot : MissionSlots()) Check(SlotInto(base, slot, plugin), slot.name);
             for (const auto& call : PacketFitCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);

@@ -35,6 +35,13 @@ const std::uint8_t* LoadoutSidecar(int index);  // nullptr outside 4..kMaxPlayer
 // before the game made its GameStatus. For the game-code tests (EDF6Coop_LoadoutRecord).
 const std::uint8_t* LoadoutRecord(std::int64_t index);
 
+// The entries the mission script VM's player table has (patches.h BvmPlayerTableHooks), and what an entry read of
+// player `index` at `entry` (the address of its control block pointer, entry base + 0x10) gives: the pointer there
+// for 0..3, null (an empty entry) for anything else.
+constexpr std::int64_t kBvmPlayerEntries = 4;
+std::uint64_t BvmPlayerEntry(std::int64_t index, std::uint64_t entry);
+MidHandler BvmPlayerTableHandler(std::uint32_t rva);
+
 // Mid-function hook handlers and call redirections for the tables in patches.h, by site RVA.
 MidHandler MissionHookHandler(std::uint32_t rva);
 void* MissionCallHandler(std::uint32_t rva);

@@ -482,6 +482,17 @@ std::vector<PointerSlot> MissionSlots() {
     };
 }
 
+std::vector<MidSite> BvmPlayerTableHooks() {
+    return {
+        // 21F380 (a script opcode): `for i < GetOnlinePlayerCount()`, entry i at r15 + r12*0x18 (r8 = r12*3).
+        {"BVM player table loop (21F380)", 0x21F3CF, {0x4B, 0x8B, 0x94, 0xC7, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        // 222740, 228AC0, 22A650: entry `movsxd rax, edx` (the script's index) at r8 / r9 / r10.
+        {"BVM player table entry (222740)", 0x222761, {0x49, 0x8B, 0x90, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        {"BVM player table entry (228AC0)", 0x228AED, {0x49, 0x8B, 0x91, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        {"BVM player table entry (22A650)", 0x22A685, {0x49, 0x8B, 0x92, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+    };
+}
+
 std::vector<MidSite> GhostHooks() {
     return {
         // The instruction that stores the count runs after the handler, with the handler's value.

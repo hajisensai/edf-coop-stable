@@ -232,6 +232,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         if (ghosts > 0)
             for (const auto& site : GhostHooks()) hooks.push_back({site, GhostHookHandler(site.rva)});
         for (const auto& site : PacketFitHooks()) hooks.push_back({site, PacketFitHookHandler(site.rva)});
+        for (const auto& site : BvmPlayerTableHooks()) hooks.push_back({site, BvmPlayerTableHandler(site.rva)});
     }
     std::vector<Redirect> redirects;
     const auto guest = GuestCalls();

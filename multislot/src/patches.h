@@ -174,6 +174,15 @@ std::vector<CallSite> RecoveryCalls();
 std::vector<MidSite> PeerTimeoutHooks();
 std::vector<CallSite> PeerTimeoutCalls();
 
+// The mission script VM's own player table (MissionScriptBVMImplement+0x168: four 0x18-byte entries, the last 16
+// bytes of each a weak_ptr), filled by its CreatePlayers (22B1C0) for the split-screen players (GameStatus+0x14FF4,
+// one or two). Four of its readers take a player index from the script or loop up to the online player count
+// (225290: GameStatus+0x14FF8 online) and read entry index without a bound: from player 5 on they read the object's
+// later fields as a weak_ptr control block and increment it (21F3C2's loop runs every player). Applied with
+// [Mission] Extend=1: each read of an entry past the four - or below zero - finds it empty, as the game finds an
+// unused one. Each site is `mov rdx, [entry+0x178]`, replaced by the handler (mission.h BvmPlayerEntryHandler).
+std::vector<MidSite> BvmPlayerTableHooks();
+
 // Solo test harness ([Test] GhostPlayers=N, needs Extend=1): when the online player count written by
 // the mission sync is 1 (host alone), it becomes 1+N; players 2..N+1 are created as remote copies of
 // the host (CreateOnlinePlayerObject looks up player 1) that nobody controls.

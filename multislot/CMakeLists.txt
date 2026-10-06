@@ -102,7 +102,8 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
+    src/netfeature.cpp src/networld.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -217,6 +218,15 @@ add_test(NAME DefaultIniKeys COMMAND DefaultIniTests "${CMAKE_SOURCE_DIR}/src" "
 add_executable(SpawnTests tests/spawn_test.cpp src/spawn.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(SpawnTests PRIVATE ${WARNINGS})
 add_test(NAME EnemySpawnCounts COMMAND SpawnTests)
+
+# Netcode W4 (src/networld.h): the enemy target decision and its hook against a fake game; with EDF.dll also the
+# hook site against the game's code (skipped without it).
+add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/netfeature.cpp src/mission.cpp src/midhook.cpp
+    src/code.cpp src/patches.cpp src/log.cpp)
+target_compile_options(NetWorldTests PRIVATE ${WARNINGS})
+add_test(NAME NetWorldEnemyTargets COMMAND NetWorldTests)
+add_test(NAME NetWorldSitesMatchEDF COMMAND NetWorldTests "${EDF_DLL}")
+set_tests_properties(NetWorldSitesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 
 add_executable(FakeMemberTests tests/fakemembers_test.cpp src/fakemembers.cpp src/roomview.cpp src/armor.cpp
     src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)

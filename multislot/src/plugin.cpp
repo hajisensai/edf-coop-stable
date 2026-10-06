@@ -41,6 +41,8 @@
 #include "updatecheck.h"
 #include "spawn.h"
 #include "coop.h"
+#include "netfeature.h"
+#include "networld.h"
 #include "src/config.h"
 #include "src/dn_part.h"
 #include "src/log.h"
@@ -200,6 +202,8 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     const auto guard = WeaponGuardHooks();
     hooks.push_back({guard[0], &RoomWeaponsHandler});
     if (!mission) hooks.push_back({guard[1], &MissionWeaponsHandler});
+    // Netcode W4 (networld.h): its sites are checked on their own, so a mismatch turns only it off.
+    for (const auto& site : VerifiedWorldHooks(base)) hooks.push_back({site, WorldHookHandler(site.rva)});
     if (mission) {
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
@@ -616,6 +620,7 @@ bool LoadRooms(const wchar_t* iniPath) {
             "other loadout records beside them, even in small rooms (0 = normal)", budget);
     }
     InitWeaponGuard(base);
+    InitNetFeatures(iniPath);
     InitJoinLog(base);
     InitFinalHello(base);
     InitPeerTimeout(base);

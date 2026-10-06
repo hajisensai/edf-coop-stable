@@ -275,6 +275,8 @@ void DirectNet::stop() {
         clients_.clear();
         hostLink_.reset();
         roster_.clear();
+        inbox_.clear();
+        lastDataMs_.clear();
         closesocket(sock_);
         sock_ = INVALID_SOCKET;
     }
@@ -292,6 +294,8 @@ void DirectNet::setLocalUser(const std::string& puid) {
         clients_.clear();
         hostLink_.reset();
         roster_.clear();
+        inbox_.clear();
+        lastDataMs_.clear();
         newLocalSession();
     }
     localPuid_ = puid;
@@ -431,6 +435,9 @@ void DirectNet::setActive(bool active) {
     hostLink_.reset();
     roster_.clear();
     lastRoster_.clear();
+    // Unread game packets and their diagnostics belong to the room just left, not the next one.
+    inbox_.clear();
+    lastDataMs_.clear();
     // The room's member lists belong to the room: the next one starts with nothing said.
     roomMembers_.clear();
     roomSet_ = false;

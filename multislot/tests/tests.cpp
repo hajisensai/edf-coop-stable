@@ -436,6 +436,34 @@ int main(int argc, char** argv) {
                   "every HUD site has a handler", hook.rva);
         }
     Check(hudPatches.size() == 15 && hudHooks.size() == 4 && hudWrap.size() == 1, "HUD table sizes");
+    // The radar's index comes from 7FFBD0's two stores to [r14] (rdx = rsp+0x44 of the radar, 82A1FC): online
+    // 7FFD99 `mov [r14], ecx` after `movsxd rcx, [rsi+0x48]` (the site PlayerTagIndexHandler replaces and wraps),
+    // offline 7FFDFA after `mov ecx, [rdx+0x338]` (the split-screen number); before both it stores -1 through rdx
+    // itself (7FFC17, r14 = rdx).
+    const std::uint8_t indexOnline[] = {0x48, 0x63, 0x4E, 0x48, 0x41, 0x89, 0x0E};  // 7FFD95
+    const std::uint8_t indexOffline[] = {0x8B, 0x8A, 0x38, 0x03, 0x00, 0x00, 0x41, 0x89, 0x0E};  // 7FFDF4
+    const std::uint8_t minusOne[] = {0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x3A};  // 7FFC10 mov rdi, -1; mov [rdx], edi
+    Check(std::memcmp(image.At(0x7FFD95, sizeof(indexOnline)), indexOnline, sizeof(indexOnline)) == 0 &&
+              std::memcmp(image.At(0x7FFDF4, sizeof(indexOffline)), indexOffline, sizeof(indexOffline)) == 0 &&
+              std::memcmp(image.At(0x7FFC10, sizeof(minusOne)), minusOne, sizeof(minusOne)) == 0,
+          "7FFBD0 stores the radar's index as -1, the online index or the split-screen number", 0x7FFD95);
+    {
+        // Every `mov [r14], r32` (41 89 /r, mod 00, r/m r14) in 7FFBD0 (7FFBD0..7FFEE6 by its unwind entry): the two.
+        int stores = 0;
+        const std::uint8_t* body = image.At(0x7FFBD0, 0x316);
+        for (std::uint32_t i = 0; body && i + 3 <= 0x316; ++i)
+            if (body[i] == 0x41 && body[i + 1] == 0x89 && (body[i + 2] & 0xC7) == 0x06) ++stores;
+        Check(stores == 2, "7FFBD0 writes a player index out at 7FFD99 and 7FFDFA and nowhere else", 0x7FFBD0);
+    }
+    // Whatever index reaches the radar: a player's wraps around the colour table, a negative one keeps the game's
+    // in-frame address.
+    const std::uint64_t frame = 0x10000;
+    for (const std::int32_t index : {0, 3, 31, 32, 33, 1023, 0x7FFFFFFF}) {
+        const std::uint64_t address = RadarColourAddress(index, frame);
+        Check(address == reinterpret_cast<std::uintptr_t>(RadarColour(index % kHudColourCount)),
+              "a player's radar colour is a table entry, wrapped", static_cast<std::uint32_t>(index));
+    }
+    Check(RadarColourAddress(-1, frame) == frame + 0x150 - 16, "a unit that is no player keeps the game's address");
     // What the hooks replace: the lamp texture name, the chat balloon names (in the order of the colours) and
     // the radar's four colours - the game's own are the first four entries of hudcolours.h.
     const auto wideAt = [&](std::uint32_t rva) { return reinterpret_cast<const wchar_t*>(image.At(rva, 2)); };

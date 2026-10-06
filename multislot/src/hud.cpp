@@ -34,18 +34,21 @@ void LampTextureHandler(CpuContext* context) { context->r8 = Address(kHudLampTex
 // `mov r8, [rbp+rax*8+7]`: rax is the balloon being made, below the table's size (at most kMaxPlayers).
 void ChatTextureHandler(CpuContext* context) { context->r8 = Address(kHudColours[context->rax].chatTexture); }
 
-// `movsxd rax, [rsp+0x44]; shl rax, 4; lea r9, [rbp+0x150]; add r9, rax`. 7FFBD0 leaves -1 at rsp+0x44 for a
-// unit that is no player of the mission; any index outside the table gets the address the game computed.
+// `movsxd rax, [rsp+0x44]; shl rax, 4; lea r9, [rbp+0x150]; add r9, rax`.
 void RadarColourHandler(CpuContext* context) {
     std::int32_t index = 0;
     std::memcpy(&index, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(SiteRsp(context) + 0x44)), sizeof(index));
-    const bool ours = index >= 0 && index < kHudColourCount;
-    context->r9 = ours ? Address(RadarColour(index)) : context->rbp + 0x150 + static_cast<std::uint64_t>(static_cast<std::int64_t>(index) * 16);
+    context->r9 = RadarColourAddress(index, context->rbp);
 }
 
 }  // namespace
 
 const float* RadarColour(int index) { return kRadar[static_cast<std::size_t>(index)].rgba; }
+
+std::uint64_t RadarColourAddress(std::int32_t index, std::uint64_t rbp) {
+    if (index < 0) return rbp + 0x150 + static_cast<std::uint64_t>(static_cast<std::int64_t>(index) * 16);
+    return Address(RadarColour(index % kHudColourCount));
+}
 
 MidHandler HudColourHookHandler(std::uint32_t rva) {
     switch (rva) {

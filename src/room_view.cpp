@@ -10,6 +10,39 @@ void eraseFrom(std::vector<std::string>& order, const std::string& member) {
 }
 }  // namespace
 
+ParkedEntryOutcome decideParkedEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing) {
+    if (slotted) return ParkedEntryOutcome::Slotted;
+    if (gone) return ParkedEntryOutcome::Gone;
+    if (waitedMs >= kParkedEntryCapMs || (waitedMs >= kParkedEntryMs && !progressing)) return ParkedEntryOutcome::GiveUp;
+    return ParkedEntryOutcome::Wait;
+}
+
+std::vector<std::string> roomMessage(const std::vector<std::string>& slots, const std::set<std::string>& removed) {
+    std::vector<std::string> out = slots;
+    if (removed.empty()) return out;
+    out.push_back(kRemovedMarker);
+    out.insert(out.end(), removed.begin(), removed.end());
+    return out;
+}
+
+void parseRoomMessage(const std::vector<std::string>& message, std::vector<std::string>* slots,
+                      std::set<std::string>* removed) {
+    if (slots) slots->clear();
+    if (removed) removed->clear();
+    bool past = false;
+    for (const std::string& entry : message) {
+        if (!past && entry == kRemovedMarker) {
+            past = true;
+            continue;
+        }
+        if (!past) {
+            if (slots) slots->push_back(entry);
+        } else if (removed && !entry.empty()) {
+            removed->insert(entry);
+        }
+    }
+}
+
 std::vector<std::string> roomOrder(const std::vector<std::string>& epic, const std::vector<std::string>& view) {
     const std::set<std::string> inView(view.begin(), view.end()), inEpic(epic.begin(), epic.end());
     std::vector<std::string> out;
@@ -71,12 +104,13 @@ std::vector<StatusChange> RoomView::settle(const std::vector<StatusChange>& want
     return due;
 }
 
-void RoomView::heardHost(const std::vector<std::string>& hostSlots) {
+void RoomView::heardHost(const std::vector<std::string>& message) {
     if (!active_) return;
     heard_ = true;
-    hostSlots_ = hostSlots;
+    awaiting_ = false;
+    parseRoomMessage(message, &hostSlots_, &hostBanned_);
     hostNow_.clear();
-    for (const std::string& m : hostSlots)
+    for (const std::string& m : hostSlots_)
         if (!m.empty()) hostNow_.insert(m);
     hostEver_.insert(hostNow_.begin(), hostNow_.end());
 }
@@ -96,6 +130,30 @@ std::vector<std::string> RoomView::hostMembers() const {
     return out;
 }
 
+void RoomView::promoted(const std::string& newHost, uint64_t nowMs) {
+    if (!active_ || newHost.empty()) return;
+    const bool followed = heard_;
+    heard_ = false;
+    hostSlots_.clear();
+    hostNow_.clear();
+    pending_.clear();
+    if (newHost == self_) {
+        // Our game's slots are the room's now; whom the old host removed stays removed.
+        banned_.insert(hostBanned_.begin(), hostBanned_.end());
+        hostBanned_.clear();
+        awaiting_ = false;
+        return;
+    }
+    awaiting_ = followed;
+    awaitingSinceMs_ = nowMs;
+}
+
+std::set<std::string> RoomView::bannedMembers() const {
+    std::set<std::string> out = banned_;
+    out.insert(hostBanned_.begin(), hostBanned_.end());
+    return out;
+}
+
 void RoomView::adoptHost() {
     if (!active_ || !heard_) return;
     members_.clear();
@@ -109,12 +167,12 @@ void RoomView::adoptHost() {
 std::vector<StatusChange> RoomView::followHost() const {
     std::vector<StatusChange> out;
     if (!active_ || !heard_) return out;
+    for (const std::string& m : order_)
+        if (hostEver_.count(m) && !hostNow_.count(m)) out.push_back({m, m == self_ ? kKicked : kLeft});
     for (const std::string& m : hostSlots_)
         if (!m.empty() && m != self_ && !members_.count(m) &&
             std::none_of(out.begin(), out.end(), [&](const StatusChange& c) { return c.target == m; }))
             out.push_back({m, kJoined});
-    for (const std::string& m : members_)
-        if (hostEver_.count(m) && !hostNow_.count(m)) out.push_back({m, m == self_ ? kKicked : kLeft});
     return out;
 }
 
@@ -126,7 +184,7 @@ std::vector<StatusChange> RoomView::hostJoins(const std::vector<Linked>& linked,
             links_[l.member] = l.link;
             continue;
         }
-        if (l.epic || l.member.empty() || l.member == self_ || banned_.count(l.member)) continue;
+        if (l.epic || l.member.empty() || l.member == self_ || banned(l.member)) continue;
         auto gone = departed_.find(l.member);
         if (gone != departed_.end() && gone->second == l.link) continue;
         if (members_.size() + out.size() >= capacity) continue;

@@ -71,7 +71,9 @@ std::string FreeUdpPort() {
     return port;
 }
 
-std::string WithPort(std::string ini, const std::string& port) {
+// @PORT@ is the scenario's direct-link host's port, @PORT2@ a second one (a member that hosts once it owns the room).
+std::string WithPort(std::string ini, const std::string& port, const std::string& port2) {
+    for (std::size_t at = ini.find("@PORT2@"); at != std::string::npos; at = ini.find("@PORT2@", at)) ini.replace(at, 7, port2);
     for (std::size_t at = ini.find("@PORT@"); at != std::string::npos; at = ini.find("@PORT@", at)) ini.replace(at, 6, port);
     return ini;
 }
@@ -209,12 +211,14 @@ int wmain(int argc, wchar_t** argv) {
         SetEnvironmentVariableA(variable, nullptr);
     for (const auto& [variable, value] : chosen->network) SetEnvironmentVariableA(variable.c_str(), value.c_str());
     const std::string port = FreeUdpPort();  // a direct-link host's, when its INI asks for one
+    std::string port2 = FreeUdpPort();
+    for (int tries = 0; port2 == port && tries < 8; ++tries) port2 = FreeUdpPort();
     for (const auto& seat : chosen->seats) {
         Spawned machine;
         machine.user = seat.user;
         machine.role = seat.role;
         const std::wstring home = folder + L"\\" + Wide(seat.user);
-        Check(PrepareMachine(home, plugin, WithPort(seat.ini, port)), seat.user + ": work folder prepared");
+        Check(PrepareMachine(home, plugin, WithPort(seat.ini, port, port2)), seat.user + ": work folder prepared");
         machines.push_back(machine);
         for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), value.c_str());
         SetEnvironmentVariableA("EDF6NET_SEAT", std::to_string(machines.size() - 1).c_str());

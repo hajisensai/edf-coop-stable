@@ -793,10 +793,13 @@ int SlotRoom(Machine& machine, const std::string& how) {
     ListenToMembers(machine);
     const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
     const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
-    const bool host = how == "host";
+    // "hostleave" creates the room and leaves it like "leave"; "heir" joins like "epic" and is made the room's owner when
+    // the first one leaves, so it hosts the start sync.
+    const bool creator = how == "host" || how == "hostleave";
+    const bool host = how == "host" || how == "heir";
     const auto epic = static_cast<std::uint32_t>(expectedMembers());  // Epic's lobby holds that many (EDF6NET_LOBBY_CAP)
     Entered entered;
-    if (host) {
+    if (creator) {
         CreateOptions options;
         options.LocalUserId = Self(machine);
         options.MaxLobbyMembers = gamenet::kMaxMachines;
@@ -874,12 +877,18 @@ int SlotRoom(Machine& machine, const std::string& how) {
             PollP2P(machine);
         follow();
     };
-    if (how == "leave") {
+    if (how == "leave" || how == "hostleave") {
         const auto leaveAt = static_cast<std::size_t>(std::atoi(Variable("EDF6NET_LEAVE_AT").c_str()));
         TickUntil(machine, 30000, [&] {
             frame();
             return members.size() >= leaveAt;
         });
+        // EDF6NET_LEAVE_AFTER_MS: stay that much longer (everyone's direct link up and following the host's slots).
+        if (const int after = std::atoi(Variable("EDF6NET_LEAVE_AFTER_MS").c_str()); after > 0)
+            TickUntil(machine, static_cast<unsigned>(after), [&] {
+                frame();
+                return false;
+            });
         const std::size_t before = members.size();
         struct LeaveOptions {
             std::int32_t ApiVersion;

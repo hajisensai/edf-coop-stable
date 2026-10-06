@@ -60,6 +60,7 @@ struct State {
     std::map<std::string, bool> chatterWaiting;    // a builder holds a background message
     Event* chatter = nullptr;
     std::uint8_t* gameImpl = nullptr;
+    std::size_t received = 0;  // sync messages handed to the game's receive
 } state;
 
 const Game& G() { return state.transport->game(); }
@@ -195,6 +196,7 @@ void OnEventRecord(int from, const std::uint8_t* data, std::size_t size) {
         Event* event = FindEvent(owner, id);
         if (!event) event = NewEvent(owner, id, type);
         Result("trace", "event %d: a message from %d", id, from);
+        ++state.received;
         IndexKey sender{from, 0};
         G().Fn<void (*)(void*, IndexKey*, void*, void*)>(kReceive)(state.gameImpl + kGameSyncs, &sender, event, envelope);
     }
@@ -329,6 +331,8 @@ bool MissionSync::Build(Transport& transport, const std::vector<std::string>& me
     return Redirect(game, kSendToEvent, Address(&HookSendToEvent)) &&
            Redirect(game, kBroadcastEvent, Address(&HookBroadcastEvent));
 }
+
+std::size_t MissionSync::Received() const { return state.received; }
 
 void MissionSync::Dump() const {
     for (const auto& member : state.members) {

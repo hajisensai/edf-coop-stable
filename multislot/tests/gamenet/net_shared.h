@@ -36,6 +36,9 @@ constexpr const char* kDelayVariable = "EDF6NET_DELAY";
 // "<bytes>:<count>" - each machine loses its first <count> unreliable packets of at least <bytes> (EOS delivers
 // unreliable packets at most once; the game resends what it needs).
 constexpr const char* kDropVariable = "EDF6NET_DROP";
+// "<user>:<ms>" - everything this machine receives from <user> reaches it that much later (set per seat): its P2P
+// handshake with that member ends late, while the others' packets come at once.
+constexpr const char* kDelayFromVariable = "EDF6NET_DELAY_FROM";
 // "<ms>" - a member's attribute reaches the other members that much later (Epic's lobby service relays them).
 constexpr const char* kLobbyDelayVariable = "EDF6NET_LOBBY_DELAY";
 // "<n>" - Epic's lobby holds at most n members whatever the room asks for (rooms above Epic's 64, played small).

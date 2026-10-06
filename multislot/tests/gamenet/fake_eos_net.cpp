@@ -6,8 +6,8 @@
 //    peer on that socket) waits, and the connection request is announced on the next EOS_Platform_Tick;
 //  - completions and notifications run inside EOS_Platform_Tick: connection requests and establishments, and the
 //    room's member joins, leaves and updates;
-//  - order is kept per channel only; with EDF6NET_DELAY one channel arrives later, with EDF6NET_DROP unreliable
-//    packets get lost (net_shared.h).
+//  - order is kept per channel only; with EDF6NET_DELAY one channel arrives later, with EDF6NET_DELAY_FROM one
+//    member's packets, with EDF6NET_DROP unreliable packets get lost (net_shared.h).
 // Everything else EDF.dll imports is exported too, as a stub that returns 0 and is reported (FakeNet_Unimplemented),
 // so a test can tell when the game reached a part of EOS this fake does not model.
 #include "net_shared.h"
@@ -82,6 +82,8 @@ struct Fake {
     // EDF6NET_DELAY / EDF6NET_DROP
     int delayedChannel = -1;
     ULONGLONG delayMs = 0;
+    std::string delayedSender;  // EDF6NET_DELAY_FROM
+    ULONGLONG senderDelayMs = 0;
     std::uint32_t dropMinimum = 0;
     int dropsLeft = 0;
     ULONGLONG lobbyDelayMs = 0;  // EDF6NET_LOBBY_DELAY
@@ -119,6 +121,13 @@ bool Open() {
         if (sscanf_s(setting, "%u:%u", &channel, &ms) == 2) {
             f.delayedChannel = static_cast<int>(channel);
             f.delayMs = ms;
+        }
+    }
+    if (GetEnvironmentVariableA(gamenet::kDelayFromVariable, setting, sizeof(setting))) {
+        const char* colon = std::strrchr(setting, ':');
+        if (colon) {
+            f.delayedSender.assign(setting, static_cast<std::size_t>(colon - setting));
+            f.senderDelayMs = std::strtoull(colon + 1, nullptr, 10);
         }
     }
     if (GetEnvironmentVariableA(gamenet::kLobbyDelayVariable, setting, sizeof(setting)))
@@ -172,7 +181,8 @@ void Drain() {
         gamenet::PacketHeader header{};
         gamenet::RingPeek(inbox, inbox.head, &header, sizeof(header));
         if (inbox.tail - inbox.head < sizeof(header) + header.size) break;  // not all written (yet)
-        const ULONGLONG due = GetTickCount64() + (header.channel == f.delayedChannel ? f.delayMs : 0);
+        const ULONGLONG due = GetTickCount64() + (header.channel == f.delayedChannel ? f.delayMs : 0) +
+                              (!f.delayedSender.empty() && f.delayedSender == header.from ? f.senderDelayMs : 0);
         Fake::Incoming packet{header.from, header.socket, header.channel, std::vector<std::uint8_t>(header.size), due};
         gamenet::RingPeek(inbox, inbox.head + sizeof(header), packet.data.data(), header.size);
         inbox.head += sizeof(header) + header.size;

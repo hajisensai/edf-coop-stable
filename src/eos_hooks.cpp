@@ -257,6 +257,7 @@ struct State {
     ParkedEntry parked;
     std::atomic<bool> parkedActive{false};  // parked.active, read without parkedMutex
     std::atomic<bool> testLoopbackHosts{false};
+    std::atomic<uint32_t> testBulkFragments{0};  // [Test] BulkFragmentsSent
     std::atomic<uint32_t> netProtocol{0}, netCaps{0};
     std::atomic<bool> refuseOtherProtocols{false};
     // A game packet that came twice (over two paths, or the direct link and EOS) reaches the game once.
@@ -2131,7 +2132,10 @@ EOS_EResult sendFragments(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, const 
     if (parts.empty()) return EOS_LimitExceeded;
     std::shared_ptr<DirectNet> net = g.net.load();
     const bool direct = net && net->canRoute(remote);
-    for (const auto& part : parts) {
+    const uint32_t cut = (flags & kFragmentBulk) ? g.testBulkFragments.load() : 0;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const auto& part = parts[i];
+        if (cut && i >= cut) break;  // [Test]: the rest is lost on the way, every time
         bool sent = direct && net->send(remote, socketName(o.SocketId), kFragmentChannel, EOS_PR_ReliableOrdered,
                                         part.data(), part.size());
         if (!sent) {
@@ -2942,9 +2946,9 @@ int hostSlotOf(const std::string& member) {
 
 uint64_t bulkUndelivered() { return g.bulkLost.load(); }
 
-bool bulkIncoming(const std::string& src, uint16_t tag) {
+uint64_t bulkIncoming(const std::string& src, uint16_t tag, size_t* total) {
     std::lock_guard<std::mutex> lock(g.fragmentMutex);
-    return g.reassembler.pending(src, kFragmentBulk, tag);
+    return g.reassembler.pending(src, kFragmentBulk, tag, GetTickCount64(), total);
 }
 
 bool hostAdvertisement(std::string& address, std::string& identity) {
@@ -2971,6 +2975,7 @@ std::map<std::string, std::pair<uint32_t, uint32_t>> directMemberNetcode() {
 }
 
 void setTestLoopbackHosts(bool on) { g.testLoopbackHosts = on; }
+void setTestBulkFragmentsSent(uint32_t count) { g.testBulkFragments = count; }
 void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
 
 void setTestPeerBlock(uint32_t afterMs, uint32_t forMs) {

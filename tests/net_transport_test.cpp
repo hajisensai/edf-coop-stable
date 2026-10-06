@@ -220,6 +220,30 @@ void testFragments() {
     CHECK(r.buffered() == datagram.size());
     r.add(kA, parts[0].data(), 3, 4000 + dn::Reassembler::kTimeoutMs + 1);  // anything, after the timeout
     CHECK(r.buffered() == 0 && r.dropped() == 1);
+    // On its way (pending) until it arrives, or until it made no progress for kTimeoutMs - judged when asked, with no
+    // fragment arriving (a sender that gave up sends none): the receiver then stops holding that member's packets.
+    {
+        dn::Reassembler q;
+        std::vector<uint8_t> three(3 * dn::kFragmentPayload);
+        auto bulkParts = dn::splitIntoFragments(0x77, dn::kFragmentBulk, 5, three.data(), three.size());
+        size_t total = 0;
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 100) == 0);
+        q.add(kA, bulkParts[0].data(), bulkParts[0].size(), 100);
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 101, &total) == 0x77 && total == three.size());
+        CHECK(q.pending(kA, dn::kFragmentBulk, 6, 101) == 0 && q.pending(kB, dn::kFragmentBulk, 5, 101) == 0 &&
+              q.pending(kA, 0, 5, 101) == 0);
+        // Progress keeps it on its way past kTimeoutMs from its first fragment (a host sharing its upload).
+        q.add(kA, bulkParts[1].data(), bulkParts[1].size(), 100 + dn::Reassembler::kTimeoutMs);
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 100 + dn::Reassembler::kTimeoutMs + 10) == 0x77);
+        // A copy is no progress.
+        q.add(kA, bulkParts[1].data(), bulkParts[1].size(), 100 + 2 * dn::Reassembler::kTimeoutMs);
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 100 + 2 * dn::Reassembler::kTimeoutMs) == 0x77);
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 101 + 2 * dn::Reassembler::kTimeoutMs) == 0);
+        CHECK(q.buffered() == 0 && q.dropped() == 1);  // let go, and its memory with it, without another fragment
+        // The sender's late resend starts it over (same id): pending again, and it can still complete.
+        for (const auto& part : bulkParts) q.add(kA, part.data(), part.size(), 200 + 2 * dn::Reassembler::kTimeoutMs);
+        CHECK(q.pending(kA, dn::kFragmentBulk, 5, 201 + 2 * dn::Reassembler::kTimeoutMs) == 0);
+    }
     // Per sender at most kMaxPartialPerSender messages wait: the oldest gives way.
     for (uint32_t id = 10; id < 10 + dn::Reassembler::kMaxPartialPerSender + 1; ++id) {
         parts = dn::splitIntoFragments(id, 0, 0, datagram.data(), datagram.size());

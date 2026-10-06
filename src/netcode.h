@@ -73,8 +73,9 @@ void setBulkHandler(BulkHandler handler);
 // A bulk message goes again until its receiver acknowledges it (5 tries, the wait doubling); this many were given up
 // since start (each logged).
 uint64_t bulkUndelivered();
-// Whether a bulk message of `tag` from `src` is on its way (some of its fragments here, not all).
-bool bulkIncoming(const std::string& src, uint16_t tag);
+// The id of a bulk message of `tag` from `src` on its way (some of its fragments here, not all; 0: none), and its size
+// in `total`. One that made no progress for Reassembler::kTimeoutMs no longer counts (its sender gave up).
+uint64_t bulkIncoming(const std::string& src, uint16_t tag, size_t* total = nullptr);
 
 // --- Rooms above Epic's 64 (I1) ---
 // What a room owner puts on the lobby itself (not a member: a searcher reads the lobby's attributes only) so that a
@@ -98,5 +99,8 @@ void setTestLoopbackHosts(bool on);
 // Tests only ([Test] PeerBlockAfterMs / PeerBlockForMs): the links between joiners lose everything from `afterMs`
 // from now for `forMs` (UINT32_MAX: for good), as when the NAT between them stops letting it through.
 void setTestPeerBlock(uint32_t afterMs, uint32_t forMs);
+// Tests only ([Test] BulkFragmentsSent): of a bulk message only its first `count` fragments ever go (0: all), so its
+// receivers keep a part of it until they let it go, and its sender resends until it gives up.
+void setTestBulkFragmentsSent(uint32_t count);
 
 }  // namespace dn

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <numeric>
 
 #include "log.h"
@@ -223,109 +224,169 @@ struct EosSocketId {  // EOS_P2P_SocketId
 };
 static_assert(sizeof(EosSocketId) == 40, "EOS_P2P_SocketId");
 
-// A received packet waiting for the records its stubs stand for.
+// A received game packet the game has not read yet. EOS acknowledged it to its sender long ago and never sends it
+// again, and the game's own resends stop after ~26 s: a held packet that is thrown away is gone for good, so none
+// ever is. A packet leaves only by reaching the game (or with the room, ClearRecords).
 struct HeldPacket {
-    bool used = false;
     std::uint64_t order = 0;       // arrival, oldest first
     unsigned long long since = 0;  // packetClock
     void* peer = nullptr;          // EOS_ProductUserId: EOS keeps these for as long as it runs
+    std::uint64_t bulk = 0;        // the records bulk (its fragment id) it waits behind; 0: it waits for nothing
+    std::size_t bulkTotal = 0;     // that bulk's size
     EosSocketId socket{};
     std::uint8_t channel = 0;
-    std::uint32_t size = 0;
-    std::uint8_t bytes[kEosMaxPacket];
+    std::vector<std::uint8_t> bytes;
 };
-HeldPacket heldPackets[kHeldPackets];
+std::deque<HeldPacket> heldStore;  // arrival order
 std::uint64_t heldOrder = 0;
 std::atomic<std::size_t> heldCount{0};
-SRWLOCK heldLock = SRWLOCK_INIT;  // taken before storeLock, never inside it
-
-// How many stubs of `data` have no record here (yet); `missing` is the first of them.
-std::size_t MissingRecords(const std::uint8_t* data, std::size_t size, StubInfo& missing) {
-    StubInfo stubs[kMaxStubsPerPacket];
-    const std::size_t found = std::min(FindStubs(data, size, stubs, kMaxStubsPerPacket), kMaxStubsPerPacket);
-    std::size_t count = 0;
-    for (std::size_t i = 0; i < found; ++i) {
-        if (FindRecord(stubs[i], nullptr)) continue;
-        if (!count++) missing = stubs[i];
-    }
-    return count;
-}
+std::uint64_t heldEver = 0, deliveredEver = 0;  // since start: every held packet is delivered, and the log says so
+// Bulks whose packets were let go (it arrived, it was given up, or it outgrew what holding may cost): a resend that
+// starts one over at the receiver does not hold that member's packets a second time.
+constexpr std::size_t kReleasedKept = 64;
+std::deque<std::pair<void*, std::uint64_t>> released;
+SRWLOCK heldLock = SRWLOCK_INIT;  // taken before storeLock (and before the bulk query's own lock), never inside it
 
 bool Wanted(const HeldPacket& packet, const EosReceiveOptions* options) {
     if (!options) return true;
     if (options->ApiVersion >= 2 && options->RequestedChannel && *options->RequestedChannel != packet.channel) return false;
-    return packet.size <= options->MaxDataSizeBytes;
+    return packet.bytes.size() <= options->MaxDataSizeBytes;
 }
 
-// The oldest held packet that is complete now and fits what the caller asks for; packets held for kHeldPacketMs
-// are given up on (counted in `expired`). Caller holds heldLock.
-HeldPacket* NextCompleteLocked(const EosReceiveOptions* options, std::size_t& expired) {
-    const unsigned long long now = packetClock();
-    HeldPacket* next = nullptr;
-    for (HeldPacket& packet : heldPackets) {
-        if (!packet.used) continue;
-        StubInfo missing;
-        if (now - packet.since >= kHeldPacketMs) {
-            packet.used = false;
-            --heldCount;
-            ++expired;
-        } else if (Wanted(packet, options) && !MissingRecords(packet.bytes, packet.size, missing) &&
-                   !(bulkIncoming && bulkIncoming(packet.peer)) && (!next || packet.order < next->order)) {
-            next = &packet;
+bool ReleasedLocked(void* peer, std::uint64_t bulk) {
+    return std::find(released.begin(), released.end(), std::make_pair(peer, bulk)) != released.end();
+}
+
+// Every packet held behind `bulk` of `peer` may go to the game now (in order); `why` goes to the log.
+void ReleaseLocked(void* peer, std::uint64_t bulk, const char* why) {
+    if (ReleasedLocked(peer, bulk)) return;
+    if (released.size() >= kReleasedKept) released.pop_front();
+    released.emplace_back(peer, bulk);
+    std::size_t count = 0;
+    for (HeldPacket& packet : heldStore)
+        if (packet.peer == peer && packet.bulk == bulk) {
+            packet.bulk = 0;
+            ++count;
         }
-    }
-    return next;
+    Log("MISSION sync: %zu game packet(s) held behind a member's loadout records bulk go to the game in order: %s",
+        count, why);
 }
 
-// Hands a held packet that is complete now to the caller of EOS_P2P_ReceivePacket.
+// The records bulk of `peer` that its packets wait behind now (0: none), its size in `total`.
+std::uint64_t HoldingForLocked(void* peer, std::size_t& total) {
+    total = 0;
+    if (!bulkIncoming || !peer) return 0;
+    const std::uint64_t bulk = bulkIncoming(peer, &total);
+    return bulk && !ReleasedLocked(peer, bulk) ? bulk : 0;
+}
+
+// Lets go every bulk whose packets need not wait any more: it arrived or its receiver gave it up (no longer on its
+// way), or the packets waited as long as the bulk takes at the slowest rate it is planned for (BulkHoldMs): past
+// that the game is better off reading on and waiting for the records once, inside the start message (ReadBulkRecord),
+// than having its sender resend into a silence that ends the room.
+void RefreshHeldLocked() {
+    const unsigned long long now = packetClock();
+    std::vector<std::pair<void*, std::uint64_t>> checked;
+    for (const HeldPacket& packet : heldStore) {
+        if (!packet.bulk) continue;
+        const auto key = std::make_pair(packet.peer, packet.bulk);
+        if (std::find(checked.begin(), checked.end(), key) != checked.end()) continue;
+        checked.push_back(key);  // the oldest packet of each bulk comes first: it has waited longest
+        std::size_t total = 0;
+        if (!bulkIncoming || bulkIncoming(packet.peer, &total) != packet.bulk)
+            ReleaseLocked(packet.peer, packet.bulk, "the bulk arrived, or its sender gave it up");
+        else if (now - packet.since >= BulkHoldMs(packet.bulkTotal))
+            ReleaseLocked(packet.peer, packet.bulk, "they waited as long as the bulk takes at 32 KiB/s; it is not waited for here");
+    }
+}
+
+// The oldest held packet the game may have now: it waits for no bulk, nothing older from its sender still waits (a
+// member's packets reach the game in the order they came), and it fits what the caller asks for.
+std::deque<HeldPacket>::iterator NextDeliverableLocked(const EosReceiveOptions* options) {
+    RefreshHeldLocked();
+    std::vector<void*> waiting;
+    for (auto it = heldStore.begin(); it != heldStore.end(); ++it) {
+        const bool behind = std::find(waiting.begin(), waiting.end(), it->peer) != waiting.end();
+        if (it->bulk || behind) {
+            if (!behind) waiting.push_back(it->peer);
+            continue;
+        }
+        if (Wanted(*it, options)) return it;
+    }
+    return heldStore.end();
+}
+
+bool PeerHeldLocked(void* peer) {
+    return std::any_of(heldStore.begin(), heldStore.end(), [peer](const HeldPacket& packet) { return packet.peer == peer; });
+}
+
+// Hands the oldest deliverable held packet to the caller of EOS_P2P_ReceivePacket.
 bool DeliverHeld(const void* options, void** peer, void* socket, std::uint8_t* channel, void* data, std::uint32_t* size) {
     if (!heldCount) return false;
-    std::size_t expired = 0;
     AcquireSRWLockExclusive(&heldLock);
-    HeldPacket* packet = NextCompleteLocked(static_cast<const EosReceiveOptions*>(options), expired);
-    if (packet) {
-        if (peer) *peer = packet->peer;
-        if (socket) std::memcpy(socket, &packet->socket, sizeof(packet->socket));
-        if (channel) *channel = packet->channel;
-        std::memcpy(data, packet->bytes, packet->size);
-        *size = packet->size;
-        packet->used = false;
-        --heldCount;
+    auto it = NextDeliverableLocked(static_cast<const EosReceiveOptions*>(options));
+    const bool found = it != heldStore.end();
+    bool drained = false;
+    std::uint64_t ever = 0, delivered = 0;
+    if (found) {
+        if (peer) *peer = it->peer;
+        if (socket) std::memcpy(socket, &it->socket, sizeof(it->socket));
+        if (channel) *channel = it->channel;
+        std::memcpy(data, it->bytes.data(), it->bytes.size());
+        *size = static_cast<std::uint32_t>(it->bytes.size());
+        heldStore.erase(it);
+        heldCount = heldStore.size();
+        ++deliveredEver;
+        drained = heldStore.empty();
+        ever = heldEver;
+        delivered = deliveredEver;
     }
     ReleaseSRWLockExclusive(&heldLock);
-    if (expired)
-        Log("MISSION sync: %zu held game packet(s) dropped: the game did not read them within %llu s", expired,
-            kHeldPacketMs / 1000);
-    return packet != nullptr;
+    if (drained)
+        Log("MISSION sync: every held game packet reached the game (%llu held, %llu delivered since start)",
+            static_cast<unsigned long long>(ever), static_cast<unsigned long long>(delivered));
+    return found;
 }
 
-// A free slot, or else the oldest held packet's.
-HeldPacket& SlotLocked() {
-    HeldPacket* oldest = &heldPackets[0];
-    for (HeldPacket& packet : heldPackets) {
-        if (!packet.used) return packet;
-        if (packet.order < oldest->order) oldest = &packet;
-    }
-    return *oldest;
+// Holds a received game packet (caller holds heldLock): behind its sender's records bulk if one is on its way. When
+// that member's packets outgrow what the bulk may cost (BulkHoldCapacity), the bulk is let go and they all go to the
+// game in order - never dropped.
+void HoldLocked(void* peer, const void* socket, std::uint8_t channel, const std::uint8_t* data, std::uint32_t size,
+                std::uint64_t bulk, std::size_t bulkTotal) {
+    HeldPacket packet;
+    packet.order = ++heldOrder;
+    packet.since = packetClock();
+    packet.peer = peer;
+    packet.bulk = bulk;
+    packet.bulkTotal = bulkTotal;
+    if (socket) std::memcpy(&packet.socket, socket, sizeof(packet.socket));
+    packet.channel = channel;
+    packet.bytes.assign(data, data + size);
+    heldStore.push_back(std::move(packet));
+    heldCount = heldStore.size();
+    ++heldEver;
+    if (!bulk) return;
+    const std::size_t behind = static_cast<std::size_t>(std::count_if(
+        heldStore.begin(), heldStore.end(), [&](const HeldPacket& p) { return p.peer == peer && p.bulk == bulk; }));
+    if (behind == 1)
+        Log("MISSION sync: a member's loadout records bulk (%zu bytes) is on its way: its game packets wait behind it "
+            "(for up to %llu ms or %zu packets)", bulkTotal, BulkHoldMs(bulkTotal), BulkHoldCapacity(bulkTotal));
+    if (behind > BulkHoldCapacity(bulkTotal))
+        ReleaseLocked(peer, bulk, "more of them came than the bulk may hold back; it is not waited for here");
 }
 
-void Hold(void* const* peer, const void* socket, const std::uint8_t* channel, const std::uint8_t* data,
-          std::uint32_t size) {
+// A packet the game's receive got from EOS: held (true) when its sender's records bulk is on its way, or when older
+// packets of that sender are held still (they go first). `always`: held either way (the game's frame waits inside
+// RecordReadHook, and what arrives meanwhile is the game's to read afterwards).
+bool HoldReceived(void* peer, const void* socket, std::uint8_t channel, const std::uint8_t* data, std::uint32_t size,
+                  bool always) {
     AcquireSRWLockExclusive(&heldLock);
-    HeldPacket& slot = SlotLocked();
-    const bool evicted = slot.used;
-    if (!evicted) ++heldCount;
-    slot.used = true;
-    slot.order = ++heldOrder;
-    slot.since = packetClock();
-    slot.peer = peer ? *peer : nullptr;
-    slot.socket = {};
-    if (socket) std::memcpy(&slot.socket, socket, sizeof(slot.socket));
-    slot.channel = channel ? *channel : 0;
-    slot.size = size;
-    std::memcpy(slot.bytes, data, size);
+    std::size_t total = 0;
+    const std::uint64_t bulk = HoldingForLocked(peer, total);
+    const bool hold = always || bulk || PeerHeldLocked(peer);
+    if (hold) HoldLocked(peer, socket, channel, data, size, bulk, total);
     ReleaseSRWLockExclusive(&heldLock);
-    if (evicted) Log("MISSION sync: %zu game packets are held already; the oldest is dropped", kHeldPackets);
+    return hold;
 }
 
 // --- oversize diagnostic ---
@@ -442,7 +503,8 @@ bool FindRecord(const StubInfo& stub, std::uint8_t* out) {
 
 void ClearRecords() {
     AcquireSRWLockExclusive(&heldLock);
-    for (HeldPacket& packet : heldPackets) packet.used = false;
+    heldStore.clear();  // the room is gone: its packets with it
+    released.clear();
     heldCount = 0;
     ReleaseSRWLockExclusive(&heldLock);
     AcquireSRWLockExclusive(&storeLock);
@@ -600,7 +662,7 @@ bool WaitForRecord(const StubInfo& stub) {
             std::uint32_t size = 0;
             if (eosReceive(lastReceive.handle, &ask, &peer, &socket, &channel, buffer.data(), &size) != 0) break;
             if (TakeSidePacket(buffer.data(), size)) continue;
-            Hold(&peer, &socket, &channel, buffer.data(), size);
+            HoldReceived(peer, &socket, channel, buffer.data(), size, true);
             ++held;
         }
         if (FindRecord(stub, nullptr) || packetClock() - start >= recordWaitMs) break;
@@ -632,7 +694,7 @@ bool WaitForBulk(std::uint64_t id, std::size_t count) {
             std::uint32_t got = 0;
             if (eosReceive(lastReceive.handle, &ask, &peer, &socket, &channel, buffer.data(), &got) != 0) break;
             if (TakeSidePacket(buffer.data(), got)) continue;
-            Hold(&peer, &socket, &channel, buffer.data(), got);
+            HoldReceived(peer, &socket, channel, buffer.data(), got, true);
             ++held;
         }
         here = BulkRecordAt(id, 0, nullptr, size);
@@ -724,6 +786,14 @@ void SetPacketFitClock(PacketFitClock clock) { packetClock = clock ? clock : &Sy
 
 std::size_t HeldPacketCount() { return heldCount; }
 
+unsigned long long BulkHoldMs(std::size_t total) {
+    return kRecordWaitMs + kBulkWaitMsPerKiB * ((total + 1023) / 1024);
+}
+
+std::size_t BulkHoldCapacity(std::size_t total) {
+    return kBulkHoldMinPackets + static_cast<std::size_t>(kBulkHoldPacketsPerSecond * BulkHoldMs(total) / 1000);
+}
+
 // The records of the last sync go to `options`' member ahead of the first packet to it since: each once, whoever
 // it is. The sync itself reaches every member whatever this plugin does (it is encrypted), so holding the records
 // back from a member whose marker has not shown up yet (Epic relays lobby attributes in their own time) only made
@@ -734,10 +804,10 @@ void SendRecordsAhead(void* handle, const EosSendOptions& options) {
     std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
     std::vector<std::uint8_t> bulk;
     AcquireSRWLockExclusive(&outgoing.lock);
-    if (!outgoing.bulk.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
+    if (!outgoing.bulk.empty() && packetClock() - outgoing.since < kRecordsAheadMs &&
         std::find(outgoing.bulkSentTo.begin(), outgoing.bulkSentTo.end(), options.RemoteUserId) == outgoing.bulkSentTo.end())
         bulk = outgoing.bulk;  // marked sent once it went (a send that fails now goes again with the next packet)
-    const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
+    const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kRecordsAheadMs &&
                      std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end();
     if (due) {
         outgoing.sentTo.push_back(options.RemoteUserId);
@@ -786,10 +856,11 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
         const EosResult result = eosReceive(handle, options, peer, socket, channel, data, size);
         if (result != 0 || !data || !size) return result;
         if (TakeSidePacket(static_cast<const std::uint8_t*>(data), *size)) continue;  // never the game's
-        if (bulkIncoming && peer && bulkIncoming(*peer)) {
-            Hold(peer, socket, channel, static_cast<const std::uint8_t*>(data), *size);
+        // Behind its sender's records bulk (or behind older packets of that sender still held): the game reads it
+        // once the bulk is here, or let go (HoldReceived).
+        if (peer && HoldReceived(*peer, socket, channel ? *channel : 0, static_cast<const std::uint8_t*>(data), *size,
+                                 false))
             continue;
-        }
         return result;
     }
 }

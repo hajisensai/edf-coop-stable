@@ -1,3 +1,4 @@
+#define _CRT_RAND_S  // rand_s: the sender id (InitHitAuthority)
 #include "hitauthgame.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -5,6 +6,7 @@
 #include <Windows.h>
 #include <intrin.h>
 
+#include <cstdlib>
 #include <cstring>
 
 #include "hitauth.h"
@@ -30,16 +32,21 @@ constexpr std::uint32_t kPartsReserve = 0x124190;       // GDI+0x70: the constru
 constexpr std::uint32_t kPartsRelease = 0x11E9D0;       // and its release
 constexpr std::uint32_t kVehicleAccept = 0x6347C0;      // VehicleBase slot 34: marks the vehicle classes
 constexpr std::uint32_t kVehicleRunner = 0x630F90;      // int(veh, hostFallback, preferSeat0): 1 this machine, 2 another
+constexpr std::uint32_t kIsHost = 0x784210;             // bool(null): this machine owns the room (true offline)
 
 // Object fields (GameObjectBase).
 constexpr std::size_t kPosition = 0x90;      // float[4] (54A6F2)
 constexpr std::size_t kNetworkObject = 0x120;
 constexpr std::size_t kNetworkFlags = 0x128;  // NetworkObject+8
+// Dead: 547C30 sets it when the HP reaches 0 (548419..548429, +0x2E9 = "just died") and leaves the HP alone while
+// it is set (548156); the per-frame update sends no target message for it (54C183, networld.h's kObjectNoTargetSync).
 constexpr std::size_t kDead = 0x2E8;
 constexpr std::size_t kHealth = 0x2F8;
-constexpr std::size_t kHealthDelta = 0x5B4;
+constexpr std::size_t kHealthDelta = 0x5B4;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
+constexpr std::size_t kSeats = 0x608;        // VehicleBase seat array (630FEF), 0x340 bytes a seat (631016)
 constexpr std::size_t kSeatCount = 0x618;    // VehicleBase seats (630FD9); 630F90 reads seat 0 when there are any
-constexpr std::size_t kAcceptSlot = 34 * 8;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
+constexpr std::size_t kSeatRider = 0x260, kSeatRiderControl = 0x268;  // weak_ptr to the rider (631020, 631043)
+constexpr std::size_t kAcceptSlot = 34 * 8;  // bool(obj, attackerRemote, fromNetwork): take this damage?
 // Virtual slots (byte offsets): the object's message trio (543ACE..543AEE), and NetworkObject's send to the copies.
 constexpr std::size_t kHandleSlot = 0x48, kPreSlot = 0x50, kPostSlot = 0x58, kSendToCopies = 0x80;
 constexpr std::size_t kStreamBytes = 0x5F8, kStreamData = 0x10, kStreamSize = 0x5F0;
@@ -112,6 +119,18 @@ std::int32_t ReferenceId(const void* weak) {
     return id;
 }
 
+// Seat 0 holds a live rider that never got a network identity (its +0x128 word is 0): RideAi's DummyVehicleRider.
+// 630F90 counts such a rider as this machine's on every machine that seated one. Game thread: read without locking,
+// as 630F90 tests the same weak_ptr (uses at control +8).
+bool NpcSeat0(const std::uint8_t* vehicle) {
+    const auto seat = Field<const std::uint8_t*>(vehicle, kSeats);
+    if (!seat) return false;
+    const auto control = Field<const std::uint8_t*>(seat, kSeatRiderControl);
+    const auto rider = Field<const std::uint8_t*>(seat, kSeatRider);
+    if (!control || !rider || Field<std::uint32_t>(control, 8) == 0) return false;
+    return OwnerOf(Field<std::uint32_t>(rider, kNetworkFlags)) == NetOwner::Unregistered;
+}
+
 NetOwner AttackerOwner(const std::uint8_t* gdi) {
     // The override the game honours first (547E6D), then the attacker's own NetworkObject.
     if (gdi[kGdiOverride]) return gdi[kGdiOverrideRemote] ? NetOwner::Remote : NetOwner::Local;
@@ -121,14 +140,17 @@ NetOwner AttackerOwner(const std::uint8_t* gdi) {
     if (owner != NetOwner::Unregistered) {
         // A vehicle's registration owner is whoever created it (the host, for a delivered one), not whoever fires
         // from it. Its shots are decided where it is run: the machine of its seat-0 rider, else its last driver,
-        // else the host (630F90 with the host fallback; docs/net-re/damage.md section 5). The vehicle classes are
+        // else the host (630F90 with the host fallback); but the host when seat 0 is an NPC with no identity, which
+        // 630F90 calls local everywhere (VehicleShooter; docs/net-re/damage.md section 9). The vehicle classes are
         // the 27 that share slot 34 6347C0; their NetworkObject sits at +0x120 like every GameObjectBase's.
         const auto* vehicle = static_cast<const std::uint8_t*>(net.object) - kNetworkObject;
         const auto table = *reinterpret_cast<const std::uint8_t* const*>(vehicle);
         const auto slot34 = reinterpret_cast<const unsigned char*>(Field<const void*>(table, kAcceptSlot));
         if (slot34 == game + kVehicleAccept && Field<std::uint64_t>(vehicle, kSeatCount) > 0) {
-            const int runner = Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
-            owner = runner == 1 ? NetOwner::Local : NetOwner::Remote;
+            const bool npc = NpcSeat0(vehicle);
+            const bool host = npc && Fn<bool(__fastcall*)(const void*)>(kIsHost)(nullptr);
+            const int runner = npc ? 0 : Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
+            owner = VehicleShooter(npc, host, runner);
         }
     }
     ReleaseShared(net);
@@ -139,8 +161,13 @@ NetOwner AttackerOwner(const std::uint8_t* gdi) {
 SRWLOCK lock = SRWLOCK_INIT;
 HitGate gate;
 std::uint32_t nextSeq = 0;
+std::uint64_t senderId = 0;  // this process, random (InitHitAuthority)
+// The rule over time (HitRuleClock), fed by SampleRule; the tests set it outright.
+constexpr DWORD kRuleSampleMs = 250;
+HitRuleClock rule;
+bool ruleForced = false, forcedForwarding = false, forcedDropping = false;
 struct Stats {
-    std::uint64_t forwarded = 0, forwardFailed = 0, dropped = 0, dealt = 0, received = 0, malformed = 0, inactive = 0;
+    std::uint64_t forwarded = 0, forwardFailed = 0, dropped = 0, dealt = 0, received = 0, malformed = 0, ownerRule = 0;
     std::uint64_t rejected[9]{};
     std::uint64_t lastLogMs = 0;
 } stats;
@@ -157,9 +184,47 @@ void Summarize(std::uint64_t now) {
             used += _snprintf_s(reasons + used, sizeof(reasons) - used, _TRUNCATE, "%s%s %llu", used ? ", " : "",
                                 HitRejectName(static_cast<HitReject>(i)), stats.rejected[i]);
     Log("NetHit: sent %llu hits to their owners (%llu not sent), dropped %llu copies of others' hits; received %llu, "
-        "dealt %llu (%llu unreadable, %llu while off)%s%s",
+        "dealt %llu (%llu unreadable, %llu left to this machine's own copy of the hit)%s%s",
         stats.forwarded, stats.forwardFailed, stats.dropped, stats.received, stats.dealt, stats.malformed,
-        stats.inactive, used > 0 ? "; refused: " : "", reasons);
+        stats.ownerRule, used > 0 ? "; refused: " : "", reasons);
+}
+
+struct RuleNow {
+    bool forwarding = false, dropping = false;
+};
+RuleNow ReadRule(std::uint64_t now) {
+    AcquireSRWLockShared(&lock);
+    const RuleNow r = ruleForced ? RuleNow{forcedForwarding, forcedDropping}
+                                 : RuleNow{rule.Forwarding(now), rule.Dropping(now)};
+    ReleaseSRWLockShared(&lock);
+    return r;
+}
+
+// The room's gate, four times a second: the hooks never ask it themselves (it builds a string per question).
+DWORD WINAPI SampleRule(void*) {
+    RuleNow said;
+    for (;;) {
+        const bool on = NetFeatureActive(NetFeature::HitAuthority);
+        const std::uint64_t now = GetTickCount64();
+        AcquireSRWLockExclusive(&lock);
+        rule.Observe(on, now);
+        const RuleNow r{rule.Forwarding(now), rule.Dropping(now)};
+        ReleaseSRWLockExclusive(&lock);
+        if (r.forwarding != said.forwarding || r.dropping != said.dropping) {
+            Log("NetHit: %s our hits on others' objects to their owners; %s others' hits on ours to their machines",
+                r.forwarding ? "sending" : "not sending", r.dropping ? "leaving" : "dealing (as the game does)");
+            said = r;
+        }
+        Sleep(kRuleSampleMs);
+    }
+}
+
+// The game's own answer to "would you take another machine's hit, not from the network" (slot 34): yes for a
+// player or vehicle of this machine (5A3600, 6347C0), no for everything else (54F8D0).
+bool TakesRemoteHits(const std::uint8_t* target) {
+    const auto table = *reinterpret_cast<const std::uint8_t* const*>(target);
+    return reinterpret_cast<bool(__fastcall*)(const void*, bool, bool)>(Field<void*>(table, kAcceptSlot))(target, true,
+                                                                                                        false);
 }
 
 // Our shot at another machine's object: an event to the object's copies, which only its owner deals.
@@ -177,6 +242,7 @@ bool Forward(std::uint8_t* target, const std::uint8_t* gdi) {
     AcquireSRWLockExclusive(&lock);
     event.seq = ++nextSeq;
     ReleaseSRWLockExclusive(&lock);
+    event.sender = senderId;
     GameStream stream;
     if (!WriteHitEventMessage(stream.get(), event)) return false;
     void* net = target + kNetworkObject;
@@ -228,14 +294,16 @@ void Deal(std::uint8_t* target, const DamageEvent& event, GameRef& attacker) {
 
 void Received(std::uint8_t* target, const DamageEvent& event) {
     const std::uint64_t now = GetTickCount64();
-    if (!NetFeatureActive(NetFeature::HitAuthority)) {
+    HitView view;
+    view.targetLocal = OwnerOf(Field<std::uint32_t>(target, kNetworkFlags)) == NetOwner::Local;
+    // The sender dropped its own copy of this hit; whatever this machine's gate says, the event is the hit, unless
+    // this machine still deals that target's remote hits itself (OwnerTakesEvent, damage.md section 6.6).
+    if (view.targetLocal && !OwnerTakesEvent(ReadRule(now).dropping, TakesRemoteHits(target))) {
         AcquireSRWLockExclusive(&lock);
-        ++stats.inactive;
+        ++stats.ownerRule;
         ReleaseSRWLockExclusive(&lock);
         return;
     }
-    HitView view;
-    view.targetLocal = OwnerOf(Field<std::uint32_t>(target, kNetworkFlags)) == NetOwner::Local;
     view.targetAlive = Field<std::uint8_t>(target, kDead) == 0;
     for (int i = 0; i < 3; ++i) view.targetPos[i] = Field<float>(target, kPosition + 4 * i);
     GameRef attacker;
@@ -272,7 +340,28 @@ std::vector<MidSite> HitAuthorityHooks() {
     };
 }
 
-void InitHitAuthority(const unsigned char* base) { game = base; }
+void InitHitAuthority(const unsigned char* base) {
+    game = base;
+    unsigned int high = 0, low = 0;
+    if (rand_s(&high) || rand_s(&low)) high = static_cast<unsigned int>(GetTickCount64()), low = GetCurrentProcessId();
+    senderId = (static_cast<std::uint64_t>(high) << 32 | low) | 1;  // never 0
+}
+
+std::uint64_t HitSenderId() { return senderId; }
+
+void SetHitRuleForTest(bool forwarding, bool dropping) {
+    AcquireSRWLockExclusive(&lock);
+    ruleForced = true;
+    forcedForwarding = forwarding;
+    forcedDropping = dropping;
+    ReleaseSRWLockExclusive(&lock);
+}
+
+void ClearHitRuleForTest() {
+    AcquireSRWLockExclusive(&lock);
+    ruleForced = false;
+    ReleaseSRWLockExclusive(&lock);
+}
 
 HitCounters HitAuthorityCounters() {
     AcquireSRWLockShared(&lock);
@@ -283,7 +372,7 @@ HitCounters HitAuthorityCounters() {
     c.received = stats.received;
     c.dealt = stats.dealt;
     c.malformed = stats.malformed;
-    c.inactive = stats.inactive;
+    c.ownerRule = stats.ownerRule;
     for (int i = 1; i < 9; ++i)
         if (i != static_cast<int>(HitReject::NotOwner)) c.refused += stats.rejected[i];
     c.notOwner = stats.rejected[static_cast<int>(HitReject::NotOwner)];
@@ -292,14 +381,17 @@ HitCounters HitAuthorityCounters() {
 }
 
 void HitPreFilterHandler(CpuContext* context) {
-    if (!NetFeatureActive(NetFeature::HitAuthority)) return;
+    // Every message every object gets passes here: damage is told apart before anything else is asked.
     auto* message = reinterpret_cast<std::uint32_t*>(context->rdx);
     auto** payload = reinterpret_cast<std::uint8_t**>(context->r8);
     if (!message || !payload || *message != kDamageMessage || !*payload) return;
+    const RuleNow now = ReadRule(GetTickCount64());
+    if (!now.forwarding && !now.dropping) return;
     auto* target = reinterpret_cast<std::uint8_t*>(context->rcx);
     const std::uint8_t* gdi = *payload;
     HitInput input;
-    input.active = true;
+    input.forwarding = now.forwarding;
+    input.dropping = now.dropping;
     input.replaying = gdi == replaying;
     input.fromNetwork = (Field<std::uint16_t>(gdi, kGdiFlags) & kGdiFromNetwork) != 0;
     input.damage = Field<float>(gdi, kGdiDamage);
@@ -310,8 +402,9 @@ void HitPreFilterHandler(CpuContext* context) {
     input.attacker = AttackerOwner(gdi);
     const HitVerdict verdict = DecideHit(input);
     if (verdict != HitVerdict::Drop && verdict != HitVerdict::Forward) return;
+    // A hit that could not be sent stays the game's: dealt here as it would be (or not, by its own rule).
     const bool sent = verdict == HitVerdict::Forward && Forward(target, gdi);
-    *message = kDroppedMessage;
+    if (verdict == HitVerdict::Drop || sent) *message = kDroppedMessage;
     AcquireSRWLockExclusive(&lock);
     if (verdict == HitVerdict::Drop) ++stats.dropped;
     else if (sent) ++stats.forwarded;
@@ -401,6 +494,8 @@ bool InstallHitAuthority(unsigned char* base) {
         page.Release();
         return false;
     }
+    if (HANDLE sampler = CreateThread(nullptr, 0, &SampleRule, nullptr, 0, nullptr)) CloseHandle(sampler);
+    else Log("NetHit: no thread to watch the room's gate (error %lu); hits stay decided as the game does", GetLastError());
     Log("NetHit: hits are decided by the shooter's machine and dealt by the target's owner (%s); hooks at EDF+%X "
         "and EDF+%X",
         NetFeatureActive(NetFeature::HitAuthority) ? "on" : "off for now", kHitPreFilter, kHitObjectReceive);

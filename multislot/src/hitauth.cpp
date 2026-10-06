@@ -61,8 +61,12 @@ NetOwner OwnerOf(std::uint32_t networkFlags) {
     return NetOwner::Unregistered;
 }
 
+NetOwner VehicleShooter(bool npcSeat0, bool host, int runner) {
+    if (npcSeat0) return host ? NetOwner::Local : NetOwner::Remote;
+    return runner == 1 ? NetOwner::Local : NetOwner::Remote;
+}
+
 HitVerdict DecideHit(const HitInput& input) {
-    if (!input.active) return HitVerdict::Vanilla;
     if (input.replaying) return HitVerdict::Deal;
     // The game's kill message, dealt by everyone after the machine that decided it: as the game does.
     if (input.fromNetwork) return HitVerdict::Vanilla;
@@ -71,8 +75,31 @@ HitVerdict DecideHit(const HitInput& input) {
     // Without a network identity on either side there is no owner to send to, and every machine has the object as
     // its own: the game's rule (the plugins' objects, docs/net-re/damage.md section 6).
     if (input.attacker == NetOwner::Unregistered || input.target == NetOwner::Unregistered) return HitVerdict::Vanilla;
-    if (input.attacker == NetOwner::Remote) return HitVerdict::Drop;
-    return input.target == NetOwner::Local ? HitVerdict::Deal : HitVerdict::Forward;
+    // Someone else's shot: its machine forwards it (HitRuleClock: dropping implies every sender forwards). Not yet
+    // dropping: the game's rule (a remote shot at our player or vehicle is dealt here, at anything else not at all).
+    if (input.attacker == NetOwner::Remote) return input.dropping ? HitVerdict::Drop : HitVerdict::Vanilla;
+    if (input.target == NetOwner::Local) return HitVerdict::Deal;  // the game takes our shot at our object anyway
+    return input.forwarding ? HitVerdict::Forward : HitVerdict::Vanilla;
+}
+
+void HitRuleClock::Observe(bool gateOn, std::uint64_t nowMs) {
+    const bool run = any_ && on_ && nowMs - lastMs_ <= maxGapMs_;
+    if (gateOn) {
+        if (!run) onSinceMs_ = nowMs;
+        lastOnMs_ = nowMs;
+        everOn_ = true;
+    }
+    any_ = true;
+    on_ = gateOn;
+    lastMs_ = nowMs;
+}
+
+bool HitRuleClock::Forwarding(std::uint64_t nowMs) const {
+    return everOn_ && nowMs - lastOnMs_ < graceMs_;
+}
+
+bool HitRuleClock::Dropping(std::uint64_t nowMs) const {
+    return any_ && on_ && nowMs - lastMs_ <= maxGapMs_ && nowMs - onSinceMs_ >= settleMs_;
 }
 
 std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::size_t capacity) {
@@ -83,6 +110,7 @@ std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::s
     w.Put(kDamageEventVersion);
     w.Put(std::uint8_t{0});
     w.Put(event.seq);
+    w.Put(event.sender);
     w.Put(event.attackerRef);
     w.Put(event.targetRef);
     w.Put(event.kind);
@@ -109,6 +137,7 @@ bool ReadDamageEvent(const std::uint8_t* data, std::size_t size, DamageEvent& ou
     r.Get<std::uint8_t>();
     DamageEvent e;
     e.seq = r.Get<std::uint32_t>();
+    e.sender = r.Get<std::uint64_t>();
     e.attackerRef = r.Get<std::int32_t>();
     e.targetRef = r.Get<std::int32_t>();
     e.kind = r.Get<std::uint32_t>();
@@ -206,7 +235,7 @@ void HitGate::Forget(std::uint64_t nowMs) {
 HitReject HitGate::Admit(const DamageEvent& event, const HitView& view, std::uint64_t nowMs) {
     if (const HitReject geometry = CheckEvent(event, view, limits_); geometry != HitReject::None) return geometry;
     Forget(nowMs);
-    Attacker& a = attackers_[event.attackerRef];
+    Attacker& a = attackers_[Key{event.sender, event.attackerRef}];
     if (a.any && nowMs - a.lastMs > limits_.forgetMs) a = Attacker{};
     // Sequence: newer than the newest moves the window; within the window, once each.
     int ahead = 0;

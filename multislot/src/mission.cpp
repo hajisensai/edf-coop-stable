@@ -5,6 +5,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 #include "crashlog.h"
@@ -38,13 +39,17 @@ std::uint8_t* At(std::uint64_t address) { return reinterpret_cast<std::uint8_t*>
 // One line per kind of event, so a mission with ten players does not flood the log.
 // Bits 0-15 are one event each; a loadout record gets one per player index above that.
 constexpr unsigned kLoadoutLogBit = 16;
-static_assert(kLoadoutLogBit + kMaxPlayers <= 64, "one log bit per player index must fit");
-std::atomic<std::uint64_t> logged{0};
+constexpr unsigned kLogBits = kLoadoutLogBit + kMaxPlayers;
+std::atomic<std::uint64_t> logged[(kLogBits + 63) / 64]{};
 void LogOnce(unsigned bit, const char* text, long long value) {
-    const std::uint64_t mask = std::uint64_t{1} << bit;
-    if (logged.fetch_or(mask) & mask) return;
+    if (bit >= kLogBits) return;
+    const std::uint64_t mask = std::uint64_t{1} << (bit % 64);
+    if (logged[bit / 64].fetch_or(mask) & mask) return;
     Log(text, value);
 }
+
+// The size of the online HUD's colour tables the index wraps around (SetHudTableSize).
+std::atomic<int> hudTableSize{kVanillaPlayers};
 
 // OnlineSession() without C++ objects so it can use SEH.
 bool OnlineMode() {
@@ -82,20 +87,12 @@ void SpawnTableCountHandler(CpuContext* context) {
 }
 
 // Replaces `movups xmm0, [rdi+r13-0x108]`: the finished offset of player r15 from the table at
-// rbp+0x40. Players 5-8 stand twice (8: three times) as far out along players 2, 3, 4's directions.
+// rbp+0x40 (SpawnOffset).
 void SpawnOffsetHandler(CpuContext* context) {
     const auto index = static_cast<std::uint32_t>(context->r15);
-    const auto* table = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(context->rbp + 0x40));
+    const auto* table = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(context->rbp + 0x40));
     float value[4];
-    if (index < 4) {
-        std::memcpy(value, table + index * 16, sizeof(value));
-    } else {
-        const std::uint32_t extra = index - 4;
-        std::memcpy(value, table + (1 + extra % 3) * 16, sizeof(value));
-        const float scale = 2.0f + static_cast<float>(extra / 3);
-        value[0] *= scale;
-        value[2] *= scale;
-    }
+    SpawnOffset(index, table, value);
     std::memcpy(context->xmm[0], value, sizeof(value));
 }
 
@@ -180,7 +177,10 @@ void AreaFactorCallHandler(CpuContext* context) {
     std::memcpy(&flag, At(SiteRsp(context) + 0x20), sizeof(flag));
     std::memcpy(&mode, At(SiteRsp(context) + 0x28), sizeof(mode));
     std::memcpy(&mission, At(context->rbp + 0x20), sizeof(mission));
-    std::uint64_t players[kMaxPlayers * 2]{};
+    // 16 KiB of weak_ptr copies: off the game thread's stack. Script factors are evaluated on the game thread only,
+    // and Initialize does not re-enter a factor, so one buffer per thread is enough.
+    thread_local std::uint64_t players[kMaxPlayers * 2];
+    std::memset(players, 0, sizeof(players));
     std::memcpy(players, At(context->r8), kVanillaPlayers * kPlayerEntrySize);
     for (int i = kVanillaPlayers; i < kMaxPlayers; ++i) {
         std::memcpy(&players[i * 2], At(mission + kMovedPlayerArray + i * kPlayerEntrySize), kPlayerEntrySize);
@@ -201,14 +201,22 @@ void AreaFactorCallHandler(CpuContext* context) {
 // Replaces `movsxd rcx, [rsi+0x48]; mov [r14], ecx`: rcx keeps the real index for the loadout record the
 // next instructions read (7FFDA3 -> sidecar), the tables get it wrapped, so player 5 shares player 1's
 // colour. A player who is not in the mission keeps the negative index, which every reader of it checks for.
+// With the plugin's HUD tables (hud.h) the tables have kHudTablePlayers entries and player 33 shares player 1's.
 void PlayerTagIndexHandler(CpuContext* context) {
     std::int32_t index = 0;
     std::memcpy(&index, At(context->rsi + 0x48), sizeof(index));
     context->rcx = static_cast<std::uint64_t>(static_cast<std::int64_t>(index));
-    const std::int32_t wrapped = index > 0 ? index % kVanillaPlayers : index;
+    const int tables = hudTableSize.load();
+    const std::int32_t wrapped = WrapHudIndex(index, tables);
     std::memcpy(At(context->r14), &wrapped, sizeof(wrapped));
-    if (index >= kVanillaPlayers)
-        LogOnce(14, "MISSION HUD colour of player index %lld uses one of the four the HUD has", index);
+    if (index >= tables)
+        LogOnce(14, "MISSION HUD colour of player index %lld shares one of the colours the HUD tables have", index);
+}
+
+// MissionContext destructor: `mov edx, 0x10; lea r8d, [rdx-0xC]` - the entry size and the count of the moved array.
+void DestroyCountHandler(CpuContext* context) {
+    context->rdx = kPlayerEntrySize;
+    context->r8 = static_cast<std::uint64_t>(kMaxPlayers);
 }
 
 // ResultSync_Begin clears the game's four item counts; the sidecars are cleared with them.
@@ -343,7 +351,49 @@ void SetGhostPlayers(int count) {
 
 int NextGhostCount(int count) {
     if (count < kVanillaPlayers) return kVanillaPlayers;         // off -> five players
-    return count + 1 > kMaxPlayers - 1 ? 0 : count + 1;          // five .. eight, then off
+    return count + 1 > kMaxPlayers - 1 ? 0 : count + 1;          // five .. the largest room, then off
+}
+
+std::int32_t WrapHudIndex(std::int32_t index, int tableSize) {
+    return index > 0 && tableSize > 0 ? index % tableSize : index;
+}
+
+void SetHudTableSize(int size) { hudTableSize.store(size > 0 ? size : kVanillaPlayers); }
+
+void SpawnOffset(std::uint32_t index, const float* table, float* out) {
+    if (index < 4) {
+        std::memcpy(out, table + index * 4, 4 * sizeof(float));
+        return;
+    }
+    if (index < static_cast<std::uint32_t>(kSpawnLinePlayers)) {
+        // Players 5..32 stand along players 2, 3, 4's directions, twice (8: three times, ...) as far out. As every
+        // version with up to 32 slots placed them.
+        const std::uint32_t extra = index - 4;
+        std::memcpy(out, table + (1 + extra % 3) * 4, 4 * sizeof(float));
+        const float scale = 2.0f + static_cast<float>(extra / 3);
+        out[0] *= scale;
+        out[2] *= scale;
+        return;
+    }
+    // Further out the lines would be hundreds of metres long: players 33+ fill rings around player 1's point, as far
+    // apart as players 1 and 2 stand, the first ring just outside the 32 lines' reach of player 2's direction.
+    std::memcpy(out, table, 4 * sizeof(float));
+    const float dx = table[4] - table[0], dz = table[6] - table[2];
+    float spacing = std::sqrt(dx * dx + dz * dz);
+    if (!(spacing > 0.5f)) spacing = 3.0f;
+    const float first = spacing * (2.0f + static_cast<float>((kSpawnLinePlayers - 5) / 3)) + spacing;
+    std::uint32_t slot = index - static_cast<std::uint32_t>(kSpawnLinePlayers);
+    for (int ring = 0;; ++ring) {
+        const float radius = first + spacing * static_cast<float>(ring);
+        const auto seats = static_cast<std::uint32_t>(6.2831853f * radius / spacing);
+        if (slot < seats) {
+            const float angle = 6.2831853f * static_cast<float>(slot) / static_cast<float>(seats);
+            out[0] = table[0] + radius * std::cos(angle);
+            out[2] = table[2] + radius * std::sin(angle);
+            return;
+        }
+        slot -= seats;
+    }
 }
 
 bool GhostHarness() { return ghostHarness; }
@@ -412,6 +462,7 @@ MidHandler MissionHookHandler(std::uint32_t rva) {
         case 0x7FFD95: return &PlayerTagIndexHandler;
         case 0x0DFD27: return &RecordOffsetHandler<&C::rbx, &C::rax>;
         case 0x591914: return &RecordOffsetHandler<&C::rax, &C::r15>;
+        case 0x1D6EDC: return &DestroyCountHandler;
         case 0x1D968E: return &SpawnTableCountHandler;
         case 0x1D98B6: return &RemoteFlagHandler;
         case 0x1D9A3B: return &RemoteFlagArrayHandler;

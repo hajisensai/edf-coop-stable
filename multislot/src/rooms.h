@@ -21,7 +21,9 @@ using LobbyInfoCopyFn = std::int32_t (*)(void* details, const void* options, voi
 using LobbyInfoReleaseFn = void (*)(void* info);
 void RouteLobbyInfo(LobbyInfoCopyFn copy, LobbyInfoReleaseFn release);
 
-// Pure decision used by both, kept separate for tests. Returns 0 when EOS data is inconsistent.
-std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers);
+// Pure decision used by both, kept separate for tests. Returns 0 when EOS data is inconsistent. roomSize: the room's
+// published size (kRoomSizeKey, patches.h; 0 none), which counts once the room is larger than an EOS lobby holds.
+std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers,
+                               std::uint32_t roomSize = 0);
 
 }  // namespace multislot

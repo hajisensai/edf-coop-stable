@@ -110,7 +110,7 @@ int main() {
     Check(sidecars, "the records above four land in their own sidecars, outside GameStatus");
     Check(LoadoutSidecar(5) - LoadoutSidecar(4) >= static_cast<std::ptrdiff_t>(kLoadoutRecordSize), "sidecars do not overlap");
     const std::uint64_t scratch = records + LoadoutRecordOffset(kMaxPlayers);
-    Check(records + LoadoutRecordOffset(-1) == scratch && records + LoadoutRecordOffset(1000) == scratch &&
+    Check(records + LoadoutRecordOffset(-1) == scratch && records + LoadoutRecordOffset(kMaxPlayers + 1000) == scratch &&
               Pointer(scratch) != LoadoutSidecar(4),
           "invalid indices share a scratch record");
 

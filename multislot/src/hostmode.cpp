@@ -156,8 +156,6 @@ void Save(int size) {
     WritePrivateProfileStringW(L"MultiSlot", L"EightPlayerRooms", nullptr, iniFile);
 }
 
-// The lobby's MaxMembers for a room created at `size`.
-std::uint64_t Capacity(int size) { return static_cast<std::uint64_t>(size ? size : kVanillaPlayers); }
 
 // Room creation first makes the Steam lobby that joiners enter before the EOS lobby (7435F7 `mov r8d, 4`,
 // cMaxMembers of ISteamMatchmaking::CreateLobby): the room takes the setting here, and the EOS lobby created
@@ -166,7 +164,7 @@ void SteamCreateCapacityHandler(CpuContext* context) {
     const int size = roomSize.load();
     createdSize.store(size);
     steamLobbyCaptured.store(true);
-    context->r8 = Capacity(size);
+    context->r8 = static_cast<std::uint64_t>(SteamLobbyCapacity(size));
 }
 
 // Lobby create options (742A9D `mov qword [rbp-0x60], 4`, MaxLobbyMembers). Without a Steam lobby step before
@@ -174,11 +172,12 @@ void SteamCreateCapacityHandler(CpuContext* context) {
 void CreateCapacityHandler(CpuContext* context) {
     const int size = steamLobbyCaptured.exchange(false) ? createdSize.load() : roomSize.load();
     createdSize.store(size);
-    const std::uint64_t capacity = Capacity(size);
+    const auto capacity = static_cast<std::uint64_t>(EosLobbyCapacity(size));
     std::memcpy(reinterpret_cast<void*>(static_cast<std::uintptr_t>(context->rbp - 0x60)), &capacity, sizeof(capacity));
     if (size)
-        Log("HOST creating a MultiSlot room for %d players (%dPlayer MOD ON; Steam and EOS lobbies for %d)", size,
-            size, size);
+        Log("HOST creating a MultiSlot room for %d players (%dPlayer MOD ON; Steam lobby for %d, EOS lobby for %d%s)",
+            size, size, SteamLobbyCapacity(size), EosLobbyCapacity(size),
+            size > kEosLobbyMembers ? ", the rest are the plugin's" : "");
     else
         Log("HOST creating a normal %d-player room (Player MOD OFF)", kVanillaPlayers);
 }
@@ -207,7 +206,8 @@ void CreateVoiceRoomHandler(CpuContext* context) {
 // setting this machine created its last room with says nothing about a room it joined.
 void UpdateCapacityHandler(CpuContext* context) {
     const RoomUpdate keep = DecideRoomUpdate(static_cast<std::uintptr_t>(context->r13));
-    context->rdx = keep.kind == LobbyKind::MultiSlot ? static_cast<std::uint64_t>(keep.capacity) : kVanillaPlayers;
+    context->rdx = keep.kind == LobbyKind::MultiSlot ? static_cast<std::uint64_t>(EosLobbyCapacity(keep.capacity))
+                                                     : kVanillaPlayers;
 }
 
 // Room update: the SEARCH_TYPE published for the room kind (`mov ebx, 0x9x`), mirrored in MultiSlot rooms.

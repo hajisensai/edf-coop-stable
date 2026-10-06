@@ -26,6 +26,7 @@
 #include "../src/midhook.h"
 #include "../src/patches.h"
 #include "../src/smoothing.h"
+#include "../src/widecmp.h"
 #include "mod_assets.h"
 
 using namespace multislot;
@@ -168,6 +169,25 @@ bool HookedInto(const unsigned char* base, const MidSite& site, HMODULE plugin) 
     const bool described = RtlLookupFunctionEntry(static_cast<DWORD64>(reinterpret_cast<std::uintptr_t>(thunk)), &imageBase,
                                                   nullptr) != nullptr;
     return handlers == 1 && resumes == 2 && described && InModule(static_cast<std::uintptr_t>(handler), plugin);
+}
+
+// The site jumps to a read-only executable cave that is exactly WideCompareCode for it (widecmp.h).
+bool WidenedInto(const unsigned char* base, const WideCompare& site) {
+    const unsigned char* at = base + site.rva;
+    if (at[0] != 0xE9) return false;
+    for (std::size_t i = 5; i < site.original.size(); ++i)
+        if (at[i] != 0x90) return false;
+    std::int32_t relative = 0;
+    std::memcpy(&relative, at + 1, 4);
+    const unsigned char* cave = at + 5 + relative;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(cave, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || mbi.Protect != PAGE_EXECUTE_READ) return false;
+    const auto expected = WideCompareCode(site, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at)));
+    return !expected.empty() && std::memcmp(cave, expected.data(), expected.size()) == 0;
+}
+
+bool CompareUntouched(const unsigned char* base, const WideCompare& site) {
+    return std::memcmp(base + site.rva, site.original.data(), site.original.size()) == 0;
 }
 
 bool SiteUntouched(const unsigned char* base, const MidSite& site) {
@@ -335,6 +355,7 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& slot : MissionSlots()) untouched = untouched && SlotTargets(base + slot.rva, reinterpret_cast<std::uint64_t>(base), slot.target);
         for (const auto& call : PacketFitCalls()) untouched = untouched && CallTargets(base + call.rva, call.rva, call.target);
         for (const auto& hook : PacketFitHooks()) untouched = untouched && SiteUntouched(base, hook);
+        for (const auto& site : MissionCompares()) untouched = untouched && CompareUntouched(base, site);
         return untouched;
     };
 
@@ -342,6 +363,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(!loaded, "Enabled=0 asks the loader to unload");
         Check(Untouched(base, guest) == static_cast<int>(guest.size()), "Enabled=0 leaves every guest patch site untouched");
         Check(Untouched(base, sessions) == static_cast<int>(sessions.size()), "Enabled=0 leaves the room tables at four");
+        for (const auto& site : SessionCompares()) Check(CompareUntouched(base, site), "Enabled=0 leaves the room table bounds at four");
         for (const auto& hook : hostHooks) Check(SiteUntouched(base, hook), "Enabled=0 leaves the host room sites untouched");
         for (const auto& hook : HostDataHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves the file open untouched");
         const PointerSlot frame = MainFrameSlot();
@@ -397,7 +419,8 @@ int wmain(int argc, wchar_t** argv) {
                   info.version.patch == MULTISLOT_VERSION_PATCH && info.version.build == 0,
               "PluginInfo carries CMakeLists.txt's project version");
         Check(Applied(base, guest) == static_cast<int>(guest.size()), "every guest patch is written");
-        Check(Applied(base, sessions) == static_cast<int>(sessions.size()), "room user slots and packet sessions are sized for eight");
+        Check(Applied(base, sessions) == static_cast<int>(sessions.size()), "room user slots and packet sessions are sized for the room");
+        for (const auto& site : SessionCompares()) Check(WidenedInto(base, site), site.name);
         Check(Contains(log, ("Rooms: " + std::to_string(kMaxPlayers) + " user slots, packet sessions and voice chat HUD records").c_str()),
               "the room table size is logged");
         for (const auto& call : calls) Check(RedirectedInto(base + call.rva, plugin), "member count call reaches the plugin through a stub");
@@ -547,14 +570,16 @@ int wmain(int argc, wchar_t** argv) {
                       Untouched(base, hudPatches) == (colours ? 0 : static_cast<int>(hudPatches.size())),
                   colours ? "every HUD table patch is written" : "a foreign HUD archive leaves the HUD tables at four");
             for (const auto& hook : hudHooks) Check(colours ? HookedInto(base, hook, plugin) : SiteUntouched(base, hook), hook.name);
-            for (const auto& hook : hudWrap) Check(colours ? SiteUntouched(base, hook) : HookedInto(base, hook, plugin), hook.name);
+            // The index wraps around the tables either way (kHudTablePlayers with ours, four without).
+            for (const auto& hook : hudWrap) Check(HookedInto(base, hook, plugin), hook.name);
             Check(ReadBytes(hudPath) == (colours ? ourHud : foreignHud), colours ? "our HUD archive is in Mods\\HUD" : "another mod's HUD archive is left alone");
             Check(Contains(log, "HUD: wrote Mods\\HUD\\ONLINEHUDTEXTURE.RAB") == (colours && mode != L"host8"),
                   "writing the HUD archive is logged only when it was written");
-            Check(Contains(log, colours ? "HUD: one colour per player for all" : "HUD: players 5-"), "the HUD colours are logged");
+            Check(Contains(log, colours ? "HUD: one colour per player for players 1-" : "HUD: players 5-"), "the HUD colours are logged");
             if (!colours) Check(Contains(log, "HUD: Mods\\HUD\\ONLINEHUDTEXTURE.RAB belongs to another mod"), "the foreign HUD archive is logged");
             Check(Applied(base, missionPatches) == static_cast<int>(missionPatches.size()), "every mission patch is written");
             for (const auto& hook : missionHooks) Check(HookedInto(base, hook, plugin), hook.name);
+            for (const auto& site : MissionCompares()) Check(WidenedInto(base, site), site.name);
             for (const auto& call : missionCalls) Check(RedirectedInto(base + call.rva, plugin), call.name);
             for (const auto& slot : MissionSlots()) Check(SlotInto(base, slot, plugin), slot.name);
             for (const auto& call : PacketFitCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);
@@ -572,7 +597,7 @@ int wmain(int argc, wchar_t** argv) {
             for (const auto& hook : GhostHooks()) Check(HookedInto(base, hook, plugin), hook.name);
             for (const auto& call : GhostCalls()) Check(RedirectedInto(base + call.rva, plugin), call.name);
             Check(Contains(log, "Test: GhostPlayers=4"), "ghost harness is logged");
-            Check(Contains(log, ("Scale5..Scale" + std::to_string(kMaxPlayers) + " are no longer used").c_str()),
+            Check(Contains(log, "Scale5..Scale32 are no longer used"),
                   "old per-player-count scale keys are reported as unused");
         } else {
             for (const auto& hook : GhostHooks()) Check(SiteUntouched(base, hook), "ghost sites untouched without GhostPlayers");

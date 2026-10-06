@@ -12,25 +12,33 @@ namespace multislot {
 
 // "<n>Player MOD": what kind of room you create as host.
 //   OFF (0, default) - a normal 4-player room anyone can find and join, exactly as without the mod.
-//   n (5..32)        - a MultiSlot room for n players that only players with this mod can find and join.
+//   n (2..1024)      - a MultiSlot room for n players that only players with this mod can find and join.
 // The room search lists both kinds, of every size, whatever the setting (lobbystate.h).
 // Every machine has slots for kMaxPlayers, so the size is the host's alone: it goes into the lobby's
-// MaxMembers, which every member follows (lobbystate.h). F2 steps through kRoomSizes and OFF on menu screens
+// MaxMembers (up to Epic's 64; past that its kRoomSizeKey attribute), which every member follows (lobbystate.h).
+// The INI may hold any size of 2..kMaxPlayers; F2 steps through kRoomSizes and OFF on menu screens
 // outside a room (saved to the INI as RoomSize). A room keeps the size it was created with for as long as it
 // exists. The menu frame (UI/LYT_MAINFRAME.SGO, which the plugin writes to Mods\UI with an extra text field
 // MSLabel, modfile.h) shows the label in its lower left corner. The main script plays that frame on the HQ,
 // lobby and room screens but not in missions, so the label is gone once a mission starts. In a room it shows
 // the room's size to its host and, as a control guide, which keys switch the member page (see ComposeLabel).
-constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32};
+constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32, 48, 64, 128, 256, 512, 1024};
 static_assert(kRoomSizes[std::size(kRoomSizes) - 1] == kMaxPlayers, "F2 must reach the largest room");
 // Epic refuses a lobby with a voice chat room (bEnableRTCRoom) for more than this many members ("Lobbies that
 // generate conference rooms must have <= 16 max players"): a larger room is created without one.
 constexpr int kVoiceRoomMaxPlayers = 16;
-// A size the INI may hold: 0 (OFF) or one of kRoomSizes.
-constexpr bool ValidRoomSize(int size) {
-    for (int step : kRoomSizes)
-        if (step == size) return true;
-    return size == 0;
+// A size the INI may hold: 0 (OFF) or 2..kMaxPlayers. A MultiSlot room of two to four is a room only this mod's
+// players see; its SEARCH_TYPE says what it is, not its capacity (lobbystate.h).
+constexpr bool ValidRoomSize(int size) { return size == 0 || (size >= 2 && size <= kMaxPlayers); }
+// The capacities a room created at `size` (0: a normal room) asks Steam and EOS for: its size, at most what each
+// service holds. Members past the EOS lobby's are the plugin's (docs/net-re/roomsize.md).
+constexpr int EosLobbyCapacity(int size) {
+    const int players = size ? size : kVanillaPlayers;
+    return players < kEosLobbyMembers ? players : kEosLobbyMembers;
+}
+constexpr int SteamLobbyCapacity(int size) {
+    const int players = size ? size : kVanillaPlayers;
+    return players < kSteamLobbyMembers ? players : kSteamLobbyMembers;
 }
 // What F2 switches to: the next of kRoomSizes above `size`, OFF after the largest.
 constexpr int NextRoomSize(int size) {

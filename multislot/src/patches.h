@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "widecmp.h"
+
 namespace multislot {
 
 // EDF.dll build this table was taken from (Steam, 2025-01 update).
@@ -10,14 +12,28 @@ constexpr std::uint32_t kImageTimeDateStamp = 0x678CCB46;
 constexpr std::uint32_t kImageSize = 0x22CE000;
 
 constexpr int kVanillaPlayers = 4;
-// What every machine is built for: user slots, packet sessions, HUD records and mission arrays for 32 players.
-// The size of a room is the host's choice when creating it (hostmode.h, 5..32) and lives in its lobby's
-// MaxMembers, so every room any of us hosts can be joined by any of us (2.3.0; before, each size was a build).
-constexpr int kMaxPlayers = 32;
-// The signed imm8/disp8 operands written from the room size (patches.cpp: `cmp r, N`, the destructor's
-// N-0x10, FindPlayerIndex's -(N+1)) hold up to 0x7E players; EOS lobbies hold 64 members.
-static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
-              "5..32 players: the room-size operands patched into the game and the loadout log bits (mission.cpp)");
+// What every machine is built for: user slots, packet sessions, voice chat HUD records and mission arrays for 1024
+// players. The size of a room is the host's choice when creating it (hostmode.h, 2..1024); EOS keeps at most 64 of
+// its members in the lobby (rooms.h, lobbystate.h), the rest are the plugin's (docs/net-re/roomsize.md).
+// The game's own bounds of four were rewritten in place while they fit their operands (imm8: 0x7F at most); a
+// room of 1024 does not, so those compares are widened through caves (widecmp.h, SessionCompares and
+// MissionCompares), and the two other byte operands derived from the count were rewritten without it (patches.cpp).
+constexpr int kMaxPlayers = 1024;
+static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 0x7FFFFFFF / 0x50,
+              "the widened bounds and the imm32 allocations derived from the room size");
+// What Epic's services hold: an EOS lobby at most 64 members, a Steam lobby (the step a room is created and joined
+// through before its EOS lobby) at most 250. A larger room keeps its size in the lobby attribute kRoomSizeKey
+// (lobbystate.h) and its lobbies at these capacities; members past them are the plugin's (docs/net-re/roomsize.md).
+constexpr int kEosLobbyMembers = 64;
+constexpr int kSteamLobbyMembers = 250;
+// The lobby attribute (int64) a MultiSlot room's size is published in.
+constexpr const char* kRoomSizeKey = "MS_ROOMSIZE";
+
+// The online HUD's per-player colour tables (HudColourPatches): one entry per colour of hudcolours.h, and the index
+// they are read with wraps around them, so player 33 shares player 1's colour. Their operands are imm8, so this
+// count stays below 0x80 (a lamp texture of 1024 colours is no use to anyone either).
+constexpr int kHudTablePlayers = 32;
+static_assert(kHudTablePlayers > kVanillaPlayers && kHudTablePlayers < 0x80, "HUD tables: imm8 operands");
 
 // Lobby SEARCH_TYPE. Vanilla rooms publish 0x90+k (k = 1..4) and a search asks for the range
 // [0x91, 0x90+m]; joining checks (v & ~0xF) == 0x90. MultiSlot rooms publish the mirror of the vanilla
@@ -34,6 +50,8 @@ static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
 // to join them: everyone in a room has to link to everyone and simulate missions the same way. Everything
 // derived from the centre is computed in patches.cpp, so a new family is this constant plus new tests.
 // Raising kMaxPlayers means a new family too: a room of nine needs nine user slots on every machine in it.
+// The decode above can only take centres 0x53 and 0x54 below the last one (0x90 - low mirror must stay below 0x80),
+// and 0x54 lies on upstream's grid, so 0x53 is the last family this scheme has.
 //
 // Families so far (published values 2*centre-0x94 .. 2*centre-0x91):
 //   0x74 -> 0x54..0x57  upstream 1.2.6+ and EDF6Coop 8p up to 2.2.x (eight slots)
@@ -42,11 +60,12 @@ static_assert(kMaxPlayers > kVanillaPlayers && kMaxPlayers <= 32,
 //   0x66 -> 0x38..0x3B  EDF6Coop 16p up to 2.2.x
 //   0x5E -> 0x28..0x2B  EDF6Coop 24p up to 2.2.x
 //   0x5A -> 0x20..0x23  EDF6Coop 32p up to 2.2.x
-//   0x56 -> 0x18..0x1B  EDF6Coop 2.3.0+: one build with 32 slots, rooms of any size
+//   0x56 -> 0x18..0x1B  EDF6Coop 2.3.0 .. 2.4.x: one build with 32 slots, rooms of any size up to 32
+//   0x53 -> 0x12..0x15  EDF6Coop with 1024 slots: rooms of 2..1024
 // Each build's join check accepts its own family only, so a 2.2.x machine with eight slots is never let into
 // a room of nine, and no family shares a value with another. The EDF6Coop families sit off upstream's grid of
 // fours (0x70, 0x6C, ... are its next ones), so a later upstream family can never share a value with them.
-constexpr std::uint32_t kSearchTypeCenter = 0x56;
+constexpr std::uint32_t kSearchTypeCenter = 0x53;
 
 // Bytes replaced at a fixed RVA. `original` is verified before anything is written.
 struct Patch {
@@ -78,6 +97,9 @@ std::vector<Patch> GuestPatches();
 // included: a user without a slot gets no P2P link, and the HUD writes a fifth record past its vector. In
 // rooms of four or fewer the extra entries stay empty, as the unused ones of smaller rooms already do.
 std::vector<Patch> SessionPatches();
+// The bounds of four in the same three constructors that only an imm8 held: Users' slot vector size and capacity
+// checks, and the voice chat HUD's record reserve check and move limit, widened to kMaxPlayers (widecmp.h).
+std::vector<WideCompare> SessionCompares();
 // Redirected to RoomCountAndCapacity and RoomFullCount (rooms.h), in this order.
 std::vector<CallSite> GuestCalls();
 // Room screen member pages (roomview.h): two calls to BuildPanelsHook, then UpdateVoiceIconsHook.
@@ -111,6 +133,9 @@ PointerSlot MainFrameSlot();
 // changed instruction computes what the game computed: records and array entries 1-4 stay where the
 // game reads them, only indices 4..7 reach the new storage.
 std::vector<Patch> MissionPatches();
+// The mission phase's index bounds of four (record replies, record stores, player objects, FindPlayerIndex, the
+// player loops of two script modes, result items), widened to kMaxPlayers (widecmp.h).
+std::vector<WideCompare> MissionCompares();
 std::vector<MidSite> MissionHooks();
 std::vector<CallSite> MissionCalls();
 // The online HUD (status lamps, chat balloons, radar markers) keeps one colour per player in tables of four that

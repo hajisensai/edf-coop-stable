@@ -85,7 +85,8 @@ int main() {
     }
     // Every count the mod supports, against the factors the README and the INI promise (tenths, half up).
     // x1.0 up to four, then +0.2 per player: x1.8 at eight ... x6.6 at 32.
-    const auto factorTenths = [](int players) { return 10 + 2 * (std::min(std::max(players, 4), kMaxPlayers) - 4); };
+    // Past kEnemyScalePlayers the factor stays at x6.6: a room of 1024 does not get 205 times the enemies.
+    const auto factorTenths = [](int players) { return 10 + 2 * (std::min(std::max(players, 4), kEnemyScalePlayers) - 4); };
     bool factors = true;
     for (int players = 1; players <= kMaxPlayers; ++players)
         for (const int count : {1, 2, 3, 5, 10, 150}) {

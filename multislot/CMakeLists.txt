@@ -102,7 +102,8 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
+    src/widecmp.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -178,6 +179,11 @@ add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp 
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
 
+# Room size (docs/net-re/roomsize.md): widened compares run in-process.
+add_executable(WideCompareTests tests/widecmp_test.cpp src/widecmp.cpp src/code.cpp src/patches.cpp)
+target_compile_options(WideCompareTests PRIVATE ${WARNINGS})
+add_test(NAME WideCompares COMMAND WideCompareTests)
+
 add_executable(MissionTests tests/mission_test.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(MissionTests PRIVATE ${WARNINGS})
 add_test(NAME MissionSlots COMMAND MissionTests)
@@ -245,7 +251,7 @@ target_compile_options(RefusalTests PRIVATE ${WARNINGS})
 add_dependencies(RefusalTests EDF6Coop)
 add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6Coop>" "${CMAKE_BINARY_DIR}/refusaltest")
 
-add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
+add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp src/widecmp.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6Coop)

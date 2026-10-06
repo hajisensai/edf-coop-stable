@@ -43,6 +43,7 @@ enum class NetFeature : std::uint32_t {
     TrafficClasses = dn::kCapTrafficClasses,
     Mesh = dn::kCapMesh,
     Fragments = dn::kCapFragments,
+    Compression = dn::kCapCompression,  // XPRESS of the game's plaintext (netcompress.h)
     // Reserved for the later workstreams; each gets its [Netcode] key when it lands.
     PlayerSync = 1u << 8,      // W2: player pose replication with velocity and extrapolation
     HitAuthority = 1u << 9,    // W3: the shooter decides hits
@@ -51,6 +52,9 @@ enum class NetFeature : std::uint32_t {
 };
 
 bool NetFeatureActive(NetFeature feature);
+// Tests only: NetFeatureActive(feature) answers `active` whatever the room runs, until ClearNetFeatureForTest.
+void SetNetFeatureForTest(NetFeature feature, bool active);
+void ClearNetFeatureForTest();
 // On in this machine's INI (whatever the room runs).
 bool NetFeatureEnabledLocally(NetFeature feature);
 

@@ -57,7 +57,9 @@ void StateLearner::observe(const std::string& remote, uint32_t type, uint64_t no
     Run& run = runs_[{remote, type}];
     // Several records of a type in one datagram are one update, not a run of them.
     if (run.lastMs != 0 && nowMs == run.lastMs) return;
-    run.steady = run.lastMs != 0 && nowMs - run.lastMs <= kMaxIntervalMs ? run.steady + 1 : 0;
+    // A late update (the sender's frame hitched) halves the run instead of ending it; a type sent with gaps over and
+    // over never gets there.
+    if (run.lastMs != 0) run.steady = nowMs - run.lastMs <= kMaxIntervalMs ? run.steady + 1 : run.steady / 2;
     run.lastMs = nowMs;
     if (run.steady >= kSamples) state_[type] = true;
 }

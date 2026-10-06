@@ -31,6 +31,7 @@
 #include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
+#include "netcompress.h"
 #include "netfeature.h"
 #include "nettraffic.h"
 #include "packetfit.h"
@@ -251,6 +252,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     }
     // Netcode rewrite W1: the controller's plaintext datagrams, for their class and the per-type traffic log.
     for (const auto& call : NetTrafficCalls()) redirects.push_back({call, NetTrafficCallHandler(call.rva)});
+    for (const auto& call : NetCompressCalls()) redirects.push_back({call, NetCompressCallHandler(call.rva)});
     std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook)},
                                  {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)}};
     if (mission)
@@ -616,6 +618,7 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitPacketFit(base);
     InitNetTraffic(base);
     InitNetFeature(iniPath);
+    InitNetCompress(base, NetFeatureEnabledLocally(NetFeature::Compression));
     if (const UINT budget = GetPrivateProfileIntW(L"Test", L"SplitSyncBudget", 0, iniPath); budget && mission) {
         SetSyncBudget(budget);
         Log("TEST SplitSyncBudget=%u: start messages you host keep at most that many bytes inline and send the "

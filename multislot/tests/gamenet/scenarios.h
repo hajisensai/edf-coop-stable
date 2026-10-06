@@ -452,6 +452,22 @@ inline std::vector<Seat> DirectSeats(int count, const std::string& step, const s
     return seats;
 }
 
+// XPRESS on the game's plaintext (netcompress.h): eight players start a mission while every machine also sends a
+// 16-byte event every frame (more would not fit beside the start message, kBatchedAllowance). Datagrams are packed once the room shows that everyone unpacks them, and
+// the start sync and every record still arrive as sent.
+inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckMission(machines, network, {true, false, false});
+    std::size_t packing = 0, unpacking = 0;
+    for (const auto& machine : machines) {
+        const std::string line = LastLine(machine.text, "NETCODE XPRESS: ");
+        if (line.empty()) continue;
+        packing += line.find("XPRESS: 0 datagrams packed") == std::string::npos ? 1 : 0;
+        unpacking += line.find(", 0 unpacked") == std::string::npos ? 1 : 0;
+    }
+    Check(packing > 0 && unpacking > 0, std::to_string(packing) + " machines packed datagrams, " +
+                                            std::to_string(unpacking) + " unpacked them");
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
@@ -469,6 +485,8 @@ inline const std::vector<Scenario>& NetScenarios() {
          {{"EDF6NET_SECONDS", "8"}}},
         {"meshflap", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=7000\r\nPeerBlockForMs=1500\r\n"), 120000,
          &CheckMeshFlap, {{"EDF6NET_SECONDS", "10"}}},
+        {"mission8xpress", Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 150000,
+         &CheckXpressMission, {{"EDF6NET_CHATTER", "16"}, {"EDF6NET_SETTLE", "2500"}}},
     };
     return all;
 }

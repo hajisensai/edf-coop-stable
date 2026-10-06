@@ -68,8 +68,9 @@ inline bool isControllerRecord(uint32_t type) {
 enum class TrafficClass : uint8_t { Unknown = 0, State = 1, Event = 2, Control = 3 };
 const char* trafficClassName(TrafficClass c);
 
-// Which unreliable record types behave as state: sent to the same player at least kSamples times in a row, each
-// within kMaxIntervalMs of the one before. A type once learnt stays state for the room (forget() on leaving it):
+// Which unreliable record types behave as state: sent to the same player kSamples times, each within kMaxIntervalMs
+// of the one before (a later one halves the count: a hitch does not undo the run, a type sent with gaps never
+// learns). A type once learnt stays state for the room (forget() on leaving it):
 // a player that stops moving sends less often, and its next update still replaces the last one. Thread-safe.
 class StateLearner {
 public:

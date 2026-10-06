@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/netcompress.h"
 #include "../src/netfeature.h"
 
 using namespace multislot;
@@ -110,9 +111,40 @@ void TestCaps() {
     Check(!NetFeatureActive(NetFeature::Mesh), "not started: NetFeatureActive is false");
 }
 
+// XPRESS on the plaintext (netcompress.h): a datagram's records packed and back, byte for byte.
+void TestPacking() {
+    Check(PackingAvailable(), "XPRESS is there (ntdll)");
+    std::vector<std::uint8_t> records;
+    for (int r = 0; r < 12; ++r) {  // records shaped like the game's: a header, then data that repeats
+        const std::uint32_t header = 80u << 20 | 0x3000;
+        records.insert(records.end(), reinterpret_cast<const std::uint8_t*>(&header), reinterpret_cast<const std::uint8_t*>(&header) + 4);
+        for (int i = 0; i < 80; ++i) records.push_back(static_cast<std::uint8_t>(i % 9 + r));
+    }
+    std::vector<std::uint8_t> packed, back;
+    Check(PackPlaintext(records.data(), records.size(), packed), "a datagram of repeating records packs");
+    Check(packed.size() + kPackSavingMin <= records.size() && IsPackedPlaintext(packed.data(), packed.size()),
+          "packed, it is smaller and says so");
+    Check(UnpackPlaintext(packed.data(), packed.size(), back) && back == records, "unpacked, it is what was sent");
+    Check(!IsPackedPlaintext(records.data(), records.size()), "a record header never reads as packed (its low byte is 0)");
+    Check(!PackPlaintext(records.data(), kPackMinimum - 1, packed), "a small one is not packed");
+    std::vector<std::uint8_t> noise(600);
+    std::uint64_t x = 0x9E3779B97F4A7C15ull;  // xorshift: bytes with nothing to pack
+    for (auto& b : noise) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        b = static_cast<std::uint8_t>(x >> 32);
+    }
+    Check(!PackPlaintext(noise.data(), noise.size(), packed), "what does not shrink is not packed");
+    PackPlaintext(records.data(), records.size(), packed);
+    packed[4] = 0xFF;  // claims another size
+    Check(!UnpackPlaintext(packed.data(), packed.size(), back), "a damaged one is refused");
+}
+
 }  // namespace
 
 int main() {
+    TestPacking();
     TestRoomAgrees();
     TestUnpublishedMember();
     TestMismatchedProtocol();

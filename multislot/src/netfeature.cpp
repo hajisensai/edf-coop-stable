@@ -6,6 +6,7 @@
 #include <cstdlib>
 
 #include "log.h"
+#include "netcompress.h"
 
 namespace multislot {
 namespace {
@@ -61,6 +62,17 @@ void Observe(const LobbyView& view) {
                 m.id.c_str(), static_cast<long long>(m.protocol), static_cast<long long>(settings.protocol),
                 settings.rejectMismatched ? " (it could not be removed)" : " (RejectMismatched=0)");
         }
+    }
+    // What packing did (netcompress.h), every StatsSeconds while it does anything.
+    static ULONGLONG lastPackLog = 0;
+    const ULONGLONG tick = GetTickCount64();
+    if (tick - lastPackLog >= dn::netcodeOptions().statsIntervalMs) {
+        lastPackLog = tick;
+        std::uint64_t packed = 0, saved = 0, unpacked = 0;
+        TakePackStats(packed, saved, unpacked);
+        if (packed || unpacked)
+            Log("NETCODE XPRESS: %llu datagrams packed (%llu bytes saved), %llu unpacked", static_cast<unsigned long long>(packed),
+                static_cast<unsigned long long>(saved), static_cast<unsigned long long>(unpacked));
     }
     // Once per change of the room's answer, what runs.
     static std::string said;
@@ -171,7 +183,8 @@ std::string FormatCaps(std::uint32_t caps) {
         NetFeature feature;
         const char* name;
     } names[] = {{NetFeature::TrafficClasses, "TrafficClasses"}, {NetFeature::Mesh, "Mesh"},
-                 {NetFeature::Fragments, "Fragments"},           {NetFeature::PlayerSync, "PlayerSync"},
+                 {NetFeature::Fragments, "Fragments"},           {NetFeature::Compression, "Compression"},
+                 {NetFeature::PlayerSync, "PlayerSync"},
                  {NetFeature::HitAuthority, "HitAuthority"},     {NetFeature::WorldAuthority, "WorldAuthority"},
                  {NetFeature::PluginObjects, "PluginObjects"}};
     std::string out;
@@ -193,8 +206,26 @@ bool NetFeatureEnabledLocally(NetFeature feature) {
     return (settings.caps & static_cast<std::uint32_t>(feature)) != 0;
 }
 
+std::atomic<std::uint32_t> forcedMask{0}, forcedOn{0};  // SetNetFeatureForTest
+
 bool NetFeatureActive(NetFeature feature) {
-    return started && NetFeatureEnabledLocally(feature) && NetGate().Active(static_cast<std::uint32_t>(feature));
+    const auto bit = static_cast<std::uint32_t>(feature);
+    if (forcedMask & bit) return (forcedOn & bit) != 0;
+    return started && NetFeatureEnabledLocally(feature) && NetGate().Active(bit);
+}
+
+void SetNetFeatureForTest(NetFeature feature, bool active) {
+    const auto bit = static_cast<std::uint32_t>(feature);
+    forcedMask |= bit;
+    if (active)
+        forcedOn |= bit;
+    else
+        forcedOn &= ~bit;
+}
+
+void ClearNetFeatureForTest() {
+    forcedMask = 0;
+    forcedOn = 0;
 }
 
 std::uint32_t LinkBudgetBytesPerSec(const std::string& peer) { return dn::linkBudgetBytesPerSec(peer); }
@@ -212,6 +243,11 @@ void InitNetFeature(const wchar_t* iniPath) {
     if (flag(L"TrafficClasses", 1)) caps |= static_cast<std::uint32_t>(NetFeature::TrafficClasses);
     if (flag(L"Mesh", 1)) caps |= static_cast<std::uint32_t>(NetFeature::Mesh);
     if (flag(L"Fragments", 1)) caps |= static_cast<std::uint32_t>(NetFeature::Fragments);
+    if (flag(L"Compression", 1)) caps |= static_cast<std::uint32_t>(NetFeature::Compression);
+    // The later workstreams' parts (W2-W4), read here so that every part of the netcode has its key in [Netcode].
+    if (flag(L"PlayerSync", 1)) caps |= static_cast<std::uint32_t>(NetFeature::PlayerSync);
+    if (flag(L"HitAuthority", 1)) caps |= static_cast<std::uint32_t>(NetFeature::HitAuthority);
+    if (flag(L"WorldAuthority", 1)) caps |= static_cast<std::uint32_t>(NetFeature::WorldAuthority);
     settings.caps = caps;
     settings.rejectMismatched = flag(L"RejectMismatched", 1);
     if (const int test = static_cast<int>(GetPrivateProfileIntW(L"Test", L"NetProtocol", 0, iniPath)); test > 0) {

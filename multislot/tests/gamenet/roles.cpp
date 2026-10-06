@@ -317,6 +317,10 @@ std::size_t ChatterBytes() {
 int Mission(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
+    // EDF6NET_SETTLE=<ms>: stay in the room that long first (the lobby beat lets features come on, netfeature.h).
+    char settle[16]{};
+    if (GetEnvironmentVariableA("EDF6NET_SETTLE", settle, sizeof(settle)))
+        TickUntil(machine, static_cast<unsigned>(std::atoi(settle)), [] { return false; });
     Transport transport;
     if (!Connect(machine, room, transport)) return 1;
     int place = 0;

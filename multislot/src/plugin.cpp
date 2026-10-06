@@ -21,6 +21,7 @@
 #include "fakemembers.h"
 #include "hostdataopen.h"
 #include "weaponguard.h"
+#include "userslots.h"
 #include "hostdatanet.h"
 #include "hostmode.h"
 #include "joinlog.h"
@@ -215,6 +216,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
     if (hostData)
         for (const auto& site : HostDataHooks()) hooks.push_back({site, &HostDataOpenHandler});
+    for (const auto& site : UserSlotHooks()) hooks.push_back({site, UserSlotHookHandler(site.rva)});
     const auto guard = WeaponGuardHooks();
     hooks.push_back({guard[0], &RoomWeaponsHandler});
     if (!mission) hooks.push_back({guard[1], &MissionWeaponsHandler});
@@ -773,6 +775,9 @@ bool LoadRooms(const wchar_t* iniPath) {
     // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
     // datagrams follow interest management within each path's budget (netaoi.h).
     dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });
+    // Member slots (userslots.h): a host sends its game's slots, every other game adds each member in the host's slot.
+    dn::setGameSlotsSource(&GameSlotTable);
+    SetUserSlotSources([](const std::string& member) { return dn::hostSlotOf(member); }, &ProductUserIdText);
     // [Test] RoomCapacity: the room's size where the test network's lobby cannot say it (gamenet joinfull).
     if (const UINT testCapacity = GetPrivateProfileIntW(L"Test", L"RoomCapacity", 0, iniPath)) {
         static UINT capacity = 0;

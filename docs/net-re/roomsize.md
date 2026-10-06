@@ -104,16 +104,23 @@
 - 成员表的唯一来源是 eos::User 集合。12BD460 是成员同步：`EOS_Lobby_CopyLobbyDetailsHandle` 拿到大厅副本，`GetMemberCount`/`GetMemberByIndex` 逐个读成员；没有 User 的就用 Users::Add（12B7F50）新建，并打上「在房间里」标志（User+0x10 bit 2）。游戏收到成员状态通知（12B3380 注册的处理函数）时会走到这里。
 - 房间成员列表 7468C0（房间画面、语音 HUD）遍历全部 User，过滤条件是 12BE510 → 12AC6F0 读的 bit 2。开局同步的 GameImpl 列的也是这些 User。PlayerInfo 不用另外造：只要 12BD460 读到某个成员，房间画面、HUD 记录和开局同步记录就都有它。
 - W1 的 `hookDetailsMemberCount`/`MemberByIndex`（`extraMembers`）在本房间的大厅副本上补上 RoomView 里 Epic 没列的成员，`tellGame` 再发 JOINED 通知。所以 W1 已经让游戏认到这些成员，W6 没有重复造。
-- **W6 修的根因：成员顺序。** 游戏按 Users::Add 的先后给成员编号（User+0x40 网络序号），包和开局同步都按这个序号走，所以每台机器添加成员的顺序必须一致。原来 RoomView 用 `std::set` 存成员，`setRoomMembers` 也会排序，结果：
-  - 大厅里的成员看到的是「Epic 顺序 + 大厅外成员」；
-  - 经直连加入的成员看到的是按 ID 排序的整张表；
-  - 两边序号不一致，开局同步卡住（gamenet 实测 3 人各自 `MissionSync_Update` 一直返回 1）。
-- 现在的做法（`src/room_view.*`）：
-  - RoomView 按添加顺序保存成员；
-  - `followHost` 按房主给的顺序发 JOINED；
-  - 房主发出的 `Room` 消息用 `roomOrder(Epic 成员, 视图)`：先是 Epic 顺序的大厅成员，再是按加入先后的大厅外成员；
-  - `DirectNet::setRoomMembers` 不再排序，顺序变化也算房间变化。
-- 前提：大厅里的成员要能收到房主的 `Room` 消息，也就是和房主有直连。默认 AutoJoin 会自动连上房主。和房主没有直连的成员（AutoJoin=0、连不上、或没装插件）的游戏看不到大厅外成员，这一点无法在插件这边补救。
+- **成员编号就是 eos::Users 的槽位，不会紧凑**（逆向核实）：
+  - Users::Add（12B7F50）在 12B802E–12B806E 的循环里找第一个空槽，结果存在 ecx 和 [rbp]，User 的构造函数（12B7610）拿到 &[rbp]；
+  - Users::Remove（12B87C0）只把 slots[User+0x40] 置空，其余成员不动，下一个加入的人就落进这个空槽；
+  - 这个编号（User+0x40，网络序号）写进游戏的包里，开局同步时每台机器也会写上自己的编号（gamenet 实测：只交换两个客人的编号，第 2 条记录就丢了）。
+- 所以要求的是每台游戏里每个成员都占同一个槽位，光有同一个添加顺序不够：
+  - 例子：房主上 A 离开后 X 补进 A 空出的槽位 1。X 按 Epic 列表的顺序（房主、B、X）添加，会把自己放到槽位 2，和房主对不上。
+  - 不经插件的原版游戏也有同样的缺陷：原版也是按 Epic 列表顺序添加成员。
+- 做法：房主游戏的槽位表是唯一的依据。
+  - 采集：`multislot/src/userslots.*` 在 Users::Add 选槽处（12B806E）和 Users::Remove 置空处（12B8A24）各挂一个 hook，按房间记录本机游戏的槽位表。
+  - 下发：房主的 `Room` 列表直接发这张表，下标就是槽位，`""` 表示空槽（`eos_hooks.cpp` hostRoomTick）。
+  - 客人：跟随房主槽位（`RoomView::slotted`）以后，Users::Add 把成员放进房主给它的槽位（`ChooseUserSlot`，要求这个槽位在本机是空的）。
+  - 没进房主槽位表的成员先不交给游戏：大厅副本只列房主槽位表里的成员，按槽位顺序（`slottedMembers`）；Epic 发来的这类成员的 JOINED 先扣住（`admitStatus`），等房主的游戏有了它，再由 followHost 补发。
+  - 通过 Epic 加入一个房主开了直连的房间（大厅上有 `EDF6DN_HOSTADDR`）：游戏的 JoinLobby 完成回调要等房主槽位到了再发（`lobbyEnteredWrapper` 先挂起，`parkedEntryTick` 处理），游戏一进房就按房主槽位添加全部成员（`RoomView::adoptHost`）。最多等 10 s，超时就按 Epic 列表进房。
+  - 房主迁移：新房主发的是它自己游戏的槽位表。这张表本来就跟旧房主一致，所以沿用了旧序列。
+- 还没覆盖的：
+  - 和房主没有直连的成员拿不到槽位表，按原版方式添加；
+  - 房主刚建房、大厅属性还没发布时就进来的人不会被挂起。这时房主的槽位还没有空洞，也没有大厅外成员，Epic 顺序和槽位一致，所以不受影响。
 
 ### 4.2 人数显示
 

@@ -103,7 +103,7 @@ add_library(EDF6Coop SHARED
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
-    src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp src/netplayer_members.cpp
+    src/userslots.cpp src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp src/netplayer_members.cpp
     src/widecmp.cpp src/interest.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
@@ -166,7 +166,8 @@ if(NOT EXISTS "${EDF_DLL}")
                     "(PatchTablesMatchEDF, PluginLoad_*, GameNet_*) will be reported as skipped")
 endif()
 
-add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
+add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp
+    src/userslots.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
 add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
 set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
@@ -350,7 +351,7 @@ target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
 target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
 add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
-foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull)
+foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull slotorder)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

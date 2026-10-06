@@ -60,6 +60,11 @@ public:
     // `members`: every member's EOS ProductUserId in lobby order (the game adds them in that order, which gives
     // each its network index), this machine among them.
     bool Start(const Machine& machine, const std::string& lobbyId, const std::vector<std::string>& members);
+    // eos::Users::Add (12B7F50) / Users::Remove (12B87C0) of one member, as the game's member sync (12BD460) and its
+    // member-status handler do when one joins or leaves after Start.
+    bool Add(const std::string& member);
+    bool Remove(const std::string& member);
+    std::vector<std::string> Members() const;  // added and not removed, in the order added
     // One frame of the game's network (eos::internal_Core::Update): EOS_Platform_Tick through EDF.dll's import,
     // the P2P receive loop and link handshakes (p2p::Manager), then the packet controller.
     void Tick() const;
@@ -85,6 +90,7 @@ private:
     Shared users_, manager_, controller_;
     std::vector<std::pair<std::string, Shared>> members_;  // eos::User of every member
     std::vector<Shared> subscriptions_;                     // held weakly by the controller: kept alive here
+    void* local_ = nullptr;                                 // the local user (Room+0x30), for our own Add
 };
 
 }  // namespace gamenet

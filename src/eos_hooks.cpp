@@ -238,6 +238,19 @@ struct State {
     std::atomic<StateSendFilter> stateFilter{nullptr};
     std::atomic<BulkHandler> bulkHandler{nullptr};
     std::atomic<RoomCapacitySource> roomCapacity{nullptr};
+    std::atomic<GameSlotsSource> gameSlots{nullptr};
+    // A join through Epic into a room whose host hosts a direct link: the game's completion waits for the host's
+    // member slots (parkedEntryTick), so its game takes every member in the host's slots from the start.
+    struct ParkedEntry {
+        bool active = false;
+        EOS_Lobby_OnLobbyIdCallback callback = nullptr;
+        EOS_Lobby_LobbyIdCallbackInfo info{};
+        std::string lobbyId;
+        uint64_t sinceMs = 0;
+    };
+    std::mutex parkedMutex;
+    ParkedEntry parked;
+    std::atomic<bool> parkedActive{false};  // parked.active, read without parkedMutex
     std::atomic<bool> testLoopbackHosts{false};
     std::atomic<uint32_t> netProtocol{0}, netCaps{0};
     std::atomic<bool> refuseOtherProtocols{false};
@@ -551,6 +564,14 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
+    // In a room whose host's slots we follow, a member joins our game once the host's game has it: then we know its
+    // slot (room_view.h). Epic's word comes first otherwise; the host's say (followHost) brings it.
+    if (status == kJoined && !self && g.view.slotted() && g.view.hostSlot(target) < 0) {
+        logRateLimited("room-unslotted", 5000,
+                       "ROOM %s JOINED: held back until the room's host's game has it (its slot is not known yet)",
+                       shortId(target).c_str());
+        return false;
+    }
     if (!g.view.admit(target, status)) return false;
     if (ends) g.endedRoom = lobbyId;
     return true;
@@ -836,6 +857,35 @@ EOS_NotificationId hookAddNotifyMemberUpdate(EOS_HLobby h, const EOS_Lobby_AddNo
 void endVirtualRoom(const char* why);
 void releaseVirtualRoom();
 
+bool entryParked() { return g.parkedActive.load(); }
+
+// Whether lobby `lobbyId` says its host hosts a direct link (kHostAddressKey, a lobby attribute every searcher reads):
+// then its member slots come over that link (room_view.h).
+bool lobbyAdvertisesHost(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user) {
+    const Api& a = g.api;
+    if (!lobby || !lobbyId || !user || !a.copyDetails || !a.attributeCount || !a.copyAttribute || !a.releaseAttribute ||
+        !a.releaseDetails)
+        return false;
+    EOS_Lobby_CopyLobbyDetailsHandleOptions co{};
+    co.ApiVersion = 1;
+    co.LobbyId = lobbyId;
+    co.LocalUserId = user;
+    EOS_HLobbyDetails details = nullptr;
+    if (a.copyDetails(lobby, &co, &details) != EOS_Success || !details) return false;
+    bool advertised = false;
+    EOS_LobbyDetails_GetAttributeCountOptions count{1};
+    const uint32_t n = a.attributeCount(details, &count);
+    for (uint32_t i = 0; i < n && !advertised; ++i) {
+        EOS_LobbyDetails_CopyAttributeByIndexOptions ai{1, i};
+        EOS_Lobby_Attribute* attribute = nullptr;
+        if (a.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data && attribute->Data->Key)
+            advertised = std::strcmp(attribute->Data->Key, kHostAddressKey) == 0;
+        if (attribute) a.releaseAttribute(attribute);
+    }
+    a.releaseDetails(details);
+    return advertised;
+}
+
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
 void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     auto* call = static_cast<LobbyCall*>(i->ClientData);
@@ -870,9 +920,25 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
+    const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
+    // A join into a room whose host hosts a direct link: the game enters once the host's member slots are here.
+    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner && g.autoJoinOn &&
+        lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)) {
+        std::lock_guard<std::mutex> lock(g.parkedMutex);
+        g.parked.active = true;
+        g.parked.callback = cb;
+        g.parked.info = copy;
+        g.parked.lobbyId = i->LobbyId ? i->LobbyId : "";
+        g.parked.sinceMs = GetTickCount64();
+        g.parkedActive = true;
+        logf("ROOM entering room %s once its host's member slots are here (its game numbers the members by them)",
+             g.parked.lobbyId.c_str());
+        delete call;
+        return;
+    }
     // EOS runs the callback again after a non-final result (EOS_OperationWillRetry): keep the call
     // until the final one, or the next run reads freed memory.
-    if (!g.api.isComplete || g.api.isComplete(i->ResultCode)) delete call;
+    if (final) delete call;
     cb(&copy);
 }
 
@@ -1449,13 +1515,16 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
-        // The order every member adds them in (roomOrder): Epic's members as Epic lists them, then the others.
-        members = known ? roomOrder(epic, g.view.members()) : g.view.members();
+        // Our game's slots (room_view.h): every member's game takes each member in the same one. Until the game has
+        // its slots, the order they would take them in.
+        if (GameSlotsSource slots = g.gameSlots.load()) members = slots();
+        if (members.empty()) members = known ? roomOrder(epic, g.view.members()) : g.view.members();
     }
     base->setRoomMembers(std::move(members));
 }
 
 bool inVirtualRoom();
+bool entryParked();
 
 // A member: its game follows who the host's game has in the room (RoomView::followHost), once Epic had its
 // chance to say the same. In a room Epic does not know we are in, the host is all there is to hear.
@@ -1476,6 +1545,7 @@ void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
             g.view.heardHost(host);
         }
         room = g.viewRoom;
+        if (entryParked()) return;  // the game is not in the room yet: it enters with the host's members
         due = g.view.settle(g.view.followHost(), now, delay);
     }
     for (const StatusChange& c : due)
@@ -1483,10 +1553,41 @@ void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");
 }
 
+// The parked entry (lobbyEnteredWrapper) completes once we follow the host's slots, the room is gone, or after
+// kParkedEntryMs (a host whose link never comes up: the game enters with Epic's members, as without the plugin).
+constexpr uint64_t kParkedEntryMs = 10000;
+void parkedEntryTick(uint64_t now) {
+    EOS_Lobby_OnLobbyIdCallback callback = nullptr;
+    EOS_Lobby_LobbyIdCallbackInfo info{};
+    std::string lobbyId;
+    bool slotted = false;
+    {
+        std::lock_guard<std::mutex> lock(g.parkedMutex);
+        if (!g.parked.active) return;
+        {
+            std::lock_guard<std::mutex> view(g.viewMutex);
+            slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
+            const bool gone = g.viewRoom != g.parked.lobbyId;
+            if (!slotted && !gone && now - g.parked.sinceMs < kParkedEntryMs) return;
+            if (slotted) g.view.adoptHost();
+        }
+        callback = g.parked.callback;
+        info = g.parked.info;
+        lobbyId = g.parked.lobbyId;
+        g.parked = {};
+        g.parkedActive = false;
+    }
+    logf("ROOM entering room %s %s", lobbyId.c_str(),
+         slotted ? "with its host's member slots" : "without its host's member slots (they did not come)");
+    info.LobbyId = lobbyId.c_str();
+    callback(&info);
+}
+
 void roomTick(uint64_t now) {
     static uint64_t lastMs = 0;
     if (now - lastMs < kRoomTickMs) return;
     lastMs = now;
+    parkedEntryTick(now);
     std::shared_ptr<DirectNet> base = g.baseNet.load();
     const bool hosting = g.marker.inLobby() && g.marker.isOwner();
     if (hosting) {
@@ -2390,7 +2491,7 @@ EOS_EResult hookCopyDetails(EOS_HLobby h, const EOS_Lobby_CopyLobbyDetailsHandle
     }
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
-        d.members = g.view.members();
+        d.members = g.view.slotted() ? g.view.hostMembers() : g.view.members();
     }
     *out = g.fakes.make(std::move(d));
     return EOS_Success;
@@ -2440,9 +2541,37 @@ std::vector<std::string> extraMembers(EOS_HLobbyDetails h, uint32_t epicCount) {
     return extra;
 }
 
+// Epic's copy `h` of the room we are in while we follow its host's slots: the members its host's game has that our
+// game was told of, in slot order - the members the game may take now (room_view.h; one Epic lists that the host's
+// game does not have yet comes once it has, and is told then). False for every other lobby, and while we do not
+// follow the host's slots.
+bool slottedMembers(EOS_HLobbyDetails h, std::vector<std::string>* out) {
+    std::string room;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (!g.view.active() || !g.view.slotted()) return false;
+        room = g.viewRoom;
+        out->clear();
+        for (const std::string& m : g.view.hostMembers())
+            if (g.view.has(m)) out->push_back(m);
+        // One our game took before we followed the host's slots, which the host's game does not have (yet): it stays.
+        for (const std::string& m : g.view.members())
+            if (g.view.hostSlot(m) < 0) out->push_back(m);
+    }
+    const Api& a = g.api;
+    EOS_LobbyDetails_CopyInfoOptions io{1};
+    EOS_LobbyDetails_Info* info = nullptr;
+    if (!a.copyInfo || !a.releaseInfo || a.copyInfo(h, &io, &info) != EOS_Success || !info) return false;
+    const bool ours = info->LobbyId && room == info->LobbyId;
+    a.releaseInfo(info);
+    return ours;
+}
+
 uint32_t hookDetailsMemberCount(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetMemberCountOptions* o) {
     FakeDetails d;
     if (g.fakes.lookup(h, &d)) return static_cast<uint32_t>(d.members.size());
+    std::vector<std::string> slotted;
+    if (!g_shutdown && slottedMembers(h, &slotted)) return static_cast<uint32_t>(slotted.size());
     const uint32_t count = g.outer.memberCount(h, o);
     return g_shutdown ? count : count + static_cast<uint32_t>(extraMembers(h, count).size());
 }
@@ -2452,6 +2581,8 @@ EOS_ProductUserId hookDetailsMemberByIndex(EOS_HLobbyDetails h, const EOS_LobbyD
     if (g.fakes.lookup(h, &d))
         return o && o->MemberIndex < d.members.size() ? idHandle(d.members[o->MemberIndex]) : nullptr;
     if (g_shutdown || !o) return g.outer.memberByIndex(h, o);
+    std::vector<std::string> slotted;
+    if (slottedMembers(h, &slotted)) return o->MemberIndex < slotted.size() ? idHandle(slotted[o->MemberIndex]) : nullptr;
     EOS_LobbyDetails_GetMemberCountOptions co{1};
     const uint32_t count = g.outer.memberCount(h, &co);
     if (o->MemberIndex < count) return g.outer.memberByIndex(h, o);
@@ -2715,6 +2846,13 @@ void setStateSendFilter(StateSendFilter filter) {
 }
 
 void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source; }
+
+void setGameSlotsSource(GameSlotsSource source) { g.gameSlots = source; }
+
+int hostSlotOf(const std::string& member) {
+    std::lock_guard<std::mutex> lock(g.viewMutex);
+    return g.view.active() && g.view.slotted() ? g.view.hostSlot(member) : -1;
+}
 
 uint64_t bulkUndelivered() { return g.bulkLost.load(); }
 

@@ -377,6 +377,7 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : PeerTimeoutCalls())
             Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves the room-leave check untouched");
         for (const auto& hook : PeerTimeoutHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves Users::Add untouched");
+        for (const auto& hook : UserSlotHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves the member slots alone");
         Check(GetFileAttributesW(layoutPath.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES,
               "Enabled=0 removes our menu layout (and the UI folder it was alone in)");
         Check(Contains(log, "Menu: removed Mods\\UI\\LYT_MAINFRAME.SGO"), "the removal is logged");
@@ -439,6 +440,7 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& hook : HostDataHooks()) Check(HookedInto(base, hook, plugin), hook.name);
         // The weapon guard's room info site; its mission start site is checked with the mission phase below.
         Check(HookedInto(base, WeaponGuardHooks()[0], plugin), "the weapon guard hooks the room info parser");
+        for (const auto& hook : UserSlotHooks()) Check(HookedInto(base, hook, plugin), hook.name);
         Check(SlotInto(base, MainFrameSlot(), plugin), "HUiMainFrame OnUpdate vtable slot points into the plugin");
         Check(Contains(log, eightPlayers ? "Hosting: 8Player MOD ON" : "Hosting: Player MOD OFF"), "the host mode setting is logged");
         Check(Contains(log, "EightPlayerRooms=1 from an earlier version") == (mode == L"host8"),

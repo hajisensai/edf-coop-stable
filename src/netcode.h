@@ -50,4 +50,8 @@ using BulkHandler = void (*)(const std::string& src, uint16_t tag, const uint8_t
 bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size_t size);
 void setBulkHandler(BulkHandler handler);
 
+// Tests only ([Test] PeerBlockAfterMs / PeerBlockForMs): the links between joiners lose everything from `afterMs`
+// from now for `forMs` (UINT32_MAX: for good), as when the NAT between them stops letting it through.
+void setTestPeerBlock(uint32_t afterMs, uint32_t forMs);
+
 }  // namespace dn

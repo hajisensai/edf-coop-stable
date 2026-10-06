@@ -23,6 +23,7 @@
 #include "../src/fake_lobby.h"
 #include "../src/hold.h"
 #include "../src/iat.h"
+#include "../src/netclass.h"
 #include "../src/netif.h"
 #include "../src/reliable.h"
 #include "../src/room_view.h"
@@ -3137,9 +3138,180 @@ void testRoomFollowsHost() {
     CHECK(a.hostRoom(&version).empty());
 }
 
+
+// --- Netcode rewrite W1: the joiners' direct links (mesh) and the paths between them ---
+
+struct Mesh {
+    dn::DirectNet host, a, b;
+    std::string port;
+    bool start(double drop = 0.0) {
+        dn::DirectOptions ho = hostOptions(0, drop);
+        if (!host.start(ho)) return false;
+        host.setLocalUser(kHost);
+        port = std::to_string(host.boundPort());
+        dn::DirectOptions ao = joinOptions("127.0.0.1:" + port, drop), bo = joinOptions("127.0.0.1:" + port, drop);
+        const std::string id = dn::processIdentity()->commitment();
+        ao.memberIds = bo.memberIds = {{kHost, id}, {kA, id}, {kB, id}};
+        if (!a.start(ao) || !b.start(bo)) return false;
+        a.setLocalUser(kA);
+        b.setLocalUser(kB);
+        return waitFor([&] { return a.canRoute(kB) && b.canRoute(kA); }, 10000);
+    }
+};
+
+// Sends `count` datagrams of `cls` from `from` to `toId` every `everyMs`, and returns what `to` got, in order of
+// arrival, and the longest gap between two arrivals.
+struct Arrivals {
+    std::vector<uint32_t> ids;
+    uint64_t longestGapMs = 0;
+};
+Arrivals stream(dn::DirectNet& from, const std::string& toId, dn::DirectNet& to, uint8_t cls, uint32_t count,
+                uint32_t everyMs, const std::function<void(uint32_t)>& each = nullptr) {
+    Arrivals got;
+    uint64_t last = 0;
+    auto drain = [&] {
+        dn::Delivered d;
+        uint8_t ch = 1;
+        while (to.pop(&ch, 1170, d)) {
+            uint32_t id = 0;
+            memcpy(&id, d.data.data(), 4);
+            got.ids.push_back(id);
+            const uint64_t now = GetTickCount64();
+            if (last) got.longestGapMs = std::max(got.longestGapMs, now - last);
+            last = now;
+        }
+    };
+    for (uint32_t i = 0; i < count; ++i) {
+        if (each) each(i);
+        std::vector<uint8_t> p(100, static_cast<uint8_t>(i));
+        memcpy(p.data(), &i, 4);
+        from.sendClassified(toId, "EDF6", 1, 0, p.data(), p.size(), cls);
+        std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+        drain();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    drain();
+    return got;
+}
+
+void testMeshLinksJoiners() {
+    printf("mesh: two joiners link directly; state goes over the direct link, not through the host\n");
+    Mesh m;
+    CHECK(m.start());
+    CHECK(m.a.pathTo(kB) == dn::Path::Relay);  // until the direct link is up and proven
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);  // the first datagram asks for the link
+    CHECK(waitFor([&] { return m.a.peerLinked(kB) && m.b.peerLinked(kA); }, 10000));
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 5000));
+    dn::Delivered first;
+    while (m.b.pop(nullptr, 1170, first)) {}  // the datagram that asked for the link
+    m.host.takeWireTraffic();
+    const Arrivals got = stream(m.a, kB, m.b, 1, 100, 10);
+    printf("  %zu of 100 state datagrams arrived\n", got.ids.size());
+    CHECK(got.ids.size() == 100);
+    const dn::WireTraffic hostSaw = m.host.takeWireTraffic();
+    CHECK(hostSaw.relayed == 0);  // the host relayed none of it
+    CHECK(m.a.takeWireTraffic().direct > 0);
+    CHECK(m.a.linkBudget(kB) >= dn::RateController::kMinRate);
+    CHECK(m.a.statusLine().find("direct-to-joiners=1") != std::string::npos);
+}
+
+void testMeshBlockedFromTheStart() {
+    printf("mesh: joiners that cannot reach each other stay on the relay, and lose nothing\n");
+    Mesh m;
+    m.a.setTestBlockPeers(0, UINT64_MAX);
+    m.b.setTestBlockPeers(0, UINT64_MAX);
+    CHECK(m.start());
+    const Arrivals got = stream(m.a, kB, m.b, 1, 200, 10);
+    printf("  %zu of 200 state datagrams arrived through the host\n", got.ids.size());
+    CHECK(got.ids.size() == 200);
+    CHECK(!m.a.peerLinked(kB) && m.a.pathTo(kB) == dn::Path::Relay);
+    CHECK(m.host.takeWireTraffic().relayed > 0);
+}
+
+void testMeshFailsOverAndBack() {
+    printf("mesh: the direct link breaks and comes back - state keeps flowing, events arrive once each\n");
+    Mesh m;
+    CHECK(m.start());
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 10000));
+    std::vector<dn::Path> paths;
+    // 400 datagrams 10 ms apart (4 s); from the 50th on (0.5 s) the direct link loses everything for 1.5 s.
+    const Arrivals got = stream(m.a, kB, m.b, 1, 400, 10, [&](uint32_t i) {
+        if (i == 50) {
+            m.a.setTestBlockPeers(0, 1500);
+            m.b.setTestBlockPeers(0, 1500);
+        }
+        if (i % 20 == 0) paths.push_back(m.a.pathTo(kB));
+    });
+    const bool wentRelay = std::find(paths.begin(), paths.end(), dn::Path::Relay) != paths.end();
+    printf("  %zu of 400 arrived, longest gap %llu ms, went through the host %s, back on the direct link %s\n",
+           got.ids.size(), static_cast<unsigned long long>(got.longestGapMs), wentRelay ? "yes" : "NO",
+           m.a.pathTo(kB) == dn::Path::Direct ? "yes" : "NO");
+    CHECK(wentRelay);
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 5000));
+    // Lost only until the direct link turned suspect (two pings' time) and the relay took copies: a gap of well
+    // under a second, against 1.5 s of outage.
+    CHECK(got.ids.size() >= 400 - 80);
+    CHECK(got.longestGapMs < 900);
+    // Events: both paths, the receiver gets two copies of each while both work (the filter drops the second).
+    dn::DuplicateFilter filter;
+    uint32_t firsts = 0, copies = 0;
+    for (uint32_t i = 0; i < 50; ++i) {
+        std::vector<uint8_t> e(60, 0xE0);
+        memcpy(e.data(), &i, 4);
+        const dn::SendReport r = m.a.sendClassified(kB, "EDF6", 1, 0, e.data(), e.size(), 2);
+        CHECK(r.sent && r.paths == 2);
+    }
+    waitFor(
+        [&] {
+            dn::Delivered d;
+            uint8_t ch = 1;
+            while (m.b.pop(&ch, 1170, d)) (filter.first(d.src, d.data.data(), d.data.size(), GetTickCount64()) ? firsts : copies)++;
+            return firsts + copies >= 100;
+        },
+        5000);
+    printf("  events: %u delivered once, %u copies dropped\n", firsts, copies);
+    CHECK(firsts == 50 && copies == 50);
+}
+
+void testRosterPages() {
+    printf("wire: member lists of large rooms go in pages\n");
+    dn::Message m;
+    m.type = dn::MsgType::Roster;
+    m.roster.hostNonce = 3;
+    for (int i = 0; i < 32; ++i) m.roster.roster.push_back("member" + std::to_string(i));
+    m.roster.version = 9;
+    m.roster.total = 1000;
+    m.roster.offset = 960;
+    auto dg = dn::encode(m, "");
+    dn::DecodeError err;
+    auto back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->roster.total == 1000 && back->roster.offset == 960 && back->roster.version == 9 &&
+          back->roster.roster.size() == 32);
+    m.roster.offset = 980;  // runs past the list: no valid sender writes it
+    dg = dn::encode(m, "");
+    CHECK(!dn::decode(dg.data(), dg.size(), "", &err) && err == dn::DecodeError::Malformed);
+    dn::Message q;
+    q.type = dn::MsgType::PeerInfo;
+    q.peer = {kB, "[2001:db8::1]:27015"};
+    dg = dn::encode(q, "");
+    back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->peer.puid == kB && back->peer.address == q.peer.address);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--mesh") {
+        testRosterPages();
+        testMeshLinksJoiners();
+        testMeshBlockedFromTheStart();
+        testMeshFailsOverAndBack();
+        printf("\n%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--receive-lifecycle") {
         testReceiveStateFollowsSession();
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
@@ -3211,6 +3383,10 @@ int wmain(int argc, wchar_t** argv) {
     testRoomWire();
     testFakeLobbies();
     testRoomFollowsHost();
+    testRosterPages();
+    testMeshLinksJoiners();
+    testMeshBlockedFromTheStart();
+    testMeshFailsOverAndBack();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

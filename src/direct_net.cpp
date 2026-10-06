@@ -425,8 +425,18 @@ DirectNet::Link* DirectNet::peerLink(const std::string& remote) {
 }
 
 bool DirectNet::blockedPeer(const std::string& puid) const {
+    if (testBlockToMs_) {
+        const uint64_t now = nowMs();
+        if (now >= testBlockFromMs_ && now < testBlockToMs_) return true;
+    }
     auto it = testBlocked_.find(puid);
     return it != testBlocked_.end() && it->second;
+}
+
+void DirectNet::setTestBlockPeers(uint64_t afterMs, uint64_t forMs) {
+    std::lock_guard<std::mutex> lock(mu_);
+    testBlockFromMs_ = nowMs() + afterMs;
+    testBlockToMs_ = forMs == UINT64_MAX ? UINT64_MAX : testBlockFromMs_ + forMs;
 }
 
 bool DirectNet::congested(const Link& link) const {
@@ -465,7 +475,12 @@ DirectNet::Route DirectNet::routeFor(const std::string& remote, uint8_t cls, uin
         return {relay, nullptr, relay ? Path::Relay : Path::None};
     }
     const bool good = direct && healthy(*direct, now) && direct->healthySinceMs && now - direct->healthySinceMs >= kPathRecoverMs;
-    if (good) return {direct, nullptr, Path::Direct};
+    if (good) {
+        // Suspect (two pings' time without a word from it, a round trip included): the copy over the relay makes
+        // sure state keeps arriving until the direct link is known healthy or stale, whichever it turns out to be.
+        const uint64_t quiet = 2 * pingIntervalFor(*direct, now) + direct->rttMs;
+        return {direct, relay && now - direct->lastRecvMs > quiet ? relay : nullptr, Path::Direct};
+    }
     if (relay) return {relay, nullptr, Path::Relay};
     if (direct) return {direct, nullptr, Path::Direct};
     return route;

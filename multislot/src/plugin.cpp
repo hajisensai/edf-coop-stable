@@ -880,6 +880,12 @@ extern "C" __declspec(dllexport) const std::uint8_t* EDF6Coop_LoadoutRecord(int 
     return multislot::LoadoutRecord(index);
 }
 
+// For the game-code tests (tests/gamenet): sends `size` bytes to `remote` in bulk (netfeature.h SendBulk).
+extern "C" __declspec(dllexport) bool EDF6Coop_SendBulk(const char* remote, std::uint16_t tag, const void* data,
+                                                        std::size_t size) {
+    return remote && multislot::SendBulk(remote, tag, data, size);
+}
+
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {
     // Every line so far was written by this thread, so the startup report is on disk already.
     const bool loaded = LoadCoop(info);

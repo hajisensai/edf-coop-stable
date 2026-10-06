@@ -74,6 +74,14 @@ void Observe(const LobbyView& view) {
 
 bool RoomCap(std::uint32_t cap) { return NetFeatureActive(static_cast<NetFeature>(cap)); }
 
+// [Test] BulkEcho=1: what arrives in bulk is logged (GameNet_bulk).
+void LogBulk(const std::string& src, std::uint16_t tag, const std::uint8_t* data, std::size_t size) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (std::size_t i = 0; i < size; ++i) hash = (hash ^ data[i]) * 1099511628211ull;
+    Log("NETCODE bulk message from %s: tag %u, %zu bytes, fnv %016llx", src.c_str(), tag, size,
+        static_cast<unsigned long long>(hash));
+}
+
 }  // namespace
 
 std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
@@ -189,6 +197,13 @@ bool NetFeatureActive(NetFeature feature) {
     return started && NetFeatureEnabledLocally(feature) && NetGate().Active(static_cast<std::uint32_t>(feature));
 }
 
+std::uint32_t LinkBudgetBytesPerSec(const std::string& peer) { return dn::linkBudgetBytesPerSec(peer); }
+void SetStateSendFilter(dn::StateSendFilter filter) { dn::setStateSendFilter(filter); }
+bool SendBulk(const std::string& remote, std::uint16_t tag, const void* data, std::size_t size) {
+    return dn::sendBulk(remote, tag, static_cast<const std::uint8_t*>(data), size);
+}
+void SetBulkHandler(dn::BulkHandler handler) { dn::setBulkHandler(handler); }
+
 void InitNetFeature(const wchar_t* iniPath) {
     const auto flag = [&](const wchar_t* key, int fallback) {
         return GetPrivateProfileIntW(L"Netcode", key, fallback, iniPath) != 0;
@@ -209,6 +224,14 @@ void InitNetFeature(const wchar_t* iniPath) {
     options.shedState = flag(L"ShedState", 1);
     options.statsIntervalMs = 1000u * GetPrivateProfileIntW(L"Netcode", L"StatsSeconds", 60, iniPath);
     dn::setNetcodeOptions(options);
+    if (GetPrivateProfileIntW(L"Test", L"BulkEcho", 0, iniPath)) dn::setBulkHandler(&LogBulk);
+    const UINT blockAfter = GetPrivateProfileIntW(L"Test", L"PeerBlockAfterMs", UINT_MAX, iniPath);
+    if (blockAfter != UINT_MAX) {
+        const UINT blockFor = GetPrivateProfileIntW(L"Test", L"PeerBlockForMs", UINT_MAX, iniPath);
+        dn::setTestPeerBlock(blockAfter, blockFor);
+        Log("TEST PeerBlockAfterMs=%u PeerBlockForMs=%u: direct links to other joiners lose everything then", blockAfter,
+            blockFor);
+    }
     Log("NETCODE protocol %lld, features on in the INI: %s; RejectMismatched=%d, ShedState=%d", static_cast<long long>(settings.protocol),
         FormatCaps(caps).c_str(), settings.rejectMismatched ? 1 : 0, options.shedState ? 1 : 0);
 }

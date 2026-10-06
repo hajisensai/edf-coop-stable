@@ -169,6 +169,8 @@ public:
     // Tests only: every datagram to and from member `puid` over a link of our own to it (not through the host) is
     // lost, as when the NAT between two joiners stops letting it through.
     void setTestBlockPeer(const std::string& puid, bool blocked);
+    // Tests only: the same for every joiner, from `afterMs` from now for `forMs` (UINT64_MAX: for good).
+    void setTestBlockPeers(uint64_t afterMs, uint64_t forMs);
     // Pops the next packet for the local player; `channel` filters like EOS RequestedChannel.
     bool pop(const uint8_t* channel, uint32_t maxSize, Delivered& out);
 
@@ -396,6 +398,7 @@ private:
     std::map<std::string, Dial> dials_;
     std::map<std::string, Intro> intros_;
     std::map<std::string, bool> testBlocked_;
+    uint64_t testBlockFromMs_ = 0, testBlockToMs_ = 0;  // setTestBlockPeers, on nowMs()
     uint64_t linkIds_ = 0;  // the last Link::id handed out
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;

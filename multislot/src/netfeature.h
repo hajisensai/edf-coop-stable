@@ -22,6 +22,7 @@
 // Usage (W2-W4 and the transport):
 //     if (multislot::NetFeatureActive(multislot::NetFeature::HitAuthority)) { ...new rule... } else { ...game's... }
 // Cheap (a shared lock and a few compares): call it where the decision is made, every time. Any thread.
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -83,6 +84,20 @@ NetRoom& NetGate();
 // Parses the [Netcode] value of `caps` keys into NetFeature bits (tests and InitNetFeature).
 std::uint32_t ParseCaps(const std::string& hex);
 std::string FormatCaps(std::uint32_t caps);
+
+// --- What the transport offers the other workstreams (src/netcode.h) ---
+// Bytes per second the path to `peer` (EOS_ProductUserId text) carries now, from its congestion controller: the
+// budget interest management (W6) schedules state by. The game's own budget (40 KB/s) for a member reached over
+// EOS only; 0 for no member.
+std::uint32_t LinkBudgetBytesPerSec(const std::string& peer);
+// Interest management decides per (observer, subject) whether a state datagram goes now (src/netcode.h
+// StateSendFilter). Unset (the default): always.
+void SetStateSendFilter(dn::StateSendFilter filter);
+// A message of up to dn::kMaxBulkBytes (about 1 MB) to `remote`, reliably in fragments; the receiver's handler
+// for `tag` gets it whole (SetBulkHandler). False when the room does not read fragments (NetFeature::Fragments)
+// or there is no path yet. Call it on the game's thread (it sends through EOS).
+bool SendBulk(const std::string& remote, std::uint16_t tag, const void* data, std::size_t size);
+void SetBulkHandler(dn::BulkHandler handler);
 
 // Reads [Netcode] (the features this machine has on, RejectMismatched, StatsSeconds, ...) and hands the
 // transport its options (src/netcode.h). Before StartNetFeature.

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <deque>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -25,6 +26,8 @@
 #include "log.h"
 #include "netclass.h"
 #include "netcode.h"
+#include "congestion.h"
+#include "fragment.h"
 #include "room_view.h"
 #include "traffic.h"
 #include "updater.h"
@@ -229,6 +232,24 @@ struct State {
     std::atomic<RoomCapQuery> roomCaps{nullptr};
     std::atomic<StateSendFilter> stateFilter{nullptr};
     std::atomic<BulkHandler> bulkHandler{nullptr};
+    // A game packet that came twice (over two paths, or the direct link and EOS) reaches the game once.
+    DuplicateFilter duplicates;
+    // Fragments (fragment.h): ours going out get ids from here, theirs come together here (receive thread only).
+    std::atomic<uint32_t> fragmentIds{0};
+    std::mutex fragmentMutex;
+    Reassembler reassembler;
+    struct ReadyPacket {
+        std::string src;
+        std::string socket;
+        uint8_t channel = 0;
+        std::vector<uint8_t> data;
+    };
+    std::deque<ReadyPacket> ready;  // reassembled game datagrams, waiting for the game's receive (fragmentMutex)
+    // What the game's last send used, for the plugin's own sends (sendBulk) on its behalf.
+    std::mutex lastSendMutex;
+    EOS_ProductUserId lastLocal = nullptr;
+    std::string lastSocket;
+    std::atomic<uint64_t> eosCopies{0}, aoiSkipped{0}, fragmentsOut{0}, bulkIn{0}, dupBefore{0};
     ULONGLONG lastStatsMs = 0;
     HMODULE eos = nullptr;
     Outer outer;
@@ -1243,6 +1264,17 @@ void maybeLogStats() {
          static_cast<unsigned long long>(dIn), static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg),
          static_cast<unsigned long long>(eIn), static_cast<unsigned long long>(fail), net ? " | " : "",
          net ? net->statusLine().c_str() : "");
+    // The netcode rewrite's paths: what went where, and what was dropped on purpose.
+    const uint64_t dups = g.duplicates.duplicates();
+    logf("PATHS last %.0fs: direct %.0f kbps, through the host %.0f kbps, relayed for others %.0f kbps (%llu state "
+         "datagrams over the relay budget), %llu state datagrams over a path's budget, %llu event copies over EOS, "
+         "%llu state datagrams held back by interest management, %llu fragments out, %llu bulk messages in, %llu copies "
+         "dropped on arrival",
+         seconds, kbps(w.direct, seconds), kbps(w.viaRelay, seconds), kbps(w.relayed, seconds),
+         static_cast<unsigned long long>(w.relayShed), static_cast<unsigned long long>(w.stateShed),
+         static_cast<unsigned long long>(g.eosCopies.exchange(0)), static_cast<unsigned long long>(g.aoiSkipped.exchange(0)),
+         static_cast<unsigned long long>(g.fragmentsOut.exchange(0)), static_cast<unsigned long long>(g.bulkIn.exchange(0)),
+         static_cast<unsigned long long>(dups - g.dupBefore.exchange(dups)));
     // What the game's datagrams held (P0 of the netcode rewrite): per class, then per record type.
     for (const std::string& line : g.recordTypes.take(seconds)) logf("%s", line.c_str());
 }
@@ -1270,10 +1302,15 @@ void refreshMemberIdentities(uint64_t now) {
     if (now - lastMs < kIdentityRefreshMs || !g.markerReady) return;
     lastMs = now;
     std::shared_ptr<DirectNet> base = g.baseNet.load();
-    if (base && g.config.direct.mode == Mode::Host) base->setMemberIdentities(roomIdentities());
+    // Joiners too: two joiners linking directly (mesh) prove to each other the identities they published.
+    const std::map<std::string, std::string> ids = roomIdentities();
+    if (base) base->setMemberIdentities(ids);
     auto [owner, commitment] = roomOwnerIdentity();
     if (base && g.config.direct.mode == Mode::Join) base->setRoomOwner(owner, commitment);
-    if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) net->setRoomOwner(owner, commitment);
+    if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) {
+        net->setRoomOwner(owner, commitment);
+        net->setMemberIdentities(ids);
+    }
 }
 
 // --- The host's say over who is in the room (P2) ---
@@ -1752,6 +1789,43 @@ TrafficClass classifyGameSend(const std::string& remote, const EOS_P2P_SendPacke
     return cls;
 }
 
+bool roomCap(uint32_t cap) {
+    RoomCapQuery query = g.roomCaps.load();
+    return query && query(cap);
+}
+
+// One packet over EOS as the game would send it, except for channel, data and reliability.
+EOS_EResult sendOverEos(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, uint8_t channel, const uint8_t* data,
+                        uint32_t size, EOS_EPacketReliability reliability) {
+    EOS_P2P_SendPacketOptions copy = o;
+    copy.Channel = channel;
+    copy.Data = data;
+    copy.DataLengthBytes = size;
+    copy.Reliability = reliability;
+    return g.api.send(h, &copy);
+}
+
+// A message above EOS's packet size, in fragments (fragment.h): reliably over the direct link when it reaches
+// `remote`, otherwise reliably over EOS. EOS_Success once every fragment left.
+EOS_EResult sendFragments(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, const std::string& remote, uint8_t flags,
+                          uint16_t tag, const uint8_t* data, size_t size) {
+    const auto parts = splitIntoFragments(++g.fragmentIds, flags, tag, data, size);
+    if (parts.empty()) return EOS_LimitExceeded;
+    std::shared_ptr<DirectNet> net = g.net.load();
+    const bool direct = net && net->canRoute(remote);
+    for (const auto& part : parts) {
+        bool sent = direct && net->send(remote, socketName(o.SocketId), kFragmentChannel, EOS_PR_ReliableOrdered,
+                                        part.data(), part.size());
+        if (!sent) {
+            EOS_EResult r = sendOverEos(h, o, kFragmentChannel, part.data(), static_cast<uint32_t>(part.size()),
+                                        EOS_PR_ReliableOrdered);
+            if (r != EOS_Success) return r;
+        }
+        ++g.fragmentsOut;
+    }
+    return EOS_Success;
+}
+
 EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     if (g_shutdown) return g.api.send(h, o);
     configureHandle(h);
@@ -1759,10 +1833,28 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
     if (o && o->Data)
         g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
-    const TrafficClass cls = o ? classifyGameSend(remote, *o) : TrafficClass::Unknown;
-    (void)cls;
+    const NetcodeOptions netcode = netcodeOptions();
+    TrafficClass cls = o ? classifyGameSend(remote, *o) : TrafficClass::Unknown;
+    if (!netcode.trafficClasses) cls = TrafficClass::Unknown;
+    if (o && o->ApiVersion >= 3) {
+        std::lock_guard<std::mutex> lock(g.lastSendMutex);
+        g.lastLocal = o->LocalUserId;
+        g.lastSocket = socketName(o->SocketId);
+    }
+    // Interest management (W6) may hold a state datagram back: the next one replaces it.
+    if (cls == TrafficClass::State) {
+        StateSendFilter filter = g.stateFilter.load();
+        if (filter && !filter(remote, idString(o->LocalUserId), GetTickCount64())) {
+            ++g.aoiSkipped;
+            return EOS_Success;
+        }
+    }
     // EOS refuses anything above its packet limit, and so does the direct link (its receivers' games read
-    // with that limit too). The game then retries for about 26 s and disbands the room.
+    // with that limit too). The game then retries for about 26 s and disbands the room - unless the whole room
+    // reads fragments.
+    if (o && o->Data && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE && !remote.empty() && netcode.fragments &&
+        roomCap(kCapFragments))
+        return sendFragments(h, *o, remote, 0, o->Channel, static_cast<const uint8_t*>(o->Data), o->DataLengthBytes);
     if (o && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE)
         logRateLimited("oversize", 10000,
                        "GAME sends a %u-byte packet (channel %u) to %s: over the %u-byte packet limit, so it cannot be "
@@ -1770,15 +1862,28 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
                        o->DataLengthBytes, static_cast<unsigned>(o->Channel), peerLabel(o->RemoteUserId).c_str(),
                        static_cast<unsigned>(EOS_P2P_MAX_PACKET_SIZE));
     std::shared_ptr<DirectNet> net = g.net.load();
-    if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
-        net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
-                    static_cast<const uint8_t*>(o->Data), o->DataLengthBytes)) {
-        ++g.directOut;
-        return EOS_Success;
+    if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty()) {
+        const SendReport sent =
+            net->sendClassified(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
+                                static_cast<const uint8_t*>(o->Data), o->DataLengthBytes, static_cast<uint8_t>(cls));
+        if (sent.sent) {
+            ++g.directOut;
+            // An event the direct link could carry over one path only gets its second copy over EOS: the receiver
+            // takes whichever comes first (DuplicateFilter), and the game's own resend after 700 ms is rarely needed.
+            if (sent.paths == 1 && (cls == TrafficClass::Event || cls == TrafficClass::Control)) {
+                if (sendOverEos(h, *o, o->Channel, static_cast<const uint8_t*>(o->Data), o->DataLengthBytes,
+                                EOS_PR_UnreliableUnordered) == EOS_Success)
+                    ++g.eosCopies;
+            }
+            return EOS_Success;
+        }
     }
     EOS_EResult r;
     bool held = g.hold && o && o->ApiVersion >= 3 && g.hold->isHeld(remote);
-    bool upgrade = g.config.reliableGameTraffic && o && o->ApiVersion >= 3 && o->Reliability == EOS_PR_UnreliableUnordered;
+    // State is replaced by the next datagram: carried unreliably, as the game sent it. Everything else the game
+    // sent unreliably keeps EOS's repair (an event's loss would otherwise wait for the game's resend).
+    bool upgrade = g.config.reliableGameTraffic && o && o->ApiVersion >= 3 &&
+                   o->Reliability == EOS_PR_UnreliableUnordered && cls != TrafficClass::State;
     if (held || upgrade) {
         EOS_P2P_SendPacketOptions copy = *o;
         // The connection is being rebuilt: let EOS queue the packet instead of discarding it.
@@ -1803,34 +1908,116 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     return r;
 }
 
+// A packet that arrived (over the direct link or EOS): a fragment goes into its message, a copy of one already
+// delivered is dropped. True when the game gets it as it is.
+bool takeArrival(const std::string& src, const std::string& socket, uint8_t channel, const uint8_t* data, uint32_t size) {
+    if (channel == kFragmentChannel && isFragment(data, size)) {
+        std::optional<FragmentMessage> done;
+        {
+            std::lock_guard<std::mutex> lock(g.fragmentMutex);
+            done = g.reassembler.add(src, data, size, GetTickCount64());
+        }
+        if (!done) return false;
+        if (done->flags & kFragmentBulk) {
+            ++g.bulkIn;
+            if (BulkHandler handler = g.bulkHandler.load()) handler(src, done->tag, done->bytes.data(), done->bytes.size());
+            else logRateLimited("bulk-unhandled", 10000, "NETCODE a bulk message (tag %u, %zu bytes) from %s has no handler",
+                                done->tag, done->bytes.size(), shortId(src).c_str());
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g.fragmentMutex);
+        g.ready.push_back({src, socket, static_cast<uint8_t>(done->tag), std::move(done->bytes)});
+        return false;
+    }
+    return g.duplicates.first(src, data, size, GetTickCount64());
+}
+
+// A reassembled datagram the game asked for (channel and size), into its receive buffers.
+bool deliverReady(const EOS_P2P_ReceivePacketOptions* o, EOS_ProductUserId* outPeer, EOS_P2P_SocketId* outSocket,
+                  uint8_t* outChannel, void* outData, uint32_t* outBytes) {
+    const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
+    std::lock_guard<std::mutex> lock(g.fragmentMutex);
+    for (auto it = g.ready.begin(); it != g.ready.end(); ++it) {
+        if (channel && it->channel != *channel) continue;
+        EOS_ProductUserId peer = idHandle(it->src);
+        if (!peer || it->data.size() > o->MaxDataSizeBytes) {
+            logRateLimited("ready-drop", 10000, "NETCODE a reassembled %zu-byte packet does not fit the game's %u-byte buffer",
+                           it->data.size(), o->MaxDataSizeBytes);
+            g.ready.erase(it);
+            return false;
+        }
+        *outPeer = peer;
+        if (outSocket) {
+            outSocket->ApiVersion = 1;
+            strncpy_s(outSocket->SocketName, it->socket.c_str(), _TRUNCATE);
+        }
+        if (outChannel) *outChannel = it->channel;
+        memcpy(outData, it->data.data(), it->data.size());
+        *outBytes = static_cast<uint32_t>(it->data.size());
+        g.ready.erase(it);
+        return true;
+    }
+    return false;
+}
+
 EOS_EResult hookReceivePacket(EOS_HP2P h, const EOS_P2P_ReceivePacketOptions* o, EOS_ProductUserId* outPeer,
                               EOS_P2P_SocketId* outSocket, uint8_t* outChannel, void* outData, uint32_t* outBytes) {
     if (g_shutdown) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
+    if (!o || !outPeer || !outData || !outBytes) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     std::shared_ptr<DirectNet> net = g.net.load();
-    if (net && o && outPeer && outData && outBytes) {
-        const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
-        Delivered d;
-        if (net->pop(channel, o->MaxDataSizeBytes, d)) {
-            EOS_ProductUserId peer = idHandle(d.src);
-            if (peer) {
-                *outPeer = peer;
-                if (outSocket) {
-                    outSocket->ApiVersion = 1;
-                    strncpy_s(outSocket->SocketName, d.socketName.c_str(), _TRUNCATE);
-                }
-                if (outChannel) *outChannel = d.channel;
-                memcpy(outData, d.data.data(), d.data.size());
-                *outBytes = static_cast<uint32_t>(d.data.size());
-                ++g.directIn;
-                return EOS_Success;
-            }
+    const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
+    // Fragments travel on a channel of their own; a receive that asks for one channel only must not leave them
+    // waiting. A bounded number per call: the game's frame goes on meanwhile.
+    if (channel && *channel != kFragmentChannel) {
+        for (int i = 0; i < 64; ++i) {
+            Delivered d;
+            if (!net || !net->pop(&kFragmentChannel, kFragmentPacket, d)) break;
+            takeArrival(d.src, d.socketName, d.channel, d.data.data(), static_cast<uint32_t>(d.data.size()));
+        }
+        EOS_P2P_ReceivePacketOptions fragments = *o;
+        fragments.RequestedChannel = &kFragmentChannel;
+        std::vector<uint8_t> buf(kFragmentPacket);
+        fragments.MaxDataSizeBytes = static_cast<uint32_t>(buf.size());
+        for (int i = 0; i < 64; ++i) {
+            EOS_ProductUserId peer = nullptr;
+            EOS_P2P_SocketId socket{};
+            uint8_t ch = 0;
+            uint32_t n = 0;
+            if (g.api.receive(h, &fragments, &peer, &socket, &ch, buf.data(), &n) != EOS_Success) break;
+            takeArrival(idString(peer), std::string(socket.SocketName, strnlen(socket.SocketName, sizeof(socket.SocketName))),
+                        ch, buf.data(), n);
         }
     }
-    EOS_EResult r = g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
-    if (r == EOS_Success) ++g.eosIn;
-    return r;
+    for (;;) {
+        if (deliverReady(o, outPeer, outSocket, outChannel, outData, outBytes)) return EOS_Success;
+        Delivered d;
+        if (net && net->pop(channel, o->MaxDataSizeBytes, d)) {
+            if (!takeArrival(d.src, d.socketName, d.channel, d.data.data(), static_cast<uint32_t>(d.data.size()))) continue;
+            EOS_ProductUserId peer = idHandle(d.src);
+            if (!peer) continue;
+            *outPeer = peer;
+            if (outSocket) {
+                outSocket->ApiVersion = 1;
+                strncpy_s(outSocket->SocketName, d.socketName.c_str(), _TRUNCATE);
+            }
+            if (outChannel) *outChannel = d.channel;
+            memcpy(outData, d.data.data(), d.data.size());
+            *outBytes = static_cast<uint32_t>(d.data.size());
+            ++g.directIn;
+            return EOS_Success;
+        }
+        EOS_EResult r = g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
+        if (r != EOS_Success) return r;
+        ++g.eosIn;
+        const std::string src = idString(*outPeer);
+        const std::string socket =
+            outSocket ? std::string(outSocket->SocketName, strnlen(outSocket->SocketName, sizeof(outSocket->SocketName)))
+                      : std::string();
+        if (takeArrival(src, socket, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes))
+            return EOS_Success;
+    }
 }
 
 // --- The room list and the virtual room, in front of every other wrapper (installVirtualRoomHooks) ---
@@ -2270,4 +2457,41 @@ void setRoomCapQuery(RoomCapQuery query) { g.roomCaps = query; }
 void setStateSendFilter(StateSendFilter filter) { g.stateFilter = filter; }
 void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
 
+void setTestPeerBlock(uint32_t afterMs, uint32_t forMs) {
+    const uint64_t length = forMs == UINT32_MAX ? UINT64_MAX : forMs;
+    if (std::shared_ptr<DirectNet> base = g.baseNet.load()) base->setTestBlockPeers(afterMs, length);
+    if (std::shared_ptr<DirectNet> net = g.net.load()) net->setTestBlockPeers(afterMs, length);
+}
+
+
+uint32_t linkBudgetBytesPerSec(const std::string& peer) {
+    if (peer.empty()) return 0;
+    std::shared_ptr<DirectNet> net = g.net.load();
+    if (net && net->canRoute(peer)) {
+        if (uint32_t budget = net->linkBudget(peer)) return budget;
+    }
+    // EOS only: nobody measures Epic's path. The game's own budget for its routine state (about 320 kbps).
+    return RateController::kMinRate;
+}
+
+bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size_t size) {
+    if (g_shutdown || remote.empty() || !data || !size || size > kMaxBulkBytes || !netcodeOptions().fragments ||
+        !roomCap(kCapFragments))
+        return false;
+    EOS_P2P_SendPacketOptions o{};
+    EOS_P2P_SocketId socket{1, {}};
+    {
+        std::lock_guard<std::mutex> lock(g.lastSendMutex);
+        if (!g.lastLocal || g.lastSocket.empty()) return false;  // the game has not opened its socket yet
+        o.LocalUserId = g.lastLocal;
+        strncpy_s(socket.SocketName, g.lastSocket.c_str(), _TRUNCATE);
+    }
+    EOS_HP2P p2p = g.p2p;
+    o.ApiVersion = 3;
+    o.RemoteUserId = idHandle(remote);
+    o.SocketId = &socket;
+    o.bAllowDelayedDelivery = 1;
+    if (!p2p || !o.RemoteUserId) return false;
+    return sendFragments(p2p, o, remote, kFragmentBulk, tag, data, size) == EOS_Success;
+}
 }  // namespace dn

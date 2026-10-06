@@ -30,6 +30,7 @@ constexpr std::uint32_t kPartsReserve = 0x124190;       // GDI+0x70: the constru
 constexpr std::uint32_t kPartsRelease = 0x11E9D0;       // and its release
 constexpr std::uint32_t kVehicleAccept = 0x6347C0;      // VehicleBase slot 34: marks the vehicle classes
 constexpr std::uint32_t kVehicleRunner = 0x630F90;      // int(veh, hostFallback, preferSeat0): 1 this machine, 2 another
+constexpr std::uint32_t kIsHost = 0x784210;             // bool(null): this machine owns the room (true offline)
 
 // Object fields (GameObjectBase).
 constexpr std::size_t kPosition = 0x90;      // float[4] (54A6F2)
@@ -38,7 +39,9 @@ constexpr std::size_t kNetworkFlags = 0x128;  // NetworkObject+8
 constexpr std::size_t kDead = 0x2E8;
 constexpr std::size_t kHealth = 0x2F8;
 constexpr std::size_t kHealthDelta = 0x5B4;
+constexpr std::size_t kSeats = 0x608;        // VehicleBase seat array (630FEF), 0x340 bytes a seat (631016)
 constexpr std::size_t kSeatCount = 0x618;    // VehicleBase seats (630FD9); 630F90 reads seat 0 when there are any
+constexpr std::size_t kSeatRider = 0x260, kSeatRiderControl = 0x268;  // weak_ptr to the rider (631020, 631043)
 constexpr std::size_t kAcceptSlot = 34 * 8;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
 // Virtual slots (byte offsets): the object's message trio (543ACE..543AEE), and NetworkObject's send to the copies.
 constexpr std::size_t kHandleSlot = 0x48, kPreSlot = 0x50, kPostSlot = 0x58, kSendToCopies = 0x80;
@@ -112,6 +115,18 @@ std::int32_t ReferenceId(const void* weak) {
     return id;
 }
 
+// Seat 0 holds a live rider that never got a network identity (its +0x128 word is 0): RideAi's DummyVehicleRider.
+// 630F90 counts such a rider as this machine's on every machine that seated one. Game thread: read without locking,
+// as 630F90 tests the same weak_ptr (uses at control +8).
+bool NpcSeat0(const std::uint8_t* vehicle) {
+    const auto seat = Field<const std::uint8_t*>(vehicle, kSeats);
+    if (!seat) return false;
+    const auto control = Field<const std::uint8_t*>(seat, kSeatRiderControl);
+    const auto rider = Field<const std::uint8_t*>(seat, kSeatRider);
+    if (!control || !rider || Field<std::uint32_t>(control, 8) == 0) return false;
+    return OwnerOf(Field<std::uint32_t>(rider, kNetworkFlags)) == NetOwner::Unregistered;
+}
+
 NetOwner AttackerOwner(const std::uint8_t* gdi) {
     // The override the game honours first (547E6D), then the attacker's own NetworkObject.
     if (gdi[kGdiOverride]) return gdi[kGdiOverrideRemote] ? NetOwner::Remote : NetOwner::Local;
@@ -121,14 +136,17 @@ NetOwner AttackerOwner(const std::uint8_t* gdi) {
     if (owner != NetOwner::Unregistered) {
         // A vehicle's registration owner is whoever created it (the host, for a delivered one), not whoever fires
         // from it. Its shots are decided where it is run: the machine of its seat-0 rider, else its last driver,
-        // else the host (630F90 with the host fallback; docs/net-re/damage.md section 5). The vehicle classes are
+        // else the host (630F90 with the host fallback); but the host when seat 0 is an NPC with no identity, which
+        // 630F90 calls local everywhere (VehicleShooter; docs/net-re/damage.md section 9). The vehicle classes are
         // the 27 that share slot 34 6347C0; their NetworkObject sits at +0x120 like every GameObjectBase's.
         const auto* vehicle = static_cast<const std::uint8_t*>(net.object) - kNetworkObject;
         const auto table = *reinterpret_cast<const std::uint8_t* const*>(vehicle);
         const auto slot34 = reinterpret_cast<const unsigned char*>(Field<const void*>(table, kAcceptSlot));
         if (slot34 == game + kVehicleAccept && Field<std::uint64_t>(vehicle, kSeatCount) > 0) {
-            const int runner = Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
-            owner = runner == 1 ? NetOwner::Local : NetOwner::Remote;
+            const bool npc = NpcSeat0(vehicle);
+            const bool host = npc && Fn<bool(__fastcall*)(const void*)>(kIsHost)(nullptr);
+            const int runner = npc ? 0 : Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
+            owner = VehicleShooter(npc, host, runner);
         }
     }
     ReleaseShared(net);

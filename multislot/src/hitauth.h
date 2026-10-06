@@ -70,6 +70,12 @@ enum class HitVerdict : std::uint8_t {
 };
 HitVerdict DecideHit(const HitInput& input);
 
+// Whose a registered vehicle's shots are (docs/net-re/damage.md section 9; the same rule as all-forces'
+// online::Authority). `npcSeat0`: seat 0 holds a live rider with no network identity (RideAi's DummyVehicleRider, an
+// NPC a script or the plugin seated): every machine that seated one would count as running the vehicle, so only the
+// host decides. Otherwise the machine 630F90(veh, hostFallback, preferSeat0) names: `runner` 1 this one, else another.
+NetOwner VehicleShooter(bool npcSeat0, bool host, int runner);
+
 // The damage event, as it travels (little-endian, fixed layout behind a magic and a version).
 struct DamageEvent {
     std::uint32_t seq = 0;          // the sender's, increasing

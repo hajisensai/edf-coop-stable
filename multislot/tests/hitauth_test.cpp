@@ -77,6 +77,28 @@ void TestOwner() {
     Check(OwnerOf(3) == NetOwner::Remote, "bit 0 wins, as the game reads it");
 }
 
+// The vehicle rule, every combination (all-forces online::Authority: npcSeat0 -> host, else 630F90).
+void TestVehicleShooter() {
+    struct Row { bool npc; bool host; int runner; NetOwner want; const char* what; };
+    const Row rows[] = {
+        {false, false, 1, NetOwner::Local, "player rider of this machine: here"},
+        {false, true, 1, NetOwner::Local, "host runs it: here"},
+        {false, false, 2, NetOwner::Remote, "another machine runs it: there"},
+        {false, true, 2, NetOwner::Remote, "the host, another machine runs it: there"},
+        {false, false, 0, NetOwner::Remote, "nobody (no host fallback): not here"},
+        {true, true, 1, NetOwner::Local, "NPC seat 0, on the host: here"},
+        {true, true, 2, NetOwner::Local, "NPC seat 0, on the host, whatever 630F90 says: here"},
+        {true, false, 1, NetOwner::Remote, "NPC seat 0 on a client that seated it too (630F90 says local): not here"},
+        {true, false, 2, NetOwner::Remote, "NPC seat 0 on a client: not here"},
+        {true, false, 0, NetOwner::Remote, "NPC seat 0 on a client, nobody: not here"},
+    };
+    for (const Row& r : rows) Check(VehicleShooter(r.npc, r.host, r.runner) == r.want, r.what);
+    // Exactly one machine decides: the host and a client that both seated an NPC.
+    int deciders = 0;
+    for (bool host : {true, false}) deciders += VehicleShooter(true, host, 1) == NetOwner::Local;
+    Check(deciders == 1, "an NPC-driven vehicle seated on every machine has one decider");
+}
+
 void TestDecision() {
     HitInput in;
     in.active = true;
@@ -365,6 +387,11 @@ void TestGameCode() {
     Check(Bytes(0x6347C0, "f6812801000001b901000000410fb6c00f44c1c3"), "VehicleBase slot 34: decided where it is");
     Check(Bytes(0x630F90, "48895c2420448844241888542410"), "630F90 (who runs a vehicle) is the expected function");
     Check(Bytes(0x630FD9, "4c39a118060000"), "630F90 counts seats at +0x618");
+    Check(Bytes(0x630FEF, "498b8e08060000"), "630F90 reads the seat array at +0x608");
+    Check(Bytes(0x631016, "4869dd400300004803d9488b9368020000"), "seats are 0x340 bytes, the rider's control block at +0x268");
+    Check(Bytes(0x631043, "4c8bbb60020000488b9b68020000"), "the rider at seat +0x260");
+    Check(Bytes(0x6310FD, "0fb7b828010000"), "630F90 reads the rider's network word at +0x128");
+    Check(Bytes(0x784210, "48895c240848897424105748"), "784210 (this machine hosts) is the expected function");
     // The game's own drop of a damage message, and the handler's range that leaves it out.
     Check(Bytes(0x774614, "41c70704000004"), "774614 writes 0x4000004 over damage it drops");
     Check(Bytes(0x54A555, "81c2000000f083fa0f"), "slot 9 takes 0x10000000..0x1000000F only");
@@ -512,6 +539,7 @@ void TestPreFilter() {
 
 int main(int argc, char** argv) {
     TestOwner();
+    TestVehicleShooter();
     TestDecision();
     TestSerialization();
     TestGdi();

@@ -346,23 +346,33 @@ int main(int argc, char** argv) {
     // --- Random state sync: the message, the decisions, the schedule ---
     {
         RngSync sync;
+        sync.sender = 0xA1A2A3A4A5A6A7A8ull;
         sync.seq = 0x01020304u;
         sync.state = 0x1122334455667788ull;
         sync.state2 = 0x99AABBCCDDEEFF00ull;
         std::uint8_t bytes[kRngSyncBytes + 4]{};
         Check(WriteRngSync(sync, bytes, kRngSyncBytes - 1) == 0, "no room: nothing written");
-        Check(WriteRngSync(sync, bytes, sizeof(bytes)) == kRngSyncBytes, "a message is 23 bytes");
-        Check(bytes[0] == 'R' && bytes[1] == 'S' && bytes[2] == 1 && bytes[3] == 0x04 && bytes[7] == 0x88 && bytes[15] == 0x00,
-              "little endian after magic and version");
+        Check(WriteRngSync(sync, bytes, sizeof(bytes)) == kRngSyncBytes, "a message is 31 bytes");
+        Check(bytes[0] == 'R' && bytes[1] == 'S' && bytes[2] == 2 && bytes[3] == 0xA8 && bytes[11] == 0x04 && bytes[15] == 0x88 &&
+                  bytes[23] == 0x00,
+              "little endian after magic and version: sender, sequence, states");
         RngSync back;
-        Check(ReadRngSync(bytes, kRngSyncBytes, back) && back.seq == sync.seq && back.state == sync.state &&
+        Check(ReadRngSync(bytes, kRngSyncBytes, back) && back.sender == sync.sender && back.seq == sync.seq && back.state == sync.state &&
                   back.state2 == sync.state2,
               "it reads back");
         Check(!ReadRngSync(bytes, kRngSyncBytes - 1, back) && !ReadRngSync(bytes, kRngSyncBytes + 1, back),
               "a message of another size is refused");
-        bytes[2] = 2;
-        Check(!ReadRngSync(bytes, kRngSyncBytes, back), "another version is refused");
         bytes[2] = 1;
+        Check(!ReadRngSync(bytes, kRngSyncBytes, back), "another version (the one without a sender) is refused");
+        bytes[2] = 2;
+        {
+            RngSync anonymous = sync;
+            anonymous.sender = 0;
+            std::uint8_t zero[kRngSyncBytes]{};
+            WriteRngSync(anonymous, zero, sizeof(zero));
+            Check(!ReadRngSync(zero, kRngSyncBytes, back), "a message without a sender is refused");
+        }
+        Check(RngSenderId() != 0 && RngSenderId() == RngSenderId(), "this process's sender id is fixed and not 0");
         bytes[0] = 'H';
         Check(!ReadRngSync(bytes, kRngSyncBytes, back), "another magic (a hit event) is refused");
         Check(!ReadRngSync(nullptr, kRngSyncBytes, back), "no data");
@@ -404,13 +414,26 @@ int main(int argc, char** argv) {
         Check(schedule.Due(0x3000, 100000, 2000) && schedule.size() == 1, "objects not seen for 30 s are forgotten");
 
         RngReceiver receiver;
-        Check(receiver.Accept(0x1000, 10, 1000), "the first message of an object is taken");
-        Check(!receiver.Accept(0x1000, 10, 1001), "the same again is stale");
-        Check(!receiver.Accept(0x1000, 9, 1002), "an older one is stale");
-        Check(receiver.Accept(0x1000, 11, 1003), "a newer one is taken");
-        Check(receiver.Accept(0x2000, 1, 1003), "another object's sequence is its own");
-        Check(receiver.Accept(0x3000, 0xFFFFFFFFu, 1004) && receiver.Accept(0x3000, 2, 1005), "sequences wrap");
-        Check(receiver.Accept(0x1000, 5, 100000), "after 30 s without one the object starts over");
+        constexpr std::uint64_t host = 0x1111, guest = 0x2222;
+        Check(receiver.Accept(0x1000, host, 10, 1000), "the first message of an object is taken");
+        Check(!receiver.Accept(0x1000, host, 10, 1001), "the same again is stale");
+        Check(!receiver.Accept(0x1000, host, 9, 1002), "an older one is stale");
+        Check(receiver.Accept(0x1000, host, 11, 1003), "a newer one is taken");
+        Check(receiver.Accept(0x2000, host, 1, 1003), "another object's sequence is its own");
+        Check(receiver.Accept(0x3000, host, 0xFFFFFFFFu, 1004) && receiver.Accept(0x3000, host, 2, 1005), "sequences wrap");
+        // The owner changes: the new owner's process counts from its own, much smaller, sequence.
+        Check(receiver.Accept(0x1000, guest, 3, 1006), "the first message from a new owner is taken although its sequence is lower");
+        Check(receiver.Accept(0x1000, guest, 4, 1007), "and its next one");
+        Check(!receiver.Accept(0x1000, guest, 4, 1008), "its repeats are stale");
+        Check(receiver.Accept(0x1000, host, 12, 1009), "the old owner taking it back starts over too");
+        Check(!receiver.Accept(0x1000, host, 12, 1010), "and is deduplicated again");
+        // Stale messages are not a sign of life: an object that only gets them is forgotten after 30 s.
+        RngReceiver quiet;
+        Check(quiet.Accept(0x5000, host, 100, 0), "a first message");
+        for (std::uint64_t t = 1000; t < 60000; t += 1000) quiet.Accept(0x5000, host, 50, t);
+        Check(quiet.Accept(0x6000, host, 1, 61000) && quiet.size() == 1, "an object with only stale messages for 30 s is forgotten");
+        Check(quiet.Accept(0x5000, host, 50, 61001), "and then starts over");
+        Check(receiver.Accept(0x1000, host, 5, 100000), "after 30 s without one the object starts over");
 
         Check(RngMessageType(13) && !RngMessageType(12) && !RngMessageType(14) && RngMessageType(0xFFFFFFFF0000000Dull),
               "r8d = type - 1 = 13 is ours, whatever the upper half");

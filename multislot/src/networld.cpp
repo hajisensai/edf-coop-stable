@@ -105,6 +105,7 @@ void MaybeSendRng(std::uint64_t object, std::uint16_t netFlags) {
     AcquireSRWLockExclusive(&rngLock);
     const bool due = rngSchedule.Due(object, now, rngIntervalMs.load());
     if (due) sync.seq = ++rngSeq;
+    sync.sender = RngSenderId();
     ReleaseSRWLockExclusive(&rngLock);
     if (!due) return;
     sync.state = Field<std::uint64_t>(object, kObjectRandom);
@@ -153,7 +154,7 @@ void RngReceiveHandler(CpuContext* context) {
         ++rngStats.malformed;
     } else if (!(Field<std::uint16_t>(net, 8) & kRemoteOwned)) {
         ++rngStats.notRemote;  // a machine that thinks it owns the object too: keep our own state
-    } else if (!rngReceiver.Accept(object, sync.seq, now)) {
+    } else if (!rngReceiver.Accept(object, sync.sender, sync.seq, now)) {
         ++rngStats.stale;
     } else {
         auto* o = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(object));

@@ -1782,7 +1782,9 @@ TrafficClass classifyGameSend(const std::string& remote, const EOS_P2P_SendPacke
     if (!plain || o.Reliability != EOS_PR_UnreliableUnordered) return TrafficClass::Unknown;
     const uint64_t now = GetTickCount64();
     for (const RecordInfo& r : plain->records)
-        if (!r.reliable && !isControllerRecord(r.type)) g.stateTypes.observe(remote, r.type, now);
+        if (!r.reliable && !isControllerRecord(r.type) && g.stateTypes.observe(remote, r.type, now))
+            logf("NETCLASS record type 0x%05X behaves as state (sent to %s %u times in a row): its datagrams go unreliably "
+                 "from now on", r.type, shortId(remote).c_str(), StateLearner::kSamples);
     g.recordTypes.record(remote, plain->records, now);
     const TrafficClass cls = classify(plain->records, plain->parsed, g.stateTypes);
     g.recordTypes.recordDatagram(cls, o.DataLengthBytes);

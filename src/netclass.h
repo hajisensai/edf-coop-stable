@@ -75,8 +75,9 @@ const char* trafficClassName(TrafficClass c);
 class StateLearner {
 public:
     static constexpr uint32_t kSamples = 20;
-    static constexpr uint64_t kMaxIntervalMs = 250;
-    void observe(const std::string& remote, uint32_t type, uint64_t nowMs);
+    static constexpr uint64_t kMaxIntervalMs = 300;  // three times the controller's 90 ms beat
+    // True when this update made `type` state (once per type).
+    bool observe(const std::string& remote, uint32_t type, uint64_t nowMs);
     bool isState(uint32_t type) const;
     void forget();
 

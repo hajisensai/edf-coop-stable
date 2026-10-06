@@ -51,17 +51,21 @@ const char* trafficClassName(TrafficClass c) {
     return "unknown";
 }
 
-void StateLearner::observe(const std::string& remote, uint32_t type, uint64_t nowMs) {
-    if (type == kRecordEventBatch || isControllerRecord(type)) return;
+bool StateLearner::observe(const std::string& remote, uint32_t type, uint64_t nowMs) {
+    if (type == kRecordEventBatch || isControllerRecord(type)) return false;
     std::lock_guard<std::mutex> lock(mu_);
     Run& run = runs_[{remote, type}];
     // Several records of a type in one datagram are one update, not a run of them.
-    if (run.lastMs != 0 && nowMs == run.lastMs) return;
+    if (run.lastMs != 0 && nowMs == run.lastMs) return false;
     // A late update (the sender's frame hitched) halves the run instead of ending it; a type sent with gaps over and
     // over never gets there.
     if (run.lastMs != 0) run.steady = nowMs - run.lastMs <= kMaxIntervalMs ? run.steady + 1 : run.steady / 2;
     run.lastMs = nowMs;
-    if (run.steady >= kSamples) state_[type] = true;
+    if (run.steady < kSamples) return false;
+    bool& state = state_[type];
+    const bool learnt = !state;
+    state = true;
+    return learnt;
 }
 
 bool StateLearner::isState(uint32_t type) const {

@@ -351,14 +351,27 @@ inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::N
     std::vector<bool> reliable;  // the state datagrams in wire order: sent reliably?
     for (const auto& packet : Wire(network))
         if (packet.header.channel == 0 && packet.header.size == 89) reliable.push_back(packet.header.reliability != 0);
-    std::size_t lateReliable = 0;
-    for (std::size_t i = reliable.size() / 2; i < reliable.size(); ++i) lateReliable += reliable[i] ? 1 : 0;
-    std::printf("INFO: %zu state datagrams on the wire, %zu reliable in the second half\n", reliable.size(), lateReliable);
-    Check(reliable.size() > 20, "state datagrams crossed EOS");
-    // Before a type is learnt (StateLearner::kSamples updates per pair, ~2.4 s here) its datagrams are Unknown and go
-    // reliably, as before. Once learnt, never.
-    Check(lateReliable == 0, "once learnt, state datagrams go unreliably (" + std::to_string(lateReliable) +
-                                 " reliable in the second half)");
+    std::size_t unreliable = 0;
+    for (bool r : reliable) unreliable += r ? 0 : 1;
+    std::printf("INFO: %zu state datagrams on the wire, %zu of them unreliable\n", reliable.size(), unreliable);
+    Check(reliable.size() > 20 && unreliable > 0, "state datagrams crossed EOS, unreliably once learnt");
+    // Before a type is learnt (StateLearner::kSamples updates in a row) its datagrams are Unknown and go reliably, as
+    // before. From the period after the one it was learnt in, no datagram of the run is Unknown any more.
+    for (const auto& machine : machines) {
+        const std::string& log = machine.text;
+        const std::size_t learnt = log.find("NETCLASS record type 0x02800 behaves as state");
+        Check(learnt != std::string::npos, machine.user + " learnt that record type 0x02800 is state");
+        if (learnt == std::string::npos) continue;
+        std::size_t at = log.find("NETCLASS datagrams: ", learnt);
+        if (at != std::string::npos) at = log.find("NETCLASS datagrams: ", at + 1);  // the period it was learnt in may straddle
+        std::size_t unknownLater = 0;
+        for (; at != std::string::npos; at = log.find("NETCLASS datagrams: ", at + 1)) {
+            const std::size_t u = log.find(" unknown ", at);
+            if (u != std::string::npos) unknownLater += std::strtoull(log.c_str() + u + 9, nullptr, 10);
+        }
+        Check(unknownLater == 0, machine.user + ": once learnt, every datagram has a class (" + std::to_string(unknownLater) +
+                                     " unknown later)");
+    }
 }
 
 // A member of another netcode protocol ([Test] NetProtocol=99) is refused by the host: removed from the room, both

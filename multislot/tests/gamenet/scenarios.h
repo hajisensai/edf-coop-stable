@@ -462,7 +462,8 @@ inline void CheckVersionGate(const std::vector<Spawned>& machines, const gamenet
     const auto& odd = machines.back();
     Check(host.text.find("NETCODE REFUSED " + odd.user) != std::string::npos, "the host refused the member of protocol 99");
     Check(network.lobby.count == machines.size() - 1, "it is out of the room (" + std::to_string(network.lobby.count) + ")");
-    Check(odd.text.find("the room's host " + host.user + " runs netcode protocol 1, this machine 99") != std::string::npos,
+    Check(odd.text.find("the room's host " + host.user + " runs netcode protocol " + std::to_string(multislot::kNetProtocol) +
+                        ", this machine 99") != std::string::npos,
           "the refused member says why its netcode is off");
     for (std::size_t i = 0; i + 1 < machines.size(); ++i) {
         const std::string& log = machines[i].text;

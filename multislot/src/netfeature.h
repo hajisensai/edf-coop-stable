@@ -28,14 +28,13 @@
 #include <string>
 #include <vector>
 
+#include "netprotocol.h"
 #include "syncmarker.h"
 #include "src/netcode.h"
 
 namespace multislot {
 
-// Bumped whenever a message, a wire format or a game rule of the netcode rewrite changes in a way an older build
-// would read differently. Builds of different protocols never run new netcode together.
-constexpr std::int64_t kNetProtocol = 1;
+// kNetProtocol: netprotocol.h.
 constexpr const char* kNetProtocolKey = "EDF6NET_PROTO";
 constexpr const char* kNetCapsKey = "EDF6NET_CAPS";
 // A member publishes the room host's protocol as it read it, after it logged what it read. The host refuses a

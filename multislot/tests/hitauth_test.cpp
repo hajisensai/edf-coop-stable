@@ -363,6 +363,8 @@ void TestGameCode() {
     Check(Bytes(0x5A3600, "4883b9d01e0000007414f6812801000001b801000000410fb6c80f45c1c3"),
           "SoldierBase slot 34: a player is decided where it is");
     Check(Bytes(0x6347C0, "f6812801000001b901000000410fb6c00f44c1c3"), "VehicleBase slot 34: decided where it is");
+    Check(Bytes(0x630F90, "48895c2420448844241888542410"), "630F90 (who runs a vehicle) is the expected function");
+    Check(Bytes(0x630FD9, "4c39a118060000"), "630F90 counts seats at +0x618");
     // The game's own drop of a damage message, and the handler's range that leaves it out.
     Check(Bytes(0x774614, "41c70704000004"), "774614 writes 0x4000004 over damage it drops");
     Check(Bytes(0x54A555, "81c2000000f083fa0f"), "slot 9 takes 0x10000000..0x1000000F only");

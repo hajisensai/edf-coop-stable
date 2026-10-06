@@ -28,6 +28,8 @@ constexpr std::uint32_t kStreamMark = 0x12B48A0;        // the read position (57
 constexpr std::uint32_t kStreamRewind = 0x12B4FD0;      // back to it (577C6E, 63260D)
 constexpr std::uint32_t kPartsReserve = 0x124190;       // GDI+0x70: the constructor's reserve(4) (22FE27)
 constexpr std::uint32_t kPartsRelease = 0x11E9D0;       // and its release
+constexpr std::uint32_t kVehicleAccept = 0x6347C0;      // VehicleBase slot 34: marks the vehicle classes
+constexpr std::uint32_t kVehicleRunner = 0x630F90;      // int(veh, hostFallback, preferSeat0): 1 this machine, 2 another
 
 // Object fields (GameObjectBase).
 constexpr std::size_t kPosition = 0x90;      // float[4] (54A6F2)
@@ -35,7 +37,9 @@ constexpr std::size_t kNetworkObject = 0x120;
 constexpr std::size_t kNetworkFlags = 0x128;  // NetworkObject+8
 constexpr std::size_t kDead = 0x2E8;
 constexpr std::size_t kHealth = 0x2F8;
-constexpr std::size_t kHealthDelta = 0x5B4;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
+constexpr std::size_t kHealthDelta = 0x5B4;
+constexpr std::size_t kSeatCount = 0x618;    // VehicleBase seats (630FD9); 630F90 reads seat 0 when there are any
+constexpr std::size_t kAcceptSlot = 34 * 8;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
 // Virtual slots (byte offsets): the object's message trio (543ACE..543AEE), and NetworkObject's send to the copies.
 constexpr std::size_t kHandleSlot = 0x48, kPreSlot = 0x50, kPostSlot = 0x58, kSendToCopies = 0x80;
 constexpr std::size_t kStreamBytes = 0x5F8, kStreamData = 0x10, kStreamSize = 0x5F0;
@@ -113,7 +117,20 @@ NetOwner AttackerOwner(const std::uint8_t* gdi) {
     if (gdi[kGdiOverride]) return gdi[kGdiOverrideRemote] ? NetOwner::Remote : NetOwner::Local;
     GameRef net;
     Fn<GameRef*(__fastcall*)(GameRef*, const void*)>(kLockNetworkObject)(&net, gdi + kGdiAttacker);
-    const NetOwner owner = net.object ? OwnerOf(Field<std::uint32_t>(net.object, 8)) : NetOwner::Unregistered;
+    NetOwner owner = net.object ? OwnerOf(Field<std::uint32_t>(net.object, 8)) : NetOwner::Unregistered;
+    if (owner != NetOwner::Unregistered) {
+        // A vehicle's registration owner is whoever created it (the host, for a delivered one), not whoever fires
+        // from it. Its shots are decided where it is run: the machine of its seat-0 rider, else its last driver,
+        // else the host (630F90 with the host fallback; docs/net-re/damage.md section 5). The vehicle classes are
+        // the 27 that share slot 34 6347C0; their NetworkObject sits at +0x120 like every GameObjectBase's.
+        const auto* vehicle = static_cast<const std::uint8_t*>(net.object) - kNetworkObject;
+        const auto table = *reinterpret_cast<const std::uint8_t* const*>(vehicle);
+        const auto slot34 = reinterpret_cast<const unsigned char*>(Field<const void*>(table, kAcceptSlot));
+        if (slot34 == game + kVehicleAccept && Field<std::uint64_t>(vehicle, kSeatCount) > 0) {
+            const int runner = Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
+            owner = runner == 1 ? NetOwner::Local : NetOwner::Remote;
+        }
+    }
     ReleaseShared(net);
     return owner;
 }
@@ -151,10 +168,12 @@ bool Forward(std::uint8_t* target, const std::uint8_t* gdi) {
     GdiToEvent(gdi, event);
     // The attacker's reference id, as the game's kill message names it (76B583); the target needs none, the event
     // travels through its own NetworkObject (and asking would give every object hit an entry in the id table).
-    event.attackerRef = ReferenceId(gdi + kGdiAttacker);
+    // Only for a live attacker: an empty reference would be given an id of its own.
     const GameRef attacker{Field<void*>(gdi, kGdiAttacker), Field<void*>(gdi, kGdiAttacker + 8)};
-    if (Alive(attacker))
+    if (Alive(attacker)) {
+        event.attackerRef = ReferenceId(gdi + kGdiAttacker);
         for (int i = 0; i < 3; ++i) event.attackerPos[i] = Field<float>(attacker.object, kPosition + 4 * i);
+    }
     AcquireSRWLockExclusive(&lock);
     event.seq = ++nextSeq;
     ReleaseSRWLockExclusive(&lock);

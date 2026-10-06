@@ -170,7 +170,12 @@ constexpr unsigned long long kBulkWaitMsPerKiB = 30;  // 32 KiB/s, half the game
 // them to netfeature.h. Unset: never bulk.
 using BulkReady = bool (*)();
 using BulkSend = bool (*)(const void* remote, std::uint16_t tag, const void* data, std::size_t size);
-void SetBulkRecords(BulkReady ready, BulkSend send);
+// Whether a bulk of records from `peer` (an EOS_ProductUserId) is on its way (some of its fragments here, not all).
+using BulkIncoming = bool (*)(const void* peer);
+// While one is, the game's packets from that member wait here (in order) instead of reaching the game: its start
+// message comes after its records, so the game reads the message once the records are here, and its frame never waits
+// for them (RecordReadHook waits only when the message overtook every fragment, at most once per bulk).
+void SetBulkRecords(BulkReady ready, BulkSend send, BulkIncoming incoming = nullptr);
 // The receiver's side: a bulk message of tag kRecordsBulkTag arrived.
 void TakeRecordsBulk(const std::uint8_t* data, std::size_t size);
 struct BulkRecord {

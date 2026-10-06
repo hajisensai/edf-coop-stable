@@ -765,7 +765,10 @@ int FullJoin(Machine& machine) {
     options.LobbyDetailsHandle = details;
     options.LocalUserId = Self(machine);
     Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
-    TickUntil(machine, 30000, [&] { return entered.done; });
+    TickUntil(machine, 30000, [&] {
+        PollP2P(machine);
+        return entered.done;
+    });
     release(details);
     Result("fulljoin", "%s %d", entered.done ? "completed" : "NOT completed", entered.result);
     if (!entered.done || entered.result != 0) return 1;

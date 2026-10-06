@@ -782,10 +782,17 @@ bool LoadRooms(const wchar_t* iniPath) {
     }
     InstallNetInterest(GetPrivateProfileIntW(L"Netcode", L"Interest", 1, iniPath) != 0);
     // I1: a start message too large even for stubs sends every record in bulk while the room reads fragments.
+    static const bool dropRecordsBulk = GetPrivateProfileIntW(L"Test", L"DropRecordsBulk", 0, iniPath) != 0;
+    if (dropRecordsBulk) Log("TEST DropRecordsBulk=1: the records of start messages this machine hosts are never sent");
     SetBulkRecords([] { return NetFeatureActive(NetFeature::Fragments); },
                    [](const void* remote, std::uint16_t tag, const void* data, std::size_t size) {
                        char id[40]{};
+                       if (dropRecordsBulk) return true;  // [Test]: "sent", and lost
                        return remote && *ProductUserIdText(remote, id, sizeof(id)) && SendBulk(id, tag, data, size);
+                   },
+                   [](const void* peer) {
+                       char id[40]{};
+                       return peer && *ProductUserIdText(peer, id, sizeof(id)) && dn::bulkIncoming(id, kRecordsBulkTag);
                    });
     SetBulkHandlerForTag(kRecordsBulkTag, [](const std::string&, std::uint16_t, const std::uint8_t* data, std::size_t size) {
         TakeRecordsBulk(data, size);

@@ -460,12 +460,35 @@ void DirectNet::setNetcode(uint32_t protocol, uint32_t caps, bool refuseOthers) 
     refuseOtherProtocols_ = refuseOthers;
 }
 
-void DirectNet::setAdmitUnlisted(bool on) {
+void DirectNet::setUnlistedPolicy(bool lobbyFull, std::set<std::string> lobby, std::set<std::string> banned) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (on != admitUnlisted_)
-        logf("DIRECT %s", on ? "the room holds more than Epic's lobby: members outside it come in over the direct link"
-                             : "only members Epic's lobby lists come in over the direct link");
-    admitUnlisted_ = on;
+    if (lobbyFull != lobbyFull_)
+        logf("DIRECT %s", lobbyFull ? "Epic's lobby is full and the room holds more: members outside it may come in over the "
+                                      "direct link, each proving its EOS id over EOS"
+                                    : "only members Epic's lobby lists come in over the direct link");
+    lobbyFull_ = lobbyFull;
+    lobbyIds_ = std::move(lobby);
+    bannedIds_ = std::move(banned);
+}
+
+// Proofs kept at most (kMaxClients, the room's size and then some): the oldest goes first.
+void DirectNet::proveEosIdentity(const std::string& puid, const std::string& commitment) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (puid.empty() || commitment.empty()) return;
+    auto [it, fresh] = provenIds_.insert_or_assign(puid, commitment);
+    (void)it;
+    if (fresh) provenOrder_.push_back(puid);
+    while (provenIds_.size() > kMaxClients && !provenOrder_.empty()) {
+        provenIds_.erase(provenOrder_.front());
+        provenOrder_.pop_front();
+    }
+}
+
+std::vector<std::string> DirectNet::takeProofRequests() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> out(proofRequests_.begin(), proofRequests_.end());
+    proofRequests_.clear();
+    return out;
 }
 
 std::map<std::string, DirectNet::MemberNetcode> DirectNet::clientNetcode() {
@@ -687,7 +710,10 @@ void DirectNet::setActive(bool active) {
     dials_.clear();
     intros_.clear();
     introduced_.clear();
-    unlistedIds_.clear();
+    provenIds_.clear();
+    provenOrder_.clear();
+    proofRequests_.clear();
+    lobbyFull_ = false;
     clientNetcode_.clear();
     rosterPages_ = {};
     roomPages_ = {};
@@ -1016,17 +1042,22 @@ const char* DirectNet::identityRefusal(const HelloMsg& h) {
     if (refuseOtherProtocols_ && netProtocol_ && h.netProtocol != netProtocol_)
         return "it runs another EDF6Coop netcode protocol (another version); the room host refuses it";
     auto member = memberIds_.find(h.puid);
-    if (member == memberIds_.end() && admitUnlisted_ && opt_.mode == Mode::Host) {
-        // A member beyond Epic's lobby: it proves the key it brings, which stays its key in this room.
-        const std::string commitment = identityCommitment(h.publicKey);
-        auto [known, fresh] = unlistedIds_.try_emplace(h.puid, commitment);
-        if (!fresh && known->second != commitment)
-            return "it is not signed by the key that member used before in this room (someone else claiming to be it?)";
-        auto digest = helloDigest(h);
-        if (!digest || !verifySignature(h.publicKey, *digest, h.signature)) {
-            if (fresh) unlistedIds_.erase(known);
-            return "its signature does not verify";
+    if (member == memberIds_.end() && opt_.mode == Mode::Host && lobbyFull_) {
+        // A member beyond Epic's lobby (see setUnlistedPolicy): never one Epic lists, never one this room removed,
+        // and only with the key it proved over EOS.
+        if (lobbyIds_.count(h.puid))
+            return "Epic's lobby lists that player, but it published no direct-link identity there (the game as it "
+                   "ships, or its entry has not reached us yet); nobody may come in under its id over the direct link";
+        if (bannedIds_.count(h.puid)) return "that player was removed from this room";
+        auto proven = provenIds_.find(h.puid);
+        if (proven == provenIds_.end()) {
+            if (proofRequests_.size() < kMaxClients) proofRequests_.insert(h.puid);
+            return "it has not proven its EOS id over EOS yet (a player beyond Epic's lobby does that first)";
         }
+        if (identityCommitment(h.publicKey) != proven->second)
+            return "it is not signed by the key that EOS id proved over EOS (someone else claiming to be it?)";
+        auto digest = helloDigest(h);
+        if (!digest || !verifySignature(h.publicKey, *digest, h.signature)) return "its signature does not verify";
         return nullptr;
     }
     if (member == memberIds_.end())
@@ -1072,7 +1103,7 @@ void DirectNet::onHostHello(const HelloMsg& h, const sockaddr_storage& from, int
         return;
     }
     const auto listed = memberIds_.find(id);
-    const std::string commitment = listed != memberIds_.end() ? listed->second : unlistedIds_[id];
+    const std::string commitment = listed != memberIds_.end() ? listed->second : provenIds_[id];
     auto it = clients_.find(id);
     bool sameSession = it != clients_.end() && it->second.session == h.session && it->second.peerNonce == h.nonce &&
                        it->second.peerEcdh == h.ecdh;

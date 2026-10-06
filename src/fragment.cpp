@@ -8,7 +8,7 @@ namespace {
 
 constexpr uint8_t kMagic[4] = {'E', 'D', 'F', 'G'};
 constexpr uint8_t kAckMagic[4] = {'E', 'D', 'F', 'A'};
-constexpr uint8_t kVersion = 1;
+constexpr uint8_t kVersion = 2;
 
 template <typename T>
 void put(uint8_t* at, T value) {
@@ -25,7 +25,7 @@ size_t fragmentsFor(size_t total) { return (total + kFragmentPayload - 1) / kFra
 
 }  // namespace
 
-std::vector<std::vector<uint8_t>> splitIntoFragments(uint32_t id, uint8_t flags, uint16_t tag, const uint8_t* data,
+std::vector<std::vector<uint8_t>> splitIntoFragments(uint64_t id, uint8_t flags, uint16_t tag, const uint8_t* data,
                                                      size_t size) {
     std::vector<std::vector<uint8_t>> out;
     if (!data || size == 0 || size > kMaxFragmentedBytes) return out;
@@ -38,30 +38,30 @@ std::vector<std::vector<uint8_t>> splitIntoFragments(uint32_t id, uint8_t flags,
         f[4] = kVersion;
         f[5] = flags;
         put<uint16_t>(f.data() + 6, tag);
-        put<uint32_t>(f.data() + 8, id);
-        put<uint32_t>(f.data() + 12, static_cast<uint32_t>(size));
-        put<uint16_t>(f.data() + 16, static_cast<uint16_t>(i));
-        put<uint16_t>(f.data() + 18, static_cast<uint16_t>(count));
+        put<uint64_t>(f.data() + 8, id);
+        put<uint32_t>(f.data() + 16, static_cast<uint32_t>(size));
+        put<uint16_t>(f.data() + 20, static_cast<uint16_t>(i));
+        put<uint16_t>(f.data() + 22, static_cast<uint16_t>(count));
         memcpy(f.data() + kFragmentHeader, data + at, n);
     }
     return out;
 }
 
-std::vector<uint8_t> fragmentAck(uint32_t id) {
+std::vector<uint8_t> fragmentAck(uint64_t id) {
     std::vector<uint8_t> out(kFragmentAckBytes);
     memcpy(out.data(), kAckMagic, 4);
-    put<uint32_t>(out.data() + 4, id);
+    put<uint64_t>(out.data() + 4, id);
     return out;
 }
 
-bool parseFragmentAck(const uint8_t* data, size_t size, uint32_t& id) {
+bool parseFragmentAck(const uint8_t* data, size_t size, uint64_t& id) {
     if (!data || size != kFragmentAckBytes || memcmp(data, kAckMagic, 4) != 0) return false;
-    id = get<uint32_t>(data + 4);
+    id = get<uint64_t>(data + 4);
     return true;
 }
 
-uint32_t Reassembler::idOf(const uint8_t* data, size_t size) {
-    return isFragment(data, size) ? get<uint32_t>(data + 8) : 0;
+uint64_t Reassembler::idOf(const uint8_t* data, size_t size) {
+    return isFragment(data, size) ? get<uint64_t>(data + 8) : 0;
 }
 
 bool isFragment(const uint8_t* data, size_t size) {
@@ -94,10 +94,10 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
     }
     const uint8_t flags = data[5];
     const uint16_t tag = get<uint16_t>(data + 6);
-    const uint32_t id = get<uint32_t>(data + 8);
-    const uint32_t total = get<uint32_t>(data + 12);
-    const uint16_t index = get<uint16_t>(data + 16);
-    const uint16_t count = get<uint16_t>(data + 18);
+    const uint64_t id = get<uint64_t>(data + 8);
+    const uint32_t total = get<uint32_t>(data + 16);
+    const uint16_t index = get<uint16_t>(data + 20);
+    const uint16_t count = get<uint16_t>(data + 22);
     const size_t n = size - kFragmentHeader;
     // What a valid sender writes: the count its total needs, a full payload in all but the last fragment.
     const bool valid = total > 0 && total <= kMaxFragmentedBytes && count == fragmentsFor(total) && index < count &&
@@ -153,6 +153,12 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
     if (completed_.size() >= kCompletedKept) completed_.erase(completed_.begin());
     completed_[key] = nowMs;
     return done;
+}
+
+bool Reassembler::pending(const std::string& src, uint8_t flags, uint16_t tag) const {
+    for (auto it = partial_.lower_bound({src, 0}); it != partial_.end() && it->first.first == src; ++it)
+        if (it->second.flags == flags && it->second.tag == tag) return true;
+    return false;
 }
 
 void Reassembler::clear() {

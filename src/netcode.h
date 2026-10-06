@@ -64,6 +64,8 @@ void setBulkHandler(BulkHandler handler);
 // A bulk message goes again until its receiver acknowledges it (5 tries, the wait doubling); this many were given up
 // since start (each logged).
 uint64_t bulkUndelivered();
+// Whether a bulk message of `tag` from `src` is on its way (some of its fragments here, not all).
+bool bulkIncoming(const std::string& src, uint16_t tag);
 
 // --- Rooms above Epic's 64 (I1) ---
 // What a room owner puts on the lobby itself (not a member: a searcher reads the lobby's attributes only) so that a
@@ -71,6 +73,11 @@ uint64_t bulkUndelivered();
 // identity commitment. False when this machine hosts no direct link.
 constexpr const char* kHostAddressKey = "EDF6DN_HOSTADDR";
 constexpr const char* kHostIdentityKey = "EDF6DN_HOSTID";
+// A player beyond a full lobby proves its EOS id to the room's host over EOS P2P itself (EOS authenticates the
+// sender of every packet): 'EDID' and its direct-link identity commitment, on this socket and channel, until the host
+// let it in. The host accepts the connection for an EOS id that said hello without a proof (DirectNet).
+constexpr const char* kIdentityProofSocket = "EDF6ID";
+constexpr uint8_t kIdentityProofChannel = 0x4F;
 bool hostAdvertisement(std::string& address, std::string& identity);
 // Our netcode protocol and features, said in every direct-link hello; a host refuses another protocol when
 // `refuseOthers`. The host's view of what each member beyond Epic's lobby runs (for the version gate).

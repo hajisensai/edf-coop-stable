@@ -83,12 +83,16 @@ struct LobbyView {
         std::map<std::string, std::string, std::less<>> texts;
     };
     std::vector<Member> members;
+    // The lobby's own texts of the watched lobby keys (WatchLobbyTexts), as Epic relays them.
+    std::map<std::string, std::string, std::less<>> lobbyTexts;
 };
 using LobbyObserver = std::function<void(const LobbyView& view)>;
 // Read `keys` of every member on each beat (once a second while we are in a lobby) and hand them to `observer`, on
 // the EOS tick, outside every lock of this file. Leaving a lobby hands it an empty view. Each call adds a watcher
 // (host data and the netcode version gate both watch); every watcher's view holds every watcher's keys.
 void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer);
+// Lobby keys (PublishLobbyText) read into every view's lobbyTexts on the same beat.
+void WatchLobbyTexts(std::vector<std::string> keys);
 // Our value of `key` (at most 1000 characters), published on our lobby member on the next beat and in every lobby
 // we enter afterwards. Any thread. Never empty: EOS refuses an empty text with EOS_InvalidParameters, and with it the
 // whole update - our split marker and every other text - so an empty value is logged and not published.

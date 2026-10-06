@@ -566,6 +566,27 @@ bool endsRoomForUs(bool self, int32_t s) {
     return s == kClosed || (self && (s == kLeft || s == kDisconnected || s == kKicked));
 }
 
+// How long a member that followed the old host's slots holds joins back for the new host's (room_view.h awaitingHost).
+constexpr uint64_t kNewHostSlotsMs = 20000;
+
+// Why the JOINED of `target` cannot reach our game yet, or nullptr. Under viewMutex. In a room whose host's slots we
+// follow, a member joins our game once the host's game has it (then we know its slot) and that slot is empty in our
+// game: a member taking the slot of one whose departure has not reached our game yet waits for it, it never takes
+// another slot (eos::Users::Add would give it the first empty one, and nothing renumbers it later). The host's say
+// (followHost) brings every held join again. After a change of host, joins wait for the new host's slots.
+const char* joinHeldBack(const std::string& target, uint64_t now) {
+    if (g.view.awaitingHost(now, kNewHostSlotsMs)) return "the room's new host says its member slots";
+    if (!g.view.slotted()) return nullptr;
+    const int slot = g.view.hostSlot(target);
+    if (slot < 0) return "the room's host's game has it (its slot is not known yet)";
+    if (GameSlotsSource source = g.gameSlots.load()) {
+        const std::vector<std::string> ours = source();
+        if (static_cast<size_t>(slot) < ours.size() && !ours[slot].empty() && ours[slot] != target)
+            return "its slot is empty in our game (the member that had it has not left our game yet)";
+    }
+    return nullptr;
+}
+
 // Whether a status reaches the game: one it already has that way is not repeated, as Epic and the room's
 // host may both report it (room_view.h). That the room ended for us, too, is told once: the host's say
 // may come before Epic's, and by then the view is gone. EDF.dll registers one member-status handler (its
@@ -575,13 +596,15 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
-    // In a room whose host's slots we follow, a member joins our game once the host's game has it: then we know its
-    // slot (room_view.h). Epic's word comes first otherwise; the host's say (followHost) brings it.
-    if (status == kJoined && !self && g.view.slotted() && g.view.hostSlot(target) < 0) {
-        logRateLimited("room-unslotted", 5000,
-                       "ROOM %s JOINED: held back until the room's host's game has it (its slot is not known yet)",
-                       shortId(target).c_str());
-        return false;
+    const uint64_t now = GetTickCount64();
+    // A new host: the old one's slots are not the room's any more (room_view.h promoted).
+    if (status == kPromoted) g.view.promoted(target, now);
+    if (status == kJoined && !self) {
+        const char* why = joinHeldBack(target, now);
+        if (why) {
+            logRateLimited("room-unslotted", 5000, "ROOM %s JOINED: held back until %s", shortId(target).c_str(), why);
+            return false;
+        }
     }
     if (!g.view.admit(target, status)) return false;
     if (ends) g.endedRoom = lobbyId;
@@ -1229,6 +1252,10 @@ constexpr uint64_t kAutoRetryMs = 60000;    // all candidates failed: try them a
 void autoJoinTick(uint64_t now) {
     AutoJoin& a = g.autoJoin;
     std::lock_guard<std::mutex> lock(a.mu);
+    // Made the room's owner (its host left): our link to the old host is no link to the room any more, and the game's
+    // packets must come and go through our own listener, which the members now connect to. At once, not at the next
+    // check: every packet of a member that came in meanwhile would be read from the dead link.
+    if (g.marker.inLobby() && g.marker.isOwner() && a.net) stopAutoJoinLocked("we host the room now");
     if (now - a.lastCheckMs < kAutoCheckMs) return;
     a.lastCheckMs = now;
     if (!g.marker.inLobby() || g.marker.isOwner()) return;
@@ -1544,6 +1571,8 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
         // its slots, the order they would take them in.
         if (GameSlotsSource slots = g.gameSlots.load()) members = slots();
         if (members.empty()) members = known ? roomOrder(epic, g.view.members()) : g.view.members();
+        // Whom the room removed goes with it: whoever hosts the room next keeps them out.
+        members = roomMessage(members, g.view.bannedMembers());
     }
     base->setRoomMembers(std::move(members));
 }
@@ -1578,23 +1607,65 @@ void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");
 }
 
-// The parked entry (lobbyEnteredWrapper) completes once we follow the host's slots, the room is gone, or after
-// kParkedEntryMs (a host whose link never comes up: the game enters with Epic's members, as without the plugin).
-constexpr uint64_t kParkedEntryMs = 10000;
+// A parked entry given up: the game was told its join failed, so it will not leave Epic's lobby itself.
+void leaveParkedLobby(const std::string& lobbyId) {
+    struct LeaveOptions {  // EOS_Lobby_LeaveLobbyOptions, ApiVersion 1
+        int32_t ApiVersion;
+        EOS_ProductUserId LocalUserId;
+        const char* LobbyId;
+    };
+    EOS_HLobby lobby = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        lobby = g.roomLobby;
+    }
+    const PFN_EOS_Lobby_LeaveOrDestroy leave = g.outer.leave ? g.outer.leave : g.api.gameLeaveLobby;
+    EOS_ProductUserId user = g.lobbyUser.load();
+    leftLobby("the join was given up: its host's member slots did not come");
+    if (!leave || !lobby || !user) return;
+    const LeaveOptions options{1, user, lobbyId.c_str()};
+    // The id is copied by EOS; the completion only logs.
+    leave(lobby, &options, nullptr, reinterpret_cast<void*>(static_cast<EOS_Lobby_OnLobbyIdCallback>(
+                                        [](const EOS_Lobby_LobbyIdCallbackInfo* i) {
+                                            logf("ROOM left lobby %s after the given-up join: %s",
+                                                 i && i->LobbyId ? i->LobbyId : "?", i ? resultName(i->ResultCode) : "?");
+                                        })));
+}
+
+// Whether our direct link to the room's host is getting anywhere: up (its member slots are on their way) or an attempt
+// at one of its addresses still running.
+bool hostLinkProgressing(uint64_t now) {
+    AutoJoin& a = g.autoJoin;
+    std::lock_guard<std::mutex> lock(a.mu);
+    if (!a.net) return false;
+    if (a.connected || a.net->canRoute(a.hostPuid)) return true;
+    return now - a.attemptMs < kAutoAttemptMs;
+}
+
+// The parked entry (lobbyEnteredWrapper) completes once we follow the host's slots (or the room is gone). Entering
+// without them would number the members by Epic's order, and nothing renumbers a member once our game added it: the
+// first one the host's game has elsewhere and every later one after it would be off for the rest of the room. So the
+// wait is not cut short at a fixed time while the link to the host gets somewhere, and when it cannot (the link is
+// going nowhere after kParkedEntryMs, or kParkedEntryCapMs passed) the join fails as a join that could not connect -
+// with a log line saying why - and we leave Epic's lobby again.
 void parkedEntryTick(uint64_t now) {
     EOS_Lobby_OnLobbyIdCallback callback = nullptr;
     EOS_Lobby_LobbyIdCallbackInfo info{};
     std::string lobbyId;
-    bool slotted = false;
+    ParkedEntryOutcome outcome = ParkedEntryOutcome::Wait;
+    uint64_t waited = 0;
+    const bool progressing = hostLinkProgressing(now);
     {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
         if (!g.parked.active) return;
+        waited = now - g.parked.sinceMs;
         {
             std::lock_guard<std::mutex> view(g.viewMutex);
-            slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
+            const bool slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
             const bool gone = g.viewRoom != g.parked.lobbyId;
-            if (!slotted && !gone && now - g.parked.sinceMs < kParkedEntryMs) return;
-            if (slotted) g.view.adoptHost();
+            outcome = decideParkedEntry(waited, slotted, gone, progressing);
+            if (outcome == ParkedEntryOutcome::Wait) return;
+            if (outcome == ParkedEntryOutcome::Slotted) g.view.adoptHost();
         }
         callback = g.parked.callback;
         info = g.parked.info;
@@ -1602,9 +1673,20 @@ void parkedEntryTick(uint64_t now) {
         g.parked = {};
         g.parkedActive = false;
     }
-    logf("ROOM entering room %s %s", lobbyId.c_str(),
-         slotted ? "with its host's member slots" : "without its host's member slots (they did not come)");
     info.LobbyId = lobbyId.c_str();
+    if (outcome == ParkedEntryOutcome::GiveUp) {
+        logf("ROOM NOT entering room %s: its host's member slots did not come (%llu s, the direct link to its host %s); "
+             "entering without them would put members in other slots than the host's game has them. The join fails "
+             "and we leave the lobby",
+             lobbyId.c_str(), static_cast<unsigned long long>(waited / 1000),
+             progressing ? "was still connecting" : "got nowhere");
+        leaveParkedLobby(lobbyId);
+        info.ResultCode = EOS_NoConnection;
+        callback(&info);
+        return;
+    }
+    logf("ROOM entering room %s %s", lobbyId.c_str(),
+         outcome == ParkedEntryOutcome::Slotted ? "with its host's member slots" : "(the room is gone)");
     callback(&info);
 }
 
@@ -1937,8 +2019,10 @@ void virtualRoomTick(uint64_t now) {
         self = idString(user);
         roomId = v.roomId;
         list = net ? net->hostRoom(&version) : std::vector<std::string>{};
+        std::vector<std::string> slots;
+        parseRoomMessage(list, &slots, nullptr);
         if (v.joining) {
-            if (std::find(list.begin(), list.end(), self) != list.end()) {
+            if (std::find(slots.begin(), slots.end(), self) != slots.end()) {
                 v.joining = false;
                 v.in = true;
                 v.hostSeenMs = now;
@@ -1970,7 +2054,9 @@ void virtualRoomTick(uint64_t now) {
     if (callback && result == EOS_Success) {
         logf("REJOIN in room %s again, over the direct link to its host", roomId.c_str());
         g.lobbyUser = user;
-        enterView(roomId, self, list);
+        std::vector<std::string> slots;
+        parseRoomMessage(list, &slots, nullptr);
+        enterView(roomId, self, slots);
         {
             std::lock_guard<std::mutex> lock(g.viewMutex);
             g.view.heardHost(list);  // the list we entered with
@@ -2627,7 +2713,7 @@ std::vector<std::string> extraMembers(EOS_HLobbyDetails h, uint32_t epicCount) {
     return extra;
 }
 
-// Epic's copy `h` of the room we are in while we follow its host's slots: the members its host's game has that our
+// Epic's copy `h` of the room we are in while we follow its host's slots (or wait for a new host's): the members its host's game has that our
 // game was told of, in slot order - the members the game may take now (room_view.h; one Epic lists that the host's
 // game does not have yet comes once it has, and is told then). False for every other lobby, and while we do not
 // follow the host's slots.
@@ -2635,14 +2721,23 @@ bool slottedMembers(EOS_HLobbyDetails h, std::vector<std::string>* out) {
     std::string room;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
-        if (!g.view.active() || !g.view.slotted()) return false;
+        if (!g.view.active()) return false;
+        const bool awaiting = g.view.awaitingHost(GetTickCount64(), kNewHostSlotsMs);
+        if (!g.view.slotted() && !awaiting) return false;
         room = g.viewRoom;
         out->clear();
-        for (const std::string& m : g.view.hostMembers())
-            if (g.view.has(m)) out->push_back(m);
-        // One our game took before we followed the host's slots, which the host's game does not have (yet): it stays.
-        for (const std::string& m : g.view.members())
-            if (g.view.hostSlot(m) < 0) out->push_back(m);
+        if (awaiting) {
+            // A new host whose slots are not here yet: the members our game was told of, no one Epic lists besides
+            // (the game reads its members whenever any status reaches it, and would take that one in the first empty
+            // slot).
+            *out = g.view.members();
+        } else {
+            for (const std::string& m : g.view.hostMembers())
+                if (g.view.has(m)) out->push_back(m);
+            // One our game took before we followed the host's slots, which the host's game does not have (yet): it stays.
+            for (const std::string& m : g.view.members())
+                if (g.view.hostSlot(m) < 0) out->push_back(m);
+        }
     }
     const Api& a = g.api;
     EOS_LobbyDetails_CopyInfoOptions io{1};

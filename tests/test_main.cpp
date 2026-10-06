@@ -3091,6 +3091,62 @@ void testRoomView() {
     CHECK((dn::roomOrder({kHost, kB}, {kHost, kC, kB, kA}) == std::vector<std::string>{kHost, kB, kC, kA}));
     CHECK((dn::roomOrder({kHost, kB, kA}, {kHost, kB}) == std::vector<std::string>{kHost, kB}));  // A not in yet
     CHECK((dn::roomOrder({}, {kB, kHost}) == std::vector<std::string>{kB, kHost}));
+
+    printf("room view: one leaving and one taking its slot in the same round - the departure goes first\n");
+    const std::string kD = "0003eeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    v.reset(kB, {kHost, kB, kC});
+    v.heardHost({kHost, kB, kC});
+    v.adoptHost();
+    v.heardHost({kHost, kB, kD});  // C left, D took its slot 2 in the host's game
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kC, dn::kLeft}, {kD, dn::kJoined}}));
+    CHECK(v.hostSlot(kD) == 2);
+
+    printf("room view: a change of host drops the old host's slots; joins wait for the new host's\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    CHECK(v.slotted() && !v.awaitingHost(0, 20000));
+    v.promoted(kA, 1000);  // the host left, A hosts now
+    CHECK(!v.slotted() && v.hostSlot(kB) < 0 && v.followHost().empty());
+    CHECK(v.awaitingHost(1000, 20000) && v.awaitingHost(20999, 20000) && !v.awaitingHost(21000, 20000));
+    v.heardHost({kD, kA, kB});  // the new host's slots: D took the old host's slot 0
+    CHECK(v.slotted() && !v.awaitingHost(1500, 20000) && v.hostSlot(kD) == 0);
+    v.reset(kB, {kHost, kB});  // a member that never followed slots does not wait for any
+    v.promoted(kA, 1000);
+    CHECK(!v.awaitingHost(1000, 20000));
+
+    printf("room view: becoming the host, our game's slots rule and nobody is held back by the old host's\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost(dn::roomMessage({kHost, kA, kB}, {kD}));  // the host removed D
+    CHECK(v.slotted() && v.banned(kD) && v.hostSlot(kD) < 0);
+    v.promoted(kB, 1000);
+    CHECK(!v.slotted() && !v.awaitingHost(1000, 20000));
+    CHECK(v.banned(kD) && v.bannedMembers().count(kD));  // the removal moves with the room to its new host
+    CHECK((v.hostJoins({{kD, 9}}, 8).empty()));          // its direct link does not let it back in
+
+    printf("room message: slots, then whom the room removed\n");
+    std::vector<std::string> slots;
+    std::set<std::string> removed;
+    dn::parseRoomMessage(dn::roomMessage({kHost, "", kB}, {kC, kD}), &slots, &removed);
+    CHECK((slots == std::vector<std::string>{kHost, "", kB}) && (removed == std::set<std::string>{kC, kD}));
+    CHECK((dn::roomMessage({kHost, kB}, {}) == std::vector<std::string>{kHost, kB}));  // nothing removed: the old list
+    dn::parseRoomMessage({kHost, kB}, &slots, &removed);
+    CHECK(slots.size() == 2 && removed.empty());
+    v.reset(kB, {kHost, kB});
+    v.heardHost(dn::roomMessage({kHost, kB}, {kA}));
+    CHECK(v.slotted() && (v.hostMembers() == std::vector<std::string>{kHost, kB}) && v.hostSlot(kA) < 0);
+    v.heardHost({kHost, kB});  // the host let A back in (through Epic): no longer removed
+    CHECK(!v.banned(kA));
+
+    printf("parked entry: waits while the link to the host gets somewhere, gives up instead of entering misnumbered\n");
+    using O = dn::ParkedEntryOutcome;
+    CHECK(dn::decideParkedEntry(100, true, false, false) == O::Slotted);
+    CHECK(dn::decideParkedEntry(100, false, true, false) == O::Gone);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs - 1, false, false, false) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs, false, false, false) == O::GiveUp);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs, false, false, true) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs - 1, false, false, true) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, false, false, true) == O::GiveUp);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, true, false, true) == O::Slotted);
 }
 
 void testRoomWire() {

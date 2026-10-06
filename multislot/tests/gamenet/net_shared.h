@@ -43,6 +43,9 @@ constexpr const char* kDelayFromVariable = "EDF6NET_DELAY_FROM";
 constexpr const char* kLobbyDelayVariable = "EDF6NET_LOBBY_DELAY";
 // "<n>" - Epic's lobby holds at most n members whatever the room asks for (rooms above Epic's 64, played small).
 constexpr const char* kLobbyCapVariable = "EDF6NET_LOBBY_CAP";
+// "<status>[,<status>...]:<ms>" - this machine hears those member statuses (EOS_ELobbyMemberStatus: 0 joined, 1 left,
+// 4 promoted, ...) that much later than they happen (Epic's lobby service late with one member's notifications).
+constexpr const char* kStatusDelayVariable = "EDF6NET_STATUS_DELAY";
 
 struct Attribute {
     char key[kKeyText];

@@ -115,9 +115,15 @@
   - 采集：`multislot/src/userslots.*` 在 Users::Add 选槽处（12B806E）和 Users::Remove 置空处（12B8A24）各挂一个 hook，按房间记录本机游戏的槽位表。
   - 下发：房主的 `Room` 列表直接发这张表，下标就是槽位，`""` 表示空槽（`eos_hooks.cpp` hostRoomTick）。
   - 客人：跟随房主槽位（`RoomView::slotted`）以后，Users::Add 把成员放进房主给它的槽位（`ChooseUserSlot`，要求这个槽位在本机是空的）。
-  - 没进房主槽位表的成员先不交给游戏：大厅副本只列房主槽位表里的成员，按槽位顺序（`slottedMembers`）；Epic 发来的这类成员的 JOINED 先扣住（`admitStatus`），等房主的游戏有了它，再由 followHost 补发。
-  - 通过 Epic 加入一个房主开了直连的房间（大厅上有 `EDF6DN_HOSTADDR`）：游戏的 JoinLobby 完成回调要等房主槽位到了再发（`lobbyEnteredWrapper` 先挂起，`parkedEntryTick` 处理），游戏一进房就按房主槽位添加全部成员（`RoomView::adoptHost`）。最多等 10 s，超时就按 Epic 列表进房。
-  - 房主迁移：新房主发的是它自己游戏的槽位表。这张表本来就跟旧房主一致，所以沿用了旧序列。
+  - 没进房主槽位表的成员先不交给游戏：大厅副本只列房主槽位表里、游戏已经被告知的成员，按槽位顺序（`slottedMembers`）；Epic 发来的这类成员的 JOINED 先扣住（`admitStatus` → `joinHeldBack`），等房主的游戏有了它，再由 followHost 补发。
+  - 同一槽位一出一进（第三轮复核 2）：followHost 同一轮里先发离开、再发加入（`RoomView::followHost`）。成员在房主那边的槽位在本机还被别人占着（比如那个人的 LEFT 还没到），它的 JOINED 就一直扣住，直到槽位空出来，绝不放进别的槽（`joinHeldBack` 查本机的 `GameSlotTable`）。gamenet `slotchurn` / `slotchurnlate` 覆盖：后者让一台机器晚 8 s 收到 LEFT（Epic 的 JOINED 先到，要等槽空）、另一台晚 8 s 收到全部进出（followHost 同一轮带出一出一进）。
+  - 通过 Epic 加入一个房主开了直连的房间（大厅上有 `EDF6DN_HOSTADDR`）：游戏的 JoinLobby 完成回调要等房主槽位到了再发（`lobbyEnteredWrapper` 先挂起，`parkedEntryTick` 处理），游戏一进房就按房主槽位添加全部成员（`RoomView::adoptHost`）。
+  - 挂起超时（第三轮复核 3）：不再在 10 s 后按 Epic 顺序进房。一旦按错的顺序放进游戏，这个成员和之后的人都纠正不回来（游戏不会给已有成员换槽，重排只能靠先踢出再加入，任务中会丢人）。所以选「放宽等待 + 明确上限 + 整体放弃」：到房主的直连在建（尝试中或已连上、槽位表在路上）就继续等；直连 10 s 没进展（`kParkedEntryMs`）或总共 45 s（`kParkedEntryCapMs`）还没有槽位表，就让这次加入以 `EOS_NoConnection` 失败、退出 Epic 大厅，日志写 `ROOM NOT entering room ...` 和原因（`decideParkedEntry`，单元测试在 `tests/test_main.cpp`）。
+  - 房主迁移（第三轮复核 1）：PROMOTED 传到游戏时（`admitStatus` → `RoomView::promoted`）旧房主的槽位表作废。
+    - 自己成了房主：不再扣任何 JOINED，以自己游戏的槽位表为准并开始发布；AutoJoin 到旧房主的直连立刻停掉，改用自己的监听（否则游戏读包读的是那条死链，gamenet 实测新成员握手永远不通，`autoJoinTick`）。
+    - 别人成了房主：曾跟随旧房主槽位的成员在新房主的槽位表到来前，JOINED 一律扣住，大厅副本只列游戏已有的成员（`awaitingHost`，最多 20 s，`kNewHostSlotsMs`）。新房主不开直连时它永远不发表，20 s 后按原版处理——那时房间里所有游戏（包括新房主自己）都按原版的 Epic 顺序，原版就有的错位风险插件补不了。
+    - gamenet `slotmigrate`：房主离开 → 有直连的成员被提升 → 之后有人加入，所有机器编号一致（新人落在旧房主空出的槽 0）、开局同步完成。
+  - 踢人名单随房主迁移（第三轮复核 5）：房主的 Room 消息在槽位表后面带上 `#removed` 和被踢的 id（`roomMessage` / `parseRoomMessage`），每个成员保存（`hostBanned_`）；成员当上房主时并入自己的名单，直连照样拒绝他们。只在本批（netcode 协议 2）的成员之间交换。
 - 还没覆盖的：
   - 和房主没有直连的成员拿不到槽位表，按原版方式添加；
   - 房主刚建房、大厅属性还没发布时就进来的人不会被挂起。这时房主的槽位还没有空洞，也没有大厅外成员，Epic 顺序和槽位一致，所以不受影响。

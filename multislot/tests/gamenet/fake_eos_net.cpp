@@ -88,6 +88,10 @@ struct Fake {
     int dropsLeft = 0;
     ULONGLONG lobbyDelayMs = 0;  // EDF6NET_LOBBY_DELAY
     std::uint32_t lobbyCap = 0;  // EDF6NET_LOBBY_CAP (0: none)
+    std::set<std::int32_t> delayedStatuses;  // EDF6NET_STATUS_DELAY
+    ULONGLONG statusDelayMs = 0;
+    std::deque<std::pair<ULONGLONG, std::function<void()>>> later;  // delayed status notifications, by due time
+    std::string ownerSeen;  // the room's owner at the last tick (PROMOTED)
 };
 
 Fake& F() {
@@ -134,6 +138,14 @@ bool Open() {
         f.lobbyDelayMs = std::strtoull(setting, nullptr, 10);
     if (GetEnvironmentVariableA(gamenet::kLobbyCapVariable, setting, sizeof(setting)))
         f.lobbyCap = static_cast<std::uint32_t>(std::strtoul(setting, nullptr, 10));
+    if (GetEnvironmentVariableA(gamenet::kStatusDelayVariable, setting, sizeof(setting))) {
+        const char* colon = std::strrchr(setting, ':');
+        if (colon) {
+            f.statusDelayMs = std::strtoull(colon + 1, nullptr, 10);
+            for (const char* at = setting; at < colon; ++at)
+                if (*at >= '0' && *at <= '9') f.delayedStatuses.insert(*at - '0');
+        }
+    }
     if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
         unsigned bytes = 0, count = 0;
         if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
@@ -439,13 +451,17 @@ void NoticeRoomChanges() {
     if (!in || id != f.lobbySeen) {
         f.membersSeen = in ? members : std::vector<std::string>();
         f.lobbySeen = in ? id : std::string();
+        f.ownerSeen = in ? lobby.owner : "";
         return;
     }
     const auto queue = [&](int kind, const std::string& member, std::int32_t status) {
         for (const auto& notify : f.lobbyNotifies) {
             if (notify.kind != kind) continue;
             const auto n = notify;
-            f.completions.push_back([=]() {
+            const bool late = kind == 0 && f.delayedStatuses.count(status) != 0;
+            auto& target = late ? f.later.emplace_back(GetTickCount64() + f.statusDelayMs, nullptr).second
+                                : f.completions.emplace_back();
+            target = ([=]() {
                 const void* user = member.empty() ? nullptr : Handle(member);
                 if (kind == 0) {
                     MemberStatusInfo info{n.clientData, id.c_str(), user, status};
@@ -464,6 +480,9 @@ void NoticeRoomChanges() {
         if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
     for (const auto& member : f.membersSeen)
         if (std::find(members.begin(), members.end(), member) == members.end()) queue(0, member, 1);
+    // Epic makes another member the owner when the owner leaves (PROMOTED, after its LEFT).
+    if (lobby.owner[0] && f.ownerSeen != lobby.owner) queue(0, lobby.owner, 4);
+    f.ownerSeen = lobby.owner;
     for (const auto& member : members) queue(1, member, 0);
     queue(2, std::string(), 0);
     f.membersSeen = members;
@@ -514,6 +533,11 @@ EXPORT void EOS_Platform_Tick(void*) {
             }
         }
         NoticeRoomChanges();
+        const ULONGLONG now = GetTickCount64();
+        while (!f.later.empty() && f.later.front().first <= now) {
+            f.completions.push_back(std::move(f.later.front().second));
+            f.later.pop_front();
+        }
         run.swap(f.completions);
     }
     for (auto& completion : run) completion();
@@ -805,6 +829,8 @@ void Leave(const LeaveOptions* options, void* clientData, void* callback, bool d
                 --lobby.count;
                 break;
             }
+        // The owner leaving: as EOS does, the member who has been in the lobby longest owns it now.
+        if (f.self == lobby.owner && lobby.count) Copy(lobby.owner, sizeof(lobby.owner), lobby.members[0].user);
     }
     ++lobby.version;
     Complete(callback, clientData, EOS_Success, id);

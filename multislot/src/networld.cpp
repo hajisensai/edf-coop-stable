@@ -57,7 +57,7 @@ bool ReadView(std::uint64_t object, RetargetView& view) {
 // the frame counter before this frame's increment, rdi the object. Setting ecx to 0 makes the jb skip this
 // frame's choice (and the owner-side message that follows it, which a remote copy never sends anyway).
 void RetargetHandler(CpuContext* context) {
-    if (!NetFeatureActive(NetFeature::EnemyTargets)) return;
+    if (!NetFeatureEnabledLocally(NetFeature::WorldAuthority)) return;
     RetargetView view;
     view.online = OnlineSession();
     if (!view.online || !ReadView(context->rdi, view)) return;
@@ -100,8 +100,8 @@ MidHandler WorldHookHandler(std::uint32_t rva) {
 
 std::vector<MidSite> VerifiedWorldHooks(const unsigned char* base) {
     std::vector<MidSite> sites;
-    if (!NetFeatureActive(NetFeature::EnemyTargets)) {
-        Log("Netcode: [Netcode] EnemyTargets=0, remote copies of enemies choose their own targets (the game's way)");
+    if (!NetFeatureEnabledLocally(NetFeature::WorldAuthority)) {
+        Log("Netcode: [Netcode] WorldAuthority=0, remote copies of enemies choose their own targets (the game's way)");
         return sites;
     }
     for (const auto& site : WorldHooks()) {
@@ -114,7 +114,7 @@ std::vector<MidSite> VerifiedWorldHooks(const unsigned char* base) {
         sites.push_back(site);
     }
     if (!sites.empty())
-        Log("Netcode: remote copies of enemies keep the target their owner sends ([Netcode] EnemyTargets=1)");
+        Log("Netcode: remote copies of enemies keep the target their owner sends ([Netcode] WorldAuthority=1)");
     return sites;
 }
 

@@ -70,6 +70,8 @@ public:
     Shared UserShared(const std::string& member) const;  // the shared_ptr Users::Add gave (no reference added)
     // eos::packet::Controller::SendReliable (12D0AC0): one record of `type` to `member`.
     bool SendReliable(const std::string& member, std::uint32_t type, const void* data, std::size_t size) const;
+    // eos::packet::Controller::SendUnreliable (12D1040): one record of `type` to `member`, never resent.
+    bool SendUnreliable(const std::string& member, std::uint32_t type, const void* data, std::size_t size) const;
     // Every record of `type` the controller hands to its subscribers from now on.
     using Handler = std::function<void(int fromIndex, const std::uint8_t* data, std::size_t size)>;
     void Subscribe(std::uint32_t type, Handler handler);

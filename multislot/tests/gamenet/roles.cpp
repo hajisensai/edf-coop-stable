@@ -1,6 +1,7 @@
 // What each machine of a game-code test does once EDF.dll and EDF6Coop.dll are in (machine.cpp). Every EOS call
 // goes through EDF.dll's import table, as the game makes it, so EDF6Coop's wrappers see it as they do in the game.
 #include <cstring>
+#include <map>
 #include <functional>
 #include <vector>
 
@@ -316,6 +317,10 @@ std::size_t ChatterBytes() {
 int Mission(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
+    // EDF6NET_SETTLE=<ms>: stay in the room that long first (the lobby beat lets features come on, netfeature.h).
+    char settle[16]{};
+    if (GetEnvironmentVariableA("EDF6NET_SETTLE", settle, sizeof(settle)))
+        TickUntil(machine, static_cast<unsigned>(std::atoi(settle)), [] { return false; });
     Transport transport;
     if (!Connect(machine, room, transport)) return 1;
     int place = 0;
@@ -370,6 +375,120 @@ int Mission(Machine& machine, bool host) {
     return done ? 0 : 1;
 }
 
+
+// Netcode rewrite W1: what the game's controller sends in a room, as the traffic classes see it. Every machine sends
+// every other one a state-like record (kStateType, unreliable, every 4th frame, a size no other datagram has) and
+// now and then a reliable one, for EDF6NET_SECONDS (default 4) s, with [Netcode] StatsSeconds=1 in its INI.
+constexpr std::uint32_t kStateType = 0x2800;
+constexpr std::size_t kStateBytes = 77;  // a datagram of only this record: 8 + 4 + 77 = 89 bytes
+
+int Seconds(int fallback) {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_SECONDS", text, sizeof(text));
+    return text[0] ? std::atoi(text) : fallback;
+}
+
+int NetStats(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    struct Count {
+        std::size_t states = 0, events = 0;
+        ULONGLONG last = 0, gap = 0;
+    };
+    std::map<int, Count> got;          // by sender's network index
+    std::map<std::string, Count> sent;  // by member
+    transport.Subscribe(kStateType, [&](int from, const std::uint8_t*, std::size_t) {
+        Count& c = got[from];
+        const ULONGLONG now = GetTickCount64();
+        if (c.last) c.gap = (std::max)(c.gap, now - c.last);
+        c.last = now;
+        ++c.states;
+    });
+    transport.Subscribe(kProbeType, [&](int from, const std::uint8_t*, std::size_t) { ++got[from].events; });
+    const std::vector<std::uint8_t> state(kStateBytes, 0x5A);
+    const std::string probe = "EVENT-" + machine.user;
+    int frame = 0;
+    TickUntil(machine, static_cast<unsigned>(Seconds(4)) * 1000, [&] {
+        for (const auto& member : room.members) {
+            if (member == machine.user) continue;
+            if (frame % 4 == 0 && transport.SendUnreliable(member, kStateType, state.data(), state.size()))
+                ++sent[member].states;
+            if (frame % 30 == 15 && transport.SendReliable(member, kProbeType, probe.data(), probe.size()))
+                ++sent[member].events;
+        }
+        ++frame;
+        transport.Tick();
+        return false;
+    });
+    // The others still send: keep receiving (and acknowledging) until everyone is done.
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    finish(1);
+    TickUntil(machine, 15000, [&] {
+        transport.Tick();
+        return finish(0) >= room.members.size();
+    });
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    for (const auto& [member, c] : sent) Result("sent-to", "%s states=%zu events=%zu", member.c_str(), c.states, c.events);
+    for (const auto& member : room.members) {
+        if (member == machine.user) continue;
+        const Count& c = got[transport.NetworkIndex(member)];
+        Result("got-from", "%s states=%zu events=%zu gap=%llu", member.c_str(), c.states, c.events, c.gap);
+    }
+    return 0;
+}
+
+// Netcode rewrite W1: a message of 1024 loadout records' size (146432 bytes) from the host to every guest, in
+// fragments ([Test] BulkEcho=1 logs what arrives).
+int Bulk(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    if (host) {
+        std::vector<std::uint8_t> message(1024 * 143);
+        for (std::size_t i = 0; i < message.size(); ++i) message[i] = static_cast<std::uint8_t>(i * 31 + (i >> 9));
+        Result("bulk-fnv", "%016llx", Fnv(message));
+        using SendBulk = bool (*)(const char*, std::uint16_t, const void*, std::size_t);
+        const auto send = reinterpret_cast<SendBulk>(GetProcAddress(machine.plugin, "EDF6Coop_SendBulk"));
+        std::size_t done = 0;
+        // Until the room shows that everyone reads fragments (the lobby beat, once a second).
+        TickUntil(machine, 8000, [&] {
+            transport.Tick();
+            done = 0;
+            for (const auto& member : room.members)
+                if (member != machine.user && send && send(member.c_str(), 7, message.data(), message.size())) ++done;
+            return done == room.members.size() - 1;
+        });
+        Result("bulk", "%s to %zu", done == room.members.size() - 1 ? "sent" : "NOT sent", done);
+    }
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    TickUntil(machine, 4000, [&] {
+        transport.Tick();
+        return false;
+    });
+    finish(1);
+    TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return finish(0) >= room.members.size();
+    });
+    return 0;
+}
+
+// Netcode rewrite W1: the version gate. Every machine stays in the room for EDF6NET_SECONDS (default 5) s, ticking,
+// and says how many the room has at the end.
+int VersionGate(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    TickUntil(machine, static_cast<unsigned>(Seconds(5)) * 1000, [] { return false; });
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    return 0;
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -382,6 +501,9 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "link") return Link(machine, host);
     if (step == "sidelink") return Link(machine, host, 5);
     if (step == "mission") return Mission(machine, host);
+    if (step == "netstats") return NetStats(machine, host);
+    if (step == "versiongate") return VersionGate(machine, host);
+    if (step == "bulk") return Bulk(machine, host);
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

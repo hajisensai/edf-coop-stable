@@ -103,7 +103,7 @@ add_library(EDF6Coop SHARED
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
-    src/netfeature.cpp src/networld.cpp)
+    src/networld.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -221,9 +221,12 @@ add_test(NAME EnemySpawnCounts COMMAND SpawnTests)
 
 # Netcode W4 (src/networld.h): the enemy target decision and its hook against a fake game; with EDF.dll also the
 # hook site against the game's code (skipped without it).
-add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/netfeature.cpp src/mission.cpp src/midhook.cpp
+add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp
+    src/packetfit.cpp src/identity.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp)
+target_include_directories(NetWorldTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(NetWorldTests PRIVATE ${WARNINGS})
+target_link_libraries(NetWorldTests PRIVATE DirectNetPart)
 add_test(NAME NetWorldEnemyTargets COMMAND NetWorldTests)
 add_test(NAME NetWorldSitesMatchEDF COMMAND NetWorldTests "${EDF_DLL}")
 set_tests_properties(NetWorldSitesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
@@ -298,3 +301,25 @@ add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
 target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(DirectNetProbeJoin PRIVATE DirectNetCore)
+
+# --- Netcode rewrite W1 (transport): datagram classes, fragments, congestion budgets, multipath direct link ---
+target_sources(DirectNetCore PRIVATE "${DIRECTNET_DIR}/netclass.cpp" "${DIRECTNET_DIR}/fragment.cpp"
+    "${DIRECTNET_DIR}/congestion.cpp")
+add_executable(NetTransportTests "${CMAKE_SOURCE_DIR}/../tests/net_transport_test.cpp")
+target_compile_definitions(NetTransportTests PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(NetTransportTests PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(NetTransportTests PRIVATE DirectNetCore)
+add_test(NAME NetTransport COMMAND NetTransportTests)
+target_sources(EDF6Coop PRIVATE src/nettraffic.cpp)
+target_sources(EDF6Coop PRIVATE src/netfeature.cpp src/netcompress.cpp)
+add_executable(NetFeatureTests tests/netfeature_test.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp
+    src/identity.cpp src/log.cpp)
+target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
+target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
+add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
+foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress)
+    add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
+             "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
+    set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+endforeach()

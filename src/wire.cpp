@@ -8,9 +8,10 @@
 namespace dn {
 namespace {
 
-// Members a Welcome or Roster names, the host included: a room of 32 players. A Welcome of 32 EOS ids
-// is 1306 bytes with a Key tag (each more adds 33); 64 would not fit the 2048-byte receive buffer.
-constexpr size_t kMaxRoster = 32;
+// Members a Welcome or one Roster/Room page names (kRosterPage), the host included. A Welcome of 32 EOS ids
+// is 1306 bytes with a Key tag (each more adds 33); 64 would not fit the 2048-byte receive buffer. Larger rooms
+// send their lists in pages (RosterMsg::total/offset); a Welcome names the first 32 and the pages follow.
+constexpr size_t kMaxRoster = kRosterPage;
 constexpr size_t kHeaderBytes = 8;
 constexpr size_t kCounterOffset = kHeaderBytes + 4;  // after the epoch
 constexpr size_t kLinkOverhead = kCounterOffset + 8 + kLinkTagBytes;
@@ -96,6 +97,21 @@ std::vector<std::string> readRoster(Reader& r) {
     return roster;
 }
 
+// A page of a member list (RosterMsg): which part of the whole list it is. Its members must lie inside the list.
+void writePage(Writer& w, uint32_t version, uint16_t total, uint16_t offset, size_t count) {
+    // A list of one page written without its paging filled in (total 0) is the whole list.
+    w.u32(version);
+    w.u16(total ? total : static_cast<uint16_t>(count));
+    w.u16(offset);
+}
+
+void readPage(Reader& r, uint32_t& version, uint16_t& total, uint16_t& offset, size_t count) {
+    version = r.u32();
+    total = r.u16();
+    offset = r.u16();
+    if (r.ok() && size_t{offset} + count > total) r.reject();
+}
+
 void writeBody(Writer& w, const Message& m) {
     if (isLinkScoped(m.type)) {
         w.u32(m.epoch);
@@ -127,10 +143,21 @@ void writeBody(Writer& w, const Message& m) {
         case MsgType::Roster:
             w.u32(m.roster.hostNonce);
             writeRoster(w, m.roster.roster);
+            writePage(w, m.roster.version, m.roster.total, m.roster.offset, m.roster.roster.size());
             break;
         case MsgType::Room:
             w.u32(m.room.hostNonce);
             writeRoster(w, m.room.members);
+            writePage(w, m.room.version, m.room.total, m.room.offset, m.room.members.size());
+            break;
+        case MsgType::PeerQuery:
+            w.str(m.peer.puid);
+            break;
+        case MsgType::PeerInfo:
+            w.str(m.peer.puid);
+            w.str(m.peer.address);
+            break;
+        case MsgType::Punch:
             break;
         case MsgType::Data:
             w.u32(m.data.seq);
@@ -141,6 +168,7 @@ void writeBody(Writer& w, const Message& m) {
             w.u8(m.data.reliability);
             w.u16(static_cast<uint16_t>(m.data.payload.size()));
             w.raw(m.data.payload.data(), m.data.payload.size());
+            w.u8(m.data.cls);
             break;
         case MsgType::Ack: {
             w.u32(m.ack.cumulative);
@@ -196,10 +224,21 @@ bool readBody(Reader& r, Message& m) {
         case MsgType::Roster:
             m.roster.hostNonce = r.u32();
             m.roster.roster = readRoster(r);
+            readPage(r, m.roster.version, m.roster.total, m.roster.offset, m.roster.roster.size());
             return true;
         case MsgType::Room:
             m.room.hostNonce = r.u32();
             m.room.members = readRoster(r);
+            readPage(r, m.room.version, m.room.total, m.room.offset, m.room.members.size());
+            return true;
+        case MsgType::PeerQuery:
+            m.peer.puid = r.str();
+            return true;
+        case MsgType::PeerInfo:
+            m.peer.puid = r.str();
+            m.peer.address = r.str();
+            return true;
+        case MsgType::Punch:
             return true;
         case MsgType::Data:
             m.data.seq = r.u32();
@@ -212,6 +251,8 @@ bool readBody(Reader& r, Message& m) {
                 m.data.payload = r.bytes(n);
             else
                 r.reject();
+            m.data.cls = r.u8();
+            if (r.ok() && m.data.cls > 3) r.reject();  // TrafficClass has four values
             return true;
         case MsgType::Ack: {
             m.ack.cumulative = r.u32();

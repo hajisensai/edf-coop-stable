@@ -20,7 +20,7 @@ constexpr std::uintptr_t kControllerRef = 0x1AF4598, kControllerCtor = 0x12D2640
 constexpr std::uintptr_t kConnectInfoCtor = 0x12B6030;
 constexpr std::uintptr_t kSubscribe = 0x735480;          // Controller::DataEventObservable (at +0x1818)
 constexpr std::uintptr_t kDataObservable = 0x1818;
-constexpr std::uintptr_t kSendReliable = 0x12D0AC0;
+constexpr std::uintptr_t kSendReliable = 0x12D0AC0, kSendUnreliable = 0x12D1040;
 constexpr std::uintptr_t kUserFlags = 0x10, kUserNetworkIndex = 0x40;
 
 // Room+0x30 in the game: the local user as p2p::Manager::Initialize takes it.
@@ -171,6 +171,14 @@ bool Transport::SendReliable(const std::string& member, std::uint32_t type, cons
     const std::vector<IndexKey> to{{index, 0}};
     using Send = bool (*)(void*, const std::vector<IndexKey>*, std::uint32_t, const void*, std::size_t, int);
     return game_.Fn<Send>(kSendReliable)(controller_.object, &to, type, data, size, 6);
+}
+
+bool Transport::SendUnreliable(const std::string& member, std::uint32_t type, const void* data, std::size_t size) const {
+    const int index = NetworkIndex(member);
+    if (index < 0) return false;
+    const std::vector<IndexKey> to{{index, 0}};
+    using Send = bool (*)(void*, const std::vector<IndexKey>*, std::uint32_t, const void*, std::size_t);
+    return game_.Fn<Send>(kSendUnreliable)(controller_.object, &to, type, data, size);
 }
 
 void Transport::Subscribe(std::uint32_t type, Handler handler) {

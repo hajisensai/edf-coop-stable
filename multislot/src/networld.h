@@ -17,7 +17,7 @@ namespace multislot {
 // message 1 and is overwritten again at the copy's next choice. A copy then chases another player than the
 // owner's enemy does until the next pose correction pulls it back.
 //
-// With [Netcode] EnemyTargets=1 a remote copy whose owner sends its targets (+0x591 set, +0x2E8 clear) and whose
+// With [Netcode] WorldAuthority=1 a remote copy whose owner sends its targets (+0x591 set, +0x2E8 clear) and whose
 // current target is still alive and selectable keeps that target instead of choosing again; the owner's next
 // message 1 replaces it as before. A copy without a target (just created, or its target died) still chooses one
 // for itself until the owner's next message, as the game does. Nothing is sent that was not sent before, so a

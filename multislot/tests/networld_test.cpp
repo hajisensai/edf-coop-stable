@@ -181,8 +181,8 @@ int main(int argc, char** argv) {
         Check(!KeepOwnersTarget(v), "a period of 0 chooses every frame, as the game does");
     }
 
-    // Feature switch: the default is on; [Netcode] EnemyTargets=0 turns it off.
-    Check(!NetFeatureActive(NetFeature::EnemyTargets), "off before the INI is read");
+    // Feature switch: the default is on; [Netcode] WorldAuthority=0 turns it off.
+    Check(!NetFeatureEnabledLocally(NetFeature::WorldAuthority), "off before the INI is read");
     char folder[MAX_PATH]{};
     GetTempPathA(MAX_PATH, folder);
     char iniPath[MAX_PATH]{};
@@ -190,14 +190,14 @@ int main(int argc, char** argv) {
     wchar_t wideIni[MAX_PATH]{};
     MultiByteToWideChar(CP_ACP, 0, iniPath, -1, wideIni, MAX_PATH);
     DeleteFileW(wideIni);
-    InitNetFeatures(wideIni);
-    Check(NetFeatureActive(NetFeature::EnemyTargets), "on by default");
-    WritePrivateProfileStringW(L"Netcode", L"EnemyTargets", L"0", wideIni);
-    InitNetFeatures(wideIni);
-    Check(!NetFeatureActive(NetFeature::EnemyTargets), "EnemyTargets=0 turns it off");
-    WritePrivateProfileStringW(L"Netcode", L"EnemyTargets", L"1", wideIni);
-    InitNetFeatures(wideIni);
-    Check(NetFeatureActive(NetFeature::EnemyTargets), "EnemyTargets=1 turns it on");
+    InitNetFeature(wideIni);
+    Check(NetFeatureEnabledLocally(NetFeature::WorldAuthority), "on by default");
+    WritePrivateProfileStringW(L"Netcode", L"WorldAuthority", L"0", wideIni);
+    InitNetFeature(wideIni);
+    Check(!NetFeatureEnabledLocally(NetFeature::WorldAuthority), "WorldAuthority=0 turns it off");
+    WritePrivateProfileStringW(L"Netcode", L"WorldAuthority", L"1", wideIni);
+    InitNetFeature(wideIni);
+    Check(NetFeatureEnabledLocally(NetFeature::WorldAuthority), "WorldAuthority=1 turns it on");
 
     // Fake game for OnlineSession(): GameStatus pointer at 20B2890 and its online mode chain (mission.cpp).
     const std::size_t imageSize = kGameStatusPointer + 0x1000;
@@ -256,11 +256,11 @@ int main(int argc, char** argv) {
         Check(RunHandler(enemy, 60) == 60, "an unreadable target leaves the game's choice");
         world.SetTarget(true);
         Check(RunHandler(0x10, 60) == 60, "an unreadable object leaves the game's choice");
-        WritePrivateProfileStringW(L"Netcode", L"EnemyTargets", L"0", wideIni);
-        InitNetFeatures(wideIni);
-        Check(RunHandler(enemy, 60) == 60, "EnemyTargets=0: the game's way");
-        WritePrivateProfileStringW(L"Netcode", L"EnemyTargets", L"1", wideIni);
-        InitNetFeatures(wideIni);
+        WritePrivateProfileStringW(L"Netcode", L"WorldAuthority", L"0", wideIni);
+        InitNetFeature(wideIni);
+        Check(RunHandler(enemy, 60) == 60, "WorldAuthority=0: the game's way");
+        WritePrivateProfileStringW(L"Netcode", L"WorldAuthority", L"1", wideIni);
+        InitNetFeature(wideIni);
         Check(RunHandler(enemy, 60) == 0, "on again");
 
         // The hook installed on the game's instructions: the thunk runs the handler, then the displaced cmp, then

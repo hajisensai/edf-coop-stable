@@ -125,8 +125,15 @@ std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
         }
         members_.push_back(std::move(m));
     }
+    UpdateActiveLocked();
     ReleaseSRWLockExclusive(&lock_);
     return fresh;
+}
+
+void NetRoom::UpdateActiveLocked() {
+    std::uint32_t mask = lobby_.empty() || !Find(members_, self_) ? 0u : ~0u;
+    for (const Member& m : members_) mask &= m.published && m.protocol == settings.protocol ? m.caps : 0u;
+    active_ = mask;
 }
 
 std::string NetRoom::WhyOff(std::uint32_t caps) const {
@@ -150,7 +157,7 @@ std::string NetRoom::WhyOff(std::uint32_t caps) const {
     return why;
 }
 
-bool NetRoom::Active(std::uint32_t caps) const { return WhyOff(caps).empty(); }
+bool NetRoom::Active(std::uint32_t caps) const { return (active_.load() & caps) == caps; }
 
 bool NetRoom::InRoom() const {
     AcquireSRWLockShared(&lock_);
@@ -280,6 +287,7 @@ void InitNetFeature(const wchar_t* iniPath) {
     }
     dn::NetcodeOptions options;
     options.trafficClasses = (caps & dn::kCapTrafficClasses) != 0;
+    options.mesh = (caps & dn::kCapMesh) != 0;
     options.fragments = (caps & dn::kCapFragments) != 0;
     options.shedState = flag(L"ShedState", 1);
     options.statsIntervalMs = 1000u * GetPrivateProfileIntW(L"Netcode", L"StatsSeconds", 60, iniPath);

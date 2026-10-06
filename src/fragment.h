@@ -33,6 +33,12 @@ constexpr uint8_t kFragmentBulk = 1;
 // The channel fragments travel on: the game ignores the channel when it receives and sends everything on 0.
 constexpr uint8_t kFragmentChannel = 0x4E;
 
+// A receiver acknowledges every bulk message it completed (an ack: 'EDFA' | u32 message id, on kFragmentChannel); the
+// sender sends it again until then (eos_hooks.cpp), so a direct link that drops in the middle loses nothing.
+constexpr size_t kFragmentAckBytes = 8;
+std::vector<uint8_t> fragmentAck(uint32_t id);
+bool parseFragmentAck(const uint8_t* data, size_t size, uint32_t& id);
+
 struct FragmentMessage {
     uint8_t flags = 0;
     uint16_t tag = 0;
@@ -52,8 +58,15 @@ public:
     static constexpr size_t kMaxPartialPerSender = 16;
     static constexpr size_t kMaxBuffered = 32u << 20;
     static constexpr uint64_t kTimeoutMs = 15000;
-    // A fragment from `src`; the message once it is complete. Malformed fragments are dropped (counted).
-    std::optional<FragmentMessage> add(const std::string& src, const uint8_t* data, size_t size, uint64_t nowMs);
+    // A fragment from `src`; the message once it is complete, exactly once: a fragment of a message completed in the
+    // last kCompletedMs (resent, or a copy) gives nothing, and sets `*again` (its sender may need telling again that
+    // it arrived). Malformed fragments are dropped (counted).
+    static constexpr uint64_t kCompletedMs = 60000;
+    static constexpr size_t kCompletedKept = 4096;
+    std::optional<FragmentMessage> add(const std::string& src, const uint8_t* data, size_t size, uint64_t nowMs,
+                                       bool* again = nullptr);
+    // The id of a fragment (0 for anything else).
+    static uint32_t idOf(const uint8_t* data, size_t size);
     void clear();
     uint64_t dropped() const { return dropped_; }
     uint64_t malformed() const { return malformed_; }
@@ -74,6 +87,7 @@ private:
     void expire(uint64_t nowMs);
     void drop(Map::iterator it);
     Map partial_;
+    std::map<std::pair<std::string, uint32_t>, uint64_t> completed_;  // -> when
     size_t buffered_ = 0;
     uint64_t dropped_ = 0, malformed_ = 0;
 };

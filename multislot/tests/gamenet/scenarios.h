@@ -394,7 +394,43 @@ inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::N
         }
         Check(unknownLater == 0, machine.user + ": once learnt, every datagram has a class (" + std::to_string(unknownLater) +
                                      " unknown later)");
+        // Sending stopped: the last state datagram to each member went once more, reliably (nothing replaces it).
+        std::size_t trails = 0;
+        for (std::size_t p = log.find("PATHS last "); p != std::string::npos; p = log.find("PATHS last ", p + 1)) {
+            const std::size_t c = log.find(" last state datagrams sent again reliably", p);
+            const std::size_t start = log.rfind(", ", c);
+            if (c != std::string::npos && start != std::string::npos && start > p) trails += std::strtoull(log.c_str() + start + 2, nullptr, 10);
+        }
+        Check(trails >= 2, machine.user + ": the last state datagram to each of the others went again reliably (" +
+                               std::to_string(trails) + ")");
     }
+}
+
+// One member has the traffic classes off: the room runs without them. Every state datagram goes as before this
+// existed - reliably, nothing held back - while the log still names its class.
+inline void CheckNetStatsMixed(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    std::size_t states = 0, unreliable = 0;
+    for (const auto& packet : Wire(network))
+        if (packet.header.channel == 0 && packet.header.size == 89) {
+            ++states;
+            unreliable += packet.header.reliability == 0 ? 1 : 0;
+        }
+    std::printf("INFO: %zu state datagrams on the wire, %zu of them unreliable\n", states, unreliable);
+    Check(states > 20 && unreliable == 0, "with one member without the classes every state datagram went reliably");
+    for (const auto& machine : machines)
+        Check(LastLine(machine.text, "NETCODE features in room").find(" on: TrafficClasses") == std::string::npos,
+              machine.user + " does not run the classes (" + LastLine(machine.text, "NETCODE features in room") + ")");
+}
+
+// [Netcode] Mesh=0 at the joiners: the room runs without the mesh, everything between them goes through the host.
+inline void CheckMeshOff(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    for (std::size_t i = 1; i < machines.size(); ++i)
+        Check(machines[i].text.find("linked directly") == std::string::npos, machines[i].user + " never linked directly");
+    Check(PathKbps(machines.front().text, "relayed for others ") > 0, "the host relayed the joiners' traffic");
 }
 
 // A member of another netcode protocol ([Test] NetProtocol=99) is refused by the host: removed from the room, both
@@ -502,6 +538,14 @@ inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamen
     }
     Check(packing > 0 && unpacking > 0, std::to_string(packing) + " machines packed datagrams, " +
                                             std::to_string(unpacking) + " unpacked them");
+    // A packed datagram keeps its class: the send finds the records of its flush by the packed size.
+    for (const auto& machine : machines)
+        for (std::size_t at = machine.text.find("NETCLASS datagrams: "); at != std::string::npos;
+             at = machine.text.find("NETCLASS datagrams: ", at + 1)) {
+            const std::size_t end = machine.text.find('\n', at);
+            const std::string line = machine.text.substr(at, end - at);
+            Check(line.find(", 0 without their plaintext") != std::string::npos, machine.user + ": every datagram had its plaintext (" + line + ")");
+        }
 }
 
 inline const std::vector<Scenario>& NetScenarios() {
@@ -521,6 +565,14 @@ inline const std::vector<Scenario>& NetScenarios() {
          {{"EDF6NET_SECONDS", "8"}}},
         {"meshflap", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=7000\r\nPeerBlockForMs=1500\r\n"), 120000,
          &CheckMeshFlap, {{"EDF6NET_SECONDS", "10"}}},
+        {"netstatsmixed",
+         [] {
+             auto seats = Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n"));
+             seats[2].ini = BaseIni("[Netcode]\r\nStatsSeconds=1\r\nTrafficClasses=0\r\n");
+             return seats;
+         }(),
+         90000, &CheckNetStatsMixed, {{"EDF6NET_SECONDS", "8"}}},
+        {"meshoff", DirectSeats(3, "netstats", "", "Mesh=0\r\n"), 120000, &CheckMeshOff, {{"EDF6NET_SECONDS", "6"}}},
         // 32 players once the room shows that everyone reads fragments: the start message carries a bulk marker only,
         // every record goes in one bulk message.
         {"mission32bulk", Seats(32, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 400000,

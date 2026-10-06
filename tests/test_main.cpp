@@ -3276,6 +3276,33 @@ void testMeshFailsOverAndBack() {
     CHECK(firsts == 50 && copies == 50);
 }
 
+void testMeshAndShedSwitches() {
+    printf("mesh: [Netcode] ShedState and Mesh act after start\n");
+    Mesh m;
+    CHECK(m.start());
+    std::vector<uint8_t> big(1000, 0x33);
+    auto burst = [&] {
+        m.host.takeWireTraffic();
+        for (int i = 0; i < 300; ++i) m.host.sendClassified(kA, "EDF6", 1, 0, big.data(), big.size(), 1);  // 300 KB at once
+        return m.host.takeWireTraffic().stateShed;
+    };
+    const uint64_t shedOn = burst();
+    printf("  a 300 KB burst of state over a fresh path: %llu dropped for its budget\n", static_cast<unsigned long long>(shedOn));
+    CHECK(shedOn > 0);
+    m.host.setShedState(false);
+    CHECK(burst() == 0);
+    // Mesh: linked, then switched off - the direct link closes, the relay carries.
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    CHECK(waitFor([&] { return m.a.peerLinked(kB); }, 10000));
+    m.a.setMesh(false);
+    m.b.setMesh(false);
+    CHECK(!m.a.peerLinked(kB) && m.a.pathTo(kB) == dn::Path::Relay);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(!m.a.peerLinked(kB));  // no new link while off
+}
+
 void testRosterPages() {
     printf("wire: member lists of large rooms go in pages\n");
     dn::Message m;
@@ -3309,6 +3336,7 @@ int wmain(int argc, wchar_t** argv) {
         testMeshLinksJoiners();
         testMeshBlockedFromTheStart();
         testMeshFailsOverAndBack();
+        testMeshAndShedSwitches();
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -3387,6 +3415,7 @@ int wmain(int argc, wchar_t** argv) {
     testMeshLinksJoiners();
     testMeshBlockedFromTheStart();
     testMeshFailsOverAndBack();
+    testMeshAndShedSwitches();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -433,6 +433,33 @@ bool DirectNet::blockedPeer(const std::string& puid) const {
     return it != testBlocked_.end() && it->second;
 }
 
+void DirectNet::setMesh(bool on) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (opt_.mesh == on) return;
+    opt_.mesh = on;
+    if (!on && (!peerLinks_.empty() || !dials_.empty())) {
+        Message bye;
+        bye.type = MsgType::Bye;
+        for (auto& [id, link] : peerLinks_) sendLink(link, bye);
+        for (auto& [id, dial] : dials_)
+            if (dial.link) sendLink(*dial.link, bye);
+        peerLinks_.clear();
+        dials_.clear();
+        logf("DIRECT links to other joiners closed: mesh off; the host relays");
+    }
+    intros_.clear();
+}
+
+void DirectNet::setShedState(bool on) {
+    std::lock_guard<std::mutex> lock(mu_);
+    opt_.shedState = on;
+}
+
+bool DirectNet::mesh() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return opt_.mesh;
+}
+
 void DirectNet::setTestBlockPeers(uint64_t afterMs, uint64_t forMs) {
     std::lock_guard<std::mutex> lock(mu_);
     testBlockFromMs_ = nowMs() + afterMs;
@@ -823,6 +850,7 @@ void DirectNet::deliverLocal(DataMsg msg) {
     d.socketName = std::move(msg.socketName);
     d.channel = msg.channel;
     d.data = std::move(msg.payload);
+    d.cls = msg.cls;
     inbox_.push_back(std::move(d));
 }
 
@@ -849,7 +877,8 @@ void DirectNet::routeData(DataMsg msg) {
     if (msg.cls == kState && msg.reliability == 0) {
         // Interest management decides for the receiver, as for a datagram of our own (the subject is its sender).
         if (RelayStateFilter filter = relayFilter_.load();
-            filter && !filter(msg.dst, msg.src, static_cast<uint32_t>(msg.payload.size()), static_cast<uint64_t>(GetTickCount64()))) {
+            filter && !filter(msg.dst, msg.src, static_cast<uint32_t>(msg.payload.size()), it->second.cc.rate(),
+                              static_cast<uint64_t>(GetTickCount64()))) {
             ++relayFiltered_;
             return;
         }

@@ -148,11 +148,12 @@ std::vector<std::string> RecordTypeMeter::take(double seconds, size_t maxLines) 
     char buf[320];
     snprintf(buf, sizeof(buf),
              "NETCLASS datagrams: state %llu (%.0f kbps) event %llu (%.0f kbps) control %llu (%.0f kbps) unknown %llu "
-             "(%.0f kbps)",
+             "(%.0f kbps), %llu without their plaintext",
              static_cast<unsigned long long>(datagrams[1]), bytes[1] * 8.0 / 1000.0 / seconds,
              static_cast<unsigned long long>(datagrams[2]), bytes[2] * 8.0 / 1000.0 / seconds,
              static_cast<unsigned long long>(datagrams[3]), bytes[3] * 8.0 / 1000.0 / seconds,
-             static_cast<unsigned long long>(datagrams[0]), bytes[0] * 8.0 / 1000.0 / seconds);
+             static_cast<unsigned long long>(datagrams[0]), bytes[0] * 8.0 / 1000.0 / seconds,
+             static_cast<unsigned long long>(unmatched_.exchange(0)));
     lines.emplace_back(buf);
     std::vector<std::pair<uint32_t, Type>> sorted(types.begin(), types.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
@@ -185,6 +186,10 @@ void notePendingDatagram(const uint8_t* plain, size_t bytes) {
     g_pending.set = true;
     g_pending.bytes = bytes;
     g_pending.datagram.parsed = parseControllerDatagram(plain, bytes, g_pending.datagram.records);
+}
+
+void retargetPendingDatagram(size_t bytes) {
+    if (g_pending.set) g_pending.bytes = bytes;
 }
 
 std::optional<PlainDatagram> takePendingDatagram(size_t bytes) {

@@ -126,6 +126,7 @@ struct Delivered {
     std::string socketName;
     uint8_t channel = 0;
     std::vector<uint8_t> data;
+    uint8_t cls = 0;  // TrafficClass it was sent as: a classified datagram may come over two paths (a copy)
 };
 
 class DirectNet {
@@ -171,9 +172,14 @@ public:
     void setTestBlockPeer(const std::string& puid, bool blocked);
     // Tests only: the same for every joiner, from `afterMs` from now for `forMs` (UINT64_MAX: for good).
     void setTestBlockPeers(uint64_t afterMs, uint64_t forMs);
+    // [Netcode] Mesh (and whether the room runs it) and ShedState, after start: DirectOptions::mesh / shedState.
+    void setMesh(bool on);
+    void setShedState(bool on);
+    bool mesh();
     // host: asked before a joiner's state datagram is relayed to another (observer = the receiver, subject = the
     // sender); false drops it (interest management: the next one replaces it). Null: always relayed.
-    using RelayStateFilter = bool (*)(const std::string& observer, const std::string& subject, uint32_t bytes, uint64_t nowMs);
+    using RelayStateFilter = bool (*)(const std::string& observer, const std::string& subject, uint32_t bytes, uint32_t budget,
+                                      uint64_t nowMs);
     void setRelayStateFilter(RelayStateFilter filter) { relayFilter_ = filter; }
     // Pops the next packet for the local player; `channel` filters like EOS RequestedChannel.
     bool pop(const uint8_t* channel, uint32_t maxSize, Delivered& out);

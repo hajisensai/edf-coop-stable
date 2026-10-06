@@ -9,6 +9,7 @@
 
 #include "log.h"
 #include "netfeature.h"
+#include "src/netclass.h"
 
 namespace multislot {
 namespace {
@@ -104,6 +105,8 @@ bool __fastcall NetEncryptHook(void* cipher, const std::uint8_t* data, std::size
     if (enabled && NetFeatureActive(NetFeature::Compression) && PackPlaintext(data, size, packed)) {
         ++packedCount;
         savedBytes += size - packed.size();
+        // The datagram EOS gets is the packed one: its class goes with that size (src/netclass.h).
+        dn::retargetPendingDatagram(dn::kControllerDatagramHeader + packed.size());
         return encrypt(cipher, packed.data(), packed.size());
     }
     return encrypt(cipher, data, size);

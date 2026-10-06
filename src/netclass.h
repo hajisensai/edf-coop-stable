@@ -31,6 +31,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -100,6 +101,8 @@ public:
     void record(const std::string& remote, const std::vector<RecordInfo>& records, uint64_t nowMs);
     // Datagrams by class, with their bytes.
     void recordDatagram(TrafficClass c, size_t bytes);
+    // A datagram of the game's that came without its plaintext (no flush noted it): counted, it should never happen.
+    void recordUnmatched() { ++unmatched_; }
     // One line per record type seen since the last call (busiest first, at most `maxLines`), then starts over.
     // `seconds`: the period the counts cover.
     std::vector<std::string> take(double seconds, size_t maxLines = 24);
@@ -114,6 +117,7 @@ private:
     std::map<uint32_t, Type> types_;
     std::map<std::pair<std::string, uint32_t>, uint64_t> last_;  // per player and type: when last sent
     uint64_t datagrams_[4] = {}, datagramBytes_[4] = {};
+    std::atomic<uint64_t> unmatched_{0};
 };
 
 // The flush hook (multislot nettraffic.cpp) hands over the records of the datagram it is about to pass to the
@@ -125,6 +129,9 @@ struct PlainDatagram {
     bool parsed = false;
 };
 void notePendingDatagram(const uint8_t* plain, size_t bytes);
+// The noted datagram goes out with another size: its records were packed (multislot netcompress.cpp) before the
+// game encrypted them, and the datagram EOS gets is the packed one (8-byte header + packed records, 12CEBB3).
+void retargetPendingDatagram(size_t bytes);
 // The records noted for a datagram of `bytes`, once; nullopt when none was noted on this thread or the size differs
 // (a packet of another size leaves the note for the datagram it belongs to).
 std::optional<PlainDatagram> takePendingDatagram(size_t bytes);

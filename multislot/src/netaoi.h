@@ -48,8 +48,10 @@ public:
     using Place = std::function<std::optional<MemberPlace>(const std::string& member)>;
     InterestGate(Budget budget, Place place, std::uint64_t tickMs = kTickMs,
                  std::uint64_t maxIntervalMs = interest::kMaxIntervalMs);
-    // Whether a state datagram of `bytes` for `subject` goes to `observer` now. Thread-safe.
-    bool Allow(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint64_t nowMs);
+    // Whether a state datagram of `bytes` for `subject` goes to `observer` now, the path to it carrying `budget` bytes a
+    // second (0: ask the Budget function). Thread-safe; calls nothing outside the gate but the Place function.
+    bool Allow(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint32_t budget,
+               std::uint64_t nowMs);
 
 private:
     struct SubjectState {
@@ -66,7 +68,7 @@ private:
         std::uint64_t lastAskMs = 0;
         std::map<std::string, SubjectState> subjects;
     };
-    void StartTick(const std::string& observer, View& view, std::uint64_t nowMs);
+    void StartTick(const std::string& observer, View& view, std::uint32_t budget, std::uint64_t nowMs);
     interest::SubjectId SubjectIdOf(const std::string& member);
 
     Budget budget_;

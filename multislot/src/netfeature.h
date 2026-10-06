@@ -23,6 +23,7 @@
 //     if (multislot::NetFeatureActive(multislot::NetFeature::HitAuthority)) { ...new rule... } else { ...game's... }
 // Cheap (a shared lock and a few compares): call it where the decision is made, every time. Any thread.
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -82,6 +83,10 @@ private:
     std::string lobby_, self_, owner_;
     std::vector<Member> members_;
     std::vector<std::string> reported_;  // mismatched members already returned, this room
+    // What Active answers, worked out when the room changes (Observe): the features every member has on, or 0. Read
+    // on every datagram (NetFeatureActive is on the send path), so it is one atomic load.
+    std::atomic<std::uint32_t> active_{0};
+    void UpdateActiveLocked();
 };
 
 NetRoom& NetGate();

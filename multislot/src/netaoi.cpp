@@ -49,10 +49,11 @@ InterestGate& Gate() {
     return gate;
 }
 
-bool Filter(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint64_t nowMs) {
+bool Filter(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint32_t budget,
+            std::uint64_t nowMs) {
     // Only where the room runs the classes: a state datagram is one the transport may replace with the next.
     if (!NetFeatureActive(NetFeature::TrafficClasses)) return true;
-    return Gate().Allow(observer, subject, bytes, nowMs);
+    return Gate().Allow(observer, subject, bytes, budget, nowMs);
 }
 
 }  // namespace
@@ -69,7 +70,7 @@ interest::SubjectId InterestGate::SubjectIdOf(const std::string& member) {
     return id;
 }
 
-void InterestGate::StartTick(const std::string& observer, View& view, std::uint64_t nowMs) {
+void InterestGate::StartTick(const std::string& observer, View& view, std::uint32_t pathBudget, std::uint64_t nowMs) {
     view.tickMs = nowMs;
     view.ticked = true;
     // Subjects that stopped asking are no longer scheduled (the scheduler forgets what it is not listed).
@@ -86,8 +87,8 @@ void InterestGate::StartTick(const std::string& observer, View& view, std::uint6
         list.push_back({s.id, p.position, p.team, p.engaged, s.bytes});
         names[s.id] = member;
     }
-    const std::uint32_t budget = interest::TickBudgetBytes(budget_ ? budget_(observer) : interest::kStubLinkBudget,
-                                                           static_cast<std::uint32_t>(tickMs_));
+    const std::uint32_t perSecond = pathBudget ? pathBudget : budget_ ? budget_(observer) : interest::kStubLinkBudget;
+    const std::uint32_t budget = interest::TickBudgetBytes(perSecond, static_cast<std::uint32_t>(tickMs_));
     double spare = budget;
     for (interest::SubjectId id : scheduler_.PickSendsThisTick(obs, list, budget, nowMs)) {
         SubjectState& s = view.subjects[names[id]];
@@ -98,7 +99,8 @@ void InterestGate::StartTick(const std::string& observer, View& view, std::uint6
     view.spare = std::max(0.0, spare);
 }
 
-bool InterestGate::Allow(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint64_t nowMs) {
+bool InterestGate::Allow(const std::string& observer, const std::string& subject, std::uint32_t bytes, std::uint32_t budget,
+                         std::uint64_t nowMs) {
     std::lock_guard<std::mutex> lock(mu_);
     // Observers gone quiet: their state goes with them.
     for (auto it = views_.begin(); it != views_.end();) {
@@ -122,7 +124,7 @@ bool InterestGate::Allow(const std::string& observer, const std::string& subject
     if (newSubject) s.id = SubjectIdOf(subject);
     s.bytes = bytes;
     s.lastAskMs = nowMs;
-    if (!view.ticked || nowMs - view.tickMs >= tickMs_) StartTick(observer, view, nowMs);
+    if (!view.ticked || nowMs - view.tickMs >= tickMs_) StartTick(observer, view, budget, nowMs);
     if (newSubject) return true;  // a subject's first datagram always goes (the scheduler sends the never-sent first)
     if (s.permitted) {
         s.permitted = false;

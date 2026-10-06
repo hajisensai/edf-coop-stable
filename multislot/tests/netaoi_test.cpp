@@ -39,7 +39,7 @@ Run Play(InterestGate& gate, const std::vector<std::string>& subjects, std::uint
             if ((t / 10 + i * 3) % 9 != 0) continue;  // every 90 ms, phases spread
             const std::string& s = subjects[i];
             ++r.asked[s];
-            if (!gate.Allow("observer", s, bytes, t)) continue;
+            if (!gate.Allow("observer", s, bytes, 0, t)) continue;
             ++r.sent[s];
             if (r.last.count(s)) r.gap[s] = std::max(r.gap[s], t - r.last[s]);
             r.last[s] = t;

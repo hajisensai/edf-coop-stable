@@ -253,45 +253,112 @@ inline const std::vector<Scenario>& Scenarios() {
 
 // --- Netcode rewrite W1 (transport) ---
 
+// The last line of `log` that starts with `prefix` ("" when none).
+inline std::string LastLine(const std::string& log, const std::string& prefix) {
+    std::string found;
+    for (std::size_t at = log.find(prefix); at != std::string::npos; at = log.find(prefix, at + 1)) {
+        const std::size_t end = log.find('\n', at);
+        found = log.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    }
+    return found;
+}
+
+// The kbps a PATHS line gives after `label` (e.g. "direct "), summed over every PATHS line of `log`.
+inline double PathKbps(const std::string& log, const std::string& label) {
+    double total = 0;
+    for (std::size_t at = log.find("PATHS last "); at != std::string::npos; at = log.find("PATHS last ", at + 1)) {
+        const std::size_t end = log.find('\n', at);
+        const std::size_t where = log.find(label, at);
+        if (where == std::string::npos || where > end) continue;
+        total += std::atof(log.c_str() + where + label.size());
+    }
+    return total;
+}
+
+// Every "got-from <user> states=<n> events=<n> gap=<ms>" a machine reported, by sender.
+struct Got {
+    std::size_t states = 0, events = 0, gapMs = 0;
+};
+inline std::map<std::string, Got> GotFrom(const Spawned& machine) {
+    std::map<std::string, Got> got;
+    for (auto it = machine.results.equal_range("got-from"); it.first != it.second; ++it.first) {
+        char user[64]{};
+        Got g;
+        if (sscanf_s(it.first->second.c_str(), "%63s states=%zu events=%zu gap=%zu", user, static_cast<unsigned>(sizeof(user)),
+                       &g.states, &g.events, &g.gapMs) == 4)
+            got[user] = g;
+    }
+    return got;
+}
+inline std::map<std::string, Got> SentTo(const Spawned& machine) {
+    std::map<std::string, Got> sent;
+    for (auto it = machine.results.equal_range("sent-to"); it.first != it.second; ++it.first) {
+        char user[64]{};
+        Got g;
+        if (sscanf_s(it.first->second.c_str(), "%63s states=%zu events=%zu", user, static_cast<unsigned>(sizeof(user)), &g.states,
+                       &g.events) == 3)
+            sent[user] = g;
+    }
+    return sent;
+}
+
+// Every reliable record one machine sent another arrived exactly once (the game's controller and the copies the
+// transport sends over a second path must not make one count twice, nor lose one), and state kept arriving.
+inline void CheckEveryRecord(const std::vector<Spawned>& machines, std::size_t maxGapMs) {
+    for (const auto& to : machines) {
+        const auto got = GotFrom(to);
+        for (const auto& from : machines) {
+            if (&from == &to) continue;
+            const auto sent = SentTo(from);
+            const auto s = sent.find(to.user);
+            const auto g = got.find(from.user);
+            if (s == sent.end() || g == got.end()) {
+                Check(false, from.user + " -> " + to.user + ": no counts reported");
+                continue;
+            }
+            Check(g->second.events == s->second.events,
+                  from.user + " -> " + to.user + ": " + std::to_string(g->second.events) + " of " +
+                      std::to_string(s->second.events) + " reliable records, each once");
+            Check(g->second.states > 0, from.user + " -> " + to.user + ": state arrived");
+            Check(g->second.gapMs <= maxGapMs, from.user + " -> " + to.user + ": state never stopped for more than " +
+                                                   std::to_string(maxGapMs) + " ms (longest gap " +
+                                                   std::to_string(g->second.gapMs) + " ms)");
+        }
+    }
+}
+
 // The game's datagrams as the transport classes them (netstats role, [Netcode] StatsSeconds=1): the plaintext tap
 // saw them, the per-type log names the state-like and the reliable record type, and the state datagrams (89
-// bytes: nothing else is that size) went to EOS unreliably while every other datagram of the game's went reliably.
+// bytes: nothing else is that size) went to EOS unreliably once their type was learnt.
 inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::Network& network) {
     CheckRoom(machines, network);
     CheckEosAcceptedAll(network);
     for (const auto& machine : machines) {
         const std::string& log = machine.text;
-        Check(log.find("NETCLASS datagrams: state ") != std::string::npos, machine.user + " logs datagram classes");
-        const std::size_t state = log.find("NETTYPE 0x02800");
-        Check(state != std::string::npos && log.find("0 reliable", state) < log.find('
-', state),
-              machine.user + " logs the state record type, sent unreliably");
-        const std::size_t event = log.find("NETTYPE 0x02700");
-        Check(event != std::string::npos && log.find("0 reliable", event) > log.find('
-', event),
-              machine.user + " logs the probe record type, sent reliably");
-        const std::size_t classes = log.rfind("NETCLASS datagrams: state ");
-        Check(classes != std::string::npos && log.compare(classes, 28, "NETCLASS datagrams: state 0 ") != 0,
-              machine.user + " learnt the state type: state datagrams counted");
-        Check(log.find("NETCODE features in room") != std::string::npos &&
-                  log.find("on: TrafficClasses,Mesh,Fragments") != std::string::npos,
+        const std::string state = LastLine(log, "NETTYPE 0x02800");
+        Check(!state.empty() && state.find(" 0 reliable") != std::string::npos,
+              machine.user + " logs the state record type, sent unreliably (" + state + ")");
+        const std::string probe = LastLine(log, "NETTYPE 0x02700");
+        Check(!probe.empty() && probe.find(" 0 reliable") == std::string::npos,
+              machine.user + " logs the probe record type, sent reliably (" + probe + ")");
+        const std::string classes = LastLine(log, "NETCLASS datagrams: state ");
+        Check(!classes.empty() && classes.find("state 0 ") == std::string::npos,
+              machine.user + " learnt the state type: state datagrams counted (" + classes + ")");
+        Check(LastLine(log, "NETCODE features in room").find(" on: TrafficClasses,Mesh,Fragments") != std::string::npos,
               machine.user + " sees every member run the same netcode");
-        std::size_t got = 0;
-        Check(std::sscanf(Result(machine, "got").c_str(), "%zu", &got) == 1 && got > 0,
-              machine.user + " received state records (" + Result(machine, "got") + ")");
     }
-    std::size_t states = 0, statesReliable = 0;
-    for (const auto& packet : Wire(network)) {
-        if (packet.header.channel != 0 || packet.header.size != 89) continue;
-        ++states;
-        statesReliable += packet.header.reliability != 0 ? 1 : 0;
-    }
-    std::printf("INFO: %zu state datagrams on the wire, %zu of them reliable
-", states, statesReliable);
-    Check(states > 0, "state datagrams crossed EOS");
-    // The first kSamples of each pair go before the type is learnt (Unknown: reliable, as before).
-    Check(statesReliable * 3 < states, "once learnt, state datagrams go unreliably (" + std::to_string(statesReliable) +
-                                           " of " + std::to_string(states) + " reliable)");
+    CheckEveryRecord(machines, 1000);
+    std::vector<bool> reliable;  // the state datagrams in wire order: sent reliably?
+    for (const auto& packet : Wire(network))
+        if (packet.header.channel == 0 && packet.header.size == 89) reliable.push_back(packet.header.reliability != 0);
+    std::size_t lateReliable = 0;
+    for (std::size_t i = reliable.size() / 2; i < reliable.size(); ++i) lateReliable += reliable[i] ? 1 : 0;
+    std::printf("INFO: %zu state datagrams on the wire, %zu reliable in the second half\n", reliable.size(), lateReliable);
+    Check(reliable.size() > 20, "state datagrams crossed EOS");
+    // Before a type is learnt (StateLearner::kSamples updates per pair, ~2.4 s here) its datagrams are Unknown and go
+    // reliably, as before. Once learnt, never.
+    Check(lateReliable == 0, "once learnt, state datagrams go unreliably (" + std::to_string(lateReliable) +
+                                 " reliable in the second half)");
 }
 
 // A member of another netcode protocol ([Test] NetProtocol=99) is refused by the host: removed from the room, both
@@ -305,30 +372,103 @@ inline void CheckVersionGate(const std::vector<Spawned>& machines, const gamenet
           "the refused member says why its netcode is off");
     for (std::size_t i = 0; i + 1 < machines.size(); ++i) {
         const std::string& log = machines[i].text;
-        const std::size_t last = log.rfind("NETCODE features in room");
-        const std::size_t end = last == std::string::npos ? last : log.find('
-', last);
-        const std::string line = last == std::string::npos ? std::string() : log.substr(last, end - last);
-        Check(line.find(" on: TrafficClasses,Mesh,Fragments") != std::string::npos,
-              machines[i].user + " runs the new netcode once the odd member is gone (" + line + ")");
+        const std::string last = LastLine(log, "NETCODE features in room");
+        Check(last.find(" on: TrafficClasses,Mesh,Fragments") != std::string::npos,
+              machines[i].user + " runs the new netcode once the odd member is gone (" + last + ")");
         Check(log.find(" off: ") != std::string::npos, machines[i].user + " had it off while the odd member was in");
     }
 }
 
+// A message of 1024 loadout records' size from the host to each guest, in fragments, whole on arrival.
+inline void CheckBulk(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEosAcceptedAll(network);
+    const auto& host = machines.front();
+    Check(Result(host, "bulk").rfind("sent", 0) == 0, "the host sent the message: " + Result(host, "bulk"));
+    const std::string expected = Result(host, "bulk-fnv");
+    for (std::size_t i = 1; i < machines.size(); ++i)
+        Check(machines[i].text.find("NETCODE bulk message from " + host.user + ": tag 7, 146432 bytes, fnv " + expected) !=
+                  std::string::npos,
+              machines[i].user + " got the 146432-byte message whole");
+}
+
+// The direct link (Mode=host, joiners Mode=join to it over loopback): the joiners link to each other and their
+// traffic goes directly, not through the host.
+inline void CheckMesh(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    for (std::size_t i = 1; i < machines.size(); ++i) {
+        const std::string& log = machines[i].text;
+        Check(log.find("linked directly") != std::string::npos, machines[i].user + " linked directly to another joiner");
+        Check(PathKbps(log, ": direct ") > 0,
+              machines[i].user + " sent game data directly (" + LastLine(log, "PATHS last ") + ")");
+    }
+}
+
+// The joiners cannot reach each other: everything between them goes through the host, and nothing is lost.
+inline void CheckMeshBlocked(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    for (std::size_t i = 1; i < machines.size(); ++i)
+        Check(machines[i].text.find("linked directly") == std::string::npos, machines[i].user + " never linked directly");
+    Check(PathKbps(machines.front().text, "relayed for others ") > 0,
+          "the host relayed the joiners' traffic (" + LastLine(machines.front().text, "PATHS last ") + ")");
+}
+
+// The joiners' direct link breaks for 1.5 s mid-game and comes back: state keeps arriving (the relay takes over,
+// with copies while the direct link is in doubt), every reliable record arrives exactly once, copies are dropped on
+// arrival, and the direct link carries again afterwards.
+inline void CheckMeshFlap(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    for (std::size_t i = 1; i < machines.size(); ++i) {
+        const std::string& log = machines[i].text;
+        Check(log.find("linked directly") != std::string::npos, machines[i].user + " linked directly");
+        Check(PathKbps(log, "through the host ") > 0 && PathKbps(log, ": direct ") > 0,
+              machines[i].user + " used both the relay and the direct link");
+    }
+    std::size_t copies = 0;
+    for (std::size_t i = 1; i < machines.size(); ++i)
+        for (std::size_t at = machines[i].text.find("PATHS last "); at != std::string::npos;
+             at = machines[i].text.find("PATHS last ", at + 1)) {
+            const std::size_t end = machines[i].text.find('\n', at);
+            const std::size_t c = machines[i].text.rfind(" copies dropped on arrival", end);
+            const std::size_t start = machines[i].text.rfind(", ", c);
+            if (c != std::string::npos && c > at) copies += std::strtoull(machines[i].text.c_str() + start + 2, nullptr, 10);
+        }
+    Check(copies > 0, std::to_string(copies) + " copies (event over two paths) dropped on arrival by the joiners");
+}
+
+// A room on the direct link: the host listens on a port of this run, the joiners dial it over loopback. `extra`
+// goes to every machine.
+inline std::vector<Seat> DirectSeats(int count, const std::string& step, const std::string& extra, const std::string& guestExtra = "") {
+    auto seats = Seats(count, step, "");
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Netcode]\r\nStatsSeconds=1\r\n";
+    for (std::size_t i = 0; i < seats.size(); ++i)
+        seats[i].ini = common + extra + (i ? guestExtra : "") +
+                       (i ? "[DirectNet]\r\nEnabled=1\r\nMode=join\r\nHostAddress=127.0.0.1:@PORT@\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n"
+                          : "[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\nBindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:@PORT@\r\n");
+    return seats;
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
-        {"netstats", Seats(3, "netstats", BaseIni("[Netcode]
-StatsSeconds=1
-")), 90000, &CheckNetStats},
+        {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
+         {{"EDF6NET_SECONDS", "8"}}},
         {"versiongate",
          [] {
              auto seats = Seats(3, "versiongate", BaseIni());
-             seats[2].ini = BaseIni("[Test]
-NetProtocol=99
-");
+             seats[2].ini = BaseIni("[Test]\r\nNetProtocol=99\r\n");
              return seats;
          }(),
          90000, &CheckVersionGate},
+        {"bulk", Seats(3, "bulk", BaseIni("[Test]\r\nBulkEcho=1\r\n")), 90000, &CheckBulk},
+        {"mesh", DirectSeats(3, "netstats", ""), 120000, &CheckMesh, {{"EDF6NET_SECONDS", "8"}}},
+        {"meshblocked", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=0\r\n"), 120000, &CheckMeshBlocked,
+         {{"EDF6NET_SECONDS", "8"}}},
+        {"meshflap", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=7000\r\nPeerBlockForMs=1500\r\n"), 120000,
+         &CheckMeshFlap, {{"EDF6NET_SECONDS", "10"}}},
     };
     return all;
 }

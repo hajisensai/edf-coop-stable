@@ -8,6 +8,9 @@
 #include <vector>
 
 #include "net_shared.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -49,6 +52,28 @@ bool PrepareMachine(const std::wstring& work, const std::wstring& plugin, const 
 }
 
 std::wstring Wide(const std::string& text) { return std::wstring(text.begin(), text.end()); }
+
+// A UDP port nothing on this machine uses now, for a scenario's direct-link host (its INI says @PORT@): other
+// test runs on the same machine get ports of their own.
+std::string FreeUdpPort() {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    const SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in6 any{};
+    any.sin6_family = AF_INET6;
+    int len = sizeof(any);
+    std::string port = "0";
+    if (s != INVALID_SOCKET && bind(s, reinterpret_cast<sockaddr*>(&any), sizeof(any)) == 0 &&
+        getsockname(s, reinterpret_cast<sockaddr*>(&any), &len) == 0)
+        port = std::to_string(ntohs(any.sin6_port));
+    if (s != INVALID_SOCKET) closesocket(s);
+    return port;
+}
+
+std::string WithPort(std::string ini, const std::string& port) {
+    for (std::size_t at = ini.find("@PORT@"); at != std::string::npos; at = ini.find("@PORT@", at)) ini.replace(at, 6, port);
+    return ini;
+}
 
 bool Spawn(Spawned& machine, const std::wstring& exe, const std::wstring& gameFolder, const std::wstring& work,
            const std::string& section) {
@@ -182,12 +207,13 @@ int wmain(int argc, wchar_t** argv) {
                                  "EDF6NET_CHATTER", "EDF6NET_RUSH"})
         SetEnvironmentVariableA(variable, nullptr);
     for (const auto& [variable, value] : chosen->network) SetEnvironmentVariableA(variable.c_str(), value.c_str());
+    const std::string port = FreeUdpPort();  // a direct-link host's, when its INI asks for one
     for (const auto& seat : chosen->seats) {
         Spawned machine;
         machine.user = seat.user;
         machine.role = seat.role;
         const std::wstring home = folder + L"\\" + Wide(seat.user);
-        Check(PrepareMachine(home, plugin, seat.ini), seat.user + ": work folder prepared");
+        Check(PrepareMachine(home, plugin, WithPort(seat.ini, port)), seat.user + ": work folder prepared");
         machines.push_back(machine);
         for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), value.c_str());
         SetEnvironmentVariableA("EDF6NET_SEAT", std::to_string(machines.size() - 1).c_str());

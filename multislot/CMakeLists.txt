@@ -103,7 +103,7 @@ add_library(EDF6Coop SHARED
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
-    src/networld.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp
+    src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp
     src/widecmp.cpp src/interest.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
@@ -251,7 +251,7 @@ add_test(NAME EnemySpawnCounts COMMAND SpawnTests)
 
 # Netcode W4 (src/networld.h): the enemy target decision and its hook against a fake game; with EDF.dll also the
 # hook site against the game's code (skipped without it).
-add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp
+add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/worldrng.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp
     src/packetfit.cpp src/identity.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp)
 target_include_directories(NetWorldTests PRIVATE "${CMAKE_SOURCE_DIR}/..")

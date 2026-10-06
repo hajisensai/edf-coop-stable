@@ -101,6 +101,7 @@ struct Network {
     std::uint32_t overflowed;  // packets refused because their receiver's inbox was full
     std::uint32_t dropped;   // unreliable packets the network lost on purpose (EDF6NET_DROP)
     std::uint32_t finished;  // machines done with their part (FakeNet_Finish)
+    std::uint32_t ready;     // machines ready for the start sync (FakeNet_Ready)
     Lobby lobby;
     Station machines[kMaxMachines];
     WireLog wire;

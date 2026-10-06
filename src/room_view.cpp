@@ -71,19 +71,46 @@ std::vector<StatusChange> RoomView::settle(const std::vector<StatusChange>& want
     return due;
 }
 
-void RoomView::heardHost(const std::vector<std::string>& hostMembers) {
+void RoomView::heardHost(const std::vector<std::string>& hostSlots) {
     if (!active_) return;
     heard_ = true;
-    hostNow_ = {hostMembers.begin(), hostMembers.end()};
-    hostOrder_ = hostMembers;
-    hostEver_.insert(hostMembers.begin(), hostMembers.end());
+    hostSlots_ = hostSlots;
+    hostNow_.clear();
+    for (const std::string& m : hostSlots)
+        if (!m.empty()) hostNow_.insert(m);
+    hostEver_.insert(hostNow_.begin(), hostNow_.end());
+}
+
+int RoomView::hostSlot(const std::string& member) const {
+    if (!heard_ || member.empty()) return -1;
+    for (size_t i = 0; i < hostSlots_.size(); ++i)
+        if (hostSlots_[i] == member) return static_cast<int>(i);
+    return -1;
+}
+
+std::vector<std::string> RoomView::hostMembers() const {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const std::string& m : hostSlots_)
+        if (!m.empty() && seen.insert(m).second) out.push_back(m);
+    return out;
+}
+
+void RoomView::adoptHost() {
+    if (!active_ || !heard_) return;
+    members_.clear();
+    order_.clear();
+    for (const std::string& m : hostMembers())
+        if (members_.insert(m).second) order_.push_back(m);
+    if (!self_.empty() && members_.insert(self_).second) order_.push_back(self_);
+    pending_.clear();
 }
 
 std::vector<StatusChange> RoomView::followHost() const {
     std::vector<StatusChange> out;
     if (!active_ || !heard_) return out;
-    for (const std::string& m : hostOrder_)
-        if (m != self_ && !members_.count(m) &&
+    for (const std::string& m : hostSlots_)
+        if (!m.empty() && m != self_ && !members_.count(m) &&
             std::none_of(out.begin(), out.end(), [&](const StatusChange& c) { return c.target == m; }))
             out.push_back({m, kJoined});
     for (const std::string& m : members_)

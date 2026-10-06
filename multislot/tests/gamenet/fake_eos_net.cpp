@@ -362,6 +362,17 @@ EXPORT std::uint32_t FakeNet_Finish(int finish) {
     return f.net->finished;
 }
 
+// Counts this machine as ready for the start sync (`ready` 1) and returns how many are: a sync begun before
+// another machine listens would lose its first message there.
+EXPORT std::uint32_t FakeNet_Ready(int ready) {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open()) return 0;
+    Locked locked(f.netLock);
+    if (ready) ++f.net->ready;
+    return f.net->ready;
+}
+
 // --- EOS: platform ---
 EXPORT void* EOS_Platform_Create(const void*) { return reinterpret_cast<void*>(0x1000); }
 EXPORT void EOS_Platform_Release(void*) {}

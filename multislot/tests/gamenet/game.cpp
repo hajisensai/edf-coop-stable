@@ -12,7 +12,7 @@ constexpr std::uintptr_t kInternalCoreVtable = 0x17EBBB0;  // eos::internal_Core
 constexpr std::uintptr_t kObservableCtor = 0x7267C0;       // ev::Observable (0x28 bytes)
 constexpr std::uintptr_t kCoreUpdate = 0x12ADB30;          // internal_Core::Update
 constexpr std::uintptr_t kUsersRef = 0x1AF4548, kUsersCtor = 0x12B77E0, kUsersSize = 0x150;
-constexpr std::uintptr_t kUsersAdd = 0x12B7F50;
+constexpr std::uintptr_t kUsersAdd = 0x12B7F50, kUsersRemove = 0x12B87C0;
 constexpr std::uintptr_t kManagerRef = 0x1AF4570, kManagerCtor = 0x12C6280, kManagerSize = 0x218;
 constexpr std::uintptr_t kManagerInitialize = 0x12C80B0;
 constexpr std::uintptr_t kEpicIdRef = 0x1AF42A8, kEpicIdCtor = 0x12B5C20, kEpicIdSize = 0x48;  // PlatformId::ID_EPIC
@@ -123,22 +123,46 @@ bool Transport::Start(const Machine& machine, const std::string& lobbyId, const 
         controller_.object, core_, &usersForController, &managerForController, lobbyId.c_str());
 
     Result("start-step", "%s", "controller ctor");
-    for (const std::string& member : members) {
-        UserDesc desc{};
-        desc.puid = Puid(member);
-        desc.remote = member != self;
-        game_.Fn<void(*)(void*)>(kConnectInfoCtor)(&desc.info);
-        if (!desc.remote) {
-            desc.info.id = AddRef(local.id);
-            desc.info.name = local.name;
-        }
-        Shared user;
-        game_.Fn<void(*)(void*, Shared*, UserDesc*)>(kUsersAdd)(users_.object, &user, &desc);
-        if (!user.object) return false;
-        members_.emplace_back(member, user);
-        Result("start-step", "added %s", member.c_str());
-    }
+    local_ = &local;
+    for (const std::string& member : members)
+        if (!Add(member)) return false;
     return true;
+}
+
+bool Transport::Add(const std::string& member) {
+    auto& local = *static_cast<LocalUser*>(local_);
+    UserDesc desc{};
+    desc.puid = Puid(member);
+    desc.remote = member != game_.machine->user;
+    game_.Fn<void(*)(void*)>(kConnectInfoCtor)(&desc.info);
+    if (!desc.remote) {
+        desc.info.id = AddRef(local.id);
+        desc.info.name = local.name;
+    }
+    Shared user;
+    game_.Fn<void(*)(void*, Shared*, UserDesc*)>(kUsersAdd)(users_.object, &user, &desc);
+    if (!user.object) return false;
+    members_.emplace_back(member, user);
+    Result("start-step", "added %s", member.c_str());
+    return true;
+}
+
+bool Transport::Remove(const std::string& member) {
+    for (auto it = members_.begin(); it != members_.end(); ++it) {
+        if (it->first != member) continue;
+        Shared user = AddRef(it->second);  // taken by value: the callee lets go of it
+        game_.Fn<void(*)(void*, Shared*)>(kUsersRemove)(users_.object, &user);
+        members_.erase(it);
+        Result("start-step", "removed %s", member.c_str());
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> Transport::Members() const {
+    std::vector<std::string> out;
+    for (const auto& [id, user] : members_) out.push_back(id);
+    return out;
 }
 
 void Transport::Tick() const { game_.Fn<void(*)(void*)>(kCoreUpdate)(core_); }

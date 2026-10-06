@@ -460,6 +460,15 @@ std::vector<CallSite> RecoveryCalls() {
     return {{"handshake final hello recovery", 0x12D5B9B, 0x12C8F50}};
 }
 
+std::vector<MidSite> UserSlotHooks() {
+    return {
+        // Users::Add (12B7F50) after the first-empty-slot search: `movsxd rax, ecx; cmp rax, r8` (then `jne 12B80CB`).
+        {"room user slot choice", 0x12B806E, {0x48, 0x63, 0xC1, 0x49, 0x3B, 0xC0}, 0, 6},
+        // Users::Remove (12B87C0) emptying the slot: `mov rax, rbp; shl rax, 4` (then `add rax, [r15]`).
+        {"room user slot emptied", 0x12B8A24, {0x48, 0x8B, 0xC5, 0x48, 0xC1, 0xE0, 0x04}, 0, 7},
+    };
+}
+
 std::vector<MidSite> PeerTimeoutHooks() {
     return {
         // Users::Add (12B7F50) right after make_shared<eos::User> (12B7610): `mov r12, [rax]; mov rsi, [rax+8]`

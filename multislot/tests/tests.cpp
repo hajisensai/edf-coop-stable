@@ -24,6 +24,7 @@
 #include "../src/patches.h"
 #include "../src/smoothing.h"
 #include "../src/rooms.h"
+#include "../src/userslots.h"
 #include "../src/joinlog.h"
 #include "../src/peertimeout.h"
 
@@ -688,6 +689,24 @@ int main(int argc, char** argv) {
     const auto ghostHooks = GhostHooks();
     allHooks.insert(allHooks.end(), ghostHooks.begin(), ghostHooks.end());
     allHooks.insert(allHooks.end(), peerTimeoutHooks.begin(), peerTimeoutHooks.end());
+    // Member slots (userslots.h): Users::Add takes the first empty slot - the loop from 12B802E (`mov [rbp], r14d`,
+    // index 0) over the slots (r9, 16 bytes each, r8 of them) stops at the first null, keeping the index in ecx and
+    // [rbp] - and the User's constructor (12B7610) gets &[rbp]; Users::Remove empties slots[User+0x40] and moves nothing.
+    const auto slotHooks = UserSlotHooks();
+    Check(slotHooks.size() == 2, "member slot hook table size");
+    for (const auto& hook : slotHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the slot hooks run their site unchanged",
+              hook.rva);
+        Check(UserSlotHookHandler(hook.rva) != nullptr, "every slot hook has a handler", hook.rva);
+    }
+    Check(Bytes(0x12B802E, {0x44, 0x89, 0x75, 0x00}) && Bytes(0x12B8058, {0x4D, 0x39, 0x34, 0xC1}) &&
+              Bytes(0x12B8061, {0x89, 0x4D, 0x00}) && Bytes(0x12B8074, {0x75, 0x55}) && Bytes(0x12B80D2, {0x48, 0x8D, 0x55, 0x00}),
+          "Users::Add: the first empty slot in ecx and [rbp], whose address the User's constructor gets", 0x12B806E);
+    Check(Bytes(0x12B8869, {0x49, 0x8B, 0x1E, 0x48, 0x63, 0x6B, 0x40}) && Bytes(0x12B8A2B, {0x49, 0x03, 0x07, 0x33, 0xC9, 0x48, 0x89, 0x08}),
+          "Users::Remove: rbp = User+0x40, that slot of [r15] is emptied", 0x12B8A24);
+    allHooks.insert(allHooks.end(), slotHooks.begin(), slotHooks.end());
     // Host data (hostdataopen.h): the file open EDFModLoader wraps. After `call [vtable+0x10]` on rcx, rdi is the
     // path wstring (rdx), turned into its characters when not stored inline (capacity 8+); the moves at the site
     // hand them to the open (752E0); after it rdi only holds a result byte (`sete dil`/`setne dil`).
@@ -833,6 +852,49 @@ int main(int argc, char** argv) {
     Check(RoomCountFromInfo(70, 0, 64, 200).members < RoomCountFromInfo(70, 0, 64, 200).capacity &&
               RoomCountFromInfo(200, 0, 64, 200).members >= RoomCountFromInfo(200, 0, 64, 200).capacity,
           "count: a room beyond Epic's lobby is full at its own size");
+
+    // Which slot a member takes: the host's when known, in the table and empty here; else the game's first empty one.
+    Check(ChooseUserSlot(1, 3, 1024, true) == 3 && ChooseUserSlot(1, 3, 1024, false) == 1 && ChooseUserSlot(1, -1, 1024, true) == 1 &&
+              ChooseUserSlot(1, 1024, 1024, true) == 1 && ChooseUserSlot(0, 0, 1024, true) == 0,
+          "a member takes the host's slot when it is empty here, the first empty one otherwise");
+    {
+        // The Add handler on a stand-in of Users::Add's registers: slots 0 and 2 taken, the host has "D" in 3.
+        std::uint64_t slots[8]{};  // 4 shared_ptr {object, control}
+        slots[0] = 1;
+        slots[4] = 1;
+        const char* puid = "D";
+        std::int32_t index = 1;
+        SetUserSlotSources([](const std::string& m) { return m == "D" ? 3 : m == "E" ? 2 : -1; },
+                           [](const void* id, char* out, std::size_t size) -> const char* {
+                               strcpy_s(out, size, static_cast<const char*>(id));
+                               return out;
+                           });
+        CpuContext add{};
+        add.rcx = 1;  // the first empty slot
+        add.r8 = 4;
+        add.r9 = reinterpret_cast<std::uintptr_t>(slots);
+        add.r13 = 0x5000;
+        add.rbx = reinterpret_cast<std::uintptr_t>(&puid);
+        add.rbp = reinterpret_cast<std::uintptr_t>(&index);
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check(static_cast<std::int32_t>(add.rcx) == 3 && index == 3, "Users::Add puts D in the host's slot 3");
+        const char* taken = "E";  // the host's slot 2 is taken here: the game's choice stands
+        add.rcx = 1;
+        index = 1;
+        add.rbx = reinterpret_cast<std::uintptr_t>(&taken);
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check(static_cast<std::int32_t>(add.rcx) == 1 && index == 1, "a host slot taken here leaves the first empty one");
+        Check((GameSlotTable() == std::vector<std::string>{"", "E", "", "D"}), "the slot table follows the adds");
+        CpuContext remove{};
+        remove.rbp = 3;
+        remove.r15 = 0x5000;
+        UserSlotHookHandler(0x12B8A24)(&remove);
+        Check((GameSlotTable() == std::vector<std::string>{"", "E"}), "a removed member's slot is empty, nothing moves up");
+        add.r13 = 0x6000;  // another room's Users
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check((GameSlotTable() == std::vector<std::string>{"", "E"}), "another room starts its own table");
+        SetUserSlotSources(nullptr, nullptr);
+    }
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

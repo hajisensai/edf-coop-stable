@@ -3073,6 +3073,20 @@ void testRoomView() {
     v.reset(kC, {kHost, kB, kC, kA});  // entering with the host's list keeps its order
     CHECK((v.members() == std::vector<std::string>{kHost, kB, kC, kA}));
 
+    printf("room view: the host's slots - a member joins our game once the host's game has it, in its slot\n");
+    v.reset(kB, {kHost, kB, kA});  // Epic listed A, the host's game does not have it yet
+    CHECK(!v.slotted());
+    v.heardHost({kHost, "", kB, kC});  // slot 1 empty (someone left), C beyond Epic's lobby
+    CHECK(v.slotted() && v.hostSlot(kHost) == 0 && v.hostSlot(kB) == 2 && v.hostSlot(kC) == 3 && v.hostSlot(kA) == -1);
+    CHECK((v.hostMembers() == std::vector<std::string>{kHost, kB, kC}));
+    v.adoptHost();  // the game enters with the host's members: A is not among them
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC}) && !v.has(kA));
+    CHECK(v.followHost().empty());
+    v.heardHost({kHost, kA, kB, kC});  // the host's game took A in the empty slot
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kA, dn::kJoined}}) && v.hostSlot(kA) == 1);
+    v.heardHost({kHost, kA});  // a host list without us
+    CHECK(!v.slotted());
+
     printf("room order: Epic's members in Epic's order, then the others in the game's\n");
     CHECK((dn::roomOrder({kHost, kB}, {kHost, kC, kB, kA}) == std::vector<std::string>{kHost, kB, kC, kA}));
     CHECK((dn::roomOrder({kHost, kB, kA}, {kHost, kB}) == std::vector<std::string>{kHost, kB}));  // A not in yet

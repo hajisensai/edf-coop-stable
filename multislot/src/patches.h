@@ -175,6 +175,9 @@ std::vector<CallSite> RecoveryCalls();
 // KeepRoomOnPeerTimeout=1 (peertimeout.h): Users::Add records when each user joined, and the room update's
 // "a P2P handshake timed out, so leave the room" check is redirected to PeerTimeoutLeaveCheck.
 std::vector<MidSite> PeerTimeoutHooks();
+// Member slots (userslots.h): Users::Add takes the slot the room's host's game has the member in; Users::Add and
+// Users::Remove keep this machine's slot table. Always on.
+std::vector<MidSite> UserSlotHooks();
 std::vector<CallSite> PeerTimeoutCalls();
 
 // The mission script VM's own player table (MissionScriptBVMImplement+0x168: four 0x18-byte entries, the last 16

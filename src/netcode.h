@@ -49,6 +49,15 @@ void setStateSendFilter(StateSendFilter filter);
 using RoomCapacitySource = uint32_t (*)();
 void setRoomCapacitySource(RoomCapacitySource source);
 
+// Member slots (room_view.h): the game numbers each member by the eos::Users slot it was added in (the first empty
+// one), and every game must have every member in the slot the host's game has it in.
+// This machine's game's slots (multislot userslots.h): index = slot, "" = empty. What a host sends as its Room list.
+using GameSlotsSource = std::vector<std::string> (*)();
+void setGameSlotsSource(GameSlotsSource source);
+// In someone else's room: the slot its host's game has `member` in, where our game must add it; -1 when not known
+// (the host's slots not heard, or they do not list it).
+int hostSlotOf(const std::string& member);
+
 // Bytes per second the path to `peer` carries now, from its congestion controller (direct link: the path in
 // use; EOS only: the game's own budget, as nobody measures Epic's path). 0: `peer` is not known.
 uint32_t linkBudgetBytesPerSec(const std::string& peer);

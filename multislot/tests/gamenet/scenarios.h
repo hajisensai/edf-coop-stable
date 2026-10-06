@@ -605,7 +605,9 @@ inline void CheckJoinFull(const std::vector<Spawned>& machines, const gamenet::N
             bool told = false;
             for (auto it = machine.results.equal_range("member-status"); it.first != it.second; ++it.first)
                 told = told || it.first->second == late.user + " 0";
-            Check(told, machine.user + "'s game was told " + late.user + " joined");
+            // Or it entered the room after the third did, with its host's member slots (eos_hooks parked entry).
+            const bool enteredWith = machine.text.find("with its host's member slots") != std::string::npos;
+            Check(told || enteredWith, machine.user + "'s game was told " + late.user + " joined, or entered with it");
         }
         Check(Result(machine, "sync").rfind("done", 0) == 0, machine.user + " finished the start sync: " + Result(machine, "sync"));
         Check(Result(machine, "players") == std::to_string(machines.size()),
@@ -653,6 +655,62 @@ inline void CheckBulkLost(const std::vector<Spawned>& machines, const gamenet::N
     }
 }
 
+// Member slots (multislot userslots.h): Epic's lobby of 3 (EDF6NET_LOBBY_CAP stands for its 64), a room of 8. A and B
+// join through Epic, D comes in over the direct link (Epic's lobby full), A leaves and X takes its place in Epic's
+// lobby. The host's game gave A slot 1, D slot 3; A's slot is empty after it left and X takes it - so X, which reads
+// Epic's lobby as host, B, X and D beyond it, must still have X in 1 and B in 2. Every game numbers the four the same
+// way, and the start sync among them gives every machine every player's own record.
+inline void CheckSlotOrder(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& a = machines[1];
+    const auto& b = machines[2];
+    const auto& d = machines[3];
+    const auto& x = machines[4];
+    Check(Result(a, "left").rfind("4 members 0", 0) == 0, a.user + " saw the room of four and left it (" + Result(a, "left") + ")");
+    Check(d.text.find("coming in over the direct link") != std::string::npos, d.user + " came in over the direct link");
+    const std::string expected = "0:" + h.user + " 1:" + x.user + " 2:" + b.user + " 3:" + d.user;
+    const std::vector<const Spawned*> stay = {&h, &x, &b, &d};  // in slot order
+    for (const Spawned* machine : stay) {
+        Check(Result(*machine, "slots") == expected,
+              machine->user + "'s game numbers the members as the host's does (" + Result(*machine, "slots") + ")");
+        Check(Result(*machine, "sync").rfind("done", 0) == 0, machine->user + " finished the start sync: " + Result(*machine, "sync"));
+        Check(Result(*machine, "players") == "4", machine->user + " has 4 players (has " + Result(*machine, "players") + ")");
+        for (std::size_t slot = 0; slot < stay.size(); ++slot) {
+            const std::string want = std::to_string(slot) + " class=" + std::to_string(slot % 4) + " marker=" +
+                                     std::to_string(500 + slot) + " armor=" + std::to_string(1000 + 37 * slot);
+            std::string record;
+            for (auto it = machine->results.equal_range("record"); it.first != it.second; ++it.first)
+                if (it.first->second.rfind(std::to_string(slot) + " ", 0) == 0) record = it.first->second;
+            Check(record.rfind(want + " ", 0) == 0,
+                  machine->user + " has " + stay[slot]->user + "'s own loadout in slot " + std::to_string(slot) + " (" + record + ")");
+        }
+    }
+    Check(x.text.find("with its host's member slots") != std::string::npos,
+          x.user + "'s game entered the room with its host's member slots, not Epic's order");
+    Check(b.text.find(x.user.substr(0, 8) + " JOINED: held back until the room's host's game has it") != std::string::npos,
+          b.user + " held Epic's word of " + x.user + " back until the host's game had it");
+}
+
+inline std::vector<Seat> SlotSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    const std::string member = common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    auto seats = Seats(5, "slots", member);
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\n"
+                            "BindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:@PORT@\r\n";
+    seats[0].role = "host-slots-host";
+    seats[1].role = "guest-slots-leave";
+    seats[2].role = "guest-slots-epic";
+    seats[3].role = "guest-slots-direct";
+    seats[4].role = "guest-slots-late";
+    const std::string final = seats[0].user + "," + seats[2].user + "," + seats[3].user + "," + seats[4].user;
+    for (auto& seat : seats) {
+        seat.env.push_back({"EDF6NET_FINAL", final});
+        seat.env.push_back({"EDF6NET_LEAVE_AT", "4"});
+    }
+    return seats;
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
@@ -677,6 +735,7 @@ inline const std::vector<Scenario>& NetScenarios() {
              return seats;
          }(),
          90000, &CheckNetStatsMixed, {{"EDF6NET_SECONDS", "8"}}},
+        {"slotorder", SlotSeats(), 150000, &CheckSlotOrder, {{"EDF6NET_LOBBY_CAP", "3"}, {"EDF6NET_EPIC_MEMBERS", "3"}}},
         {"joinfull", JoinFullSeats(), 120000, &CheckJoinFull,
          {{"EDF6NET_LOBBY_CAP", "2"}, {"EDF6NET_EPIC_MEMBERS", "2"}, {"EDF6NET_SECONDS", "12"}}},
         {"meshoff", DirectSeats(3, "netstats", "", "Mesh=0\r\n"), 120000, &CheckMeshOff, {{"EDF6NET_SECONDS", "6"}}},

@@ -200,11 +200,58 @@ void Prompt() {
           "the language follows Windows', English otherwise");
     Check(!Has(PromptText(sources, yours, L"", PromptLanguage::English), L"on a menu screen"), "no key, no key line");
 
+    Check(Has(en, L"2 file(s) - downloaded before, still here") && !Has(en, L"known only once"),
+          "bundles kept from an earlier download are named file by file");
+
+    // Asked before anything is downloaded: sizes from what the members published, or not known.
+    PromptSource sized{true, "host"};
+    sized.sized = true;
+    sized.files = 68;
+    sized.bytes = 646352;
+    const std::wstring before =
+        PromptText({sized, {false, "0002cf0177ee4e98ac2b8a3c1ecb00da"}}, yours, L"F1", PromptLanguage::English);
+    Check(Has(before, L"the room host's Mods: 68 file(s), 632 KB\n"), "a published size: files and KB");
+    Check(Has(before, L"0002cf01: number of files not known (an older EDF6Coop)\n"), "none published: said so");
+    Check(!Has(before, L"Files your game would read") && Has(before, L"known only once they are downloaded"),
+          "no list before the download, and the log names them after");
+    Check(Has(before, L"Yes: they are downloaded now") && Has(before, L"No: nothing is downloaded"),
+          "yes downloads, no downloads nothing");
+    const std::wstring zhBefore = PromptText({sized}, yours, L"F1", PromptLanguage::Chinese);
+    Check(Has(zhBefore, L"房主的 Mods: 68 个文件, 632 KB") && Has(zhBefore, L"现在开始下载") &&
+              Has(zhBefore, L"什么都不下载"),
+          "in Chinese too");
+
     std::vector<std::string> many;
     for (int i = 0; i < 25; ++i) many.push_back("WEAPON/W" + std::to_string(100 + i) + ".SGO");
     const std::wstring longer = PromptText({{true, "host", many}}, {}, L"F1", PromptLanguage::English);
     Check(Has(longer, L"  WEAPON/W119.SGO\n") && !Has(longer, L"W120.SGO") && Has(longer, L"... and 5 more"),
           "a long list stops at kPromptMaxPaths and counts the rest");
+}
+
+// What each member says of the size of its bundles, read back for the question.
+void Sizes() {
+    const Bundle mods = Make(1), page = Make(2), other = Make(3);
+    Check(BundleSizesText({}) == kPageNone && BundleSizesText({nullptr}) == kPageNone, "nothing shared: none, not empty");
+    const std::string both = BundleSizesText({&mods, nullptr, &page});
+    Check(both == DigestHex(mods.digest) + ":" + std::to_string(mods.files) + ":" + std::to_string(mods.bytes.size()) +
+                      ";" + DigestHex(page.digest) + ":" + std::to_string(page.files) + ":" +
+                      std::to_string(page.bytes.size()),
+          "digest:files:bytes per bundle");
+    Check(both.size() < 1000, "fits one lobby attribute");
+    LobbyView view;
+    view.members = {{"host", {{kBundleSizesKey, both}}}, {"old", {}}, {"bad", {{kBundleSizesKey, ""}}}};
+    const auto first = PublishedSize(view, "host", mods.digest), second = PublishedSize(view, "host", page.digest);
+    Check(first && first->files == mods.files && first->bytes == mods.bytes.size() && second &&
+              second->bytes == page.bytes.size(),
+          "each bundle's size is read back");
+    Check(!PublishedSize(view, "host", other.digest) && !PublishedSize(view, "old", mods.digest) &&
+              !PublishedSize(view, "nobody", mods.digest),
+          "another bundle, a member that published nothing, or no such member: not known");
+    for (const std::string broken : {DigestHex(mods.digest) + ":3", DigestHex(mods.digest) + ":3:x",
+                                     DigestHex(mods.digest) + ":3:4x", "x" + DigestHex(mods.digest) + ":3:4"}) {
+        view.members[2].texts[kBundleSizesKey] = broken;
+        Check(!PublishedSize(view, "bad", mods.digest), "a malformed value is not a size");
+    }
 }
 
 void Transfer() {
@@ -359,6 +406,7 @@ int main() {
     Merge();
     Notices();
     Prompt();
+    Sizes();
     Transfer();
     ManyBundles();
     Refusals();

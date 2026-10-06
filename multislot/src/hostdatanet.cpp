@@ -1,6 +1,7 @@
 #include "hostdatanet.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <mutex>
 #include <set>
@@ -74,6 +75,37 @@ RoomOverlay MergeSources(const std::vector<const SourceFiles*>& sources) {
     for (const auto& [path, folder] : claimed)
         if (!folder->empty()) merged.overlay.entries.push_back({path, *folder});
     return merged;
+}
+
+std::string BundleSizesText(const std::vector<const hostdata::Bundle*>& bundles) {
+    std::string text;
+    for (const hostdata::Bundle* bundle : bundles) {
+        if (!bundle) continue;
+        if (!text.empty()) text += ';';
+        text += hostdata::DigestHex(bundle->digest) + ':' + std::to_string(bundle->files) + ':' +
+                std::to_string(bundle->bytes.size());
+    }
+    return text.empty() ? std::string(kPageNone) : text;
+}
+
+std::optional<BundleSize> PublishedSize(const LobbyView& view, const std::string& member, const Digest& digest) {
+    const auto who = std::find_if(view.members.begin(), view.members.end(),
+                                  [&member](const LobbyView::Member& m) { return m.id == member; });
+    if (who == view.members.end()) return std::nullopt;
+    const auto text = who->texts.find(kBundleSizesKey);
+    if (text == who->texts.end()) return std::nullopt;
+    const std::string wanted = hostdata::DigestHex(digest) + ':';
+    const std::size_t at = text->second.find(wanted);
+    if (at == std::string::npos || (at && text->second[at - 1] != ';')) return std::nullopt;
+    // "<files>:<bytes>", then the end or ';'.
+    const char* next = text->second.data() + at + wanted.size();
+    const char* end = text->second.data() + text->second.size();
+    BundleSize size;
+    auto read = std::from_chars(next, end, size.files);
+    if (read.ec != std::errc() || read.ptr == end || *read.ptr != ':') return std::nullopt;
+    read = std::from_chars(read.ptr + 1, end, size.bytes);
+    if (read.ec != std::errc() || (read.ptr != end && *read.ptr != ';')) return std::nullopt;
+    return size;
 }
 
 std::wstring WeaponsNotice(const WeaponsView& view) {
@@ -373,6 +405,7 @@ std::optional<std::vector<hostdata::DataFile>> WriteStore(const std::wstring& st
         return std::nullopt;
     }
     Log("Host data: %zu file(s) from the room kept in %ls", files->size(), name.c_str());
+    for (const hostdata::DataFile& file : *files) Log("Host data:   %s, %zu bytes", file.path.c_str(), file.bytes.size());
     return files;
 }
 
@@ -451,13 +484,13 @@ void DecideLocked() {
             continue;
         }
         ++rt.remote;
-        // Fetched before anyone is asked, so the question can name the files; read only once approved.
+        // Downloaded only once approved (Ask: the player said yes before anything comes).
         const bool skip = rt.settings.accept == HostAccept::Never || rt.failed.contains(source.digest) ||
                           rt.declined.contains(source.digest);
         if (!skip && rt.settings.accept == HostAccept::Auto) rt.approved.insert(source.digest);
         const SourceFiles* have = skip ? nullptr : HaveLocked(source.digest);
-        if (!skip && !have && !missing) missing = source;
         const bool used = !skip && rt.approved.contains(source.digest);
+        if (used && !have && !missing) missing = source;
         waiting = waiting || (used && !have);
         files.push_back(used ? have : nullptr);
     }
@@ -494,6 +527,9 @@ void ShareLocked() {
     rt.link.Share({rt.mods, rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].bundle : nullptr});
     const std::optional<Digest> page = PageDigestLocked();
     PublishMemberText(kPageDigestKey, page ? hostdata::DigestHex(*page) : std::string(kPageNone));
+    PublishMemberText(kBundleSizesKey,
+                      BundleSizesText({rt.mods.get(), rt.page >= 0 ? rt.pages[static_cast<std::size_t>(rt.page)].bundle.get()
+                                                                   : nullptr}));
 }
 
 void NextPageLocked() {
@@ -741,9 +777,8 @@ void TakeAnswersLocked() {
     rt.answers.clear();
 }
 
-// On a menu frame in a room (Accept=Ask): asks about the bundles that arrived and nobody answered for yet. It does not
-// wait for the others (one slow member must not hold back the question about the host's files, which are fetched
-// first); those that arrive later get a question of their own. Caller holds the lock.
+// On a menu frame in a room (Accept=Ask): asks about the bundles of the room nobody answered for yet, before any of
+// them is downloaded; one that shows up later gets a question of its own. Caller holds the lock.
 void AskLocked() {
     Runtime& rt = Rt();
     if (rt.settings.accept != HostAccept::Ask || rt.asking || !rt.answers.empty()) return;
@@ -751,13 +786,18 @@ void AskLocked() {
     std::vector<Digest> digests;
     std::size_t files = 0;
     for (const RoomSource& source : RemoteLocked()) {
-        const auto have = rt.have.find(source.digest);
-        if (have == rt.have.end() || rt.approved.contains(source.digest) || rt.declined.contains(source.digest) ||
-            rt.failed.contains(source.digest))
+        if (rt.approved.contains(source.digest) || rt.declined.contains(source.digest) || rt.failed.contains(source.digest))
             continue;
-        prompt.push_back({source.mods, source.member, have->second.paths});
+        PromptSource asked{source.mods, source.member};
+        if (const auto have = rt.have.find(source.digest); have != rt.have.end()) asked.paths = have->second.paths;
+        if (const auto size = PublishedSize(rt.view, source.member, source.digest)) {
+            asked.sized = true;
+            asked.files = size->files;
+            asked.bytes = size->bytes;
+        }
+        files += asked.paths.empty() ? asked.files : asked.paths.size();
+        prompt.push_back(std::move(asked));
         digests.push_back(source.digest);
-        files += have->second.paths.size();
     }
     if (digests.empty()) return;
     std::vector<std::string> yours = rt.own.paths;
@@ -815,7 +855,7 @@ bool StartHostData(HMODULE game, ImportRedirect redirect, const HostDataSettings
         if (settings.share && rt.mods) PublishMemberText(kHostDigestKey, hostdata::DigestHex(rt.mods->digest));
         ShareLocked();
     }
-    WatchMemberTexts({kHostDataKey, kHostDigestKey, kPageDigestKey}, &Observe);
+    WatchMemberTexts({kHostDataKey, kHostDigestKey, kPageDigestKey, kBundleSizesKey}, &Observe);
     ListenToTicks(&AfterTick);
     return true;
 }

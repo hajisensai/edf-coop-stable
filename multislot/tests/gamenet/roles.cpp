@@ -667,12 +667,15 @@ struct MemberStatusInfo {  // EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo
     const void* TargetUserId;
     std::int32_t CurrentStatus;
 };
+// The statuses the game was told, in that order (the member sync of SlotRoom plays them as the game does).
+std::vector<std::pair<std::string, std::int32_t>> toldStatuses;
 void OnMemberStatus(const MemberStatusInfo* info) {
     char text[64]{};
     std::int32_t length = sizeof(text);
     if (info && info->TargetUserId)
         FakeExport<std::int32_t (*)(const void*, char*, std::int32_t*)>("EOS_ProductUserId_ToString")(info->TargetUserId, text, &length);
     Result("member-status", "%s %d", text, info ? info->CurrentStatus : -1);
+    if (info) toldStatuses.emplace_back(text, info->CurrentStatus);
 }
 void ListenToMembers(const Machine& machine) {
     struct Options {
@@ -858,11 +861,26 @@ int SlotRoom(Machine& machine, const std::string& how) {
         for (const auto& m : members) now += " " + m;
         if (now != seen) Result("seen", "%zu%s", members.size(), (seen = now).c_str());
         if (!started) {
+            toldStatuses.clear();  // the start takes the room as it lists it now
             if (std::find(members.begin(), members.end(), machine.user) == members.end()) return;
             started = transport.Start(machine, room.lobby, members);
             return;
         }
-        // As the game hears them: one that left before one that came after it (Epic tells them in that order).
+        // Each status as the game is told it, in that order (12BD460 adds a member when told it joined, the
+        // member-status handler removes one that left): told "joined" before the "left" of the member whose slot it
+        // takes, the newcomer gets another slot.
+        std::vector<std::pair<std::string, std::int32_t>> told;
+        told.swap(toldStatuses);
+        for (const auto& [m, status] : told) {
+            if (m.empty() || m == machine.user) continue;
+            const auto had = transport.Members();
+            const bool has = std::find(had.begin(), had.end(), m) != had.end();
+            const bool listed = std::find(members.begin(), members.end(), m) != members.end();
+            if (status == 0 && !has && listed) transport.Add(m);
+            if ((status == 1 || status == 2 || status == 3) && has) transport.Remove(m);
+        }
+        // Then whatever the room lists that no status said (the members that were there when we came in): one
+        // that left before one that came after it.
         for (const auto& m : transport.Members())
             if (m != machine.user && std::find(members.begin(), members.end(), m) == members.end()) transport.Remove(m);
         for (const auto& m : members) {

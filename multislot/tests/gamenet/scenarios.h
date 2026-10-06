@@ -826,6 +826,15 @@ inline std::vector<Seat> ChurnSeats(bool late) {
     if (late) {
         seats[2].env.push_back({"EDF6NET_STATUS_DELAY", "1:8000"});
         seats[3].env.push_back({"EDF6NET_STATUS_DELAY", "0,1:8000"});
+    } else {
+        // The same round: the host's game hears X's LEFT only with Y's JOINED, so it frees X's slot and gives it to Y
+        // in one tick and its next room message has both; the guests hear Epic's statuses long after that message, so
+        // the host's say is what brings both to their games, in one round of followHost.
+        seats[0].env.push_back({"EDF6NET_STATUS_PAIR", "1"});
+        for (const int guest : {2, 3}) {
+            seats[guest].env.push_back({"EDF6NET_STATUS_DELAY", "0,1:20000"});
+            seats[guest].env.push_back({"EDF6NET_STATUS_DELAY_AFTER", "4"});
+        }
     }
     return seats;
 }
@@ -837,9 +846,17 @@ inline void CheckSlotChurn(const std::vector<Spawned>& machines, const gamenet::
     const auto& y = machines[4];
     Check(Result(x, "left").rfind("4 members 0", 0) == 0, x.user + " saw the room of four and left it (" + Result(x, "left") + ")");
     CheckSameSlots({&h, &y, &b, &machines[3]});
-    if (late)
+    if (late) {
         Check(b.text.find(y.user.substr(0, 8) + " JOINED: held back until its slot is empty in our game") != std::string::npos,
               b.user + " held Y back until X, whose slot it takes, had left its game");
+        return;
+    }
+    // X's departure and Y's arrival reached each guest's game in one round of the host's say, X first.
+    const std::string round = "ROOM following the host: 1 departure(s) and 1 join(s) in one round (LEFT " +
+                              x.user.substr(0, 8) + ", JOINED " + y.user.substr(0, 8) + ")";
+    for (const Spawned* guest : {&b, &machines[3]})
+        Check(guest->text.find(round) != std::string::npos,
+              guest->user + " followed X leaving and Y taking its slot in one round, the departure first");
 }
 
 inline const std::vector<Scenario>& NetScenarios() {

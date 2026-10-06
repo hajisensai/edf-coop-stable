@@ -40,6 +40,8 @@
 #include "smoothing.h"
 #include "updatecheck.h"
 #include "spawn.h"
+#include "hitauthgame.h"
+#include "netfeature.h"
 #include "coop.h"
 #include "src/config.h"
 #include "src/dn_part.h"
@@ -630,6 +632,10 @@ bool LoadRooms(const wchar_t* iniPath) {
         return false;
     }
     KeepMenuLayout(true);
+    // Hit authority (hitauthgame.h, docs/net-re/damage.md): hooks and a thunk page of its own, so a site that is
+    // not the expected code leaves only it off and the game decides hits as it always did.
+    InitNetFeatures(iniPath);
+    InstallHitAuthority(base);
     Log("Joining: normal rooms and MultiSlot rooms of every size from EDF6Coop 2.3.0 on are joinable, and the room "
         "list shows both whatever the setting");
     Log("Rooms: %d user slots, packet sessions and voice chat HUD records (P2P links to every member of a %d-player "

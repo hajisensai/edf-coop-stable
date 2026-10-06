@@ -316,7 +316,9 @@ bool InstallPlayerSync(unsigned char* base, const PlayerSyncSettings& wanted) {
     }
     // mov dword ptr [r14+0x58], imm32 (90.0f)
     const std::uint8_t flushOriginal[] = {0x41, 0xC7, 0x46, 0x58, 0x00, 0x00, 0xB4, 0x42};
-    const bool flush = wanted.flushIntervalMs > 0 && wanted.flushIntervalMs != 90;
+    // Decided by this machine's own switch (netplayer.h EffectiveFlushIntervalMs): [Netcode] PlayerSync=0 leaves 90 ms.
+    const int flushMs = EffectiveFlushIntervalMs(wanted.flushIntervalMs, NetFeatureEnabledLocally(NetFeature::PlayerSync));
+    const bool flush = flushMs > 0;
     if (flush && std::memcmp(base + kFlushIntervalSite, flushOriginal, sizeof(flushOriginal)) != 0) {
         Log("PLAYER sync: OFF - the packet flush interval at EDF+%X is not the game's 90 ms (W1 or another mod "
             "changed it?); nothing changed",
@@ -342,7 +344,7 @@ bool InstallPlayerSync(unsigned char* base, const PlayerSyncSettings& wanted) {
         writes.push_back({site.rva, {base + site.rva, base + site.rva + 8}, std::move(bytes)});
     }
     if (flush) {
-        const float interval = static_cast<float>(wanted.flushIntervalMs);
+        const float interval = static_cast<float>(flushMs);
         std::vector<std::uint8_t> bytes(flushOriginal, flushOriginal + sizeof(flushOriginal));
         std::memcpy(bytes.data() + 4, &interval, sizeof(interval));
         writes.push_back({kFlushIntervalSite, {flushOriginal, flushOriginal + sizeof(flushOriginal)}, std::move(bytes)});
@@ -359,7 +361,7 @@ bool InstallPlayerSync(unsigned char* base, const PlayerSyncSettings& wanted) {
         "frame(s); remote players with that data are extrapolated (up to %.0f ms) and converge in %.0f ms (warp above "
         "%.0f m, feed-forward %.0f%%); players without it keep the game's own sync. Packet flush every %d ms",
         Sites().size(), flush ? " + flush interval" : "", settings.sendIntervalFrames, params.maxExtrapolateMs,
-        params.tauMs, params.snapDistance, params.feedForward * 100.0f, flush ? wanted.flushIntervalMs : 90);
+        params.tauMs, params.snapDistance, params.feedForward * 100.0f, flush ? flushMs : 90);
     return true;
 }
 

@@ -71,7 +71,9 @@ PlayerSample MakeSample(SendTrack& track, Vec3 position, double nowMs);
 struct NetPlayerParams {
     float tauMs = 80.0f;               // error time constant: a tenth left after ~2.3 tau
     float maxExtrapolateMs = 200.0f;   // how far ahead of its last sample a player is extrapolated
-    float snapDistance = 8.0f;         // larger errors warp the copy to the estimate
+    float snapDistance = 8.0f;         // larger errors warp the copy to the estimate...
+    float warpLeadSeconds = 0.25f;     // ...or, when faster, errors above speed * this (a 40 m/s boost turning:
+                                       // the extrapolation itself can be ~v * 0.2 s off for a moment)
     float maxSpeed = 60.0f;            // cap of what is added per frame, m/s
     float feedForward = 1.0f;          // 0..1: how much of the sender's velocity replaces the copy's own motion
     float deadband = 0.03f;            // m: errors below this are left alone
@@ -100,6 +102,10 @@ bool AcceptSample(RemoteTrack& track, const PlayerSample& sample, double localMs
 bool TrackFresh(const RemoteTrack& track, double nowMs, const NetPlayerParams& params);
 // Where the player is now by its last sample: position + velocity * age, the age capped at maxExtrapolateMs.
 Vec3 EstimatePosition(const RemoteTrack& track, double nowMs, const NetPlayerParams& params);
+// How old the last sample is on this machine's clock (latency baseline removed), ms.
+double SampleAgeMs(const RemoteTrack& track, double nowMs);
+// The error above which the copy is warped: max(snapDistance, speed * warpLeadSeconds).
+float WarpDistance(const RemoteTrack& track, const NetPlayerParams& params);
 
 struct RemoteStep {
     bool warp = false;  // put the copy at `target`
@@ -110,5 +116,12 @@ struct RemoteStep {
 RemoteStep StepRemote(RemoteTrack& track, Vec3 current, double nowMs, const NetPlayerParams& params);
 // The copy was not driven this frame (the game's correction was off, a ride, a warp): measure afresh.
 void ResetSteps(RemoteTrack& track);
+
+// The packet controller flush interval EDF6Coop sets ([NetPlayer] FlushIntervalMs), or 0 to leave the game's 90 ms.
+// It is written into the controller's constructor, so it is decided once at start, by this machine's own switch:
+// with [Netcode] PlayerSync=0 the game's 90 ms stays. With the switch on it applies in every room, mixed rooms too:
+// it only changes how often this machine's own datagrams leave (nothing on the wire another build reads
+// differently), at about 5 kbit/s more header traffic per member at 45 ms.
+int EffectiveFlushIntervalMs(int configuredMs, bool playerSyncOnLocally);
 
 }  // namespace multislot

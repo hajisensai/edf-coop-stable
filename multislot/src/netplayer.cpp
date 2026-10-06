@@ -149,8 +149,16 @@ bool AcceptSample(RemoteTrack& track, const PlayerSample& sample, double localMs
     return true;
 }
 
+double SampleAgeMs(const RemoteTrack& track, double nowMs) {
+    return (std::max)(nowMs - (track.senderTime + track.offset), 0.0);
+}
+
+float WarpDistance(const RemoteTrack& track, const NetPlayerParams& params) {
+    return (std::max)(params.snapDistance, Length(track.last.velocity) * params.warpLeadSeconds);
+}
+
 Vec3 EstimatePosition(const RemoteTrack& track, double nowMs, const NetPlayerParams& params) {
-    const double age = std::clamp(nowMs - (track.senderTime + track.offset), 0.0, static_cast<double>(params.maxExtrapolateMs));
+    const double age = (std::min)(SampleAgeMs(track, nowMs), static_cast<double>(params.maxExtrapolateMs));
     return track.last.position + track.last.velocity * static_cast<float>(age / 1000.0);
 }
 
@@ -164,14 +172,17 @@ RemoteStep StepRemote(RemoteTrack& track, Vec3 current, double nowMs, const NetP
     RemoteStep step;
     step.target = EstimatePosition(track, nowMs, params);
     const Vec3 error = step.target - current;
-    if (Length(error) > params.snapDistance) {
+    if (Length(error) > WarpDistance(track, params)) {
         step.warp = true;
         ResetSteps(track);
         return step;
     }
     const double dtMs = track.stepped ? std::clamp(nowMs - track.lastStepMs, 4.0, 50.0) : 1000.0 / 60.0;
     const float dt = static_cast<float>(dtMs / 1000.0);
-    const Vec3 wanted = track.last.velocity * dt;
+    // The estimate moves with the sample's velocity only until the extrapolation limit, and so does the copy: this
+    // step gets the velocity for what is left of that time, none past it.
+    const double runMs = std::clamp(static_cast<double>(params.maxExtrapolateMs) - SampleAgeMs(track, nowMs), 0.0, dtMs);
+    const Vec3 wanted = track.last.velocity * static_cast<float>(runMs / 1000.0);
     if (track.stepped) {
         // What the copy did on its own last step: its motion less what we added.
         const Vec3 own = current - track.lastPosition - track.lastAdded;
@@ -188,6 +199,11 @@ RemoteStep StepRemote(RemoteTrack& track, Vec3 current, double nowMs, const NetP
     track.lastAdded = step.add;
     track.lastStepMs = nowMs;
     return step;
+}
+
+int EffectiveFlushIntervalMs(int configuredMs, bool playerSyncOnLocally) {
+    if (!playerSyncOnLocally || configuredMs <= 0 || configuredMs == 90) return 0;
+    return std::clamp(configuredMs, 16, 90);
 }
 
 }  // namespace multislot

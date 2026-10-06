@@ -142,6 +142,11 @@ void NoteMember(const std::string& member, const MemberPlace& place) {
     places.byMember[member] = place;
 }
 
+void ForgetMember(const std::string& member) {
+    std::lock_guard<std::mutex> lock(places.mu);
+    places.byMember.erase(member);
+}
+
 void ForgetMembers() {
     std::lock_guard<std::mutex> lock(places.mu);
     places.byMember.clear();

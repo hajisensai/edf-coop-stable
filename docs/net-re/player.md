@@ -39,6 +39,13 @@ NetworkUpdate = main slot55 0x596130（PW 0x5803C0 jmp 过去）。远端（+0x1
 - flush 间隔写在包控制器构造函数里，启动时一次性决定：按**本机** [Netcode] PlayerSync 开关（`EffectiveFlushIntervalMs`），关闭时保持 90ms。开启时在任何房间都生效，包括门未全开的混装房间——它只改变本机数据报的发出频率，线上没有别的版本会读出不同含义的东西；代价约 +5 kbit/s/对端头部流量。按房间门在运行时切换需要改每个控制器实例的 +0x58，属于传输层（W1），未做。
 - ini：[NetPlayer] SendIntervalFrames=2、FlushIntervalMs=45（0=保持 90）、ConvergeMs=80、MaxExtrapolateMs=200、SnapDistance=8、FeedForwardPercent=100。
 
+## 兴趣管理的位置输入（I1 接线，2026-10-07）
+- 成员 ↔ 玩家对象（H 代码 / M 类型）：`SoldierBase::CreateOnlinePlayerObject`（0x591130）用 `room->vfunc1` 取成员列表，按 lambda 0x5A35D0（`eos::User+0x48 == 玩家索引`）找到该玩家的 eos::User，存进对象 +0x1ED0/+0x1ED8（0x591254）。该字段又被 0x59BC16 用 0x12AC280（User+0x10 bit0 = 已连接）判断成员是否还在，不在就删除对象——所以 +0x1ED0 是 eos::User。成员 ID = User+0x18 的 EOS_ProductUserId（peertimeout.h）转成 32 位文本。联机任务里每个玩家（包括本机玩家）都走这条路创建（0x1DC525），离线用 0x591410（无 +0x1ED0）。
+- `netplayer_members.*`：在玩家的 NetworkUpdate 包装里（每帧、每对象）按成员每 100ms 喂一次 `NoteMember`：本机玩家用自身位置，远端玩家有 W2 块时用外推估计（及速度），否则用副本位置；朝向取水平运动方向，站立时保留上次。2 秒没见到的成员 `ForgetMember`（netaoi 新增的最小接入点）回到中等相关默认。拿不到 eos::User 或 ID 的对象什么都不喂，闸门按中等相关处理，不会被误判为远处。
+- 房主中转时闸门按目标成员 ID 查位置，同一张表即可覆盖。
+- `engaged` 暂恒为 false：还没找到可靠的"交战中"字段。
+- 只在 PlayerSync 的 hook 装上时才有输入（安装失败则所有成员保持中等相关）。
+
 ## hook 清单（最终）
 | 地址 | 原值 | 用途 |
 |---|---|---|

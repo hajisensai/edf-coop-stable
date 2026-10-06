@@ -10,9 +10,12 @@
 #include <vector>
 
 #include "code.h"
+#include "identity.h"
 #include "log.h"
 #include "netfeature.h"
+#include "netaoi.h"
 #include "netplayer.h"
+#include "netplayer_members.h"
 #include "patches.h"
 
 namespace multislot {
@@ -227,11 +230,56 @@ Vec3 ProxyPosition(void* soldier, float& w) {
     return {matrix[12], matrix[13], matrix[14]};
 }
 
+// Interest management's positions (netplayer_members.h, netaoi.h): every player object's member and place.
+MemberPlaces& Places() {
+    static MemberPlaces places(
+        [](const void* productId) {
+            if (!productId) return std::string();
+            char text[64]{};
+            ProductUserIdText(productId, text, sizeof(text));
+            return std::string(text);
+        },
+        [](const std::string& member, const PlayerPlace& place) {
+            MemberPlace m;
+            m.position = {place.position.x, place.position.y, place.position.z};
+            m.facing = {place.facing.x, place.facing.y, place.facing.z};
+            m.engaged = place.engaged;
+            NoteMember(member, m);
+        },
+        [](const std::string& member) { ForgetMember(member); });
+    return places;
+}
+double expiredMs = 0.0;
+
+// Called with the lock held.
+void FeedPlace(void* soldier, double now) {
+    if (now - expiredMs > 500.0) {
+        expiredMs = now;
+        Places().Expire(now);
+    }
+    if (!IsPlayer(soldier)) return;
+    const void* user = PlayerUser(soldier);
+    if (!user) return;
+    Vec3 position = RecordPosition(soldier), velocity;
+    if (Remote(soldier)) {
+        // The estimate where this player's machine sends the block: where it is now, not where the copy got to.
+        const RemoteTrack* track = remotes.Find(soldier, now, false);
+        if (track && TrackFresh(*track, now, params)) {
+            position = EstimatePosition(*track, now, params);
+            velocity = track->last.velocity;
+        }
+    }
+    Places().Observe(user, position, velocity, now);
+}
+
 template <int F>
 void UpdateHook(void* soldier) {
     const UpdateFn original = GameFn<UpdateFn>(kOriginal[F][kUpdate]);
-    if (!Remote(soldier) || !NetFeatureActive(NetFeature::PlayerSync)) return original(soldier);
     const double now = NowMs();
+    AcquireSRWLockExclusive(&lock);
+    FeedPlace(soldier, now);
+    ReleaseSRWLockExclusive(&lock);
+    if (!Remote(soldier) || !NetFeatureActive(NetFeature::PlayerSync)) return original(soldier);
     AcquireSRWLockExclusive(&lock);
     RemoteTrack* track = remotes.Find(soldier, now, false);
     const bool drive = track && TrackFresh(*track, now, params);

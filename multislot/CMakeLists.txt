@@ -103,7 +103,7 @@ add_library(EDF6Coop SHARED
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
-    src/networld.cpp)
+    src/networld.cpp src/hitauth.cpp src/hitauthgame.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -169,6 +169,18 @@ add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/ro
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
 add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
 set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+
+# Hit authority (src/hitauth.h): the event, the decision, the owner's checks; and against EDF.dll, the hook sites,
+# the game facts the rule rests on and the event's round trip through the game's own stream code.
+add_executable(HitAuthTests tests/hitauth_test.cpp src/hitauth.cpp src/hitauthgame.cpp src/netfeature.cpp
+    src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp
+    src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
+target_include_directories(HitAuthTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(HitAuthTests PRIVATE ${WARNINGS})
+target_link_libraries(HitAuthTests PRIVATE DirectNetPart)
+add_test(NAME HitAuthority COMMAND HitAuthTests)
+add_test(NAME HitAuthorityGameCode COMMAND HitAuthTests "${EDF_DLL}")
+set_tests_properties(HitAuthorityGameCode PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 
 add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)

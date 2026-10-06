@@ -200,6 +200,20 @@ inline void CheckBusyMission(const std::vector<Spawned>& m, const gamenet::Netwo
           "the start message shared a controller record with a background message (" + Result(m.front(), "shared-batch") + ")");
 }
 
+// W2 player sync: every machine installed its hooks on the real EDF.dll (every checked byte and slot matched), and
+// every extended player record crossed the game's controller and read back exactly, with EDF6Coop's bin reader and
+// with the game's own.
+inline void CheckPlayerSync(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEosAcceptedAll(network);
+    for (const auto& machine : machines) {
+        Check(machine.text.find("PLAYER sync: hooks installed (20 vtable slots + flush interval)") != std::string::npos,
+              machine.user + " installed the player sync hooks against EDF.dll");
+        Check(Result(machine, "player-records") == "8 ok 0 bad",
+              machine.user + " read every player record back exactly (" + Result(machine, "player-records") + ")");
+    }
+}
+
 // host0...01 hosts; guest...02 and on join one after another, in that order (roles.cpp: EDF6NET_SEAT), so seat n
 // is player n+1.
 inline std::vector<Seat> Seats(int count, const std::string& step, const std::string& ini) {
@@ -246,6 +260,7 @@ inline const std::vector<Scenario>& Scenarios() {
         // attributes (the split sync marker among them) to the others.
         {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,
          {{"EDF6NET_RUSH", "1"}, {"EDF6NET_LOBBY_DELAY", "2500"}}},
+        {"playersync", Seats(2, "playersync", BaseIni()), 90000, &CheckPlayerSync},
     };
     return all;
 }

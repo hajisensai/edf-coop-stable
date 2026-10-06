@@ -269,7 +269,7 @@ set_target_properties(GameNetEos PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping RU
     ARCHIVE_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_compile_options(GameNetEos PRIVATE ${WARNINGS})
 add_executable(GameMachine tests/gamenet/machine.cpp tests/gamenet/roles.cpp tests/gamenet/game.cpp
-    tests/gamenet/missionsync.cpp tests/gamenet/playersync.cpp src/netplayer.cpp)
+    tests/gamenet/missionsync.cpp src/netplayer.cpp)
 set_target_properties(GameMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_include_directories(GameMachine PRIVATE ${MODLOADER_INCLUDE})
 target_compile_options(GameMachine PRIVATE ${WARNINGS})

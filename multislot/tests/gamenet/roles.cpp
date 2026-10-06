@@ -319,6 +319,8 @@ std::size_t ChatterBytes() {
 
 // The mission start sync: every machine runs MissionSync_Begin and then MissionSync_Update until it answers 0,
 // and reports what its game holds afterwards.
+int MissionIn(Machine& machine, bool host, const Room& room);
+
 int Mission(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
@@ -326,6 +328,11 @@ int Mission(Machine& machine, bool host) {
     char settle[16]{};
     if (GetEnvironmentVariableA("EDF6NET_SETTLE", settle, sizeof(settle)))
         TickUntil(machine, static_cast<unsigned>(std::atoi(settle)), [] { return false; });
+    return MissionIn(machine, host, room);
+}
+
+// The start sync among `room.members` (in the order the game adds them), once everyone is in.
+int MissionIn(Machine& machine, bool host, const Room& room) {
     Transport transport;
     if (!Connect(machine, room, transport)) return 1;
     int place = 0;
@@ -618,26 +625,95 @@ void PollP2P(const Machine& machine) {
 }
 
 // The game's lobby manager listens to member statuses (012B3380 registers one handler): what EDF6Coop tells the game
-// about members beyond Epic's lobby goes there, and the room the host's game has follows it.
+// about members beyond Epic's lobby goes there, and the room the game has follows it. Each one is reported
+// ("member-status <id> <status>", EOS_ELobbyMemberStatus: 0 joined, 1 left).
+struct MemberStatusInfo {  // EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo
+    void* ClientData;
+    const char* LobbyId;
+    const void* TargetUserId;
+    std::int32_t CurrentStatus;
+};
+void OnMemberStatus(const MemberStatusInfo* info) {
+    char text[64]{};
+    std::int32_t length = sizeof(text);
+    if (info && info->TargetUserId)
+        FakeExport<std::int32_t (*)(const void*, char*, std::int32_t*)>("EOS_ProductUserId_ToString")(info->TargetUserId, text, &length);
+    Result("member-status", "%s %d", text, info ? info->CurrentStatus : -1);
+}
 void ListenToMembers(const Machine& machine) {
     struct Options {
         std::int32_t ApiVersion;
     } options{1};
-    Import<std::uint64_t (*)(void*, const void*, void*, void (*)(const void*))>(machine,
-                                                                               "EOS_Lobby_AddNotifyLobbyMemberStatusReceived")(
-        kLobbyInterface, &options, nullptr, [](const void*) {});
+    Import<std::uint64_t (*)(void*, const void*, void*, void (*)(const MemberStatusInfo*))>(
+        machine, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived")(kLobbyInterface, &options, nullptr, &OnMemberStatus);
+}
+
+// The room's members as the game reads them when it is told one joined (12BD460: EOS_Lobby_CopyLobbyDetailsHandle,
+// then EOS_LobbyDetails_GetMemberCount / GetMemberByIndex, through EDF.dll's imports - where EDF6Coop's wrappers
+// are), in that order: each gets an eos::User (Users::Add) flagged as in the room (User+0x10 bit 2), and those are
+// what the room member list (7468C0: the room screen, the voice chat HUD) and the start sync have.
+std::vector<std::string> GameRoomMembers(const Machine& machine, const std::string& lobby) {
+    struct CopyOptions {
+        std::int32_t ApiVersion;
+        const char* LobbyId;
+        const void* LocalUserId;
+    } copy{1, lobby.c_str(), Self(machine)};
+    void* details = nullptr;
+    std::vector<std::string> members;
+    if (Import<std::int32_t (*)(void*, const void*, void**)>(machine, "EOS_Lobby_CopyLobbyDetailsHandle")(kLobbyInterface, &copy,
+                                                                                                          &details) != 0 ||
+        !details)
+        return members;
+    struct CountOptions {
+        std::int32_t ApiVersion;
+    } countOptions{1};
+    const std::uint32_t count =
+        Import<std::uint32_t (*)(void*, const void*)>(machine, "EOS_LobbyDetails_GetMemberCount")(details, &countOptions);
+    for (std::uint32_t i = 0; i < count && i < 64; ++i) {
+        struct ByIndex {
+            std::int32_t ApiVersion;
+            std::uint32_t MemberIndex;
+        } byIndex{1, i};
+        const void* member = Import<const void* (*)(void*, const void*)>(machine, "EOS_LobbyDetails_GetMemberByIndex")(details, &byIndex);
+        char text[64]{};
+        std::int32_t length = sizeof(text);
+        if (member) FakeExport<std::int32_t (*)(const void*, char*, std::int32_t*)>("EOS_ProductUserId_ToString")(member, text, &length);
+        members.push_back(text);
+    }
+    Import<void (*)(void*)>(machine, "EOS_LobbyDetails_Release")(details);
+    return members;
+}
+
+// Waits until the game reads `expected` members in the room, reports them ("game-members <n> <ids>"), and plays the
+// start sync among them in that order.
+int FullRoomMission(Machine& machine, bool host, Room room, std::size_t expected) {
+    std::vector<std::string> members;
+    TickUntil(machine, 20000, [&] {
+        PollP2P(machine);
+        members = GameRoomMembers(machine, room.lobby);
+        return members.size() >= expected;
+    });
+    std::string list;
+    for (const auto& member : members) list += " " + member;
+    Result("game-members", "%zu%s", members.size(), list.c_str());
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    if (members.size() < expected) return 1;
+    room.members = members;
+    return MissionIn(machine, host, room);
+}
+
+// EDF6NET_ROOM_MEMBERS: how many the room holds once everyone is in (joinfull: 3).
+std::size_t RoomMembers() {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_ROOM_MEMBERS", text, sizeof(text));
+    return text[0] ? static_cast<std::size_t>(std::atoi(text)) : 3;
 }
 
 int FullRoom(Machine& machine, bool host) {
     ListenToMembers(machine);
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
-    TickUntil(machine, static_cast<unsigned>(Seconds(10)) * 1000, [&] {
-        PollP2P(machine);
-        return false;
-    });
-    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
-    return 0;
+    return FullRoomMission(machine, host, room, RoomMembers());
 }
 
 int FullJoin(Machine& machine) {
@@ -672,8 +748,10 @@ int FullJoin(Machine& machine) {
     TickUntil(machine, 30000, [&] { return entered.done; });
     release(details);
     Result("fulljoin", "%s %d", entered.done ? "completed" : "NOT completed", entered.result);
-    TickUntil(machine, 2000, [] { return false; });
-    return entered.done && entered.result == 0 ? 0 : 1;
+    if (!entered.done || entered.result != 0) return 1;
+    Room room;
+    room.lobby = entered.lobby;
+    return FullRoomMission(machine, false, room, RoomMembers());
 }
 
 }  // namespace

@@ -93,20 +93,36 @@
 
 **协议版本门（W1 的 `netfeature.h`）**：如果 W1 也要靠换 SEARCH_TYPE 家族来做版本门，会和这里冲突。建议版本门走成员属性（syncmarker 的机制），SEARCH_TYPE 只用来区分人数能力。
 
-## 4. 超过 64 人：成员资格（需要 W1 接线）
-
-插件这边已经做好的（multislot）：
+## 4. 超过 64 人：成员资格
 
 - 房主建 EOS 大厅时用 min(size, 64)，Steam 大厅用 min(size, 250)；每次房间更新由大厅所有者加上 `MS_ROOMSIZE`（`lobbystate.cpp` AddRoomSize，只有所有者加，否则 EOS 会拒掉整个更新）。
 - 房间列表的容量读 `MS_ROOMSIZE`。读属性走 EDF.dll 当前的导入表项（`rooms.cpp` GameImport），所以直连部分伪造的大厅句柄也能被正确识别。
-- `RoomFullCount`：成员数 ≥ 房间容量才隐藏房间。EOS 那边满了 64 人、但房间没满时不隐藏。
+- **加入满员大厅、房主放人**：W1 已接好（57c92f6）。房主把直连地址和身份公布成大厅属性；Epic 拒绝加入时客人改走直连；`roomCapacity()` 用 `CurrentLobbyCapacity()`。
 
-需要 W1（src/）接线的：
+### 4.1 游戏怎样认到大厅外的成员（逆向结论）
 
-1. **加入满员大厅**：EOS 大厅满 64 人以后，Epic 会拒绝 JoinLobby。客人要改走现有的「不经 Epic 重进」路径（`eos_hooks.cpp` 的 REJOIN：fake lobby + 直连房主）。为此房主需要把身份指纹和地址公布成**大厅属性**（现在是成员属性，客人在搜房结果里读不到），客人拿到搜房结果后直接拨号。
-2. **房主放人**：`eos_hooks.cpp:1272 roomCapacity()` 现在用的是 Epic 的 MaxMembers（≤64）。应改成调用 multislot 的 `CurrentLobbyCapacity()`（读的是 `MS_ROOMSIZE`），否则 `hostJoins(linked, capacity)` 只放 64 人进房。
-3. **游戏看到的成员列表**：64 人以外的成员只存在于房主的 `Room` 消息里。`room_view.cpp` 的 followHost / hostJoins 已经会把 JOINED 事件交给游戏，于是 Users::Add 给他们分配槽位（1024 个槽位已经备好）。但游戏的成员列表构造 7468C0 读的是 LobbyDetails，只列 Epic 知道的成员。要让房间画面和语音 HUD 也显示 64 人以外的成员，需要在 `MemberListHook` 里按 RoomView 补上 PlayerInfo（PlayerInfo 的结构是 `eos::RoomInfo::PlayerInfo`，还没逆向）。这一步待做。
-4. **成员数显示**：房间列表上的人数取自 EOS 成员数（≤64）。可以让房主加一个 `MS_MEMBERS` 属性，节流更新。
+- 成员表的唯一来源是 eos::User 集合。12BD460 是成员同步：`EOS_Lobby_CopyLobbyDetailsHandle` 拿到大厅副本，`GetMemberCount`/`GetMemberByIndex` 逐个读成员；没有 User 的就用 Users::Add（12B7F50）新建，并打上「在房间里」标志（User+0x10 bit 2）。游戏收到成员状态通知（12B3380 注册的处理函数）时会走到这里。
+- 房间成员列表 7468C0（房间画面、语音 HUD）遍历全部 User，过滤条件是 12BE510 → 12AC6F0 读的 bit 2。开局同步的 GameImpl 列的也是这些 User。PlayerInfo 不用另外造：只要 12BD460 读到某个成员，房间画面、HUD 记录和开局同步记录就都有它。
+- W1 的 `hookDetailsMemberCount`/`MemberByIndex`（`extraMembers`）在本房间的大厅副本上补上 RoomView 里 Epic 没列的成员，`tellGame` 再发 JOINED 通知。所以 W1 已经让游戏认到这些成员，W6 没有重复造。
+- **W6 修的根因：成员顺序。** 游戏按 Users::Add 的先后给成员编号（User+0x40 网络序号），包和开局同步都按这个序号走，所以每台机器添加成员的顺序必须一致。原来 RoomView 用 `std::set` 存成员，`setRoomMembers` 也会排序，结果：
+  - 大厅里的成员看到的是「Epic 顺序 + 大厅外成员」；
+  - 经直连加入的成员看到的是按 ID 排序的整张表；
+  - 两边序号不一致，开局同步卡住（gamenet 实测 3 人各自 `MissionSync_Update` 一直返回 1）。
+- 现在的做法（`src/room_view.*`）：
+  - RoomView 按添加顺序保存成员；
+  - `followHost` 按房主给的顺序发 JOINED；
+  - 房主发出的 `Room` 消息用 `roomOrder(Epic 成员, 视图)`：先是 Epic 顺序的大厅成员，再是按加入先后的大厅外成员；
+  - `DirectNet::setRoomMembers` 不再排序，顺序变化也算房间变化。
+- 前提：大厅里的成员要能收到房主的 `Room` 消息，也就是和房主有直连。默认 AutoJoin 会自动连上房主。和房主没有直连的成员（AutoJoin=0、连不上、或没装插件）的游戏看不到大厅外成员，这一点无法在插件这边补救。
+
+### 4.2 人数显示
+
+- 房间列表一项的人数和容量由 73B5CC 改成 `RoomCountAndCapacity`，房主的 HIDDEN 判定由 78BDE2 改成 `RoomFullCount`。纯判定函数是 `rooms.cpp` 的 `RoomCountFromInfo`。
+- 大于 EOS 大厅的房间（大厅满编 64 且 `MS_ROOMSIZE` 更大）：
+  - 人数取游戏读到的成员数（本房间包括大厅外成员）和房主公布的 `MS_MEMBERS` 中较大的一个，且不少于 Epic 的人数；
+  - 原来 `members + available == max` 的一致性检查遇到大厅外成员就会判不一致，退回容量 4，房主的房间会被当成已满而隐藏。这个问题已修。
+- 房主每次房间更新都会写 `MS_MEMBERS`（`lobbystate.cpp` AddRoomSize）。值是游戏通过导入表读到的本房间成员数（`rooms.cpp` GameRoomMemberCount，包括 W1 补上的成员）。
+- 待真机核实：78BB60 只在房间对象的脏标志（+0x88）置位时才运行。大厅外成员加入时游戏是否会置这个标志，静态逆向没追完，所以 `MS_MEMBERS` 的刷新时机还要实测。
 
 ## 5. 带宽：兴趣管理（`multislot/src/interest.*`）
 

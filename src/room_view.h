@@ -56,16 +56,20 @@ public:
     // always pass: only joins and departures of other members can repeat.
     bool admit(const std::string& target, int32_t status);
     bool has(const std::string& member) const { return members_.count(member) != 0; }
-    std::vector<std::string> members() const { return {members_.begin(), members_.end()}; }
+    // In the order the game added them: the list it entered with, then each join as it was admitted. The game
+    // numbers the members of its room in the order it adds them (eos::User network index, which its packets and the
+    // mission start sync go by), so every machine has to add them in one order: the host's (roomOrder).
+    const std::vector<std::string>& members() const { return order_; }
 
     // Holds back what the plugin would tell the game until Epic had its chance: returns the changes of
     // `wanted` that were wanted, the same way, in every call for the last `delayMs` (0: at once). A change
     // missing from `wanted` starts over. Deliver each through admit().
     std::vector<StatusChange> settle(const std::vector<StatusChange>& wanted, uint64_t nowMs, uint64_t delayMs);
 
-    // A member of the room: the host's newest list of who its game has in the room.
+    // A member of the room: the host's newest list of who its game has in the room, in its order (roomOrder).
     void heardHost(const std::vector<std::string>& hostMembers);
-    // A member: what our game must be told to have what the host's game has. Whom the host lists joins.
+    // A member: what our game must be told to have what the host's game has. Whom the host lists joins, in the
+    // host's order.
     // Whom the host listed before and lists no longer leaves (our own removal is a kick); a member only
     // Epic told us of, which the host never listed (its game may simply not have seen the join yet), stays.
     std::vector<StatusChange> followHost() const;
@@ -105,6 +109,7 @@ private:
     bool active_ = false;
     std::string self_;
     std::set<std::string> members_;
+    std::vector<std::string> order_;  // members_, in the order they were added
     std::set<std::string> banned_;
     std::set<std::string> direct_;              // came in by their direct link only
     std::map<std::string, uint64_t> links_;     // the host: each member's direct link while in the room
@@ -112,7 +117,14 @@ private:
     std::map<std::string, Pending> pending_;    // settle(): what was wanted, since when
     bool heard_ = false;
     std::set<std::string> hostNow_;   // the host's newest list
+    std::vector<std::string> hostOrder_;  // the same, in the host's order
     std::set<std::string> hostEver_;  // everyone the host listed since we entered
 };
+
+// The one order of a room's members every machine adds them in, as the host sends it (Room message) and a member
+// beyond Epic's lobby enters with: Epic's lobby in Epic's order (the order every member Epic lists reads it in,
+// and the order their games add them in), then the members Epic does not list, in the order the room's game has them
+// (`view`, RoomView::members). A member of `epic` the view does not have is left out (the game has not added it yet).
+std::vector<std::string> roomOrder(const std::vector<std::string>& epic, const std::vector<std::string>& view);
 
 }  // namespace dn

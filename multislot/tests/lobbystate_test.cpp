@@ -312,6 +312,35 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
           "the refusal and the leave are logged");
     Fake<void (*)(void*)>("EOS_LobbyDetails_Release")(ghost);
 
+    // A room larger than an EOS lobby: its owner's updates carry its size and how many its game has in it (the
+    // members beyond Epic's lobby among them), which a room list entry shows.
+    EnterLobby("lobby-big", "self");
+    SetMaxMembers(static_cast<std::uint32_t>(kEosLobbyMembers));
+    SetSearchType(static_cast<std::int64_t>(kMirrored));
+    Fake<void (*)(const char*, std::int64_t)>("FakeEos_SetLobbyAttribute")(kRoomSizeKey, 200);
+    NoteLobbyEntered(Lobby(), User("self"), "lobby-big", 0);
+    NextBeat();
+    static std::string countedLobby;
+    SetRoomMemberCountSource([](void*, const void*, const char* lobbyId) -> std::uint32_t {
+        countedLobby = lobbyId ? lobbyId : "";
+        return 70;
+    });
+    const auto lobbyAttribute = Fake<std::int64_t (*)(const char*)>("FakeEos_LobbyAttribute");
+    {
+        using ModificationFn = std::int32_t (*)(void*, const UpdateModificationOptions*, void**);
+        void* bigModification = nullptr;
+        const UpdateModificationOptions modifyBig{1, User("self"), "lobby-big"};
+        Fake<ModificationFn>("EOS_Lobby_UpdateLobbyModification")(Lobby(), &modifyBig, &bigModification);
+        const UpdateOptions bigUpdate{1, bigModification};
+        Call("EOS_Lobby_UpdateLobby", &bigUpdate);
+        Fake<void (*)(void*)>("EOS_LobbyModification_Release")(bigModification);
+        Tick();
+    }
+    Check(lobbyAttribute(kRoomSizeKey) == 200 && lobbyAttribute(kRoomMembersKey) == 70 && countedLobby == "lobby-big",
+          "a room larger than an EOS lobby publishes its size and the members its game has");
+    SetRoomMemberCountSource(nullptr);
+    Fake<void (*)(const char*)>("FakeEos_Reset")("self");
+
     // Updates and leaves report their results.
     EnterLobby("lobby-last", "self");
     NoteLobbyEntered(Lobby(), User("self"), "lobby-last", static_cast<std::uint32_t>(kRoomSize));

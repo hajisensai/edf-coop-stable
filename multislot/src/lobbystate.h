@@ -83,4 +83,9 @@ void NoteLobbyLeft();
 // own calls skip the others (another plugin's wrapper installed earlier still sits between them and EOS). False when the EOS SDK or one of its exports is missing, or an import could not be redirected.
 bool InstallLobbyState(HMODULE game, ImportRedirect redirect);
 
+// How many members the game has in lobby `lobbyId` (rooms.h GameRoomMemberCount), 0 unknown: what the owner of a
+// room larger than an EOS lobby publishes in its updates (kRoomMembersKey). Unset: nothing is published.
+using RoomMemberCountFn = std::uint32_t (*)(void* lobbyInterface, const void* user, const char* lobbyId);
+void SetRoomMemberCountSource(RoomMemberCountFn source);
+
 }  // namespace multislot

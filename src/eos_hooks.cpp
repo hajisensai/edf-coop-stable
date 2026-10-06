@@ -23,6 +23,8 @@
 #include "iat.h"
 #include "lobby_marker.h"
 #include "log.h"
+#include "netclass.h"
+#include "netcode.h"
 #include "room_view.h"
 #include "traffic.h"
 #include "updater.h"
@@ -31,7 +33,6 @@ namespace dn {
 namespace {
 
 constexpr const char* kEosDll = "EOSSDK-Win64-Shipping.dll";
-constexpr ULONGLONG kStatsIntervalMs = 60000;
 constexpr uint64_t kMinQueueBytes = 64ull * 1024 * 1024;
 
 using PFN_EOS_Platform_Tick = void (*)(EOS_HPlatform);
@@ -218,6 +219,16 @@ struct State {
     std::unordered_map<std::string, EOS_ProductUserId> idCache;
     std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0}, eosUpgraded{0};
     TrafficMeter gameOut;  // everything the game sends, whichever way it goes
+    // What the game's datagrams hold, from their plaintext (netclass.h): per record type for the log, and which
+    // record types behave as state.
+    RecordTypeMeter recordTypes;
+    StateLearner stateTypes;
+    // The transport side of the netcode rewrite (netcode.h).
+    std::mutex netcodeMutex;
+    NetcodeOptions netcode;
+    std::atomic<RoomCapQuery> roomCaps{nullptr};
+    std::atomic<StateSendFilter> stateFilter{nullptr};
+    std::atomic<BulkHandler> bulkHandler{nullptr};
     ULONGLONG lastStatsMs = 0;
     HMODULE eos = nullptr;
     Outer outer;
@@ -842,6 +853,7 @@ void stopAutoJoinLocked(const char* why) {
 
 void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
+    g.stateTypes.forget();  // the next room's players and missions teach their own
     endVirtualRoom(why);
     leaveView();
     {
@@ -1200,7 +1212,8 @@ void noteLocalUser(EOS_HP2P h, EOS_ProductUserId id) {
 
 void maybeLogStats() {
     ULONGLONG now = GetTickCount64();
-    if (now - g.lastStatsMs < kStatsIntervalMs) return;
+    const ULONGLONG interval = netcodeOptions().statsIntervalMs;
+    if (now - g.lastStatsMs < interval) return;
     bool first = g.lastStatsMs == 0;
     g.lastStatsMs = now;
     if (first) return;
@@ -1217,18 +1230,21 @@ void maybeLogStats() {
     logKickRepeats();
     // One line: what the game sent, what that cost on our socket (resends, acks and pings included, so
     // "wire up" far above "game sends" is the transport's own overhead), and each link's resend state.
-    logf("STATS last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
+    const double seconds = static_cast<double>(interval) / 1000.0;
+    logf("STATS last %.0fs: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
          "(largest %u), %.0f%% copies of the same data to another player, %.1f%% of packets repeat one sent to the "
          "same player within 5 s | wire up %.0f kbps down %.0f kbps, relayed for others %.0f kbps | direct packets "
          "out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
-         kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
+         seconds, kbps(t.bytes, seconds), kbps(t.busiestSecondBytes, 1.0), t.peers,
          t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
          t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
-         t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
-         kbps(w.in, 60.0), kbps(w.relayed, 60.0), static_cast<unsigned long long>(dOut),
+         t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, seconds),
+         kbps(w.in, seconds), kbps(w.relayed, seconds), static_cast<unsigned long long>(dOut),
          static_cast<unsigned long long>(dIn), static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg),
          static_cast<unsigned long long>(eIn), static_cast<unsigned long long>(fail), net ? " | " : "",
          net ? net->statusLine().c_str() : "");
+    // What the game's datagrams held (P0 of the netcode rewrite): per class, then per record type.
+    for (const std::string& line : g.recordTypes.take(seconds)) logf("%s", line.c_str());
 }
 
 // A direct-link host lets a player in only as the room member whose published identity it proves
@@ -1721,6 +1737,21 @@ EOS_HP2P hookGetP2PInterface(EOS_HPlatform platform) {
     return h;
 }
 
+// The class of a packet the game sends (netclass.h), from the records its packet controller flushed into it on
+// this thread just before. Only the game's own datagrams (sent UnreliableUnordered) have them; anything else - the
+// plugin's packets, sent with a reliability of their own - is Unknown and goes as it asks.
+TrafficClass classifyGameSend(const std::string& remote, const EOS_P2P_SendPacketOptions& o) {
+    std::optional<PlainDatagram> plain = takePendingDatagram(o.DataLengthBytes);
+    if (!plain || o.Reliability != EOS_PR_UnreliableUnordered) return TrafficClass::Unknown;
+    const uint64_t now = GetTickCount64();
+    for (const RecordInfo& r : plain->records)
+        if (!r.reliable && !isControllerRecord(r.type)) g.stateTypes.observe(remote, r.type, now);
+    g.recordTypes.record(remote, plain->records, now);
+    const TrafficClass cls = classify(plain->records, plain->parsed, g.stateTypes);
+    g.recordTypes.recordDatagram(cls, o.DataLengthBytes);
+    return cls;
+}
+
 EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     if (g_shutdown) return g.api.send(h, o);
     configureHandle(h);
@@ -1728,6 +1759,8 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
     if (o && o->Data)
         g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
+    const TrafficClass cls = o ? classifyGameSend(remote, *o) : TrafficClass::Unknown;
+    (void)cls;
     // EOS refuses anything above its packet limit, and so does the direct link (its receivers' games read
     // with that limit too). The game then retries for about 26 s and disbands the room.
     if (o && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE)
@@ -2218,5 +2251,23 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     logf("EOS hooks %s", ok ? "installed" : "FAILED (EDF.dll import table not as expected), direct link disabled");
     return ok;
 }
+
+
+// --- netcode.h ---
+
+void setNetcodeOptions(const NetcodeOptions& options) {
+    std::lock_guard<std::mutex> lock(g.netcodeMutex);
+    g.netcode = options;
+    if (g.netcode.statsIntervalMs < 1000) g.netcode.statsIntervalMs = 1000;
+}
+
+NetcodeOptions netcodeOptions() {
+    std::lock_guard<std::mutex> lock(g.netcodeMutex);
+    return g.netcode;
+}
+
+void setRoomCapQuery(RoomCapQuery query) { g.roomCaps = query; }
+void setStateSendFilter(StateSendFilter filter) { g.stateFilter = filter; }
+void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
 
 }  // namespace dn

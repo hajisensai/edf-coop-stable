@@ -1,0 +1,232 @@
+#include "netfeature.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+
+#include "log.h"
+
+namespace multislot {
+namespace {
+
+struct Settings {
+    std::uint32_t caps = 0;  // the features on in this machine's INI
+    bool rejectMismatched = true;
+    std::int64_t protocol = kNetProtocol;  // [Test] NetProtocol plays another version
+};
+Settings settings;
+std::atomic<bool> started{false};  // the lobby glue is in: the room can be read
+
+std::int64_t ParseInt(const std::string& text, bool& ok) {
+    char* end = nullptr;
+    const long long value = std::strtoll(text.c_str(), &end, 10);
+    ok = !text.empty() && end && *end == '\0';
+    return value;
+}
+
+const NetRoom::Member* Find(const std::vector<NetRoom::Member>& members, const std::string& id) {
+    for (const auto& m : members)
+        if (m.id == id) return &m;
+    return nullptr;
+}
+
+// The lobby beat: what everyone publishes. The owner refuses a member of another netcode protocol.
+void Observe(const LobbyView& view) {
+    const std::vector<NetRoom::Member> mismatched = NetGate().Observe(view);
+    if (view.lobbyId.empty()) return;
+    const bool owner = !view.owner.empty() && view.owner == view.self;
+    for (const NetRoom::Member& m : mismatched) {
+        if (m.id == view.owner) {
+            Log("NETCODE the room's host %s runs netcode protocol %lld, this machine %lld (another EDF6Coop "
+                "version): every netcode feature is off in this room%s",
+                m.id.c_str(), static_cast<long long>(m.protocol), static_cast<long long>(settings.protocol),
+                settings.rejectMismatched ? "; a host of our version would refuse us" : "");
+            continue;
+        }
+        if (!owner) {
+            Log("NETCODE %s runs netcode protocol %lld, this machine %lld: every netcode feature is off in this room "
+                "until it leaves",
+                m.id.c_str(), static_cast<long long>(m.protocol), static_cast<long long>(settings.protocol));
+            continue;
+        }
+        if (settings.rejectMismatched && KickLobbyMember(m.id)) {
+            Log("NETCODE REFUSED %s: it runs netcode protocol %lld, this room %lld (another EDF6Coop version). It "
+                "is removed from the room so that nobody plays by other rules ([Netcode] RejectMismatched=0 keeps "
+                "it and turns every netcode feature off instead)",
+                m.id.c_str(), static_cast<long long>(m.protocol), static_cast<long long>(settings.protocol));
+        } else {
+            Log("NETCODE %s runs netcode protocol %lld, this room %lld: every netcode feature is off in this room "
+                "while it is in it%s",
+                m.id.c_str(), static_cast<long long>(m.protocol), static_cast<long long>(settings.protocol),
+                settings.rejectMismatched ? " (it could not be removed)" : " (RejectMismatched=0)");
+        }
+    }
+    // Once per change of the room's answer, what runs.
+    static std::string said;
+    const std::string why = NetGate().WhyOff(settings.caps);
+    const std::string now = why.empty() ? "on: " + FormatCaps(settings.caps) : "off: " + why;
+    if (now != said) {
+        said = now;
+        Log("NETCODE features in room %s %s", view.lobbyId.c_str(), now.c_str());
+    }
+}
+
+bool RoomCap(std::uint32_t cap) { return NetFeatureActive(static_cast<NetFeature>(cap)); }
+
+}  // namespace
+
+std::vector<NetRoom::Member> NetRoom::Observe(const LobbyView& view) {
+    std::vector<Member> fresh;
+    AcquireSRWLockExclusive(&lock_);
+    if (view.lobbyId != lobby_) reported_.clear();
+    lobby_ = view.lobbyId;
+    self_ = view.self;
+    owner_ = view.owner;
+    members_.clear();
+    for (const LobbyView::Member& seen : view.members) {
+        Member m;
+        m.id = seen.id;
+        const auto proto = seen.texts.find(kNetProtocolKey);
+        bool ok = false;
+        if (proto != seen.texts.end()) m.protocol = ParseInt(proto->second, ok);
+        m.published = ok;
+        if (const auto caps = seen.texts.find(kNetCapsKey); caps != seen.texts.end()) m.caps = ParseCaps(caps->second);
+        if (m.published && m.protocol != settings.protocol && m.id != self_ &&
+            std::find(reported_.begin(), reported_.end(), m.id) == reported_.end()) {
+            reported_.push_back(m.id);
+            fresh.push_back(m);
+        }
+        members_.push_back(std::move(m));
+    }
+    ReleaseSRWLockExclusive(&lock_);
+    return fresh;
+}
+
+std::string NetRoom::WhyOff(std::uint32_t caps) const {
+    AcquireSRWLockShared(&lock_);
+    std::string why;
+    if (lobby_.empty()) why = "not in a room";
+    else if (members_.empty()) why = "the room's members are not known yet";
+    for (const Member& m : why.empty() ? members_ : std::vector<Member>()) {
+        if (!m.published) {
+            why = m.id + " publishes no netcode protocol (the game as it ships, an older EDF6Coop, or its lobby entry has "
+                         "not reached us yet)";
+        } else if (m.protocol != settings.protocol) {
+            why = m.id + " runs netcode protocol " + std::to_string(m.protocol);
+        } else if ((m.caps & caps) != caps) {
+            why = m.id + " has features " + FormatCaps(m.caps) + " on, not all of " + FormatCaps(caps);
+        }
+        if (!why.empty()) break;
+    }
+    if (why.empty() && !Find(members_, self_)) why = "our own lobby entry is not listed yet";
+    ReleaseSRWLockShared(&lock_);
+    return why;
+}
+
+bool NetRoom::Active(std::uint32_t caps) const { return WhyOff(caps).empty(); }
+
+bool NetRoom::InRoom() const {
+    AcquireSRWLockShared(&lock_);
+    const bool in = !lobby_.empty();
+    ReleaseSRWLockShared(&lock_);
+    return in;
+}
+
+bool NetRoom::Owner() const {
+    AcquireSRWLockShared(&lock_);
+    const bool owner = !owner_.empty() && owner_ == self_;
+    ReleaseSRWLockShared(&lock_);
+    return owner;
+}
+
+std::vector<NetRoom::Member> NetRoom::Members() const {
+    AcquireSRWLockShared(&lock_);
+    std::vector<Member> members = members_;
+    ReleaseSRWLockShared(&lock_);
+    return members;
+}
+
+NetRoom& NetGate() {
+    static NetRoom room;
+    return room;
+}
+
+std::uint32_t ParseCaps(const std::string& hex) {
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(hex.c_str(), &end, 16);
+    return !hex.empty() && end && *end == '\0' ? static_cast<std::uint32_t>(value) : 0;
+}
+
+std::string FormatCaps(std::uint32_t caps) {
+    static const struct {
+        NetFeature feature;
+        const char* name;
+    } names[] = {{NetFeature::TrafficClasses, "TrafficClasses"}, {NetFeature::Mesh, "Mesh"},
+                 {NetFeature::Fragments, "Fragments"},           {NetFeature::PlayerSync, "PlayerSync"},
+                 {NetFeature::HitAuthority, "HitAuthority"},     {NetFeature::WorldAuthority, "WorldAuthority"},
+                 {NetFeature::PluginObjects, "PluginObjects"}};
+    std::string out;
+    std::uint32_t named = 0;
+    for (const auto& n : names) {
+        const auto bit = static_cast<std::uint32_t>(n.feature);
+        named |= bit;
+        if (caps & bit) out += (out.empty() ? "" : ",") + std::string(n.name);
+    }
+    if (caps & ~named) {
+        char rest[16];
+        std::snprintf(rest, sizeof(rest), "0x%X", caps & ~named);
+        out += (out.empty() ? "" : ",") + std::string(rest);
+    }
+    return out.empty() ? "none" : out;
+}
+
+bool NetFeatureEnabledLocally(NetFeature feature) {
+    return (settings.caps & static_cast<std::uint32_t>(feature)) != 0;
+}
+
+bool NetFeatureActive(NetFeature feature) {
+    return started && NetFeatureEnabledLocally(feature) && NetGate().Active(static_cast<std::uint32_t>(feature));
+}
+
+void InitNetFeature(const wchar_t* iniPath) {
+    const auto flag = [&](const wchar_t* key, int fallback) {
+        return GetPrivateProfileIntW(L"Netcode", key, fallback, iniPath) != 0;
+    };
+    std::uint32_t caps = 0;
+    if (flag(L"TrafficClasses", 1)) caps |= static_cast<std::uint32_t>(NetFeature::TrafficClasses);
+    if (flag(L"Mesh", 1)) caps |= static_cast<std::uint32_t>(NetFeature::Mesh);
+    if (flag(L"Fragments", 1)) caps |= static_cast<std::uint32_t>(NetFeature::Fragments);
+    settings.caps = caps;
+    settings.rejectMismatched = flag(L"RejectMismatched", 1);
+    if (const int test = static_cast<int>(GetPrivateProfileIntW(L"Test", L"NetProtocol", 0, iniPath)); test > 0) {
+        settings.protocol = test;
+        Log("TEST NetProtocol=%d: this machine publishes and expects netcode protocol %d (another version's)", test, test);
+    }
+    dn::NetcodeOptions options;
+    options.trafficClasses = (caps & dn::kCapTrafficClasses) != 0;
+    options.fragments = (caps & dn::kCapFragments) != 0;
+    options.shedState = flag(L"ShedState", 1);
+    options.statsIntervalMs = 1000u * GetPrivateProfileIntW(L"Netcode", L"StatsSeconds", 60, iniPath);
+    dn::setNetcodeOptions(options);
+    Log("NETCODE protocol %lld, features on in the INI: %s; RejectMismatched=%d, ShedState=%d", static_cast<long long>(settings.protocol),
+        FormatCaps(caps).c_str(), settings.rejectMismatched ? 1 : 0, options.shedState ? 1 : 0);
+}
+
+bool StartNetFeature(bool lobbyGlue) {
+    if (!lobbyGlue) {
+        Log("NETCODE UNAVAILABLE: the lobby glue is not in, so what the room runs cannot be read; every netcode feature "
+            "stays off");
+        return false;
+    }
+    PublishMemberText(kNetProtocolKey, std::to_string(settings.protocol));
+    char caps[16];
+    std::snprintf(caps, sizeof(caps), "%X", settings.caps);
+    PublishMemberText(kNetCapsKey, caps);
+    WatchMemberTexts({kNetProtocolKey, kNetCapsKey}, &Observe);
+    dn::setRoomCapQuery(&RoomCap);
+    started = true;
+    return true;
+}
+
+}  // namespace multislot

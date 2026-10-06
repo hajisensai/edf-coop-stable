@@ -105,6 +105,14 @@ using GetLobbyOwnerFn = const void* (*)(void* details, const GetLobbyOwnerOption
 using ReleaseDetailsFn = void (*)(void* details);
 using ReleaseAttributeFn = void (*)(Attribute* attribute);
 using IsCompleteFn = std::int32_t (*)(EosResult);
+struct KickMemberOptions {  // EOS_Lobby_KickMemberOptions
+    std::int32_t ApiVersion;
+    const char* LobbyId;
+    const void* LocalUserId;
+    const void* TargetUserId;
+};
+using KickMemberFn = void (*)(void* lobby, const KickMemberOptions*, void* clientData, LobbyIdCallback);
+using IdFromStringFn = const void* (*)(const char*);
 
 struct Api {
     UpdateModificationFn updateModification = nullptr;
@@ -119,6 +127,8 @@ struct Api {
     ReleaseDetailsFn releaseDetails = nullptr;
     ReleaseAttributeFn releaseAttribute = nullptr;
     IsCompleteFn isComplete = nullptr;
+    KickMemberFn kickMember = nullptr;      // optional: KickLobbyMember
+    IdFromStringFn idFromString = nullptr;  // optional: KickLobbyMember
     // What the game's imports pointed at before us (EOS, or another plugin's hook in front of it).
     CreateLobbyFn createLobby = nullptr;
     JoinLobbyFn joinLobby = nullptr;
@@ -145,13 +155,14 @@ struct Local {
     bool failureLogged = false;  // in this lobby
     bool splitReader = false;  // kSplitSyncKey is ours to publish
     std::map<std::string, std::string, std::less<>> texts;  // PublishMemberText
-    std::vector<std::string> watched;                       // WatchMemberTexts
+    std::vector<std::string> watched;                       // WatchMemberTexts: every watcher's keys
     // The watched texts each member of this lobby has shown. Our copy of the lobby drops a member's attributes when
     // that member's game updates the lobby (EOS logs "Lobby backend has attributes missing from client"): a text
     // once seen stays until its member publishes another value or leaves, like the split marker.
     std::map<std::string, std::map<std::string, std::string, std::less<>>, std::less<>> seen;
-    LobbyObserver observer;
-    std::function<void(void*)> tickListener;
+    // Every watcher and tick listener (host data, the netcode version gate): each registration adds one.
+    std::vector<LobbyObserver> observers;
+    std::vector<std::function<void(void*)>> tickListeners;
 } local;
 
 // A pending CreateLobby / JoinLobby of the game; EOS runs its completion until the result is final.
@@ -309,11 +320,11 @@ void TickHook(void* platform) {
         local.nextBeat = now + kObserveIntervalMs;
         beat = BeatLocked(view);
     }
-    const LobbyObserver observer = beat ? local.observer : nullptr;
-    const std::function<void(void*)> listener = local.tickListener;
+    const std::vector<LobbyObserver> observers = beat ? local.observers : std::vector<LobbyObserver>();
+    const std::vector<std::function<void(void*)>> listeners = local.tickListeners;
     ReleaseSRWLockExclusive(&local.lock);
-    if (observer) observer(view);
-    if (listener) listener(platform);
+    for (const LobbyObserver& observer : observers) observer(view);
+    for (const auto& listener : listeners) listener(platform);
 }
 
 void Entered(const LobbyCall& call, const char* lobbyId) {
@@ -355,11 +366,11 @@ void LeftLobby() {
     local.lobbyId.clear();
     local.seen.clear();
     local.dirty = false;
-    const LobbyObserver observer = local.observer;
+    const std::vector<LobbyObserver> observers = local.observers;
     ReleaseSRWLockExclusive(&local.lock);
     SplitSync().Left();
     ClearRecords();
-    if (observer) observer(LobbyView{});
+    for (const LobbyObserver& observer : observers) observer(LobbyView{});
 }
 
 void LeaveLobbyHook(void* lobby, const void* options, void* clientData, void* callback) {
@@ -474,8 +485,10 @@ bool PeerReadsSplitSync(const void* remote) {
 
 void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer) {
     AcquireSRWLockExclusive(&local.lock);
-    local.watched = std::move(keys);
-    local.observer = std::move(observer);
+    for (std::string& key : keys)
+        if (std::find(local.watched.begin(), local.watched.end(), key) == local.watched.end())
+            local.watched.push_back(std::move(key));
+    local.observers.push_back(std::move(observer));
     ReleaseSRWLockExclusive(&local.lock);
 }
 
@@ -496,8 +509,26 @@ void PublishMemberText(const std::string& key, const std::string& value) {
 
 void ListenToTicks(std::function<void(void* platform)> listener) {
     AcquireSRWLockExclusive(&local.lock);
-    local.tickListener = std::move(listener);
+    local.tickListeners.push_back(std::move(listener));
     ReleaseSRWLockExclusive(&local.lock);
+}
+
+void Kicked(const LobbyIdCallbackInfo* info) {
+    if (api.isComplete && !api.isComplete(info->ResultCode)) return;
+    if (info->ResultCode != kEosSuccess) Log("NETCODE removing a member from the room failed (EOS result %d)", info->ResultCode);
+}
+
+bool KickLobbyMember(const std::string& id) {
+    AcquireSRWLockShared(&local.lock);
+    void* const lobby = local.lobby;
+    const void* const user = local.user;
+    const std::string lobbyId = local.lobbyId;
+    ReleaseSRWLockShared(&local.lock);
+    const void* target = api.idFromString && !id.empty() ? api.idFromString(id.c_str()) : nullptr;
+    if (!api.kickMember || !lobby || !user || lobbyId.empty() || !target) return false;
+    const KickMemberOptions options{1, lobbyId.c_str(), user, target};
+    api.kickMember(lobby, &options, nullptr, &Kicked);
+    return true;
 }
 
 bool InstallSyncMarker(HMODULE game, ImportRedirect redirect, bool splitReader) {
@@ -519,6 +550,10 @@ bool InstallSyncMarker(HMODULE game, ImportRedirect redirect, bool splitReader) 
     ok &= Resolve(eos, "EOS_Lobby_Attribute_Release", api.releaseAttribute);
     ok &= Resolve(eos, "EOS_EResult_IsOperationComplete", api.isComplete);
     if (!ok) return false;
+    // Only KickLobbyMember needs these; without them it reports false.
+    api.kickMember = reinterpret_cast<KickMemberFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_Lobby_KickMember")));
+    api.idFromString =
+        reinterpret_cast<IdFromStringFn>(reinterpret_cast<void*>(GetProcAddress(eos, "EOS_ProductUserId_FromString")));
     AcquireSRWLockExclusive(&local.lock);
     local.splitReader = splitReader;
     ReleaseSRWLockExclusive(&local.lock);

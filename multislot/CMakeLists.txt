@@ -288,3 +288,25 @@ add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
 target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(DirectNetProbeJoin PRIVATE DirectNetCore)
+
+# --- Netcode rewrite W1 (transport): datagram classes, fragments, congestion budgets, multipath direct link ---
+target_sources(DirectNetCore PRIVATE "${DIRECTNET_DIR}/netclass.cpp" "${DIRECTNET_DIR}/fragment.cpp"
+    "${DIRECTNET_DIR}/congestion.cpp")
+add_executable(NetTransportTests "${CMAKE_SOURCE_DIR}/../tests/net_transport_test.cpp")
+target_compile_definitions(NetTransportTests PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(NetTransportTests PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(NetTransportTests PRIVATE DirectNetCore)
+add_test(NAME NetTransport COMMAND NetTransportTests)
+target_sources(EDF6Coop PRIVATE src/nettraffic.cpp)
+target_sources(EDF6Coop PRIVATE src/netfeature.cpp)
+add_executable(NetFeatureTests tests/netfeature_test.cpp src/netfeature.cpp src/syncmarker.cpp src/packetfit.cpp
+    src/identity.cpp src/log.cpp)
+target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
+target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
+add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
+foreach(scenario netstats versiongate)
+    add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
+             "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
+    set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+endforeach()

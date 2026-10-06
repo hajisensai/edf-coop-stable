@@ -31,6 +31,8 @@
 #include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
+#include "netfeature.h"
+#include "nettraffic.h"
 #include "packetfit.h"
 #include "patches.h"
 #include "peertimeout.h"
@@ -247,6 +249,8 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         if (ghosts > 0)
             for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
     }
+    // Netcode rewrite W1: the controller's plaintext datagrams, for their class and the per-type traffic log.
+    for (const auto& call : NetTrafficCalls()) redirects.push_back({call, NetTrafficCallHandler(call.rva)});
     std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook)},
                                  {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)}};
     if (mission)
@@ -610,6 +614,8 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitPacketFit(base);
+    InitNetTraffic(base);
+    InitNetFeature(iniPath);
     if (const UINT budget = GetPrivateProfileIntW(L"Test", L"SplitSyncBudget", 0, iniPath); budget && mission) {
         SetSyncBudget(budget);
         Log("TEST SplitSyncBudget=%u: start messages you host keep at most that many bytes inline and send the "
@@ -713,6 +719,8 @@ bool LoadRooms(const wchar_t* iniPath) {
     // this machine reads a split message: only true once both P2P imports are ours.
     const bool lobbyGlue = (imports == 2 || hostData) && InstallSyncMarker(game, &RedirectGameImport, imports == 2);
     const bool marker = imports == 2 && lobbyGlue;
+    // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
+    StartNetFeature(lobbyGlue);
     if (marker) SetSplitSyncReaders(&ReadsSplitSync);
     if (mission) {
         if (imports == 2)

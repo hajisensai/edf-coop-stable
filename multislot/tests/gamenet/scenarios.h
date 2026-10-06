@@ -575,8 +575,13 @@ inline void CheckJoinFull(const std::vector<Spawned>& machines, const gamenet::N
     Check(Result(late, "fulljoin") == "completed 0", late.user + " is in the room: " + Result(late, "fulljoin"));
     Check(late.text.find("is full") != std::string::npos && late.text.find("coming in over the direct link") != std::string::npos,
           late.user + " was turned away by Epic and came in over the direct link");
-    Check(host.text.find("members outside it come in over the direct link") != std::string::npos,
-          "the host admits members beyond Epic's lobby");
+    Check(host.text.find("members outside it may come in over the direct link") != std::string::npos,
+          "the host admits members beyond Epic's lobby once it is full");
+    // Not on its word: its first hello is refused until it proved its EOS id over EOS itself.
+    const std::size_t refused = host.text.find("refused hello for " + late.user.substr(0, 8));
+    const std::size_t proved = host.text.find(late.user.substr(0, 8) + " proved its EOS id over EOS");
+    Check(proved != std::string::npos && (refused == std::string::npos || refused < proved),
+          "the third player came in only after proving its EOS id over EOS");
     Check(host.text.find("DIRECT client " + late.user.substr(0, 8) + " connected") != std::string::npos,
           "the host linked the third player");
     Check(host.text.find("ROOM " + late.user.substr(0, 8) + " -> JOINED for the game") != std::string::npos,

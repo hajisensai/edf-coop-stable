@@ -32,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -180,10 +181,19 @@ public:
     // Our netcode protocol and features, said in every hello; a host refuses a hello of another protocol when
     // `refuseOthers` (multislot netfeature.h RejectMismatched). 0: nothing said, nothing checked.
     void setNetcode(uint32_t protocol, uint32_t caps, bool refuseOthers);
-    // host: let in a member that published no identity in Epic's lobby - the room holds more than Epic's lobby does
-    // (above 64), so members beyond it cannot publish one. It proves the key its hello carries; the first key a member
-    // used in this room is the one it must keep using (memberIds). Members Epic lists still prove the one they published.
-    void setAdmitUnlisted(bool on);
+    // host: members beyond Epic's lobby (rooms above its 64). Only while `lobbyFull` (Epic's lobby holds all it can
+    // and the room holds more) does a hello of an EOS id Epic does not list count at all, and then only from an id
+    // that is not a lobby member (`lobby`: every EOS id Epic lists now, with or without the plugin), was not removed
+    // from this room (`banned`), and proved over EOS itself that it holds the key its hello brings (proveEosIdentity).
+    // An EOS id cannot be proven by a key it signs itself; EOS's P2P layer authenticates the sender of every packet
+    // (the ProductUserId a packet arrives from is the one Epic signed in), so a proof that arrives over EOS P2P from
+    // that id, naming the key's commitment, binds the key to the id. A newer proof rebinds it (a new process, a new key).
+    void setUnlistedPolicy(bool lobbyFull, std::set<std::string> lobby, std::set<std::string> banned);
+    // host: an EOS P2P packet from `puid` named `commitment` as its direct-link key (eos_hooks.cpp reads it).
+    void proveEosIdentity(const std::string& puid, const std::string& commitment);
+    // host: the EOS ids that said hello without a proof yet: eos_hooks.cpp accepts their EOS connection on the proof
+    // socket so that the proof can arrive. Taken (cleared) by the call.
+    std::vector<std::string> takeProofRequests();
     // host: the netcode protocol and features each linked client said in its hello.
     struct MemberNetcode {
         uint32_t protocol = 0;
@@ -428,9 +438,13 @@ private:
     std::atomic<RelayStateFilter> relayFilter_{nullptr};
     uint32_t netProtocol_ = 0, netCaps_ = 0;
     bool refuseOtherProtocols_ = false;
-    bool admitUnlisted_ = false;
+    bool lobbyFull_ = false;
+    std::set<std::string> lobbyIds_, bannedIds_;
+    std::map<std::string, std::string> provenIds_;  // host: EOS id -> commitment proven over EOS (bounded)
+    std::deque<std::string> provenOrder_;           // oldest first, for the bound
+    std::set<std::string> proofRequests_;
     std::map<std::string, MemberNetcode> clientNetcode_;  // host: as said in each client's hello
-    std::map<std::string, std::string> unlistedIds_;       // host: members beyond Epic's lobby -> the key they proved
+
     std::atomic<uint64_t> relayFiltered_{0};
     uint64_t linkIds_ = 0;  // the last Link::id handed out
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled

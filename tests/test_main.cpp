@@ -3326,6 +3326,50 @@ void testMeshAndShedSwitches() {
     CHECK(!m.a.peerLinked(kB));  // no new link while off
 }
 
+void testUnlistedMembersProveTheirEosId() {
+    printf("direct: beyond a full lobby only an EOS id proven over EOS comes in, never a lobby member or a removed one\n");
+    dn::DirectNet host;
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.memberIds.clear();  // nobody published an identity
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    const std::string port = std::to_string(host.boundPort());
+    const std::string commitment = dn::processIdentity()->commitment();
+    auto dial = [&](const std::string& id) {
+        auto a = std::make_unique<dn::DirectNet>();
+        a->start(joinOptions("127.0.0.1:" + port, 0));
+        a->setLocalUser(id);
+        return a;
+    };
+    // The lobby not full: nobody it does not list comes in, proof or not.
+    host.proveEosIdentity(kA, commitment);
+    auto a = dial(kA);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(!host.canRoute(kA));
+    // Full: kB is listed by Epic (without an identity), kC was removed from this room.
+    const std::string kC = "0002dddddddddddddddddddddddddddd";
+    host.setUnlistedPolicy(true, {kHost, kB}, {kC});
+    CHECK(waitFor([&] { return host.canRoute(kA); }, 5000));  // proven over EOS
+    auto b = dial(kB);
+    host.proveEosIdentity(kB, commitment);  // even with a proof: Epic lists it
+    host.proveEosIdentity(kC, commitment);
+    auto c = dial(kC);
+    const std::string kD = "0002ffffffffffffffffffffffffffff";
+    auto d = dial(kD);  // never proven
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    CHECK(!host.canRoute(kB) && !host.canRoute(kC) && !host.canRoute(kD));
+    // kD said hello without a proof: the host asks for it (eos_hooks accepts its EOS connection on the proof socket).
+    const auto asked = host.takeProofRequests();
+    CHECK(std::find(asked.begin(), asked.end(), kD) != asked.end());
+    // Proven with another key than its hellos carry: still out.
+    host.proveEosIdentity(kD, std::string(32, '0'));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(!host.canRoute(kD));
+    // Proven with its key (a new process proves again, and rebinds): in.
+    host.proveEosIdentity(kD, commitment);
+    CHECK(waitFor([&] { return host.canRoute(kD); }, 5000));
+}
+
 void testRosterPages() {
     printf("wire: member lists of large rooms go in pages\n");
     dn::Message m;
@@ -3360,6 +3404,7 @@ int wmain(int argc, wchar_t** argv) {
         testMeshBlockedFromTheStart();
         testMeshFailsOverAndBack();
         testMeshAndShedSwitches();
+        testUnlistedMembersProveTheirEosId();
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -3439,6 +3484,7 @@ int wmain(int argc, wchar_t** argv) {
     testMeshBlockedFromTheStart();
     testMeshFailsOverAndBack();
     testMeshAndShedSwitches();
+    testUnlistedMembersProveTheirEosId();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -71,6 +71,11 @@ uint64_t bulkUndelivered();
 // identity commitment. False when this machine hosts no direct link.
 constexpr const char* kHostAddressKey = "EDF6DN_HOSTADDR";
 constexpr const char* kHostIdentityKey = "EDF6DN_HOSTID";
+// A player beyond a full lobby proves its EOS id to the room's host over EOS P2P itself (EOS authenticates the
+// sender of every packet): 'EDID' and its direct-link identity commitment, on this socket and channel, until the host
+// let it in. The host accepts the connection for an EOS id that said hello without a proof (DirectNet).
+constexpr const char* kIdentityProofSocket = "EDF6ID";
+constexpr uint8_t kIdentityProofChannel = 0x4F;
 bool hostAdvertisement(std::string& address, std::string& identity);
 // Our netcode protocol and features, said in every direct-link hello; a host refuses another protocol when
 // `refuseOthers`. The host's view of what each member beyond Epic's lobby runs (for the version gate).

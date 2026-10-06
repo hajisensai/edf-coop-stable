@@ -100,6 +100,8 @@ public:
     // up after members that left, too).
     bool kick(const std::string& member);
     bool banned(const std::string& member) const { return banned_.count(member) != 0; }
+    // Everyone removed from this room (the direct link keeps them out too).
+    const std::set<std::string>& bannedMembers() const { return banned_; }
 
 private:
     struct Pending {

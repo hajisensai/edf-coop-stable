@@ -370,6 +370,65 @@ int Mission(Machine& machine, bool host) {
     return done ? 0 : 1;
 }
 
+
+// Netcode rewrite W1: what the game's controller sends in a room, as the traffic classes see it. Every machine sends
+// every other one a state-like record (kStateType, unreliable, every 4th frame, a size no other datagram has) and
+// now and then a reliable one, for EDF6NET_SECONDS (default 4) s, with [Netcode] StatsSeconds=1 in its INI.
+constexpr std::uint32_t kStateType = 0x2800;
+constexpr std::size_t kStateBytes = 77;  // a datagram of only this record: 8 + 4 + 77 = 89 bytes
+
+int Seconds(int fallback) {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_SECONDS", text, sizeof(text));
+    return text[0] ? std::atoi(text) : fallback;
+}
+
+int NetStats(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    std::size_t states = 0, events = 0, receivedStates = 0, receivedEvents = 0;
+    transport.Subscribe(kStateType, [&](int, const std::uint8_t*, std::size_t) { ++receivedStates; });
+    transport.Subscribe(kProbeType, [&](int, const std::uint8_t*, std::size_t) { ++receivedEvents; });
+    const std::vector<std::uint8_t> state(kStateBytes, 0x5A);
+    const std::string probe = "EVENT-" + machine.user;
+    int frame = 0;
+    TickUntil(machine, static_cast<unsigned>(Seconds(4)) * 1000, [&] {
+        for (const auto& member : room.members) {
+            if (member == machine.user) continue;
+            if (frame % 4 == 0) {
+                transport.SendUnreliable(member, kStateType, state.data(), state.size());
+                ++states;
+            }
+            if (frame % 30 == 15) {
+                transport.SendReliable(member, kProbeType, probe.data(), probe.size());
+                ++events;
+            }
+        }
+        ++frame;
+        transport.Tick();
+        return false;
+    });
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    Result("sent", "%zu state %zu event", states, events);
+    Result("got", "%zu state %zu event", receivedStates, receivedEvents);
+    return 0;
+}
+
+// Netcode rewrite W1: the version gate. Every machine stays in the room for EDF6NET_SECONDS (default 5) s, ticking,
+// and says how many the room has at the end.
+int VersionGate(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    TickUntil(machine, static_cast<unsigned>(Seconds(5)) * 1000, [] { return false; });
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    return 0;
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -382,6 +441,8 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "link") return Link(machine, host);
     if (step == "sidelink") return Link(machine, host, 5);
     if (step == "mission") return Mission(machine, host);
+    if (step == "netstats") return NetStats(machine, host);
+    if (step == "versiongate") return VersionGate(machine, host);
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

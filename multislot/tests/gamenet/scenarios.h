@@ -250,8 +250,93 @@ inline const std::vector<Scenario>& Scenarios() {
     return all;
 }
 
+
+// --- Netcode rewrite W1 (transport) ---
+
+// The game's datagrams as the transport classes them (netstats role, [Netcode] StatsSeconds=1): the plaintext tap
+// saw them, the per-type log names the state-like and the reliable record type, and the state datagrams (89
+// bytes: nothing else is that size) went to EOS unreliably while every other datagram of the game's went reliably.
+inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEosAcceptedAll(network);
+    for (const auto& machine : machines) {
+        const std::string& log = machine.text;
+        Check(log.find("NETCLASS datagrams: state ") != std::string::npos, machine.user + " logs datagram classes");
+        const std::size_t state = log.find("NETTYPE 0x02800");
+        Check(state != std::string::npos && log.find("0 reliable", state) < log.find('
+', state),
+              machine.user + " logs the state record type, sent unreliably");
+        const std::size_t event = log.find("NETTYPE 0x02700");
+        Check(event != std::string::npos && log.find("0 reliable", event) > log.find('
+', event),
+              machine.user + " logs the probe record type, sent reliably");
+        const std::size_t classes = log.rfind("NETCLASS datagrams: state ");
+        Check(classes != std::string::npos && log.compare(classes, 28, "NETCLASS datagrams: state 0 ") != 0,
+              machine.user + " learnt the state type: state datagrams counted");
+        Check(log.find("NETCODE features in room") != std::string::npos &&
+                  log.find("on: TrafficClasses,Mesh,Fragments") != std::string::npos,
+              machine.user + " sees every member run the same netcode");
+        std::size_t got = 0;
+        Check(std::sscanf(Result(machine, "got").c_str(), "%zu", &got) == 1 && got > 0,
+              machine.user + " received state records (" + Result(machine, "got") + ")");
+    }
+    std::size_t states = 0, statesReliable = 0;
+    for (const auto& packet : Wire(network)) {
+        if (packet.header.channel != 0 || packet.header.size != 89) continue;
+        ++states;
+        statesReliable += packet.header.reliability != 0 ? 1 : 0;
+    }
+    std::printf("INFO: %zu state datagrams on the wire, %zu of them reliable
+", states, statesReliable);
+    Check(states > 0, "state datagrams crossed EOS");
+    // The first kSamples of each pair go before the type is learnt (Unknown: reliable, as before).
+    Check(statesReliable * 3 < states, "once learnt, state datagrams go unreliably (" + std::to_string(statesReliable) +
+                                           " of " + std::to_string(states) + " reliable)");
+}
+
+// A member of another netcode protocol ([Test] NetProtocol=99) is refused by the host: removed from the room, both
+// logs say why, and the members that stay run the new netcode once it is gone.
+inline void CheckVersionGate(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    const auto& host = machines.front();
+    const auto& odd = machines.back();
+    Check(host.text.find("NETCODE REFUSED " + odd.user) != std::string::npos, "the host refused the member of protocol 99");
+    Check(network.lobby.count == machines.size() - 1, "it is out of the room (" + std::to_string(network.lobby.count) + ")");
+    Check(odd.text.find("the room's host " + host.user + " runs netcode protocol 1, this machine 99") != std::string::npos,
+          "the refused member says why its netcode is off");
+    for (std::size_t i = 0; i + 1 < machines.size(); ++i) {
+        const std::string& log = machines[i].text;
+        const std::size_t last = log.rfind("NETCODE features in room");
+        const std::size_t end = last == std::string::npos ? last : log.find('
+', last);
+        const std::string line = last == std::string::npos ? std::string() : log.substr(last, end - last);
+        Check(line.find(" on: TrafficClasses,Mesh,Fragments") != std::string::npos,
+              machines[i].user + " runs the new netcode once the odd member is gone (" + line + ")");
+        Check(log.find(" off: ") != std::string::npos, machines[i].user + " had it off while the odd member was in");
+    }
+}
+
+inline const std::vector<Scenario>& NetScenarios() {
+    static const std::vector<Scenario> all = {
+        {"netstats", Seats(3, "netstats", BaseIni("[Netcode]
+StatsSeconds=1
+")), 90000, &CheckNetStats},
+        {"versiongate",
+         [] {
+             auto seats = Seats(3, "versiongate", BaseIni());
+             seats[2].ini = BaseIni("[Test]
+NetProtocol=99
+");
+             return seats;
+         }(),
+         90000, &CheckVersionGate},
+    };
+    return all;
+}
+
 inline const Scenario* FindScenario(const std::string& name) {
     for (const auto& scenario : Scenarios())
+        if (scenario.name == name) return &scenario;
+    for (const auto& scenario : NetScenarios())
         if (scenario.name == name) return &scenario;
     return nullptr;
 }

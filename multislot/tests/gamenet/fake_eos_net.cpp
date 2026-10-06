@@ -787,6 +787,34 @@ void Leave(const LeaveOptions* options, void* clientData, void* callback, bool d
 }
 }  // namespace
 
+// The room owner removes a member (netcode version gate): as EOS does, the member is out of the lobby and everyone
+// left sees it go.
+struct KickMemberOptions {
+    std::int32_t ApiVersion;
+    const char* LobbyId;
+    const void* LocalUserId;
+    const void* TargetUserId;
+};
+EXPORT void EOS_Lobby_KickMember(void*, const KickMemberOptions* options, void* clientData, void* callback) {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open() || !options || !options->LobbyId || !options->TargetUserId)
+        return Complete(callback, clientData, EOS_InvalidParameters, "");
+    const std::string id = options->LobbyId;
+    const std::string target = Text(options->TargetUserId);
+    Locked locked(f.netLock);
+    gamenet::Lobby& lobby = f.net->lobby;
+    if (id != lobby.id || f.self != lobby.owner) return Complete(callback, clientData, EOS_InvalidParameters, id);
+    for (std::uint32_t i = 0; i < lobby.count; ++i)
+        if (target == lobby.members[i].user) {
+            for (std::uint32_t j = i + 1; j < lobby.count; ++j) lobby.members[j - 1] = lobby.members[j];
+            --lobby.count;
+            ++lobby.version;
+            return Complete(callback, clientData, EOS_Success, id);
+        }
+    Complete(callback, clientData, EOS_NotFound, id);
+}
+
 EXPORT void EOS_Lobby_LeaveLobby(void*, const LeaveOptions* options, void* clientData, void* callback) {
     Leave(options, clientData, callback, false);
 }

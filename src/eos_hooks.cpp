@@ -36,7 +36,7 @@ namespace dn {
 // Defined with the netcode API at the end of the file, used by the hooks before it.
 void meshTick(uint64_t now);
 void bulkTick(uint64_t now);
-void ackBulk(const std::string& member, uint32_t id);
+void ackBulk(const std::string& member, uint64_t id);
 DirectOptions withNetcode(DirectOptions o);
 namespace {
 void sendIdentityProof(EOS_ProductUserId local, const std::string& host);
@@ -250,6 +250,12 @@ struct State {
     DuplicateFilter duplicates;
     // Fragments (fragment.h): ours going out get ids from here, theirs come together here (receive thread only).
     std::atomic<uint32_t> fragmentIds{0};
+    // This process's fragment id epoch (fragment.h): random, so ids of a restarted sender never repeat its last run's.
+    const uint64_t fragmentEpoch = [] {
+        uint32_t e = 0;
+        randomBytes(reinterpret_cast<uint8_t*>(&e), sizeof(e));
+        return static_cast<uint64_t>(e) << 32;
+    }();
     std::mutex fragmentMutex;
     Reassembler reassembler;
     struct ReadyPacket {
@@ -282,7 +288,7 @@ struct State {
         EOS_HP2P p2p = nullptr;
         EOS_ProductUserId local = nullptr, remote = nullptr;
         std::string socket;
-        uint32_t id = 0;
+        uint64_t id = 0;
         uint16_t tag = 0;
         std::vector<uint8_t> data;
         uint64_t sentMs = 0, waitMs = 0;
@@ -928,6 +934,10 @@ void leftLobby(const char* why) {
     {
         std::lock_guard<std::mutex> lock(g.trailMutex);
         g.trails.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g.bulkMutex);  // unacknowledged bulk messages to the room just left
+        g.bulks.clear();
     }
     endVirtualRoom(why);
     leaveView();
@@ -2015,8 +2025,8 @@ EOS_EResult sendOverEos(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, uint8_t 
 // A message above EOS's packet size, in fragments (fragment.h): reliably over the direct link when it reaches
 // `remote`, otherwise reliably over EOS. EOS_Success once every fragment left.
 EOS_EResult sendFragments(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, const std::string& remote, uint8_t flags,
-                          uint16_t tag, const uint8_t* data, size_t size, uint32_t id = 0) {
-    const auto parts = splitIntoFragments(id ? id : ++g.fragmentIds, flags, tag, data, size);
+                          uint16_t tag, const uint8_t* data, size_t size, uint64_t id = 0) {
+    const auto parts = splitIntoFragments(id ? id : g.fragmentEpoch | ++g.fragmentIds, flags, tag, data, size);
     if (parts.empty()) return EOS_LimitExceeded;
     std::shared_ptr<DirectNet> net = g.net.load();
     const bool direct = net && net->canRoute(remote);
@@ -2119,7 +2129,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
 // delivered is dropped. True when the game gets it as it is.
 bool takeArrival(const std::string& src, const std::string& socket, uint8_t channel, const uint8_t* data, uint32_t size,
                  bool mayBeCopy) {
-    uint32_t acked = 0;
+    uint64_t acked = 0;
     if (channel == kFragmentChannel && parseFragmentAck(data, size, acked)) {
         std::lock_guard<std::mutex> lock(g.bulkMutex);
         g.bulks.erase(std::remove_if(g.bulks.begin(), g.bulks.end(),
@@ -2794,6 +2804,11 @@ void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source;
 
 uint64_t bulkUndelivered() { return g.bulkLost.load(); }
 
+bool bulkIncoming(const std::string& src, uint16_t tag) {
+    std::lock_guard<std::mutex> lock(g.fragmentMutex);
+    return g.reassembler.pending(src, kFragmentBulk, tag);
+}
+
 bool hostAdvertisement(std::string& address, std::string& identity) {
     if (g.config.direct.mode != Mode::Host) return false;
     address = g.marker.ownAddress();
@@ -2839,7 +2854,7 @@ uint32_t linkBudgetBytesPerSec(const std::string& peer) {
 
 // Tells `member` its bulk message `id` arrived: over the direct link when it reaches it, else EOS (reliably: a lost
 // acknowledgement only costs a resend, but a resend of 140 KiB is worth avoiding).
-void ackBulk(const std::string& member, uint32_t id) {
+void ackBulk(const std::string& member, uint64_t id) {
     const std::vector<uint8_t> ack = fragmentAck(id);
     std::shared_ptr<DirectNet> net = g.net.load();
     if (net && net->send(member, "", kFragmentChannel, EOS_PR_ReliableOrdered, ack.data(), ack.size())) return;
@@ -2934,7 +2949,7 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
     o.SocketId = &socket;
     o.bAllowDelayedDelivery = 1;
     if (!p2p || !o.RemoteUserId) return false;
-    const uint32_t id = ++g.fragmentIds;
+    const uint64_t id = g.fragmentEpoch | ++g.fragmentIds;
     if (sendFragments(p2p, o, remote, kFragmentBulk, tag, data, size, id) != EOS_Success) return false;
     State::PendingBulk pending;
     pending.member = remote;

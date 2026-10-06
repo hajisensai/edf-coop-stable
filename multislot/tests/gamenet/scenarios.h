@@ -143,7 +143,13 @@ inline void CheckMission(const std::vector<Spawned>& machines, const gamenet::Ne
         const bool arrived = log.find("arrived beside the start message") != std::string::npos;
         Check(arrived == (expect.split && !expect.bulk),
               machines[i].user + (expect.split && !expect.bulk ? " got records beside the start message" : " needed no records beside it"));
-        if (expect.bulk) Check(log.find("loadout records arrived in bulk") != std::string::npos, machines[i].user + " got the records in bulk");
+        if (expect.bulk) {
+            Check(log.find("loadout records arrived in bulk") != std::string::npos, machines[i].user + " got the records in bulk");
+            // The game's packets from the host waited while the records came (packetfit.h BulkIncoming): its frame
+            // never waited for them inside the start message.
+            Check(log.find("for the " + std::to_string(members) + " loadout records in bulk") == std::string::npos,
+                  machines[i].user + " never waited inside the start message for the records");
+        }
         Check(log.find("never arrived") == std::string::npos, machines[i].user + " missed no record");
         const std::size_t wait = log.find("MISSION sync: waited ");
         waited += wait != std::string::npos && log.find(": here", wait) != std::string::npos ? 1 : 0;
@@ -628,6 +634,25 @@ inline std::vector<Seat> JoinFullSeats() {
     return seats;
 }
 
+
+// The host's bulk of records never leaves ([Test] DropRecordsBulk=1): every guest waits for it once, then leaves the
+// records out at once - not once per record (32 records would freeze a guest's frame for minutes).
+inline void CheckBulkLost(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    for (std::size_t i = 1; i < machines.size(); ++i) {
+        const std::string& log = machines[i].text;
+        std::size_t waits = 0;
+        for (std::size_t at = log.find("loadout records in bulk: still missing"); at != std::string::npos;
+             at = log.find("loadout records in bulk: still missing", at + 1))
+            ++waits;
+        Check(waits == 1, machines[i].user + " waited for the lost bulk once (" + std::to_string(waits) + ")");
+        Check(Result(machines[i], "sync").rfind("done", 0) == 0, machines[i].user + " finished the sync: " + Result(machines[i], "sync"));
+        unsigned long long ms = 0;
+        sscanf_s(Result(machines[i], "sync").c_str(), "done after %llu", &ms);
+        Check(ms < 15000, machines[i].user + " was not held for long (" + std::to_string(ms) + " ms)");
+    }
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
@@ -660,6 +685,13 @@ inline const std::vector<Scenario>& NetScenarios() {
         {"mission32bulk", Seats(32, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 400000,
          [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, false, false, true}); },
          {{"EDF6NET_SETTLE", "4000"}}},
+        {"mission8bulklost",
+         [] {
+             auto seats = Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n"));
+             seats[0].ini = BaseIni("[Netcode]\r\nStatsSeconds=1\r\n[Test]\r\nDropRecordsBulk=1\r\n");
+             return seats;
+         }(),
+         150000, &CheckBulkLost, {{"EDF6NET_SETTLE", "2500"}}},
         {"mission8xpress", Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 150000,
          &CheckXpressMission, {{"EDF6NET_CHATTER", "16"}, {"EDF6NET_SETTLE", "2500"}}},
     };

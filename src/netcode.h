@@ -64,6 +64,8 @@ void setBulkHandler(BulkHandler handler);
 // A bulk message goes again until its receiver acknowledges it (5 tries, the wait doubling); this many were given up
 // since start (each logged).
 uint64_t bulkUndelivered();
+// Whether a bulk message of `tag` from `src` is on its way (some of its fragments here, not all).
+bool bulkIncoming(const std::string& src, uint16_t tag);
 
 // --- Rooms above Epic's 64 (I1) ---
 // What a room owner puts on the lobby itself (not a member: a searcher reads the lobby's attributes only) so that a

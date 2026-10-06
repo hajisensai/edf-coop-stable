@@ -184,9 +184,16 @@ void testFragments() {
     CHECK(single.size() == 1 && r.add(kA, single[0].data(), single[0].size(), 1004));
     CHECK(!r.add(kA, single[0].data(), single[0].size(), 1005, &again) && again);
     CHECK(dn::Reassembler::idOf(single[0].data(), single[0].size()) == 9);
-    uint32_t ackId = 0;
-    const auto ack = dn::fragmentAck(77);
-    CHECK(dn::parseFragmentAck(ack.data(), ack.size(), ackId) && ackId == 77 && !dn::isFragment(ack.data(), ack.size()));
+    uint64_t ackId = 0;
+    const auto ack = dn::fragmentAck(0x1234567800000077ull);
+    CHECK(dn::parseFragmentAck(ack.data(), ack.size(), ackId) && ackId == 0x1234567800000077ull &&
+          !dn::isFragment(ack.data(), ack.size()));
+    // A sender back after a restart counts from 1 again under another epoch: its message is not taken for the
+    // earlier one (which completed within kCompletedMs).
+    auto earlier = dn::splitIntoFragments(0xAAAA000000000001ull, dn::kFragmentBulk, 1, datagram.data(), 100);
+    auto restarted = dn::splitIntoFragments(0xBBBB000000000001ull, dn::kFragmentBulk, 1, datagram.data() + 1, 100);
+    CHECK(r.add(kB, earlier[0].data(), earlier[0].size(), 1006));
+    CHECK(r.add(kB, restarted[0].data(), restarted[0].size(), 1007));
 
     // A start message of 1024 loadout records (about 143 bytes each).
     std::vector<uint8_t> big(1024 * 143);

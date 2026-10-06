@@ -139,13 +139,29 @@ struct Outgoing {
 
 BulkReady bulkReady = nullptr;
 BulkSend bulkSend = nullptr;
+BulkIncoming bulkIncoming = nullptr;
 
 // Bulks received (or written), by id: a few syncs' worth, oldest replaced first.
+constexpr std::size_t kBulksKept = 4;
 struct Bulks {
     SRWLOCK lock = SRWLOCK_INIT;
     std::vector<std::pair<std::uint64_t, std::vector<BulkRecord>>> held;  // newest last
+    std::vector<std::uint64_t> abandoned;  // bulks waited for once in vain: their records are not waited for again
 } bulks;
-constexpr std::size_t kBulksKept = 4;
+
+bool BulkAbandoned(std::uint64_t id) {
+    AcquireSRWLockShared(&bulks.lock);
+    const bool gone = std::find(bulks.abandoned.begin(), bulks.abandoned.end(), id) != bulks.abandoned.end();
+    ReleaseSRWLockShared(&bulks.lock);
+    return gone;
+}
+
+void AbandonBulk(std::uint64_t id) {
+    AcquireSRWLockExclusive(&bulks.lock);
+    if (bulks.abandoned.size() >= kBulksKept) bulks.abandoned.erase(bulks.abandoned.begin());
+    bulks.abandoned.push_back(id);
+    ReleaseSRWLockExclusive(&bulks.lock);
+}
 
 void KeepBulk(std::uint64_t id, std::vector<BulkRecord> records) {
     AcquireSRWLockExclusive(&bulks.lock);
@@ -254,7 +270,7 @@ HeldPacket* NextCompleteLocked(const EosReceiveOptions* options, std::size_t& ex
             --heldCount;
             ++expired;
         } else if (Wanted(packet, options) && !MissingRecords(packet.bytes, packet.size, missing) &&
-                   (!next || packet.order < next->order)) {
+                   !(bulkIncoming && bulkIncoming(packet.peer)) && (!next || packet.order < next->order)) {
             next = &packet;
         }
     }
@@ -441,6 +457,7 @@ void ClearRecords() {
     ReleaseSRWLockExclusive(&outgoing.lock);
     AcquireSRWLockExclusive(&bulks.lock);
     bulks.held.clear();
+    bulks.abandoned.clear();
     ReleaseSRWLockExclusive(&bulks.lock);
     bulkReader = {};
 }
@@ -639,7 +656,12 @@ bool ReadBulkRecord(void* context, void* record, void* stream, std::size_t posit
     }
     alignas(16) std::uint8_t scratch[kStreamObjectSize] = {};
     std::size_t size = 0;
-    if (!BulkRecordAt(id, k, scratch + kStreamData, size) && !(WaitForBulk(id, count) && BulkRecordAt(id, k, scratch + kStreamData, size))) {
+    // Waited for once already in vain: every later record of it is left out at once (a frame of the game must not
+    // wait count times over).
+    const bool here = BulkRecordAt(id, k, scratch + kStreamData, size) ||
+                      (!BulkAbandoned(id) && WaitForBulk(id, count) && BulkRecordAt(id, k, scratch + kStreamData, size));
+    if (!here) AbandonBulk(id);
+    if (!here) {
         Log("MISSION sync: the loadout records in bulk never arrived; record %zu of %zu is left out and that player will "
             "look wrong on this machine", k, count);
         const std::int32_t none = -1;
@@ -713,10 +735,8 @@ void SendRecordsAhead(void* handle, const EosSendOptions& options) {
     std::vector<std::uint8_t> bulk;
     AcquireSRWLockExclusive(&outgoing.lock);
     if (!outgoing.bulk.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
-        std::find(outgoing.bulkSentTo.begin(), outgoing.bulkSentTo.end(), options.RemoteUserId) == outgoing.bulkSentTo.end()) {
-        outgoing.bulkSentTo.push_back(options.RemoteUserId);
-        bulk = outgoing.bulk;
-    }
+        std::find(outgoing.bulkSentTo.begin(), outgoing.bulkSentTo.end(), options.RemoteUserId) == outgoing.bulkSentTo.end())
+        bulk = outgoing.bulk;  // marked sent once it went (a send that fails now goes again with the next packet)
     const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
                      std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end();
     if (due) {
@@ -726,6 +746,11 @@ void SendRecordsAhead(void* handle, const EosSendOptions& options) {
     ReleaseSRWLockExclusive(&outgoing.lock);
     if (!bulk.empty()) {
         const bool sent = bulkSend && bulkSend(options.RemoteUserId, kRecordsBulkTag, bulk.data(), bulk.size());
+        if (sent) {
+            AcquireSRWLockExclusive(&outgoing.lock);
+            outgoing.bulkSentTo.push_back(options.RemoteUserId);
+            ReleaseSRWLockExclusive(&outgoing.lock);
+        }
         Log("MISSION sync: every loadout record (%zu bytes) sent in bulk ahead of the start message: %s", bulk.size(),
             sent ? "sent" : "NOT sent");
     }
@@ -761,6 +786,10 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
         const EosResult result = eosReceive(handle, options, peer, socket, channel, data, size);
         if (result != 0 || !data || !size) return result;
         if (TakeSidePacket(static_cast<const std::uint8_t*>(data), *size)) continue;  // never the game's
+        if (bulkIncoming && peer && bulkIncoming(*peer)) {
+            Hold(peer, socket, channel, static_cast<const std::uint8_t*>(data), *size);
+            continue;
+        }
         return result;
     }
 }
@@ -817,9 +846,10 @@ void LogOversizePacket(std::uintptr_t caller, std::uint8_t channel, std::int32_t
 }
 
 
-void SetBulkRecords(BulkReady ready, BulkSend send) {
+void SetBulkRecords(BulkReady ready, BulkSend send, BulkIncoming incoming) {
     bulkReady = ready;
     bulkSend = send;
+    bulkIncoming = incoming;
 }
 
 std::vector<std::uint8_t> BuildRecordsBulk(std::uint64_t id, const std::vector<BulkRecord>& records) {

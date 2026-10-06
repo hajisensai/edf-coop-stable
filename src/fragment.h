@@ -8,7 +8,7 @@
 // do not decrypt, which the game drops.
 //
 // Each fragment:
-//   'EDFG' | u8 version (1) | u8 flags | u16 tag | u32 message id | u32 total bytes | u16 index | u16 count | bytes
+//   'EDFG' | u8 version (2) | u8 flags | u16 tag | u64 message id | u32 total bytes | u16 index | u16 count | bytes
 // `tag`: the game channel a datagram was sent on, or the bulk handler's tag (flags & kFragmentBulk). Every
 // fragment but the last carries kFragmentPayload bytes. Fragments are sent reliably (ordered or not: the
 // reassembly takes them in any order) and a message is complete once every index arrived.
@@ -23,9 +23,9 @@
 
 namespace dn {
 
-constexpr size_t kFragmentHeader = 20;
+constexpr size_t kFragmentHeader = 24;
 constexpr size_t kFragmentPacket = 1170;
-constexpr size_t kFragmentPayload = kFragmentPacket - kFragmentHeader;  // 1150
+constexpr size_t kFragmentPayload = kFragmentPacket - kFragmentHeader;  // 1146
 constexpr size_t kMaxFragments = 1024;
 // 1177600 bytes: a start message of 1024 players' loadout records (about 140 KB) fits eight times over.
 constexpr size_t kMaxFragmentedBytes = kFragmentPayload * kMaxFragments;
@@ -35,9 +35,11 @@ constexpr uint8_t kFragmentChannel = 0x4E;
 
 // A receiver acknowledges every bulk message it completed (an ack: 'EDFA' | u32 message id, on kFragmentChannel); the
 // sender sends it again until then (eos_hooks.cpp), so a direct link that drops in the middle loses nothing.
-constexpr size_t kFragmentAckBytes = 8;
-std::vector<uint8_t> fragmentAck(uint32_t id);
-bool parseFragmentAck(const uint8_t* data, size_t size, uint32_t& id);
+// Message ids are 64 bits: a sender's random epoch (one per process) above a counter, so that a sender back within
+// kCompletedMs after a restart (counting from 1 again) never meets the receiver's record of its earlier messages.
+constexpr size_t kFragmentAckBytes = 12;
+std::vector<uint8_t> fragmentAck(uint64_t id);
+bool parseFragmentAck(const uint8_t* data, size_t size, uint64_t& id);
 
 struct FragmentMessage {
     uint8_t flags = 0;
@@ -46,7 +48,7 @@ struct FragmentMessage {
 };
 
 // The packets for message `id`; empty when the message is empty or larger than kMaxFragmentedBytes.
-std::vector<std::vector<uint8_t>> splitIntoFragments(uint32_t id, uint8_t flags, uint16_t tag, const uint8_t* data,
+std::vector<std::vector<uint8_t>> splitIntoFragments(uint64_t id, uint8_t flags, uint16_t tag, const uint8_t* data,
                                                      size_t size);
 bool isFragment(const uint8_t* data, size_t size);
 
@@ -66,8 +68,10 @@ public:
     std::optional<FragmentMessage> add(const std::string& src, const uint8_t* data, size_t size, uint64_t nowMs,
                                        bool* again = nullptr);
     // The id of a fragment (0 for anything else).
-    static uint32_t idOf(const uint8_t* data, size_t size);
+    static uint64_t idOf(const uint8_t* data, size_t size);
     void clear();
+    // Whether a message of `flags`/`tag` from `src` is partly here (on its way).
+    bool pending(const std::string& src, uint8_t flags, uint16_t tag) const;
     uint64_t dropped() const { return dropped_; }
     uint64_t malformed() const { return malformed_; }
     size_t buffered() const { return buffered_; }
@@ -83,11 +87,11 @@ private:
         std::vector<bool> got;
         std::vector<uint8_t> bytes;
     };
-    using Map = std::map<std::pair<std::string, uint32_t>, Partial>;
+    using Map = std::map<std::pair<std::string, uint64_t>, Partial>;
     void expire(uint64_t nowMs);
     void drop(Map::iterator it);
     Map partial_;
-    std::map<std::pair<std::string, uint32_t>, uint64_t> completed_;  // -> when
+    std::map<std::pair<std::string, uint64_t>, uint64_t> completed_;  // -> when
     size_t buffered_ = 0;
     uint64_t dropped_ = 0, malformed_ = 0;
 };

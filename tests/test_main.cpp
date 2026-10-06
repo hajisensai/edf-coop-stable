@@ -2216,6 +2216,65 @@ void testLinksFollowTheRoom() {
     CHECK(waitFor([&] { return host.canRoute(kA) && a.canRoute(kHost); }, 5000));
 }
 
+void testReceiveStateFollowsSession() {
+    printf("direct: queued packets and recent traffic belong to the local room/user session\n");
+    for (int transition = 0; transition < 3; ++transition) {
+        dn::DirectNet host, joiner;
+        CHECK(host.start(hostOptions(0, 0)));
+        host.setLocalUser(kHost);
+        CHECK(joiner.start(joinOptions("127.0.0.1:" + std::to_string(host.boundPort()), 0)));
+        joiner.setLocalUser(kA);
+        CHECK(waitFor([&] { return host.canRoute(kA) && joiner.canRoute(kHost); }, 5000));
+        const auto payload = payloadFor(42);
+        CHECK(host.send(kA, "EDF6", 1, 1, payload.data(), payload.size()));
+        CHECK(joiner.send(kHost, "EDF6", 1, 1, payload.data(), payload.size()));
+        CHECK(waitFor([&] {
+            return host.heardFromRecently(kA, 10000) && joiner.heardFromRecently(kHost, 10000);
+        }, 5000));  // wait for delivery into both inboxes without draining either
+
+        // Repeated observations of the same room/user must preserve unread packets.
+        host.setActive(true);
+        joiner.setLocalUser(kA);
+        dn::Delivered out;
+        CHECK(host.pop(nullptr, 1170, out) && out.data == payload);
+        CHECK(joiner.pop(nullptr, 1170, out) && out.data == payload);
+
+        // A second channel lets us wait for a later packet without consuming the stale one.
+        CHECK(host.send(kA, "EDF6", 1, 2, payload.data(), payload.size()));
+        CHECK(host.send(kA, "EDF6", 2, 2, payload.data(), payload.size()));
+        CHECK(joiner.send(kHost, "EDF6", 1, 2, payload.data(), payload.size()));
+        CHECK(joiner.send(kHost, "EDF6", 2, 2, payload.data(), payload.size()));
+        const uint8_t channel = 2;
+        CHECK(waitFor([&] { return host.pop(&channel, 1170, out); }, 5000));
+        CHECK(waitFor([&] { return joiner.pop(&channel, 1170, out); }, 5000));
+
+        if (transition == 0) {
+            host.setActive(false);
+            joiner.setActive(false);
+        } else if (transition == 1) {
+            host.setLocalUser(kB);
+            joiner.setLocalUser(kB);
+        } else {
+            host.stop();
+            joiner.stop();
+        }
+        CHECK(!host.pop(nullptr, 1170, out));
+        CHECK(!joiner.pop(nullptr, 1170, out));
+        CHECK(!host.heardFromRecently(kA, 10000));
+        CHECK(!joiner.heardFromRecently(kHost, 10000));
+
+        if (transition == 0) {
+            host.setActive(true);
+            joiner.setActive(true);
+            CHECK(waitFor([&] { return host.canRoute(kA) && joiner.canRoute(kHost); }, 5000));
+            CHECK(!host.heardFromRecently(kA, 10000));
+            CHECK(!joiner.heardFromRecently(kHost, 10000));
+            CHECK(streamInOrder(host, kA, joiner, kHost, 3));
+            CHECK(streamInOrder(joiner, kHost, host, kA, 3));
+        }
+    }
+}
+
 void testDisconnectHold() {
     printf("hold: transient disconnects are hidden from the game and recovered\n");
     int forwarded = 0, reaccepts = 0;
@@ -3081,6 +3140,11 @@ void testRoomFollowsHost() {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--receive-lifecycle") {
+        testReceiveStateFollowsSession();
+        printf("\n%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     // Manual end-to-end check against the real GitHub release: --live-update <dll path> <pretend version>
     if (argc == 4 && std::wstring(argv[1]) == L"--live-update") {
         std::string version;
@@ -3119,6 +3183,7 @@ int wmain(int argc, wchar_t** argv) {
     testConfigParsing();
     testRosterDropsQuietMember();
     testLinksFollowTheRoom();
+    testReceiveStateFollowsSession();
     testHostRestart();
     testStalledLinkSurvives();
     testReplyFromOtherAddress();

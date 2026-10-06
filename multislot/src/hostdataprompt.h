@@ -1,9 +1,10 @@
 // The question a player gets before the game uses other members' weapon and vehicle files (hostdatanet.h,
 // Accept=Ask): who brings what, which files, and what either answer risks.
 //
-// The files are fetched and checked before the question (they sit in Mods\Plugins\EDF6Coop.hostdata, which the game
-// does not read), so it names every file. It is a window of its own (a message box on a thread of its own): the game
-// keeps running behind it, and the answer reaches hostdatanet on whatever thread the window ran.
+// Asked before anything is downloaded: a source says how many files and bytes it is when its member published that
+// (kBundleSizesKey), and names its files only when this machine kept them from an earlier download. It is a window of
+// its own (a message box on a thread of its own): the game keeps running behind it, and the answer reaches
+// hostdatanet on whatever thread the window ran.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -23,7 +24,10 @@ PromptLanguage PromptLanguageFor(LANGID language);
 struct PromptSource {
     bool mods = false;               // the room owner's Mods; otherwise a member's weapon page
     std::string member;              // EOS_ProductUserId as text
-    std::vector<std::string> paths;  // DataFile paths ("WEAPON/AWEAPON346.SGO")
+    std::vector<std::string> paths;  // DataFile paths ("WEAPON/AWEAPON346.SGO"), when kept from an earlier download
+    bool sized = false;              // its member published how big it is:
+    std::size_t files = 0;
+    std::size_t bytes = 0;
 };
 
 constexpr std::size_t kPromptMaxPaths = 20;  // listed; the rest are counted

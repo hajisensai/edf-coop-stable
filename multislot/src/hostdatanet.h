@@ -9,10 +9,11 @@
 // every member the page it picked (kPageDigestKey), published on its own lobby member (syncmarker.h: the game never
 // reads member attributes). The room's files are those in a fixed order (PlanRoomSources): the owner's Mods, the
 // owner's page, then the other members' pages as the lobby lists them; a file two of them have is the first one's.
-// Every machine works the same order out of the same lobby, fetches what it does not have (unless Accept=Never) and
-// is pointed at the result between missions; the menu says so at the front. Accept=Auto uses what arrived at once;
-// Ask (the default) first asks on a menu screen, naming every file and what either answer risks
-// (hostdataprompt.h). The answer holds for those bundles in this lobby; AcceptKey switches all of them later.
+// Every machine works the same order out of the same lobby, fetches what it does not have and is pointed at the
+// result between missions; the menu says so at the front. Accept=Auto fetches and uses at once; Ask (the default)
+// first asks on a menu screen - who brings how many files, and what either answer risks (hostdataprompt.h) - and
+// downloads only after yes; Never fetches nothing. The answer holds for those bundles in this lobby; AcceptKey
+// switches all of them later.
 //
 // The files travel over the P2P link the game already has to every member: the game's own socket, on
 // kHostDataChannel (the game sends on channel 0 and reads any). EOS_P2P_ReceivePacket is wrapped next to EOS, before
@@ -45,6 +46,9 @@ constexpr const char* kPageDigestKey = "EDF6CO_HDP";  // the bundle of the weapo
 // No page. Not "": EOS refuses an empty text (syncmarker.h, PublishMemberText). Anything that is no hex digest reads
 // as no page, so members that published "" before keep reading the same.
 constexpr const char* kPageNone = "none";
+// How big each bundle this machine shares is, so a player can be asked before downloading one:
+// "<hex SHA-256>:<files>:<bytes>" per bundle, ';' between them, kPageNone for none (BundleSizesText).
+constexpr const char* kBundleSizesKey = "EDF6CO_HDS";
 constexpr const char* kHostDataFormat = "1";
 constexpr std::uint8_t kHostDataChannel = 0x48;
 
@@ -77,6 +81,15 @@ struct RoomOverlay {
 // The room's files: each path is the first source's that has it. A null source is one this machine goes without
 // (not here, not approved, or failed); it takes no place.
 RoomOverlay MergeSources(const std::vector<const SourceFiles*>& sources);
+
+// kBundleSizesKey's value for `bundles` (nulls skipped).
+std::string BundleSizesText(const std::vector<const hostdata::Bundle*>& bundles);
+struct BundleSize {
+    std::size_t files = 0;
+    std::size_t bytes = 0;
+};
+// The size `member` published for its bundle `digest`, if it did.
+std::optional<BundleSize> PublishedSize(const LobbyView& view, const std::string& member, const hostdata::Digest& digest);
 
 // What the menu says about weapons, at the front of the label.
 struct WeaponsView {

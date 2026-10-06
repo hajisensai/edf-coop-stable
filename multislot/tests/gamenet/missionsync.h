@@ -30,6 +30,8 @@ struct Loadout {
 class MissionSync {
 public:
     // `members` in lobby order (each one's player slot); `hostMission`/`hostDifficulty` only matter on the host.
+    // Right after Transport::Start, before the P2P handshake ends: the game's event controller listens to the packet
+    // controller from the moment the network exists, and a member that is done with its handshake sends at once.
     bool Build(Transport& transport, const std::vector<std::string>& members, const Loadout& loadout,
                std::int32_t mission, std::int32_t difficulty);
     // The end of a frame: the event controller sends what its builders hold.
@@ -44,6 +46,8 @@ public:
     std::int32_t Mission() const;
     std::int32_t Difficulty() const;
     std::vector<std::uint8_t> Record(int slot) const;
+    // Sync messages this machine's event controller handed to the game's receive so far.
+    std::size_t Received() const;
     void Dump() const;  // the sync objects and users, for a test that went wrong
 
 private:

@@ -206,12 +206,17 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
 }
 
 // Starts the game's packet controller for the room and waits until the game's P2P handshake connected every
-// other member.
-bool Connect(Machine& machine, const Room& room, Transport& transport) {
+// other member. `listen` runs between the two and subscribes what the machine receives: a member done with its own
+// handshakes sends at once, while this machine may still be waiting for someone else's, and the game's controller
+// delivers what arrives on every tick of that wait - to whoever listens then, and nowhere else (it acknowledges the
+// record all the same, so its sender never sends it again). In the game the subscribers (the event controller among
+// them) exist before the network does.
+bool Connect(Machine& machine, const Room& room, Transport& transport, const std::function<bool()>& listen = {}) {
     if (!transport.Start(machine, room.lobby, room.members)) {
         Result("link", "the game's network objects could not be built");
         return false;
     }
+    if (listen && !listen()) return false;
     const bool connected = TickUntil(machine, 15000, [&] {
         transport.Tick();
         for (const auto& member : room.members)
@@ -258,13 +263,16 @@ int Link(Machine& machine, bool host, int sidePackets = 0) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
     Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
-    if (host && sidePackets) SendSidePackets(machine, room, sidePackets);
     std::vector<std::string> received;
-    transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
-        received.emplace_back(reinterpret_cast<const char*>(data), size);
-        Result("received", "from %d: %.*s", from, static_cast<int>(size), reinterpret_cast<const char*>(data));
-    });
+    const auto listen = [&] {
+        transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
+            received.emplace_back(reinterpret_cast<const char*>(data), size);
+            Result("received", "from %d: %.*s", from, static_cast<int>(size), reinterpret_cast<const char*>(data));
+        });
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    if (host && sidePackets) SendSidePackets(machine, room, sidePackets);
     const std::string probe = "PROBE-PLAINTEXT-FROM-" + machine.user;
     for (const auto& member : room.members)
         if (member != machine.user && !transport.SendReliable(member, kProbeType, probe.data(), probe.size()))
@@ -326,8 +334,6 @@ int Mission(Machine& machine, bool host) {
     char settle[16]{};
     if (GetEnvironmentVariableA("EDF6NET_SETTLE", settle, sizeof(settle)))
         TickUntil(machine, static_cast<unsigned>(std::atoi(settle)), [] { return false; });
-    Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
     int place = 0;
     while (room.members[static_cast<std::size_t>(place)] != machine.user) ++place;
     Loadout loadout{place % 4, 500 + place, 1000 + 37 * place, 100 + 37 * place};
@@ -336,11 +342,17 @@ int Mission(Machine& machine, bool host) {
     if (GetEnvironmentVariableA("EDF6NET_FIRST_WEAPON", setting, sizeof(setting))) loadout.firstWeapon = std::atoi(setting);
     if (GetEnvironmentVariableA("EDF6NET_WEAPON_ROWS", setting, sizeof(setting)))
         loadout.weaponRows = static_cast<std::uint32_t>(std::atoi(setting));
+    Transport transport;
     MissionSync sync;
-    if (!sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) {
+    // The event controller listens before the handshake ends (Connect): a member done with its own handshakes may
+    // be in the sync already.
+    const auto listen = [&] {
+        if (sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) return true;
         Result("mission", "the sync could not be set up");
-        return 1;
-    }
+        return false;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    Result("early-messages", "%zu", sync.Received());  // sync messages that came during the handshake
     Result("loadout", "%d class=%d marker=%d armor=%d", place, loadout.soldierClass, loadout.marker, loadout.armor);
     const std::size_t chatter = ChatterBytes();
     // A frame of the game: other messages, the network, the mission script, then the event builders go out.
@@ -397,21 +409,24 @@ int NetStats(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
     Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
     struct Count {
         std::size_t states = 0, events = 0;
         ULONGLONG last = 0, gap = 0;
     };
     std::map<int, Count> got;          // by sender's network index
     std::map<std::string, Count> sent;  // by member
-    transport.Subscribe(kStateType, [&](int from, const std::uint8_t*, std::size_t) {
-        Count& c = got[from];
-        const ULONGLONG now = GetTickCount64();
-        if (c.last) c.gap = (std::max)(c.gap, now - c.last);
-        c.last = now;
-        ++c.states;
-    });
-    transport.Subscribe(kProbeType, [&](int from, const std::uint8_t*, std::size_t) { ++got[from].events; });
+    const auto listen = [&] {
+        transport.Subscribe(kStateType, [&](int from, const std::uint8_t*, std::size_t) {
+            Count& c = got[from];
+            const ULONGLONG now = GetTickCount64();
+            if (c.last) c.gap = (std::max)(c.gap, now - c.last);
+            c.last = now;
+            ++c.states;
+        });
+        transport.Subscribe(kProbeType, [&](int from, const std::uint8_t*, std::size_t) { ++got[from].events; });
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
     const std::vector<std::uint8_t> state(kStateBytes, 0x5A);
     const std::string probe = "EVENT-" + machine.user;
     int frame = 0;
@@ -526,11 +541,10 @@ int PlayerSync(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
     Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
-    const Game& game = transport.game();
     const int seat = host ? 0 : 1;
     int good = 0, bad = 0;
-    transport.Subscribe(kPlayerType, [&](int from, const std::uint8_t* data, std::size_t size) {
+    const auto onRecord = [&](int from, const std::uint8_t* data, std::size_t size) {
+        const Game& game = transport.game();
         const int i = static_cast<int>(data[0]);
         const PlayerSample expected = SampleFor(1 - seat, i);
         bool ok = size > 1;
@@ -564,7 +578,13 @@ int PlayerSync(Machine& machine, bool host) {
             ++bad;
         Result("player-record", "from %d #%d %s; the game's half-float position is off by %.3f m", from, i,
                ok ? "ok" : "MISMATCH", halfError);
-    });
+    };
+    const auto listen = [&] {
+        transport.Subscribe(kPlayerType, onRecord);
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    const Game& game = transport.game();
     for (int i = 0; i < kPlayerRecords; ++i) {
         GameSerialize writer{};
         game.Fn<void* (*)(void*)>(kSerializeWriter)(writer.bytes);

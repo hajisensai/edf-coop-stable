@@ -14,7 +14,9 @@
 namespace gamenet {
 
 constexpr std::uint32_t kMagic = 0x4E364445;  // "ED6N"
-constexpr int kMaxMachines = 8;
+// Rooms of up to 32 machines (docs/net-re/roomsize.md): a 32-player start sync is the largest one run here; each
+// machine is a process with the game's EDF.dll loaded, about 0.2 GB.
+constexpr int kMaxMachines = 32;
 constexpr int kMaxAttributes = 16;
 constexpr std::size_t kUserText = 33;
 constexpr std::size_t kSocketText = 33;

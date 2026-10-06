@@ -177,6 +177,16 @@ void testFragments() {
     auto done = r.add(kA, parts[0].data(), parts[0].size(), 1002);
     CHECK(done && done->bytes == datagram && done->tag == 0 && done->flags == 0);
     CHECK(r.buffered() == 0);
+    // Delivered once: a resend (or a copy) of a message that came whole gives nothing, and says it came again.
+    bool again = false;
+    CHECK(!r.add(kA, parts[0].data(), parts[0].size(), 1003, &again) && again);
+    auto single = dn::splitIntoFragments(9, dn::kFragmentBulk, 1, datagram.data(), 100);
+    CHECK(single.size() == 1 && r.add(kA, single[0].data(), single[0].size(), 1004));
+    CHECK(!r.add(kA, single[0].data(), single[0].size(), 1005, &again) && again);
+    CHECK(dn::Reassembler::idOf(single[0].data(), single[0].size()) == 9);
+    uint32_t ackId = 0;
+    const auto ack = dn::fragmentAck(77);
+    CHECK(dn::parseFragmentAck(ack.data(), ack.size(), ackId) && ackId == 77 && !dn::isFragment(ack.data(), ack.size()));
 
     // A start message of 1024 loadout records (about 143 bytes each).
     std::vector<uint8_t> big(1024 * 143);

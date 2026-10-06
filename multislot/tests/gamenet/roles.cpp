@@ -142,6 +142,8 @@ bool AllMarked(const Seen& seen, std::size_t members) {
 
 int expectedMembers() {
     char text[16]{};
+    // EDF6NET_EPIC_MEMBERS: how many Epic's lobby lists when it holds fewer than the room (joinfull).
+    if (GetEnvironmentVariableA("EDF6NET_EPIC_MEMBERS", text, sizeof(text))) return std::atoi(text);
     GetEnvironmentVariableA("EDF6NET_MEMBERS", text, sizeof(text));
     return text[0] ? std::atoi(text) : 2;
 }
@@ -596,6 +598,84 @@ int PlayerSync(Machine& machine, bool host) {
     Result("player-records", "%d ok %d bad", good, bad);
     return all && bad == 0 ? 0 : 1;
 }
+
+// I1: rooms above Epic's lobby (EDF6NET_LOBBY_CAP=2 plays Epic's 64 small). The host and the first guest are in
+// Epic's lobby; the last guest finds it full and comes in over the direct link to the host, which lets it in by its
+// own member list.
+// The game's P2P receive, as its network polls it every frame: EDF6Coop learns the local EOS user from it (a direct
+// link host welcomes nobody before), and it drains what arrives.
+void PollP2P(const Machine& machine) {
+    EOS_P2P_ReceivePacketOptions options{2, static_cast<EOS_ProductUserId>(const_cast<void*>(Self(machine))), 4096, nullptr};
+    std::vector<std::uint8_t> data(4096);
+    EOS_ProductUserId peer = nullptr;
+    EOS_P2P_SocketId socket{};
+    std::uint8_t channel = 0;
+    std::uint32_t size = 0;
+    const auto receive = Import<EOS_EResult (*)(void*, const EOS_P2P_ReceivePacketOptions*, EOS_ProductUserId*, EOS_P2P_SocketId*,
+                                                std::uint8_t*, void*, std::uint32_t*)>(machine, "EOS_P2P_ReceivePacket");
+    while (receive(kPlatform, &options, &peer, &socket, &channel, data.data(), &size) == EOS_Success) {
+    }
+}
+
+// The game's lobby manager listens to member statuses (012B3380 registers one handler): what EDF6Coop tells the game
+// about members beyond Epic's lobby goes there, and the room the host's game has follows it.
+void ListenToMembers(const Machine& machine) {
+    struct Options {
+        std::int32_t ApiVersion;
+    } options{1};
+    Import<std::uint64_t (*)(void*, const void*, void*, void (*)(const void*))>(machine,
+                                                                               "EOS_Lobby_AddNotifyLobbyMemberStatusReceived")(
+        kLobbyInterface, &options, nullptr, [](const void*) {});
+}
+
+int FullRoom(Machine& machine, bool host) {
+    ListenToMembers(machine);
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    TickUntil(machine, static_cast<unsigned>(Seconds(10)) * 1000, [&] {
+        PollP2P(machine);
+        return false;
+    });
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    return 0;
+}
+
+int FullJoin(Machine& machine) {
+    ListenToMembers(machine);
+    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+    const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+    const auto copyByKey = FakeExport<std::int32_t (*)(void*, const void*, void**)>("EOS_LobbyDetails_CopyAttributeByKey");
+    const auto release = FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release");
+    struct ByKey {
+        std::int32_t ApiVersion;
+        const char* AttrKey;
+    } key{1, "EDF6DN_HOSTADDR"};
+    void* details = nullptr;
+    // Epic's lobby full, and its host's direct-link address on it.
+    const bool ready = TickUntil(machine, 20000, [&] {
+        if (details) release(details);
+        details = roomCount() >= 2 ? roomDetails() : nullptr;
+        void* attribute = nullptr;
+        if (!details || copyByKey(details, &key, &attribute) != 0) return false;
+        FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
+        return true;
+    });
+    if (!ready) {
+        Result("fulljoin", "no full room with its host's address to join");
+        return 1;
+    }
+    Entered entered;
+    JoinOptions options;
+    options.LobbyDetailsHandle = details;
+    options.LocalUserId = Self(machine);
+    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+    TickUntil(machine, 30000, [&] { return entered.done; });
+    release(details);
+    Result("fulljoin", "%s %d", entered.done ? "completed" : "NOT completed", entered.result);
+    TickUntil(machine, 2000, [] { return false; });
+    return entered.done && entered.result == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -612,6 +692,8 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "netstats") return NetStats(machine, host);
     if (step == "versiongate") return VersionGate(machine, host);
     if (step == "bulk") return Bulk(machine, host);
+    if (step == "fullroom") return FullRoom(machine, host);
+    if (step == "fulljoin") return FullJoin(machine);
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

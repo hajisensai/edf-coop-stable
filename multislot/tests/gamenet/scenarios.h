@@ -100,6 +100,7 @@ struct MissionExpect {
     bool late;   // they arrive after it, and the guests wait for them
     bool lossy;  // the network lost start messages, and the game resent them
     bool rushed = false;  // the sync started before the members' markers reached the others
+    bool bulk = false;    // every record went in one bulk message (the room reads fragments, packetfit.h)
 };
 
 // The mission start sync: everyone ends up with every player's record, byte for byte the same.
@@ -132,14 +133,17 @@ inline void CheckMission(const std::vector<Spawned>& machines, const gamenet::Ne
     CheckEosAcceptedAll(network);
     const auto& host = machines.front();
     const bool sentBeside = host.text.find("sent beside the start message: result 0") != std::string::npos;
-    Check(sentBeside == expect.split, expect.split ? "the host sent loadout records beside the start message"
-                                                   : "the start message fit: nothing was sent beside it");
+    const bool sentBulk = host.text.find("sent in bulk ahead of the start message: sent") != std::string::npos;
+    Check(sentBulk == expect.bulk, expect.bulk ? "the host sent every loadout record in bulk" : "nothing went in bulk");
+    Check(sentBeside == (expect.split && !expect.bulk), expect.split && !expect.bulk ? "the host sent loadout records beside the start message"
+                                                   : "nothing was sent beside the start message");
     int waited = 0;
     for (std::size_t i = 1; i < machines.size(); ++i) {
         const std::string& log = machines[i].text;
         const bool arrived = log.find("arrived beside the start message") != std::string::npos;
-        Check(arrived == expect.split,
-              machines[i].user + (expect.split ? " got records beside the start message" : " needed no records beside it"));
+        Check(arrived == (expect.split && !expect.bulk),
+              machines[i].user + (expect.split && !expect.bulk ? " got records beside the start message" : " needed no records beside it"));
+        if (expect.bulk) Check(log.find("loadout records arrived in bulk") != std::string::npos, machines[i].user + " got the records in bulk");
         Check(log.find("never arrived") == std::string::npos, machines[i].user + " missed no record");
         const std::size_t wait = log.find("MISSION sync: waited ");
         waited += wait != std::string::npos && log.find(": here", wait) != std::string::npos ? 1 : 0;
@@ -232,21 +236,21 @@ inline const std::vector<Scenario>& Scenarios() {
         {"link", Seats(2, "link", BaseIni()), 90000, &CheckMarkedLink},
         // Two players, a test budget small enough that the second record goes beside the start message: what two
         // people testing the split by hand ran (SplitSyncBudget).
-        {"mission2", Seats(2, "mission", BaseIni("[Test]\r\nSplitSyncBudget=200\r\n")), 150000, &CheckSplitMission},
+        {"mission2", Seats(2, "mission", BaseIni("[Test]\r\nSplitSyncBudget=200\r\n[Netcode]\r\nFragments=0\r\n")), 150000, &CheckSplitMission},
         // Four players: the start message fits and is the game's own.
         {"mission4", Seats(4, "mission", BaseIni()), 150000, &CheckWholeMission},
         // Eight players: their records make the start message 1132 bytes, above the 1100 it may have, so one goes
         // beside it.
-        {"mission8", Seats(8, "mission", BaseIni()), 150000, &CheckSplitMission},
+        {"mission8", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckSplitMission},
         // The records travel on a channel of their own, and EOS keeps no order between channels: here they come
         // 400 ms after the start message, which every guest reads first and has to wait at.
-        {"mission8late", Seats(8, "mission", BaseIni()), 150000, &CheckLateRecords, {{"EDF6NET_DELAY", "77:400"}}},
+        {"mission8late", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckLateRecords, {{"EDF6NET_DELAY", "77:400"}}},
         // Without the direct link's reliable layer the game's datagrams are unreliable: the network loses the first
         // start message, and the game's own resend has to bring it.
         {"mission8lossy", Seats(8, "mission", BaseIni("", false)), 150000, &CheckLossyMission, {{"EDF6NET_DROP", "900:1"}}},
         // Every frame every machine says something else too (an event message of 16 bytes), which shares the
         // controller record with the start message: the room the plugin leaves for it (kBatchedAllowance).
-        {"mission8busy", Seats(8, "mission", BaseIni()), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
+        {"mission8busy", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckBusyMission, {{"EDF6NET_CHATTER", "16"}}},
         {"sidelink", {Seats(2, "sidelink", BaseIni()).front(), Seats(2, "sidelink", "")[1]}, 90000,
          &CheckPlainSidePackets, {{"EDF6NET_RUSH", "1"}}},
         {"mission4modweapon",
@@ -258,13 +262,13 @@ inline const std::vector<Scenario>& Scenarios() {
          150000, &CheckModWeapons},
         // A mission started the moment the last player is in, while Epic takes 2.5 s to relay each member's lobby
         // attributes (the split sync marker among them) to the others.
-        {"mission8rushed", Seats(8, "mission", BaseIni()), 150000, &CheckRushedMission,
+        {"mission8rushed", Seats(8, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 150000, &CheckRushedMission,
          {{"EDF6NET_RUSH", "1"}, {"EDF6NET_LOBBY_DELAY", "2500"}}},
         {"playersync", Seats(2, "playersync", BaseIni()), 90000, &CheckPlayerSync},
         // Rooms past eight (docs/net-re/roomsize.md): 16 and 32 players, each record beside the start message but
         // the few that fit, every machine with every player's bytes.
-        {"mission16", Seats(16, "mission", BaseIni()), 240000, &CheckSplitMission},
-        {"mission32", Seats(32, "mission", BaseIni()), 400000, &CheckSplitMission},
+        {"mission16", Seats(16, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 240000, &CheckSplitMission},
+        {"mission32", Seats(32, "mission", BaseIni("[Netcode]\r\nFragments=0\r\n")), 400000, &CheckSplitMission},
     };
     return all;
 }
@@ -390,7 +394,43 @@ inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::N
         }
         Check(unknownLater == 0, machine.user + ": once learnt, every datagram has a class (" + std::to_string(unknownLater) +
                                      " unknown later)");
+        // Sending stopped: the last state datagram to each member went once more, reliably (nothing replaces it).
+        std::size_t trails = 0;
+        for (std::size_t p = log.find("PATHS last "); p != std::string::npos; p = log.find("PATHS last ", p + 1)) {
+            const std::size_t c = log.find(" last state datagrams sent again reliably", p);
+            const std::size_t start = log.rfind(", ", c);
+            if (c != std::string::npos && start != std::string::npos && start > p) trails += std::strtoull(log.c_str() + start + 2, nullptr, 10);
+        }
+        Check(trails >= 2, machine.user + ": the last state datagram to each of the others went again reliably (" +
+                               std::to_string(trails) + ")");
     }
+}
+
+// One member has the traffic classes off: the room runs without them. Every state datagram goes as before this
+// existed - reliably, nothing held back - while the log still names its class.
+inline void CheckNetStatsMixed(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    std::size_t states = 0, unreliable = 0;
+    for (const auto& packet : Wire(network))
+        if (packet.header.channel == 0 && packet.header.size == 89) {
+            ++states;
+            unreliable += packet.header.reliability == 0 ? 1 : 0;
+        }
+    std::printf("INFO: %zu state datagrams on the wire, %zu of them unreliable\n", states, unreliable);
+    Check(states > 20 && unreliable == 0, "with one member without the classes every state datagram went reliably");
+    for (const auto& machine : machines)
+        Check(LastLine(machine.text, "NETCODE features in room").find(" on: TrafficClasses") == std::string::npos,
+              machine.user + " does not run the classes (" + LastLine(machine.text, "NETCODE features in room") + ")");
+}
+
+// [Netcode] Mesh=0 at the joiners: the room runs without the mesh, everything between them goes through the host.
+inline void CheckMeshOff(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    CheckEveryRecord(machines, 1000);
+    for (std::size_t i = 1; i < machines.size(); ++i)
+        Check(machines[i].text.find("linked directly") == std::string::npos, machines[i].user + " never linked directly");
+    Check(PathKbps(machines.front().text, "relayed for others ") > 0, "the host relayed the joiners' traffic");
 }
 
 // A member of another netcode protocol ([Test] NetProtocol=99) is refused by the host: removed from the room, both
@@ -488,7 +528,7 @@ inline std::vector<Seat> DirectSeats(int count, const std::string& step, const s
 // 16-byte event every frame (more would not fit beside the start message, kBatchedAllowance). Datagrams are packed once the room shows that everyone unpacks them, and
 // the start sync and every record still arrive as sent.
 inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamenet::Network& network) {
-    CheckMission(machines, network, {true, false, false});
+    CheckMission(machines, network, {true, false, false, false, true});
     std::size_t packing = 0, unpacking = 0;
     for (const auto& machine : machines) {
         const std::string line = LastLine(machine.text, "NETCODE XPRESS: ");
@@ -498,6 +538,45 @@ inline void CheckXpressMission(const std::vector<Spawned>& machines, const gamen
     }
     Check(packing > 0 && unpacking > 0, std::to_string(packing) + " machines packed datagrams, " +
                                             std::to_string(unpacking) + " unpacked them");
+    // A packed datagram keeps its class: the send finds the records of its flush by the packed size.
+    for (const auto& machine : machines)
+        for (std::size_t at = machine.text.find("NETCLASS datagrams: "); at != std::string::npos;
+             at = machine.text.find("NETCLASS datagrams: ", at + 1)) {
+            const std::size_t end = machine.text.find('\n', at);
+            const std::string line = machine.text.substr(at, end - at);
+            Check(line.find(", 0 without their plaintext") != std::string::npos, machine.user + ": every datagram had its plaintext (" + line + ")");
+        }
+}
+
+
+// Epic's lobby full (EDF6NET_LOBBY_CAP=2 stands for its 64), the room larger (8): the host puts its direct-link address
+// and identity on the lobby, the third player is turned away by Epic and comes in over the direct link instead, and the
+// host lets it in by its own member list.
+inline void CheckJoinFull(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    const auto& host = machines.front();
+    const auto& late = machines.back();
+    Check(network.lobby.count == 2, "Epic's lobby holds its 2 (" + std::to_string(network.lobby.count) + ")");
+    Check(Result(late, "fulljoin") == "completed 0", late.user + " is in the room: " + Result(late, "fulljoin"));
+    Check(late.text.find("is full") != std::string::npos && late.text.find("coming in over the direct link") != std::string::npos,
+          late.user + " was turned away by Epic and came in over the direct link");
+    Check(host.text.find("members outside it come in over the direct link") != std::string::npos,
+          "the host admits members beyond Epic's lobby");
+    Check(host.text.find("DIRECT client " + late.user.substr(0, 8) + " connected") != std::string::npos,
+          "the host linked the third player");
+    Check(host.text.find("ROOM " + late.user.substr(0, 8) + " -> JOINED for the game") != std::string::npos,
+          "the host's game was told the third player joined");
+}
+
+inline std::vector<Seat> JoinFullSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(3, "fullroom", "");
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n"
+                            "PublicAddress=127.0.0.1:@PORT@\r\n";
+    seats[1].ini = common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    seats[2].ini = seats[1].ini;
+    seats[2].role = "guest-fulljoin";
+    return seats;
 }
 
 inline const std::vector<Scenario>& NetScenarios() {
@@ -517,6 +596,21 @@ inline const std::vector<Scenario>& NetScenarios() {
          {{"EDF6NET_SECONDS", "8"}}},
         {"meshflap", DirectSeats(3, "netstats", "", "[Test]\r\nPeerBlockAfterMs=7000\r\nPeerBlockForMs=1500\r\n"), 120000,
          &CheckMeshFlap, {{"EDF6NET_SECONDS", "10"}}},
+        {"netstatsmixed",
+         [] {
+             auto seats = Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n"));
+             seats[2].ini = BaseIni("[Netcode]\r\nStatsSeconds=1\r\nTrafficClasses=0\r\n");
+             return seats;
+         }(),
+         90000, &CheckNetStatsMixed, {{"EDF6NET_SECONDS", "8"}}},
+        {"joinfull", JoinFullSeats(), 120000, &CheckJoinFull,
+         {{"EDF6NET_LOBBY_CAP", "2"}, {"EDF6NET_EPIC_MEMBERS", "2"}, {"EDF6NET_SECONDS", "12"}}},
+        {"meshoff", DirectSeats(3, "netstats", "", "Mesh=0\r\n"), 120000, &CheckMeshOff, {{"EDF6NET_SECONDS", "6"}}},
+        // 32 players once the room shows that everyone reads fragments: the start message carries a bulk marker only,
+        // every record goes in one bulk message.
+        {"mission32bulk", Seats(32, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 400000,
+         [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckMission(m, n, {true, false, false, false, true}); },
+         {{"EDF6NET_SETTLE", "4000"}}},
         {"mission8xpress", Seats(8, "mission", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 150000,
          &CheckXpressMission, {{"EDF6NET_CHATTER", "16"}, {"EDF6NET_SETTLE", "2500"}}},
     };

@@ -13,6 +13,8 @@ namespace {
 
 constexpr std::uint8_t kStubMagic[8] = {'M', 'S', 'l', 'o', 't', 'R', 'e', 'c'};
 constexpr std::uint8_t kSideMagic[8] = {'M', 'S', 'l', 'o', 't', 'S', 'i', 'd'};
+constexpr std::uint8_t kBulkMagic[8] = {'M', 'S', 'l', 'o', 't', 'B', 'l', 'k'};
+constexpr std::uint8_t kBulkPayloadMagic[8] = {'M', 'S', 'l', 'o', 't', 'R', 'B', 'k'};
 constexpr std::uint8_t kByteArrayTag = 0xA0;  // 12B5200: 0xA0 | length >> 8, then the low byte of the length
 constexpr std::uint8_t kStubLength = static_cast<std::uint8_t>(kStubBytes - 2);
 static_assert(kStubBytes == 2 + sizeof(kStubMagic) + 1 + 2 + 8, "stub layout");
@@ -131,7 +133,53 @@ struct Outgoing {
     std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
     std::vector<const void*> sentTo;
     unsigned long long since = 0;
+    std::vector<std::uint8_t> bulk;  // every record in one bulk message (empty: none)
+    std::vector<const void*> bulkSentTo;
 } outgoing;
+
+BulkReady bulkReady = nullptr;
+BulkSend bulkSend = nullptr;
+
+// Bulks received (or written), by id: a few syncs' worth, oldest replaced first.
+struct Bulks {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::vector<std::pair<std::uint64_t, std::vector<BulkRecord>>> held;  // newest last
+} bulks;
+constexpr std::size_t kBulksKept = 4;
+
+void KeepBulk(std::uint64_t id, std::vector<BulkRecord> records) {
+    AcquireSRWLockExclusive(&bulks.lock);
+    for (auto& [have, list] : bulks.held)
+        if (have == id) {
+            ReleaseSRWLockExclusive(&bulks.lock);
+            return;
+        }
+    if (bulks.held.size() >= kBulksKept) bulks.held.erase(bulks.held.begin());
+    bulks.held.emplace_back(id, std::move(records));
+    ReleaseSRWLockExclusive(&bulks.lock);
+}
+
+// Record `k` of bulk `id` into `out` (and its size); false when that bulk is not here (yet).
+bool BulkRecordAt(std::uint64_t id, std::size_t k, std::uint8_t* out, std::size_t& size) {
+    AcquireSRWLockShared(&bulks.lock);
+    bool found = false;
+    for (const auto& [have, list] : bulks.held)
+        if (have == id && k < list.size()) {
+            size = list[k].bytes.size();
+            if (out) std::memcpy(out, list[k].bytes.data(), size);
+            found = true;
+            break;
+        }
+    ReleaseSRWLockShared(&bulks.lock);
+    return found;
+}
+
+// Which record of a bulk marker the game's reader is at (it stays on the marker until the last).
+struct BulkReader {
+    const void* stream = nullptr;
+    std::uint64_t id = 0;
+    std::size_t next = 0;
+} bulkReader;
 
 // What the game's last receive asked EOS: what RecordReadHook receives with while it waits for a record.
 struct LastReceive {
@@ -388,7 +436,13 @@ void ClearRecords() {
     AcquireSRWLockExclusive(&outgoing.lock);
     outgoing.records.clear();
     outgoing.sentTo.clear();
+    outgoing.bulk.clear();
+    outgoing.bulkSentTo.clear();
     ReleaseSRWLockExclusive(&outgoing.lock);
+    AcquireSRWLockExclusive(&bulks.lock);
+    bulks.held.clear();
+    ReleaseSRWLockExclusive(&bulks.lock);
+    bulkReader = {};
 }
 
 void InitPacketFit(const unsigned char* gameBase) {
@@ -437,6 +491,33 @@ void FlushRecords(void* stream) {
     for (std::size_t i = 0; i < batch.count; ++i) {
         refs.push_back({batch.records[i].index, batch.records[i].size});
         full += batch.records[i].size;
+    }
+    // Too large even with stubs to spare, and the room reads fragments: every record goes in bulk (see packetfit.h).
+    if (full > syncBudget && bulkReady && bulkSend && bulkReady()) {
+        std::vector<BulkRecord> all;
+        for (std::size_t i = 0; i < batch.count; ++i)
+            all.push_back({batch.records[i].index,
+                           std::vector<std::uint8_t>(batch.records[i].bytes, batch.records[i].bytes + batch.records[i].size)});
+        std::uint64_t id = RecordHash(reinterpret_cast<const std::uint8_t*>(&full), sizeof(full));
+        for (const auto& r : all) id = RecordHash(r.bytes.data(), r.bytes.size()) ^ (id * 0x100000001B3ull);
+        std::vector<std::uint8_t> payload = BuildRecordsBulk(id, all);
+        std::uint8_t marker[kStubBytes];
+        WriteBulkMarker(marker, batch.count, id);
+        Append(stream, marker, sizeof(marker));
+        Log("MISSION sync: %zu loadout records would make the start message %zu bytes (it may hold %zu); all of them go "
+            "in one bulk message of %zu bytes, the message is %zu bytes",
+            batch.count, full, syncBudget, payload.size(), StreamSize(stream));
+        KeepBulk(id, std::move(all));
+        AcquireSRWLockExclusive(&outgoing.lock);
+        outgoing.records.clear();
+        outgoing.sentTo.clear();
+        outgoing.bulk = std::move(payload);
+        outgoing.bulkSentTo.clear();
+        outgoing.since = packetClock();
+        ReleaseSRWLockExclusive(&outgoing.lock);
+        batch.stream = nullptr;
+        batch.count = 0;
+        return;
     }
     const auto inlined = PlanInline(header, refs, syncBudget);
     std::size_t moved = 0;
@@ -514,10 +595,69 @@ bool WaitForRecord(const StubInfo& stub) {
     return here;
 }
 
+// Waits for bulk `id` as WaitForRecord waits for a record (receiving from EOS itself, holding the game's packets).
+bool WaitForBulk(std::uint64_t id, std::size_t count) {
+    std::size_t size = 0;
+    if (BulkRecordAt(id, 0, nullptr, size)) return true;
+    if (!lastReceive.known || !eosReceive) return false;
+    const unsigned long long wait = recordWaitMs + kBulkWaitMsPerKiB * (count * kMaxRecordBytes / 1024);
+    const EosReceiveOptions ask{lastReceive.apiVersion, lastReceive.localUser, static_cast<std::uint32_t>(kGameReceiveBuffer),
+                                nullptr};
+    std::vector<std::uint8_t> buffer(kGameReceiveBuffer);
+    const unsigned long long start = packetClock();
+    std::size_t held = 0;
+    bool here = false;
+    for (;;) {
+        for (;;) {
+            void* peer = nullptr;
+            EosSocketId socket{};
+            std::uint8_t channel = 0;
+            std::uint32_t got = 0;
+            if (eosReceive(lastReceive.handle, &ask, &peer, &socket, &channel, buffer.data(), &got) != 0) break;
+            if (TakeSidePacket(buffer.data(), got)) continue;
+            Hold(&peer, &socket, &channel, buffer.data(), got);
+            ++held;
+        }
+        here = BulkRecordAt(id, 0, nullptr, size);
+        if (here || packetClock() - start >= wait) break;
+        Sleep(1);
+    }
+    Log("MISSION sync: waited %llu ms (of %llu) for the %zu loadout records in bulk: %s (%zu game packet(s) held for the "
+        "game meanwhile)", packetClock() - start, wait, count, here ? "here" : "still missing", held);
+    return here;
+}
+
+// The start message's bulk marker read as record `bulkReader.next` of the bulk; the stream stays on the marker until
+// the last record was read.
+bool ReadBulkRecord(void* context, void* record, void* stream, std::size_t position, std::size_t count, std::uint64_t id) {
+    if (bulkReader.stream != stream || bulkReader.id != id || bulkReader.next >= count) bulkReader = {stream, id, 0};
+    const std::size_t k = bulkReader.next++;
+    if (bulkReader.next >= count) {
+        position += kStubBytes;  // the last one: the game reads on after the marker
+        std::memcpy(Bytes(stream) + kStreamPosition, &position, sizeof(position));
+        bulkReader = {};
+    }
+    alignas(16) std::uint8_t scratch[kStreamObjectSize] = {};
+    std::size_t size = 0;
+    if (!BulkRecordAt(id, k, scratch + kStreamData, size) && !(WaitForBulk(id, count) && BulkRecordAt(id, k, scratch + kStreamData, size))) {
+        Log("MISSION sync: the loadout records in bulk never arrived; record %zu of %zu is left out and that player will "
+            "look wrong on this machine", k, count);
+        const std::int32_t none = -1;
+        std::memcpy(record, &none, sizeof(none));
+        return true;
+    }
+    std::memcpy(scratch + kStreamSize, &size, sizeof(size));
+    return readRecord(context, record, scratch);
+}
+
 bool __fastcall RecordReadHook(void* context, void* record, void* stream) {
     std::size_t position = 0;
     std::memcpy(&position, Bytes(stream) + kStreamPosition, sizeof(position));
     const std::size_t size = std::min(StreamSize(stream), kStreamCapacity);
+    std::size_t bulkCount = 0;
+    std::uint64_t bulkId = 0;
+    if (position < size && ParseBulkMarker(Bytes(stream) + kStreamData + position, size - position, bulkCount, bulkId))
+        return ReadBulkRecord(context, record, stream, position, bulkCount, bulkId);
     StubInfo stub;
     if (position >= size || !ParseStub(Bytes(stream) + kStreamData + position, size - position, stub))
         return readRecord(context, record, stream);
@@ -570,7 +710,13 @@ std::size_t HeldPacketCount() { return heldCount; }
 // do not decrypt (GameNet_mission2plain).
 void SendRecordsAhead(void* handle, const EosSendOptions& options) {
     std::vector<std::pair<StubInfo, std::vector<std::uint8_t>>> records;
+    std::vector<std::uint8_t> bulk;
     AcquireSRWLockExclusive(&outgoing.lock);
+    if (!outgoing.bulk.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
+        std::find(outgoing.bulkSentTo.begin(), outgoing.bulkSentTo.end(), options.RemoteUserId) == outgoing.bulkSentTo.end()) {
+        outgoing.bulkSentTo.push_back(options.RemoteUserId);
+        bulk = outgoing.bulk;
+    }
     const bool due = !outgoing.records.empty() && packetClock() - outgoing.since < kHeldPacketMs &&
                      std::find(outgoing.sentTo.begin(), outgoing.sentTo.end(), options.RemoteUserId) == outgoing.sentTo.end();
     if (due) {
@@ -578,6 +724,11 @@ void SendRecordsAhead(void* handle, const EosSendOptions& options) {
         records = outgoing.records;
     }
     ReleaseSRWLockExclusive(&outgoing.lock);
+    if (!bulk.empty()) {
+        const bool sent = bulkSend && bulkSend(options.RemoteUserId, kRecordsBulkTag, bulk.data(), bulk.size());
+        Log("MISSION sync: every loadout record (%zu bytes) sent in bulk ahead of the start message: %s", bulk.size(),
+            sent ? "sent" : "NOT sent");
+    }
     if (due && splitSyncReaders) splitSyncReaders(options.RemoteUserId);  // says so if it shows no marker
     for (const auto& [stub, bytes] : records) {
         std::uint8_t packet[kSideHeader + kMaxRecordBytes];
@@ -663,6 +814,72 @@ void LogOversizePacket(std::uintptr_t caller, std::uint8_t channel, std::int32_t
     Log("NETLOG OVERSIZE game packet of %u bytes (EOS takes %zu): channel=%u reliability=%d caller=EDF+%llX result=%d "
         "first bytes %s (logged once per kind)",
         size, kEosMaxPacket, channel, reliability, static_cast<unsigned long long>(caller), result, head);
+}
+
+
+void SetBulkRecords(BulkReady ready, BulkSend send) {
+    bulkReady = ready;
+    bulkSend = send;
+}
+
+std::vector<std::uint8_t> BuildRecordsBulk(std::uint64_t id, const std::vector<BulkRecord>& records) {
+    std::vector<std::uint8_t> out(sizeof(kBulkPayloadMagic) + 8 + 2);
+    std::memcpy(out.data(), kBulkPayloadMagic, sizeof(kBulkPayloadMagic));
+    Put64(out.data() + 8, id);
+    Put16(out.data() + 16, records.size());
+    for (const BulkRecord& r : records) {
+        const std::size_t at = out.size();
+        out.resize(at + 4 + r.bytes.size());
+        Put16(out.data() + at, static_cast<std::size_t>(r.index));
+        Put16(out.data() + at + 2, r.bytes.size());
+        std::memcpy(out.data() + at + 4, r.bytes.data(), r.bytes.size());
+    }
+    return out;
+}
+
+bool ParseRecordsBulk(const std::uint8_t* data, std::size_t size, std::uint64_t& id, std::vector<BulkRecord>& records) {
+    records.clear();
+    if (!data || size < 18 || std::memcmp(data, kBulkPayloadMagic, sizeof(kBulkPayloadMagic)) != 0) return false;
+    id = Get64(data + 8);
+    const std::size_t count = Get16(data + 16);
+    std::size_t at = 18;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (size - at < 4) return false;
+        const std::size_t length = Get16(data + at + 2);
+        if (length == 0 || length > kMaxRecordBytes || size - at - 4 < length) return false;
+        records.push_back({static_cast<int>(Get16(data + at)), std::vector<std::uint8_t>(data + at + 4, data + at + 4 + length)});
+        at += 4 + length;
+    }
+    return at == size;
+}
+
+void WriteBulkMarker(std::uint8_t* out, std::size_t count, std::uint64_t id) {
+    out[0] = kByteArrayTag;
+    out[1] = kStubLength;
+    std::memcpy(out + 2, kBulkMagic, sizeof(kBulkMagic));
+    out[10] = 0xFF;
+    Put16(out + 11, count);
+    Put64(out + 13, id);
+}
+
+bool ParseBulkMarker(const std::uint8_t* at, std::size_t available, std::size_t& count, std::uint64_t& id) {
+    if (!at || available < kStubBytes || at[0] != kByteArrayTag || at[1] != kStubLength ||
+        std::memcmp(at + 2, kBulkMagic, sizeof(kBulkMagic)) != 0 || at[10] != 0xFF)
+        return false;
+    count = Get16(at + 11);
+    id = Get64(at + 13);
+    return count > 0;
+}
+
+void TakeRecordsBulk(const std::uint8_t* data, std::size_t size) {
+    std::uint64_t id = 0;
+    std::vector<BulkRecord> records;
+    if (!ParseRecordsBulk(data, size, id, records)) {
+        Log("MISSION sync: a malformed bulk of loadout records (%zu bytes) was dropped", size);
+        return;
+    }
+    Log("MISSION sync: %zu loadout records arrived in bulk (%zu bytes)", records.size(), size);
+    KeepBulk(id, std::move(records));
 }
 
 }  // namespace multislot

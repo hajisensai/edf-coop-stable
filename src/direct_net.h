@@ -95,6 +95,9 @@ struct DirectOptions {
     uint64_t relayBytesPerSecond = 2u << 20;
     // A state datagram over the path's budget (linkBudget) is dropped instead of sent into a queue.
     bool shedState = true;
+    // Our netcode protocol and features for our hellos, and whether a host refuses another protocol (setNetcode).
+    uint32_t netProtocol = 0, netCaps = 0;
+    bool refuseOtherProtocols = false;
 };
 
 // The paths a datagram can take to another member (see the file comment).
@@ -126,6 +129,7 @@ struct Delivered {
     std::string socketName;
     uint8_t channel = 0;
     std::vector<uint8_t> data;
+    uint8_t cls = 0;  // TrafficClass it was sent as: a classified datagram may come over two paths (a copy)
 };
 
 class DirectNet {
@@ -171,6 +175,28 @@ public:
     void setTestBlockPeer(const std::string& puid, bool blocked);
     // Tests only: the same for every joiner, from `afterMs` from now for `forMs` (UINT64_MAX: for good).
     void setTestBlockPeers(uint64_t afterMs, uint64_t forMs);
+    // [Netcode] Mesh (and whether the room runs it) and ShedState, after start: DirectOptions::mesh / shedState.
+    void setMesh(bool on);
+    // Our netcode protocol and features, said in every hello; a host refuses a hello of another protocol when
+    // `refuseOthers` (multislot netfeature.h RejectMismatched). 0: nothing said, nothing checked.
+    void setNetcode(uint32_t protocol, uint32_t caps, bool refuseOthers);
+    // host: let in a member that published no identity in Epic's lobby - the room holds more than Epic's lobby does
+    // (above 64), so members beyond it cannot publish one. It proves the key its hello carries; the first key a member
+    // used in this room is the one it must keep using (memberIds). Members Epic lists still prove the one they published.
+    void setAdmitUnlisted(bool on);
+    // host: the netcode protocol and features each linked client said in its hello.
+    struct MemberNetcode {
+        uint32_t protocol = 0;
+        uint32_t caps = 0;
+    };
+    std::map<std::string, MemberNetcode> clientNetcode();
+    void setShedState(bool on);
+    bool mesh();
+    // host: asked before a joiner's state datagram is relayed to another (observer = the receiver, subject = the
+    // sender); false drops it (interest management: the next one replaces it). Null: always relayed.
+    using RelayStateFilter = bool (*)(const std::string& observer, const std::string& subject, uint32_t bytes, uint32_t budget,
+                                      uint64_t nowMs);
+    void setRelayStateFilter(RelayStateFilter filter) { relayFilter_ = filter; }
     // Pops the next packet for the local player; `channel` filters like EOS RequestedChannel.
     bool pop(const uint8_t* channel, uint32_t maxSize, Delivered& out);
 
@@ -399,6 +425,13 @@ private:
     std::map<std::string, Intro> intros_;
     std::map<std::string, bool> testBlocked_;
     uint64_t testBlockFromMs_ = 0, testBlockToMs_ = 0;  // setTestBlockPeers, on nowMs()
+    std::atomic<RelayStateFilter> relayFilter_{nullptr};
+    uint32_t netProtocol_ = 0, netCaps_ = 0;
+    bool refuseOtherProtocols_ = false;
+    bool admitUnlisted_ = false;
+    std::map<std::string, MemberNetcode> clientNetcode_;  // host: as said in each client's hello
+    std::map<std::string, std::string> unlistedIds_;       // host: members beyond Epic's lobby -> the key they proved
+    std::atomic<uint64_t> relayFiltered_{0};
     uint64_t linkIds_ = 0;  // the last Link::id handed out
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;

@@ -23,6 +23,7 @@
 //     if (multislot::NetFeatureActive(multislot::NetFeature::HitAuthority)) { ...new rule... } else { ...game's... }
 // Cheap (a shared lock and a few compares): call it where the decision is made, every time. Any thread.
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -37,6 +38,10 @@ namespace multislot {
 constexpr std::int64_t kNetProtocol = 1;
 constexpr const char* kNetProtocolKey = "EDF6NET_PROTO";
 constexpr const char* kNetCapsKey = "EDF6NET_CAPS";
+// A member publishes the room host's protocol as it read it, after it logged what it read. The host refuses a
+// member of another protocol only once it shows this: the refused member has said why on its own side first (both
+// beat once a second, and without this the host could remove it before it ever read the host's entry).
+constexpr const char* kNetSeenKey = "EDF6NET_SEEN";
 
 enum class NetFeature : std::uint32_t {
     // W1, the transport (src/netcode.h).
@@ -66,9 +71,11 @@ public:
         bool published = false;  // shows EDF6NET_PROTO
         std::int64_t protocol = 0;
         std::uint32_t caps = 0;
+        bool seenHost = false;  // shows kNetSeenKey: it has read (and logged) the host's protocol
     };
     // What the lobby beat read (an empty view: we left). Returns the members whose protocol differs from ours and
-    // that are new since the last call (each once per room), for the owner to refuse.
+    // that are new since the last call (each once per room): for the owner to refuse, once they show kNetSeenKey
+    // (until then they are not returned, and come again); for anyone else to log.
     std::vector<Member> Observe(const LobbyView& view);
     bool Active(std::uint32_t caps) const;  // every listed member publishes kNetProtocol and has all of `caps`
     bool InRoom() const;
@@ -82,6 +89,10 @@ private:
     std::string lobby_, self_, owner_;
     std::vector<Member> members_;
     std::vector<std::string> reported_;  // mismatched members already returned, this room
+    // What Active answers, worked out when the room changes (Observe): the features every member has on, or 0. Read
+    // on every datagram (NetFeatureActive is on the send path), so it is one atomic load.
+    std::atomic<std::uint32_t> active_{0};
+    void UpdateActiveLocked();
 };
 
 NetRoom& NetGate();
@@ -102,6 +113,8 @@ void SetStateSendFilter(dn::StateSendFilter filter);
 // or there is no path yet. Call it on the game's thread (it sends through EOS).
 bool SendBulk(const std::string& remote, std::uint16_t tag, const void* data, std::size_t size);
 void SetBulkHandler(dn::BulkHandler handler);
+// The handler of one tag (several parts receive bulk messages; the one dn handler dispatches by tag).
+void SetBulkHandlerForTag(std::uint16_t tag, dn::BulkHandler handler);
 
 // Reads [Netcode] (the features this machine has on, RejectMismatched, StatsSeconds, ...) and hands the
 // transport its options (src/netcode.h). Before StartNetFeature.

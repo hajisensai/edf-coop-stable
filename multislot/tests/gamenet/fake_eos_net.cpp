@@ -85,6 +85,7 @@ struct Fake {
     std::uint32_t dropMinimum = 0;
     int dropsLeft = 0;
     ULONGLONG lobbyDelayMs = 0;  // EDF6NET_LOBBY_DELAY
+    std::uint32_t lobbyCap = 0;  // EDF6NET_LOBBY_CAP (0: none)
 };
 
 Fake& F() {
@@ -122,6 +123,8 @@ bool Open() {
     }
     if (GetEnvironmentVariableA(gamenet::kLobbyDelayVariable, setting, sizeof(setting)))
         f.lobbyDelayMs = std::strtoull(setting, nullptr, 10);
+    if (GetEnvironmentVariableA(gamenet::kLobbyCapVariable, setting, sizeof(setting)))
+        f.lobbyCap = static_cast<std::uint32_t>(std::strtoul(setting, nullptr, 10));
     if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
         unsigned bytes = 0, count = 0;
         if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
@@ -734,7 +737,7 @@ EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, 
         lobby = gamenet::Lobby{};
         Copy(lobby.id, sizeof(lobby.id), id);
         Copy(lobby.owner, sizeof(lobby.owner), f.self);
-        lobby.maxMembers = options->MaxLobbyMembers;
+        lobby.maxMembers = f.lobbyCap && f.lobbyCap < options->MaxLobbyMembers ? f.lobbyCap : options->MaxLobbyMembers;
         lobby.count = 1;
         Copy(lobby.members[0].user, sizeof(lobby.members[0].user), f.self);
         ++lobby.version;
@@ -853,7 +856,18 @@ EXPORT EOS_EResult EOS_LobbyModification_AddMemberAttribute(void* handle, const 
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_LobbyModification_AddAttribute(void* handle, const AddAttributeOptions* options) {
-    if (!handle || !options || !options->Attribute) return EOS_InvalidParameters;
+    if (!handle || !options || !options->Attribute || !options->Attribute->Key) return EOS_InvalidParameters;
+    gamenet::Attribute value{};
+    Copy(value.key, sizeof(value.key), options->Attribute->Key);
+    if (options->Attribute->ValueType == kString) {
+        if (!options->Attribute->Value.AsUtf8 || !*options->Attribute->Value.AsUtf8) return EOS_InvalidParameters;
+        value.type = 4;
+        Copy(value.text, sizeof(value.text), options->Attribute->Value.AsUtf8);
+    } else {
+        value.type = 1;
+        value.number = options->Attribute->Value.AsInt64;
+    }
+    static_cast<Modification*>(handle)->lobby.push_back(value);
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_LobbyModification_SetMaxMembers(void*, const void*) { return EOS_Success; }
@@ -873,6 +887,21 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
     for (auto value : modification->member) {
         value.visibleAt = GetTickCount64() + f.lobbyDelayMs;
         SetAttribute(*self, value);
+    }
+    // The lobby's own attributes: only from its owner (EOS refuses them from anyone else, and the whole update).
+    if (!modification->lobby.empty() && f.self != lobby.owner) return Complete(callback, clientData, EOS_InvalidParameters, lobby.id);
+    for (const auto& value : modification->lobby) {
+        gamenet::Attribute* free = nullptr;
+        bool set = false;
+        for (auto& attribute : lobby.attributes) {
+            if (!std::strcmp(attribute.key, value.key)) {
+                attribute = value;
+                set = true;
+                break;
+            }
+            if (!free && !attribute.key[0]) free = &attribute;
+        }
+        if (!set && free) *free = value;
     }
     ++lobby.version;
     Complete(callback, clientData, EOS_Success, lobby.id);
@@ -941,9 +970,39 @@ EXPORT EOS_EResult EOS_LobbyDetails_CopyMemberAttributeByIndex(void* details, co
         }
     return EOS_NotFound;
 }
-EXPORT std::uint32_t EOS_LobbyDetails_GetAttributeCount(void*, const void*) { return 0; }
-EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByIndex(void*, const void*, Attribute**) { return EOS_NotFound; }
-EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByKey(void*, const void*, Attribute**) { return EOS_NotFound; }
+EXPORT std::uint32_t EOS_LobbyDetails_GetAttributeCount(void* details, const void*) {
+    std::uint32_t count = 0;
+    if (details)
+        for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes) count += attribute.key[0] ? 1 : 0;
+    return count;
+}
+struct CopyAttributeByIndexOptions {
+    std::int32_t ApiVersion;
+    std::uint32_t AttrIndex;
+};
+EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByIndex(void* details, const CopyAttributeByIndexOptions* options, Attribute** out) {
+    if (!details || !options || !out) return EOS_InvalidParameters;
+    std::uint32_t index = 0;
+    for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes)
+        if (attribute.key[0] && index++ == options->AttrIndex) {
+            *out = NewAttribute(attribute);
+            return EOS_Success;
+        }
+    return EOS_NotFound;
+}
+struct CopyAttributeByKeyOptions {
+    std::int32_t ApiVersion;
+    const char* AttrKey;
+};
+EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByKey(void* details, const CopyAttributeByKeyOptions* options, Attribute** out) {
+    if (!details || !options || !options->AttrKey || !out) return EOS_InvalidParameters;
+    for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes)
+        if (attribute.key[0] && !_stricmp(attribute.key, options->AttrKey)) {
+            *out = NewAttribute(attribute);
+            return EOS_Success;
+        }
+    return EOS_NotFound;
+}
 namespace {
 struct OwnedInfo {
     LobbyDetailsInfo api{};

@@ -126,6 +126,8 @@ void writeBody(Writer& w, const Message& m) {
             w.raw(m.hello.publicKey.data(), m.hello.publicKey.size());
             w.raw(m.hello.ecdh.data(), m.hello.ecdh.size());
             w.raw(m.hello.signature.data(), m.hello.signature.size());
+            w.u32(m.hello.netProtocol);
+            w.u32(m.hello.netCaps);
             break;
         case MsgType::Challenge:
             w.u32(m.challenge.clientNonce);
@@ -207,6 +209,8 @@ bool readBody(Reader& r, Message& m) {
             r.fixed(m.hello.publicKey);
             r.fixed(m.hello.ecdh);
             r.fixed(m.hello.signature);
+            m.hello.netProtocol = r.u32();
+            m.hello.netCaps = r.u32();
             return true;
         case MsgType::Challenge:
             m.challenge.clientNonce = r.u32();
@@ -365,6 +369,8 @@ std::optional<Digest> helloDigest(const HelloMsg& hello) {
     w.u64(hello.session);
     w.str(hello.puid);
     writeKey(w, hello.ecdh);
+    w.u32(hello.netProtocol);
+    w.u32(hello.netCaps);
     return sha256(w.buf.data(), w.buf.size());
 }
 

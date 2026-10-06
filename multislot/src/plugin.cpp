@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -27,10 +28,12 @@
 #include "loaderproxy.h"
 #include "lobbystate.h"
 #include "hud.h"
+#include "identity.h"
 #include "midhook.h"
 #include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
+#include "netaoi.h"
 #include "netcompress.h"
 #include "netfeature.h"
 #include "netplayer_game.h"
@@ -766,6 +769,26 @@ bool LoadRooms(const wchar_t* iniPath) {
     const bool marker = imports == 2 && lobbyGlue;
     // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
     StartNetFeature(lobbyGlue);
+    // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
+    // datagrams follow interest management within each path's budget (netaoi.h).
+    dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });
+    // [Test] RoomCapacity: the room's size where the test network's lobby cannot say it (gamenet joinfull).
+    if (const UINT testCapacity = GetPrivateProfileIntW(L"Test", L"RoomCapacity", 0, iniPath)) {
+        static UINT capacity = 0;
+        capacity = testCapacity;
+        dn::setRoomCapacitySource([]() -> std::uint32_t { return capacity; });
+        Log("TEST RoomCapacity=%u: the room holds that many whatever its lobby says", testCapacity);
+    }
+    InstallNetInterest(GetPrivateProfileIntW(L"Netcode", L"Interest", 1, iniPath) != 0);
+    // I1: a start message too large even for stubs sends every record in bulk while the room reads fragments.
+    SetBulkRecords([] { return NetFeatureActive(NetFeature::Fragments); },
+                   [](const void* remote, std::uint16_t tag, const void* data, std::size_t size) {
+                       char id[40]{};
+                       return remote && *ProductUserIdText(remote, id, sizeof(id)) && SendBulk(id, tag, data, size);
+                   });
+    SetBulkHandlerForTag(kRecordsBulkTag, [](const std::string&, std::uint16_t, const std::uint8_t* data, std::size_t size) {
+        TakeRecordsBulk(data, size);
+    });
     if (marker) SetSplitSyncReaders(&ReadsSplitSync);
     if (mission) {
         if (imports == 2)

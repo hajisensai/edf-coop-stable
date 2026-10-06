@@ -7,6 +7,7 @@ namespace dn {
 namespace {
 
 constexpr uint8_t kMagic[4] = {'E', 'D', 'F', 'G'};
+constexpr uint8_t kAckMagic[4] = {'E', 'D', 'F', 'A'};
 constexpr uint8_t kVersion = 1;
 
 template <typename T>
@@ -46,6 +47,23 @@ std::vector<std::vector<uint8_t>> splitIntoFragments(uint32_t id, uint8_t flags,
     return out;
 }
 
+std::vector<uint8_t> fragmentAck(uint32_t id) {
+    std::vector<uint8_t> out(kFragmentAckBytes);
+    memcpy(out.data(), kAckMagic, 4);
+    put<uint32_t>(out.data() + 4, id);
+    return out;
+}
+
+bool parseFragmentAck(const uint8_t* data, size_t size, uint32_t& id) {
+    if (!data || size != kFragmentAckBytes || memcmp(data, kAckMagic, 4) != 0) return false;
+    id = get<uint32_t>(data + 4);
+    return true;
+}
+
+uint32_t Reassembler::idOf(const uint8_t* data, size_t size) {
+    return isFragment(data, size) ? get<uint32_t>(data + 8) : 0;
+}
+
 bool isFragment(const uint8_t* data, size_t size) {
     return data && size >= kFragmentHeader && memcmp(data, kMagic, 4) == 0;
 }
@@ -65,8 +83,11 @@ void Reassembler::expire(uint64_t nowMs) {
 }
 
 std::optional<FragmentMessage> Reassembler::add(const std::string& src, const uint8_t* data, size_t size,
-                                                uint64_t nowMs) {
+                                                uint64_t nowMs, bool* again) {
     expire(nowMs);
+    if (again) *again = false;
+    for (auto it = completed_.begin(); it != completed_.end();)
+        it = nowMs - it->second > kCompletedMs ? completed_.erase(it) : std::next(it);
     if (!isFragment(data, size) || data[4] != kVersion) {
         ++malformed_;
         return std::nullopt;
@@ -86,6 +107,10 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
         return std::nullopt;
     }
     const auto key = std::make_pair(src, id);
+    if (completed_.count(key)) {  // arrived whole already: a resend or a copy
+        if (again) *again = true;
+        return std::nullopt;
+    }
     auto it = partial_.find(key);
     if (it == partial_.end()) {
         size_t mine = 0;
@@ -125,11 +150,14 @@ std::optional<FragmentMessage> Reassembler::add(const std::string& src, const ui
     FragmentMessage done{p.flags, p.tag, std::move(p.bytes)};
     buffered_ -= total;
     partial_.erase(it);
+    if (completed_.size() >= kCompletedKept) completed_.erase(completed_.begin());
+    completed_[key] = nowMs;
     return done;
 }
 
 void Reassembler::clear() {
     partial_.clear();
+    completed_.clear();
     buffered_ = 0;
 }
 

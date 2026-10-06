@@ -99,6 +99,10 @@ void ListenToTicks(std::function<void(void* platform)> listener);
 // Asks EOS to remove member `id` (EOS_ProductUserId text) from our lobby (the room owner's call: netfeature.h refuses
 // a member whose netcode differs). Any thread; false when we are in no lobby or EOS lacks the function.
 bool KickLobbyMember(const std::string& id);
+// A text attribute of the lobby itself (not of our member), published while we own the lobby, on the same beat: what
+// a searcher reads before it is in the room (rooms above Epic's 64: the host's direct-link address and identity).
+// Never empty, like PublishMemberText. Any thread.
+void PublishLobbyText(const std::string& key, const std::string& value);
 
 // Redirects EOS_Lobby_CreateLobby, EOS_Lobby_JoinLobby, EOS_Lobby_LeaveLobby, EOS_Lobby_DestroyLobby and
 // EOS_Platform_Tick (the tick publishes and reads attributes, on the thread EOS wants its calls on). `splitReader`:

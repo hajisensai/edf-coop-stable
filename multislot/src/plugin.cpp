@@ -33,6 +33,7 @@
 #include "netlog.h"
 #include "netcompress.h"
 #include "netfeature.h"
+#include "netplayer_game.h"
 #include "nettraffic.h"
 #include "packetfit.h"
 #include "patches.h"
@@ -768,6 +769,9 @@ bool LoadRooms(const wchar_t* iniPath) {
     else
         Log("Remote players: the game's own position smoothing is untouched "
             "([Smoothing] RemotePlayerPercent in the INI raises it; 0 = leave alone)");
+    // W2 player sync (netplayer_game.h): its own slots and checks; refused alone, the rest stays as it is.
+    if (!InstallPlayerSync(base, ReadPlayerSyncSettings(iniPath)))
+        Log("PLAYER sync: not installed; every player keeps the game's own sync");
     // EDF.dll ends the game with TerminateProcess, so the shutdown marker needs that import wrapped, or
     // it never fires and every start wrongly reports the last one as cut (1.5.2-1.5.8 did exactly that:
     // 15 such lines in one friend's log, 9 in another's, none of them real).

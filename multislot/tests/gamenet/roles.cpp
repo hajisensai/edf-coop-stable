@@ -1,5 +1,7 @@
 // What each machine of a game-code test does once EDF.dll and EDF6Coop.dll are in (machine.cpp). Every EOS call
 // goes through EDF.dll's import table, as the game makes it, so EDF6Coop's wrappers see it as they do in the game.
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <functional>
@@ -10,6 +12,7 @@
 #include "machine.h"
 #include "net_shared.h"
 #include "../../../src/eos_min.h"
+#include "../../src/netplayer.h"
 
 namespace gamenet {
 namespace {
@@ -489,6 +492,110 @@ int VersionGate(Machine& machine, bool host) {
     return 0;
 }
 
+// W2 player sync (netplayer.h): a player record as EDF6Coop extends it - the game's own fields written with the
+// game's writers (mask, a float, the position as the game sends it), then the block as a bin element written by
+// EDF6Coop's writer, then the same block written by the game's own bin writer (EDF+12B5200) - goes through the
+// game's controller to the other machine, which reads it twice: with the game's readers and EDF6Coop's bin reader,
+// and with the game's readers and the game's bin reader (EDF+12B49D0). Both must give back every block exactly.
+constexpr std::uint32_t kPlayerType = 0x2701;  // a record type nothing in the game subscribes to
+constexpr int kPlayerRecords = 8;
+constexpr std::uintptr_t kSerializeWriter = 0x79A460, kSerializeReader = 0x79A430;
+constexpr std::uintptr_t kWriteInt16 = 0x12B54E0, kWriteFloat = 0x12B5350, kWriteVec3 = 0x761B20, kWriteBin = 0x12B5200;
+constexpr std::uintptr_t kReadInt16 = 0x12B4B80, kReadFloat = 0x12B4AD0, kReadVec3 = 0x760C50, kReadBin = 0x12B49D0;
+struct alignas(16) GameSerialize {
+    std::uint8_t bytes[0x600];
+};
+
+multislot::PlayerSample SampleFor(int seat, int i) {
+    multislot::PlayerSample s;
+    s.seq = static_cast<std::uint16_t>(100 + i);
+    s.senderMs = 0xFFFFFFF0u + static_cast<std::uint32_t>(33 * i);  // across the wrap
+    s.position = {700.3f + seat * 11.0f + i * 0.217f, 12.7f + i, -950.55f};
+    s.velocity = {6.25f, -9.8f + i, 0.125f * seat};
+    return s;
+}
+bool SameSample(const multislot::PlayerSample& a, const multislot::PlayerSample& b) {
+    return a.seq == b.seq && a.senderMs == b.senderMs && !std::memcmp(&a.position, &b.position, sizeof(a.position)) &&
+           !std::memcmp(&a.velocity, &b.velocity, sizeof(a.velocity));
+}
+
+int PlayerSync(Machine& machine, bool host) {
+    using namespace multislot;
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    const Game& game = transport.game();
+    const int seat = host ? 0 : 1;
+    int good = 0, bad = 0;
+    transport.Subscribe(kPlayerType, [&](int from, const std::uint8_t* data, std::size_t size) {
+        const int i = static_cast<int>(data[0]);
+        const PlayerSample expected = SampleFor(1 - seat, i);
+        bool ok = size > 1;
+        float halfError = 0.0f;
+        for (int pass = 0; ok && pass < 2; ++pass) {
+            GameSerialize reader{};
+            game.Fn<void* (*)(void*, const void*, std::size_t)>(kSerializeReader)(reader.bytes, data + 1, size - 1);
+            const std::uint16_t mask = game.Fn<std::uint16_t (*)(void*)>(kReadInt16)(reader.bytes);
+            const float heading = game.Fn<float (*)(void*)>(kReadFloat)(reader.bytes);
+            alignas(16) float position[4]{};
+            game.Fn<bool (*)(void*, float*)>(kReadVec3)(reader.bytes, position);
+            ok = ok && mask == (0x58 | kPlayerBlockBit) && std::fabs(heading - 1.5f) < 0.01f;
+            halfError = (std::max)(halfError, std::fabs(position[0] - expected.position.x));
+            for (int copy = 0; copy < 2; ++copy) {
+                std::uint8_t block[64]{};
+                std::size_t got = 0;
+                if (pass == 0) {
+                    ok = ok && ReadBinElement(reader.bytes, block, sizeof(block), got);
+                } else {
+                    std::size_t capacity = sizeof(block);
+                    ok = ok && game.Fn<bool (*)(void*, void*, std::size_t*)>(kReadBin)(reader.bytes, block, &capacity);
+                    got = capacity;
+                }
+                PlayerSample sample;
+                ok = ok && got == kPlayerBlockBytes && DecodePlayerBlock(block, got, sample) && SameSample(sample, expected);
+            }
+        }
+        if (ok)
+            ++good;
+        else
+            ++bad;
+        Result("player-record", "from %d #%d %s; the game's half-float position is off by %.3f m", from, i,
+               ok ? "ok" : "MISMATCH", halfError);
+    });
+    for (int i = 0; i < kPlayerRecords; ++i) {
+        GameSerialize writer{};
+        game.Fn<void* (*)(void*)>(kSerializeWriter)(writer.bytes);
+        const PlayerSample sample = SampleFor(seat, i);
+        game.Fn<bool (*)(void*, std::int16_t)>(kWriteInt16)(writer.bytes, static_cast<std::int16_t>(0x58 | kPlayerBlockBit));
+        game.Fn<bool (*)(void*, float)>(kWriteFloat)(writer.bytes, 1.5f);
+        alignas(16) const float position[4] = {sample.position.x, sample.position.y, sample.position.z, 1.0f};
+        game.Fn<bool (*)(void*, const float*)>(kWriteVec3)(writer.bytes, position);
+        std::uint8_t block[kPlayerBlockBytes];
+        EncodePlayerBlock(sample, block, sizeof(block));
+        const bool ours = WriteBinElement(writer.bytes, block, sizeof(block));
+        game.Fn<bool (*)(void*, const void*, std::size_t)>(kWriteBin)(writer.bytes, block, sizeof(block));
+        std::uint64_t length = 0;
+        std::memcpy(&length, writer.bytes + kSerializeEnd, sizeof(length));
+        std::vector<std::uint8_t> record(1 + length);
+        record[0] = static_cast<std::uint8_t>(i);
+        std::memcpy(record.data() + 1, writer.bytes + kSerializeData, length);
+        for (const auto& member : room.members)
+            if (member != machine.user && (!ours || !transport.SendReliable(member, kPlayerType, record.data(), record.size())))
+                Result("send", "player record %d to %s refused", i, member.c_str());
+        if (i == 0) Result("player-record-bytes", "%llu", static_cast<unsigned long long>(length));
+    }
+    const bool all = TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return good + bad >= kPlayerRecords;
+    });
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    Result("player-records", "%d ok %d bad", good, bad);
+    return all && bad == 0 ? 0 : 1;
+}
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -501,6 +608,7 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "link") return Link(machine, host);
     if (step == "sidelink") return Link(machine, host, 5);
     if (step == "mission") return Mission(machine, host);
+    if (step == "playersync") return PlayerSync(machine, host);
     if (step == "netstats") return NetStats(machine, host);
     if (step == "versiongate") return VersionGate(machine, host);
     if (step == "bulk") return Bulk(machine, host);

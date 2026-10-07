@@ -778,13 +778,13 @@ std::string Variable(const char* name) {
     return text;
 }
 
-bool JoinThrough(Machine& machine, void* details, Entered& entered) {
+bool JoinThrough(Machine& machine, void* details, Entered& entered, unsigned waitMs = 20000) {
     JoinOptions options;
     options.LobbyDetailsHandle = details;
     options.LocalUserId = Self(machine);
     Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
     // A join into a room whose host hosts a direct link completes once its host's member slots are here (eos_hooks).
-    TickUntil(machine, 20000, [&] {
+    TickUntil(machine, waitMs, [&] {
         PollP2P(machine);
         return entered.done;
     });
@@ -821,7 +821,8 @@ int SlotRoom(Machine& machine, const std::string& how) {
             if (how == "direct" ? count < epic : how == "late" ? !(wasFull && count < epic) : count < seat) return false;
             if (details) FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
             details = roomDetails();
-            if (!details || how != "direct") return details != nullptr;
+            // "giveup" too: its join is parked only once the host's address is on the lobby.
+            if (!details || (how != "direct" && how != "giveup")) return details != nullptr;
             // Coming in over the direct link needs the host's address on the lobby (FullJoin).
             struct ByKey {
                 std::int32_t ApiVersion;
@@ -837,6 +838,17 @@ int SlotRoom(Machine& machine, const std::string& how) {
         if (!found) {
             Result("room", "no room to join (%s)", how.c_str());
             return 1;
+        }
+        // "giveup": the host's direct link is out of reach, so the join is given up (eos_hooks parkedEntryTick); then
+        // the room must not be offered for coming back (REJOIN): ticks a while longer, so a remembered room would show.
+        if (how == "giveup") {
+            const bool joined = JoinThrough(machine, details, entered, 60000);
+            Result("giveup", "%s %d", entered.done ? (joined ? "joined" : "failed") : "pending", entered.result);
+            TickUntil(machine, 5000, [&] {
+                PollP2P(machine);
+                return false;
+            });
+            return entered.done && !joined ? 0 : 1;
         }
         if (!JoinThrough(machine, details, entered)) {
             Result("room", "%s join failed (%d)", how.c_str(), entered.result);
@@ -950,6 +962,12 @@ int SlotRoom(Machine& machine, const std::string& how) {
                 reinterpret_cast<void*>(GetProcAddress(plugin, "EDF6Coop_HostSlot"))))
             Result("followsHost", "%d", hostSlot(machine.user.c_str()));
     if (!everyone) return 1;
+    // EDF6NET_STAY_MS: stay in the room that much longer (a room others try to join).
+    if (const int stay = std::atoi(Variable("EDF6NET_STAY_MS").c_str()); stay > 0)
+        TickUntil(machine, static_cast<unsigned>(stay), [&] {
+            frame();
+            return false;
+        });
     // EDF6NET_SLOTS_ONLY=1: the numbering is what is checked; a room whose games cannot agree on it plays no start sync.
     if (Variable("EDF6NET_SLOTS_ONLY") == "1") return 0;
     room.members = byIndex;

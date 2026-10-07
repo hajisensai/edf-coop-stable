@@ -921,6 +921,34 @@ inline void CheckSlotChurn(const std::vector<Spawned>& machines, const gamenet::
               guest->user + " followed X leaving and Y taking its slot in one round, the departure first");
 }
 
+// A join given up (review 4, item 5): H hosts a direct link but advertises an address nobody answers on, so G's join
+// waits for H's member slots, gets nowhere and is given up (the join fails, G leaves Epic's lobby). G must forget the
+// room then: it is nothing to come back into, and must not show up as REJOIN in the room list.
+inline std::vector<Seat> GiveUpSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(2, "slots", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\n"
+                            "BindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:9\r\n";
+    seats[0].role = "host-slots-host";
+    seats[1].role = "guest-slots-giveup";
+    for (auto& seat : seats) {
+        seat.env.push_back({"EDF6NET_FINAL", seats[0].user});
+        seat.env.push_back({"EDF6NET_SLOTS_ONLY", "1"});
+    }
+    seats[0].env.push_back({"EDF6NET_STAY_MS", "40000"});
+    return seats;
+}
+
+inline void CheckGiveUp(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& g = machines[1];
+    Check(Result(g, "giveup").rfind("failed", 0) == 0, g.user + "'s join failed (" + Result(g, "giveup") + ")");
+    Check(g.text.find("ROOM NOT entering room") != std::string::npos, g.user + " gave its join up, and said why");
+    Check(g.text.find("REJOIN remembering room") != std::string::npos, g.user + " had noted the room while it waited");
+    Check(g.text.find("REJOIN forgetting room") != std::string::npos && g.text.find(": the join was given up") != std::string::npos,
+          g.user + " forgot the room it could not enter (no REJOIN entry for it)");
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
@@ -949,6 +977,7 @@ inline const std::vector<Scenario>& NetScenarios() {
         {"slotmigrate", MigrateSeats(), 180000, &CheckSlotMigrate, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"slotmigratenodirect", MigrateNoDirectSeats(), 200000, &CheckSlotMigrateNoDirect, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"slotmigrateearlyroom", MigrateEarlyRoomSeats(), 180000, &CheckSlotMigrateEarlyRoom, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
+        {"slotgiveup", GiveUpSeats(), 120000, &CheckGiveUp},
         {"slotchurn", ChurnSeats(false), 150000,
          [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckSlotChurn(m, n, false); },
          {{"EDF6NET_EPIC_MEMBERS", "4"}}},

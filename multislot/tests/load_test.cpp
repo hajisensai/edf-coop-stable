@@ -126,6 +126,71 @@ bool RedirectedInto(const unsigned char* site, HMODULE plugin) {
     return InModule(target, plugin);
 }
 
+// The private EDF mapping has no imports or DllMain. Its allocator, record copies and destructor only need
+// CRT imports here; resolve those from this process, as the stream native tests do, without starting the game.
+bool ResolveRuntimeImports(HMODULE module) {
+    auto* image = reinterpret_cast<unsigned char*>(module);
+    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    for (auto d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(image + directory.VirtualAddress); d->Name; ++d) {
+        const char* dll = reinterpret_cast<const char*>(image + d->Name);
+        if (_strnicmp(dll, "VCRUNTIME", 9) && _strnicmp(dll, "api-ms-win-crt-", 15)) continue;
+        const HMODULE runtime = LoadLibraryA(dll);
+        if (!runtime) return false;
+        auto names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(image + d->OriginalFirstThunk);
+        auto slots = reinterpret_cast<std::uint64_t*>(image + d->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++slots) {
+            if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal)) continue;
+            const auto name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(image + names->u1.AddressOfData);
+            const FARPROC proc = GetProcAddress(runtime, reinterpret_cast<const char*>(name->Name));
+            if (!proc) return false;
+            DWORD old = 0;
+            if (!VirtualProtect(slots, sizeof(*slots), PAGE_READWRITE, &old)) return false;
+            *slots = reinterpret_cast<std::uint64_t>(proc);
+            if (!VirtualProtect(slots, sizeof(*slots), old, &old)) return false;
+        }
+    }
+    return true;
+}
+
+void CheckVoiceHudLifetime(const unsigned char* base, HMODULE game, HMODULE plugin) {
+    const auto call = SessionCalls().at(0);
+    const bool redirected = RedirectedInto(base + call.rva, plugin);
+    Check(redirected, "voice HUD allocation reaches the plugin through a stub");
+    if (!redirected) return;
+    const bool imports = ResolveRuntimeImports(game);
+    Check(imports, "voice HUD native lifetime has its CRT imports");
+    if (!imports) return;
+    std::int32_t displacement = 0;
+    std::memcpy(&displacement, base + call.rva + 1, sizeof(displacement));
+    using Allocate = void* (*)(std::size_t);
+    const auto allocate = reinterpret_cast<Allocate>(base + call.rva + 5 + displacement);
+    using Resize = void (*)(void*, std::size_t, const void*);
+    using Destroy = void (*)(void*);
+    const auto resize = reinterpret_cast<Resize>(base + 0x9621A0);
+    const auto destroy = reinterpret_cast<Destroy>(base + 0x961930);
+    // Native vector: +8 data, +0x10 capacity, +0x18 count. The template record has two empty wstrings
+    // (inline capacity 7) followed by the HUD's flags. Exercise real record construction and destruction,
+    // not a C++ copy of the alignment check. Repeat so a leaked/stale vector state cannot pass silently.
+    alignas(16) std::uint64_t record[10]{};
+    record[3] = record[7] = 7;
+    for (const std::size_t count : {std::size_t{4}, std::size_t{52}, std::size_t{kMaxPlayers}}) {
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            void* buffer = allocate(0x50 * count);
+            Check(buffer != nullptr, "voice HUD native allocation succeeds");
+            if (!buffer) return;
+            std::uint64_t vector[4]{0, reinterpret_cast<std::uint64_t>(buffer), count, 0};
+            resize(vector, count, record);
+            Check(vector[3] == count, "native voice HUD resize initializes every record");
+            destroy(vector);
+            Check(vector[1] == 0 && vector[2] == 0 && vector[3] == 0,
+                  "native voice HUD destructor releases and clears the grown vector");
+            destroy(vector);
+        }
+    }
+}
+
 // `jmp rel32` at the site -> a thunk laid out like MidThunkCode (handler inside the plugin, the
 // site's displaced bytes, resume right after the site).
 bool HookedInto(const unsigned char* base, const MidSite& site, HMODULE plugin) {
@@ -370,6 +435,8 @@ int wmain(int argc, wchar_t** argv) {
         const PointerSlot frame = MainFrameSlot();
         Check(SlotTargets(base + frame.rva, reinterpret_cast<std::uint64_t>(base), frame.target), "Enabled=0 leaves the menu frame vtable untouched");
         for (const auto& call : calls) Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves calls untouched");
+        for (const auto& call : SessionCalls())
+            Check(CallTargets(base + call.rva, call.rva, call.target), "Enabled=0 leaves voice HUD allocation untouched");
         Check(after.family == before.family && after.decode == before.decode && after.range == before.range && after.map == before.map,
               "Enabled=0 leaves SEARCH_TYPE behaviour identical");
         Check(Contains(log, "Enabled=0"), "Enabled=0 is logged");
@@ -422,6 +489,7 @@ int wmain(int argc, wchar_t** argv) {
               "PluginInfo carries CMakeLists.txt's project version");
         Check(Applied(base, guest) == static_cast<int>(guest.size()), "every guest patch is written");
         Check(Applied(base, sessions) == static_cast<int>(sessions.size()), "room user slots and packet sessions are sized for the room");
+        CheckVoiceHudLifetime(base, game, plugin);
         for (const auto& site : SessionCompares()) Check(WidenedInto(base, site), site.name);
         Check(Contains(log, ("Rooms: " + std::to_string(kMaxPlayers) + " user slots, packet sessions and voice chat HUD records").c_str()),
               "the room table size is logged");

@@ -732,6 +732,78 @@ void TestPreFilter() {
     ClearHitRuleForTest();
 }
 
+// ReferenceId takes a weak_ptr by value at the binary boundary: its real epilogue destroys the argument.
+// An empty reference manager lets us execute that path without starting a game session or replacing game code.
+void TestForwardReferenceOwnership() {
+    constexpr std::uint32_t kWorld = 0x20B2AC0;
+    Check(Bytes(0x78506F, "488b054ada9201"), "ReferenceId reads the expected world singleton");
+    Check(Bytes(0x78511A, "498b4e084885c97410f00fc1790c83ff017506488b01ff5008"),
+          "ReferenceId destroys its by-value weak argument through the real game epilogue");
+    alignas(16) std::uint8_t world[0x100]{};
+    void* singleton = world + 0x98;
+    void* previous = nullptr;
+    auto* address = const_cast<unsigned char*>(base) + kWorld;
+    std::memcpy(&previous, address, sizeof(previous));
+    DWORD old = 0;
+    const bool writable = VirtualProtect(address, sizeof(singleton), PAGE_READWRITE, &old) != FALSE;
+    Check(writable, "the private DLL mapping's world singleton can be set for the reference test");
+    if (!writable) return;
+    std::memcpy(address, &singleton, sizeof(singleton));
+
+    struct Control {
+        using Call = void(__fastcall*)(void*);
+        Call* table;
+        long uses = 1;
+        long weaks = 2;  // the shared owner's implicit weak, plus the GDI's weak
+        int deleted = 0;
+    };
+    Control::Call controlTable[] = {
+        [](void*) {},
+        [](void* p) { ++static_cast<Control*>(p)->deleted; },
+    };
+    Control control{controlTable};
+    alignas(16) std::uint8_t attacker[0x100]{};
+    void* weak[2] = {attacker, &control};
+    // Prove the fixture reaches the real callee's ownership transfer, including when no id can be assigned.
+    std::int32_t id = 0;
+    Fn<std::int32_t*(__fastcall*)(std::int32_t*, void*)>(0x785050)(&id, weak);
+    Check(id == -1 && control.weaks == 1, "the real ReferenceId consumes one weak even without a reference manager");
+    control.weaks = 2;
+
+    std::uint64_t netTable[20]{};
+    netTable[0x80 / 8] = reinterpret_cast<std::uint64_t>(&FakeSend);
+    alignas(16) std::uint8_t target[0x800]{};
+    const void* table = netTable;
+    const std::uint32_t remote = 1;
+    std::memcpy(target + 0x120, &table, sizeof(table));
+    std::memcpy(target + 0x128, &remote, sizeof(remote));
+    alignas(16) std::uint8_t gdi[kGdiBytes]{};
+    gdi[kGdiOverride] = 1;  // our live attacker, without needing its full NetworkObject
+    const float damage = 50.0f;
+    std::memcpy(gdi + kGdiDamage, &damage, sizeof(damage));
+    std::memcpy(gdi + kGdiAttacker, weak, sizeof(weak));
+    SetHitRuleForTest(true, false);
+    const int sendsBefore = fakeSends;
+    for (bool sent : {true, false, true}) {
+        fakeSendResult = sent;
+        std::uint32_t message = kDamageMessage;
+        void* payload = gdi;
+        CpuContext ctx{};
+        ctx.rcx = reinterpret_cast<std::uint64_t>(target);
+        ctx.rdx = reinterpret_cast<std::uint64_t>(&message);
+        ctx.r8 = reinterpret_cast<std::uint64_t>(&payload);
+        HitPreFilterHandler(&ctx);
+        Check(control.uses == 1 && control.weaks == 2 && control.deleted == 0,
+              "forwarding a live attack preserves the GDI's weak ownership, including failed sends");
+        Check(!std::memcmp(gdi + kGdiAttacker, weak, sizeof(weak)), "forwarding leaves the GDI's reference intact");
+        Check(message == (sent ? kDroppedMessage : kDamageMessage), "reference ownership preserves forwarding decisions");
+    }
+    Check(fakeSends == sendsBefore + 3, "the ownership regression executes all three production forwards");
+    ClearHitRuleForTest();
+    std::memcpy(address, &previous, sizeof(previous));
+    VirtualProtect(address, sizeof(singleton), old, &old);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -766,6 +838,7 @@ int main(int argc, char** argv) {
         base = reinterpret_cast<const unsigned char*>(game);
         TestGameCode();
         TestPreFilter();
+        TestForwardReferenceOwnership();
     }
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

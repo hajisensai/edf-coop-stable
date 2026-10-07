@@ -18,7 +18,7 @@ namespace {
 
 // EDF.dll (RVAs).
 constexpr std::uint32_t kLockNetworkObject = 0x22FCA0;  // shared_ptr<NetworkObject>(out, const weak_ptr<SceneObject>*)
-constexpr std::uint32_t kReferenceId = 0x785050;        // int*(int* out, const weak_ptr<SceneObject>*): assigns one if none
+constexpr std::uint32_t kReferenceId = 0x785050;        // int*(int* out, weak_ptr<SceneObject> by value): consumes its copy
 constexpr std::uint32_t kResolveReference = 0x784C60;   // weak_ptr<SceneObject>*(out, const int* id)
 constexpr std::uint32_t kStreamConstruct = 0x79A460;    // the game's message stream (0x5F8 bytes), as 54CD28 builds one
 constexpr std::uint32_t kStreamDestroy = 0x760180;
@@ -114,8 +114,13 @@ private:
 static_assert(sizeof(GameStream) >= kStreamBytes, "the game's stream fits");
 
 std::int32_t ReferenceId(const void* weak) {
+    // MSVC passes this by-value weak_ptr indirectly. 78511A..785130 destroys that argument (control +0xC),
+    // even when no reference manager exists. Give it an owned copy, never the GDI's borrowed reference.
+    GameRef owned;
+    std::memcpy(&owned, weak, sizeof(owned));
+    if (owned.control) _InterlockedIncrement(Count(owned.control, 0xC));
     std::int32_t id = -1;
-    Fn<std::int32_t*(__fastcall*)(std::int32_t*, const void*)>(kReferenceId)(&id, weak);
+    Fn<std::int32_t*(__fastcall*)(std::int32_t*, GameRef*)>(kReferenceId)(&id, &owned);
     return id;
 }
 

@@ -3129,8 +3129,10 @@ void testRoomView() {
     CHECK(!v.awaitingHost() && v.heldCount() == 0);
     CHECK(v.consumeRelease(kD) && !v.consumeRelease(kD));  // let past the hold once
     CHECK(v.admit(kD, dn::kJoined) && v.has(kD) && v.consumeRelease(kC));
-    v.holdJoin(kHost, 22000);
-    CHECK(v.admit(kHost, dn::kLeft) == false && !v.held(kHost));  // gone before it reached our game: nothing to bring
+    const std::string kGone = "0005aaaaaaaaaaaaaaaaaaaaaaaaaaaa";  // a member our game never had
+    v.holdJoin(kGone, 22000);
+    CHECK(v.held(kGone));
+    CHECK(v.admit(kGone, dn::kLeft) == false && !v.held(kGone));  // gone before it reached our game: nothing to bring
 
     printf("room view: becoming the host, the joins we held take the old host's slots first, in slot order\n");
     {

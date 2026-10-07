@@ -702,7 +702,13 @@ inline void CheckSlotOrder(const std::vector<Spawned>& machines, const gamenet::
     const auto& x = machines[4];
     Check(Result(a, "left").rfind("4 members 0", 0) == 0, a.user + " saw the room of four and left it (" + Result(a, "left") + ")");
     Check(d.text.find("coming in over the direct link") != std::string::npos, d.user + " came in over the direct link");
-    const std::string expected = "0:" + h.user + " 1:" + x.user + " 2:" + b.user + " 3:" + d.user;
+    // X takes A's slot 1 - unless the host's direct-link resilience still held Epic's LEFT of A (A's link not yet
+    // down) when X's JOINED reached the host's game: then slot 1 was still A's there, the game gave X the next empty
+    // one, 4, and every other game must follow that, not Epic's order.
+    const bool leaveHeld = h.text.find("held lobby status handed to the game") != std::string::npos &&
+                           Result(h, "slots") == "0:" + h.user + " 2:" + b.user + " 3:" + d.user + " 4:" + x.user;
+    const std::string expected = leaveHeld ? Result(h, "slots")
+                                           : "0:" + h.user + " 1:" + x.user + " 2:" + b.user + " 3:" + d.user;
     const std::vector<const Spawned*> stay = {&h, &x, &b, &d};  // in slot order
     for (const Spawned* machine : stay) {
         Check(Result(*machine, "slots") == expected,

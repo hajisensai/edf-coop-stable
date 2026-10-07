@@ -13,6 +13,29 @@
 
 namespace multislot {
 
+std::uint64_t HostDataAnswers::Begin() {
+    pending_ = true;
+    return ++question_;
+}
+
+void HostDataAnswers::Submit(std::uint64_t question, std::vector<hostdata::Digest> digests, bool use) {
+    if (question != question_ || !pending_) return;
+    pending_ = false;
+    answers_.push_back({std::move(digests), use});
+}
+
+void HostDataAnswers::Invalidate() {
+    ++question_;
+    pending_ = false;
+    answers_.clear();
+}
+
+std::vector<HostDataAnswers::Answer> HostDataAnswers::Take() {
+    auto answers = std::move(answers_);
+    answers_.clear();
+    return answers;
+}
+
 using hostdata::Digest;
 
 namespace {
@@ -317,15 +340,9 @@ struct Runtime {
     std::string lobby;   // the lobby `approved`, `declined` and `failed` are about
     std::set<Digest> approved;           // other members' bundles the game may read (Ask: the player said yes)
     std::set<Digest> declined;           // and those it must not (the player said no, or gave them back)
-    bool asking = false;                 // the question is on screen
     // What the player answered, for the next menu frame: the window runs on a thread of its own, and acting on the
     // answer may start a fetch, which calls EOS - only ever from the game's thread.
-    struct Answer {
-        std::string lobby;
-        std::vector<Digest> digests;
-        bool use = false;
-    };
-    std::vector<Answer> answers;
+    HostDataAnswers answers;
     std::map<Digest, SourceFiles> have;  // other members' bundles here and checked
     std::set<Digest> failed;             // those that could not be fetched in this lobby
     std::vector<RoomSource> sources;     // the room's sources as last worked out
@@ -469,6 +486,7 @@ void DecideLocked() {
     Runtime& rt = Rt();
     if (rt.view.lobbyId != rt.lobby) {  // another lobby, or none: what was answered or failed was about the last one
         rt.lobby = rt.view.lobbyId;
+        rt.answers.Invalidate();
         rt.approved.clear();
         rt.declined.clear();
         rt.failed.clear();
@@ -760,33 +778,27 @@ void AnswerLocked(const std::vector<Digest>& digests, bool use) {
 }
 
 // On the window's thread.
-void Answered(const std::string& lobby, const std::vector<Digest>& digests, bool use) {
+void Answered(std::uint64_t question, const std::vector<Digest>& digests, bool use) {
     Runtime& rt = Rt();
     std::scoped_lock lock(rt.lock);
-    rt.asking = false;
-    rt.answers.push_back({lobby, digests, use});
+    rt.answers.Submit(question, digests, use);
 }
 
 // The answers given since the last menu frame. Caller holds the lock.
 void TakeAnswersLocked() {
     Runtime& rt = Rt();
-    for (const Runtime::Answer& answer : rt.answers) {
-        if (answer.lobby != rt.lobby) {
-            Log("Host data: the question was answered after leaving that room; nothing changes");
-            continue;
-        }
+    for (const HostDataAnswers::Answer& answer : rt.answers.Take()) {
         Log("Host data: the player %s the room's files (%zu bundle(s)); %ls switches", answer.use ? "takes" : "declines",
             answer.digests.size(), rt.settings.keyName);
         AnswerLocked(answer.digests, answer.use);
     }
-    rt.answers.clear();
 }
 
 // On a menu frame in a room (Accept=Ask): asks about the bundles of the room nobody answered for yet, before any of
 // them is downloaded; one that shows up later gets a question of its own. Caller holds the lock.
 void AskLocked() {
     Runtime& rt = Rt();
-    if (rt.settings.accept != HostAccept::Ask || rt.asking || !rt.answers.empty()) return;
+    if (rt.settings.accept != HostAccept::Ask || rt.answers.Busy()) return;
     std::vector<PromptSource> prompt;
     std::vector<Digest> digests;
     std::size_t files = 0;
@@ -808,18 +820,20 @@ void AskLocked() {
     std::vector<std::string> yours = rt.own.paths;
     std::sort(yours.begin(), yours.end());
     const PromptLanguage language = PromptLanguageFor(GetUserDefaultUILanguage());
-    rt.asking = AskInWindow(PromptTitle(language), PromptText(prompt, yours, rt.settings.keyName, language),
-                            [lobby = rt.lobby, digests](bool use) { Answered(lobby, digests, use); });
-    if (rt.asking) {
+    const std::uint64_t question = rt.answers.Begin();
+    if (AskInWindow(PromptTitle(language), PromptText(prompt, yours, rt.settings.keyName, language),
+                    [question, digests](bool use) { Answered(question, digests, use); })) {
         Log("Host data: asking the player about %zu bundle(s) of other members, %zu file(s)", digests.size(), files);
         return;
     }
     Log("Host data: keeping this machine's own files; %ls takes the room's", rt.settings.keyName);
+    rt.answers.Invalidate();
     AnswerLocked(digests, false);
 }
 
 // AcceptKey: gives back what is taken, or takes every bundle of the room. Caller holds the lock.
 void SwitchLocked() {
+    Rt().answers.Invalidate();
     std::vector<Digest> digests;
     for (const RoomSource& source : RemoteLocked()) digests.push_back(source.digest);
     const bool take = !TakenLocked();

@@ -81,6 +81,38 @@ struct Net {
 };
 
 // Who brings what in a room, in the order that decides a file two of them have.
+void PromptAnswersFollowSessionAndLatestChoice() {
+    HostDataAnswers answers;
+    const Digest first = Make(1).digest, second = Make(2).digest;
+    const auto oldQuestion = answers.Begin();
+    Check(answers.Busy() && answers.Take().empty(), "a displayed question authorizes no download");
+    answers.Invalidate();  // leave the room (its ID may be reused on rejoining)
+    const auto newQuestion = answers.Begin();
+    answers.Submit(oldQuestion, {first}, true);
+    Check(answers.Busy() && answers.Take().empty(), "a former session's yes cannot approve or dismiss the new question");
+    answers.Submit(newQuestion, {second}, false);
+    Check(answers.Busy(), "the reply waits for the game thread before another question");
+    const auto declined = answers.Take();
+    Check(declined.size() == 1 && declined[0].digests == std::vector<Digest>{second} && !declined[0].use,
+          "only the current question's selected bundles and decision reach the menu thread");
+    Check(!answers.Busy(), "consuming a reply permits the next question");
+    answers.Submit(newQuestion, {second}, true);
+    Check(answers.Take().empty(), "a duplicate callback cannot change the decision");
+    const auto keyboardQuestion = answers.Begin();
+    answers.Invalidate();  // F1 takes or gives back the files while the window remains open
+    answers.Submit(keyboardQuestion, {first}, true);
+    Check(answers.Take().empty(), "the keyboard's newer choice supersedes an open window");
+    const auto queuedQuestion = answers.Begin();
+    answers.Submit(queuedQuestion, {first}, true);
+    answers.Invalidate();  // lobby observer runs before the next menu frame
+    Check(!answers.Busy() && answers.Take().empty(), "leaving discards an answer queued for the previous room");
+    const auto approvedQuestion = answers.Begin();
+    answers.Submit(approvedQuestion, {first, second}, true);
+    const auto approved = answers.Take();
+    Check(approved.size() == 1 && approved[0].use && approved[0].digests == std::vector<Digest>{first, second},
+          "a current yes approves exactly the bundles the window described");
+}
+
 void Plan() {
     const Bundle mods = Make(1), hostPage = Make(2), guestPage = Make(3), thirdPage = Make(4), oldPage = Make(5);
     LobbyView view;
@@ -425,6 +457,7 @@ void UnreachableAskerDoesNotBlockOthers() {
 }  // namespace
 
 int main() {
+    PromptAnswersFollowSessionAndLatestChoice();
     Plan();
     Merge();
     Notices();

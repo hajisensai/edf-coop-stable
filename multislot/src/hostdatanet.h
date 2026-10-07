@@ -54,6 +54,27 @@ constexpr std::uint8_t kHostDataChannel = 0x48;
 
 enum class HostAccept { Ask, Auto, Never };
 
+// Window replies wait for the game's menu thread. A new room session or a keyboard choice invalidates both
+// queued replies and windows still open; a late callback must not replace the player's newer choice.
+// The runtime lock protects every operation, including calls from the window thread.
+class HostDataAnswers {
+public:
+    struct Answer {
+        std::vector<hostdata::Digest> digests;
+        bool use = false;
+    };
+    std::uint64_t Begin();
+    void Submit(std::uint64_t question, std::vector<hostdata::Digest> digests, bool use);
+    void Invalidate();
+    bool Busy() const { return pending_ || !answers_.empty(); }
+    std::vector<Answer> Take();
+
+private:
+    std::uint64_t question_ = 0;
+    bool pending_ = false;
+    std::vector<Answer> answers_;
+};
+
 // One bundle the room's files come from.
 struct RoomSource {
     std::string member;  // who brings it (EOS_ProductUserId as text)

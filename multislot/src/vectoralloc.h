@@ -1,9 +1,9 @@
 #pragma once
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <memory>
 
 namespace multislot {
 
@@ -25,12 +25,13 @@ std::byte* AllocateVectorBlock(std::size_t bytes, Allocate&& allocate) {
     if (bytes > std::numeric_limits<std::size_t>::max() - kBigAllocationExtra) return nullptr;
     auto* block = static_cast<std::byte*>(allocate(bytes + kBigAllocationExtra));
     if (!block) return nullptr;
-    // Reserve the backlink before asking the standard alignment operation to fit the payload.
-    void* aligned = block + sizeof(block);
-    std::size_t space = bytes + kBigAllocationAlignment - 1;
-    auto* buffer = static_cast<std::byte*>(std::align(kBigAllocationAlignment, bytes, aligned, space));
-    std::memcpy(buffer - sizeof(block), &block, sizeof(block));
-    return buffer;
+    // Place padding, then the backlink, then the aligned payload in the original allocation. Derive padding
+    // from the address remainder so no address addition can overflow and all writes use non-negative offsets.
+    const auto remainder = std::bit_cast<std::uintptr_t>(block) % kBigAllocationAlignment;
+    const auto padding = (kBigAllocationAlignment - (remainder + sizeof(block)) % kBigAllocationAlignment) %
+                         kBigAllocationAlignment;
+    std::memcpy(block + padding, &block, sizeof(block));
+    return block + padding + sizeof(block);
 }
 
 // The game's operator new (EDF+12D85B0), set by the plugin before it redirects a call to VectorOperatorNew.

@@ -16,6 +16,7 @@
 #include <iterator>
 #include <limits>
 #include <set>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -146,11 +147,13 @@ void CheckClearOfVr(const Spans& spans) {
 
 // What 961930 (and every std::vector of the game) checks before it frees a buffer of `bytes`: the address it passes to
 // operator delete, or 0 where it fails fast.
-std::uintptr_t GameFreeAddress(const std::byte* buffer, std::size_t bytes) {
-    const auto at = std::bit_cast<std::uintptr_t>(buffer);
+std::uintptr_t GameFreeAddress(std::span<const std::byte> allocation, std::size_t offset, std::size_t bytes) {
+    if (offset > allocation.size() || bytes > allocation.size() - offset) return 0;
+    const auto at = std::bit_cast<std::uintptr_t>(allocation.data() + offset);
     if (bytes < 0x1000) return at;
     std::uintptr_t block = 0;
-    std::memcpy(&block, buffer - sizeof(block), sizeof(block));
+    if (offset < sizeof(block)) return 0;
+    std::memcpy(&block, allocation.data() + offset - sizeof(block), sizeof(block));
     return at - block - 8 > 0x1F ? 0 : block;
 }
 
@@ -158,19 +161,20 @@ void CheckVectorBlocks() {
     // Storage ownership stays in the fixture while the callback records the allocator's request.
     std::vector<std::byte> storage;
     std::size_t requested = 0;
-    const auto recording = [&](std::size_t bytes) {
+    const auto recording = [&requested, &storage](std::size_t bytes) {
         requested = bytes;
         storage.resize(bytes);
         return storage.data();
     };
     const auto* small = AllocateVectorBlock(0x140, recording);
-    Check(small && requested == 0x140 && GameFreeAddress(small, 0x140) == std::bit_cast<std::uintptr_t>(small),
+    Check(small && requested == 0x140 && GameFreeAddress(storage, 0, 0x140) == std::bit_cast<std::uintptr_t>(small),
           "a small vector block is operator new's own");
     // Cover the exact alignment threshold as well as actual HUD record capacities.
     for (std::size_t bytes : {std::size_t{0x1000}, std::size_t{0x50 * 52}, std::size_t{0x50 * 64},
                               std::size_t{0x50 * kMaxPlayers}}) {
         const auto* buffer = AllocateVectorBlock(bytes, recording);
-        const auto block = GameFreeAddress(buffer, bytes);
+        const auto offset = static_cast<std::size_t>(buffer - storage.data());
+        const auto block = GameFreeAddress(storage, offset, bytes);
         const auto at = std::bit_cast<std::uintptr_t>(buffer);
         Check(buffer && requested == bytes + kBigAllocationExtra &&
                   block == std::bit_cast<std::uintptr_t>(storage.data()) && at % kBigAllocationAlignment == 0 &&
@@ -182,11 +186,31 @@ void CheckVectorBlocks() {
           "an overflowing request never reaches the backing allocator");
     Check(!AllocateVectorBlock(0x1000, [](std::size_t) -> std::byte* { return nullptr; }),
           "a failed backing allocation propagates without writing a header");
+    // Exercise every possible base-address remainder, including the longest 39-byte prefix. The fixture's
+    // explicit allocation extent lets the backlink reader verify the same bounds without looking before it.
+    constexpr std::size_t payload = 0x1000;
+    constexpr std::size_t allocated = payload + kBigAllocationExtra;
+    alignas(32) std::array<std::byte, allocated + kBigAllocationAlignment> shifted{};
+    for (std::size_t shift = 0; shift < kBigAllocationAlignment; ++shift) {
+        auto* base = shifted.data() + shift;
+        const auto* buffer = AllocateVectorBlock(payload, [base](std::size_t bytes) {
+            Check(bytes == allocated, "every alignment reserves the full payload and prefix");
+            return base;
+        });
+        const auto offset = static_cast<std::size_t>(buffer - base);
+        Check(offset >= sizeof(base) && offset <= kBigAllocationExtra &&
+                  std::bit_cast<std::uintptr_t>(buffer) % kBigAllocationAlignment == 0 &&
+                  GameFreeAddress({base, allocated}, offset, payload) == std::bit_cast<std::uintptr_t>(base),
+              "all 32 allocation alignments preserve the native backlink and payload extent");
+    }
     // The 2.4.1 crash: an ordinary grown block without a backlink is rejected.
     const std::size_t grown = 0x50 * kMaxPlayers;
     const std::vector<std::byte> plain(grown + 16);
-    Check(GameFreeAddress(plain.data() + 16, grown) == 0,
+    Check(GameFreeAddress(plain, 16, grown) == 0,
           "a plain operator new block of the grown size fails 961930's check");
+    Check(GameFreeAddress(plain, 0, grown) == 0 && GameFreeAddress(plain, plain.size() + 1, grown) == 0 &&
+              GameFreeAddress(plain, 16, plain.size()) == 0,
+          "backlink inspection rejects missing prefix and out-of-range payloads");
 }
 
 }  // namespace

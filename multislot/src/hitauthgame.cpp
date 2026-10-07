@@ -124,15 +124,15 @@ std::int32_t ReferenceId(const void* weak) {
     return id;
 }
 
-// Seat 0 holds a live rider that never got a network identity (its +0x128 word is 0): RideAi's DummyVehicleRider.
-// 630F90 counts such a rider as this machine's on every machine that seated one. Game thread: read without locking,
-// as 630F90 tests the same weak_ptr (uses at control +8).
-bool NpcSeat0(const std::uint8_t* vehicle) {
+// The caller checked the seat count. An empty/expired seat or an unregistered Dummy belongs to the host for
+// damage authority, even if 630F90 would keep using this client's last driver. Read on the game thread, using
+// the same weak_ptr liveness fields as 630F90 (uses at control +8).
+bool NoRegisteredDriver(const std::uint8_t* vehicle) {
     const auto seat = Field<const std::uint8_t*>(vehicle, kSeats);
-    if (!seat) return false;
+    if (!seat) return true;
     const auto control = Field<const std::uint8_t*>(seat, kSeatRiderControl);
     const auto rider = Field<const std::uint8_t*>(seat, kSeatRider);
-    if (!control || !rider || Field<std::uint32_t>(control, 8) == 0) return false;
+    if (!control || !rider || Field<std::uint32_t>(control, 8) == 0) return true;
     return OwnerOf(Field<std::uint32_t>(rider, kNetworkFlags)) == NetOwner::Unregistered;
 }
 
@@ -144,18 +144,18 @@ NetOwner AttackerOwner(const std::uint8_t* gdi) {
     NetOwner owner = net.object ? OwnerOf(Field<std::uint32_t>(net.object, 8)) : NetOwner::Unregistered;
     if (owner != NetOwner::Unregistered) {
         // A vehicle's registration owner is whoever created it (the host, for a delivered one), not whoever fires
-        // from it. Its shots are decided where it is run: the machine of its seat-0 rider, else its last driver,
-        // else the host (630F90 with the host fallback); but the host when seat 0 is an NPC with no identity, which
-        // 630F90 calls local everywhere (VehicleShooter; docs/net-re/damage.md section 9). The vehicle classes are
+        // from it. Its shots follow a registered current driver through 630F90; without one, only the host decides.
+        // A private host Dummy and an empty client seat must not split authority with the client's last driver
+        // (VehicleShooter; docs/net-re/damage.md section 9). The vehicle classes are
         // the 27 that share slot 34 6347C0; their NetworkObject sits at +0x120 like every GameObjectBase's.
         const auto* vehicle = static_cast<const std::uint8_t*>(net.object) - kNetworkObject;
         const auto table = *reinterpret_cast<const std::uint8_t* const*>(vehicle);
         const auto slot34 = reinterpret_cast<const unsigned char*>(Field<const void*>(table, kAcceptSlot));
         if (slot34 == game + kVehicleAccept && Field<std::uint64_t>(vehicle, kSeatCount) > 0) {
-            const bool npc = NpcSeat0(vehicle);
-            const bool host = npc && Fn<bool(__fastcall*)(const void*)>(kIsHost)(nullptr);
-            const int runner = npc ? 0 : Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
-            owner = VehicleShooter(npc, host, runner);
+            const bool noDriver = NoRegisteredDriver(vehicle);
+            const bool host = noDriver && Fn<bool(__fastcall*)(const void*)>(kIsHost)(nullptr);
+            const int runner = noDriver ? 0 : Fn<int(__fastcall*)(const void*, bool, bool)>(kVehicleRunner)(vehicle, true, true);
+            owner = VehicleShooter(noDriver, host, runner);
         }
     }
     ReleaseShared(net);

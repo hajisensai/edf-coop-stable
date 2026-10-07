@@ -61,8 +61,9 @@ NetOwner OwnerOf(std::uint32_t networkFlags) {
     return NetOwner::Unregistered;
 }
 
-NetOwner VehicleShooter(bool npcSeat0, bool host, int runner) {
-    if (npcSeat0) return host ? NetOwner::Local : NetOwner::Remote;
+NetOwner VehicleShooter(bool noRegisteredDriver, bool host, int runner) {
+    // The last driver's machine is not an authority after the current driver leaves.
+    if (noRegisteredDriver) return host ? NetOwner::Local : NetOwner::Remote;
     return runner == 1 ? NetOwner::Local : NetOwner::Remote;
 }
 

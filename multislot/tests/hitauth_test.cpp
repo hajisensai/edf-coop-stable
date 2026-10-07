@@ -78,9 +78,9 @@ void TestOwner() {
     Check(OwnerOf(3) == NetOwner::Remote, "bit 0 wins, as the game reads it");
 }
 
-// The vehicle rule, every combination (all-forces online::Authority: npcSeat0 -> host, else 630F90).
+// The vehicle rule, every combination (all-forces online::Authority: no registered current driver -> host).
 void TestVehicleShooter() {
-    struct Row { bool npc; bool host; int runner; NetOwner want; const char* what; };
+    struct Row { bool noDriver; bool host; int runner; NetOwner want; const char* what; };
     const Row rows[] = {
         {false, false, 1, NetOwner::Local, "player rider of this machine: here"},
         {false, true, 1, NetOwner::Local, "host runs it: here"},
@@ -92,8 +92,10 @@ void TestVehicleShooter() {
         {true, false, 1, NetOwner::Remote, "NPC seat 0 on a client that seated it too (630F90 says local): not here"},
         {true, false, 2, NetOwner::Remote, "NPC seat 0 on a client: not here"},
         {true, false, 0, NetOwner::Remote, "NPC seat 0 on a client, nobody: not here"},
+        {true, false, 1, NetOwner::Remote, "empty client seat with its last local driver: only the host decides"},
+        {true, true, 2, NetOwner::Local, "expired driver on the host with a remote last driver: the host decides"},
     };
-    for (const Row& r : rows) Check(VehicleShooter(r.npc, r.host, r.runner) == r.want, r.what);
+    for (const Row& r : rows) Check(VehicleShooter(r.noDriver, r.host, r.runner) == r.want, r.what);
     // Exactly one machine decides: the host and a client that both seated an NPC.
     int deciders = 0;
     for (bool host : {true, false}) deciders += VehicleShooter(true, host, 1) == NetOwner::Local;
@@ -804,6 +806,73 @@ void TestForwardReferenceOwnership() {
     VirtualProtect(address, sizeof(singleton), old, &old);
 }
 
+// Execute the production attacker lookup with real RTTI, weak locking, host lookup and vehicle runner code.
+// The host may have seated its private Dummy while the client still has an empty seat and a local last driver.
+void TestVehicleSeatAuthority() {
+    alignas(16) std::uint8_t world[0x100]{}, session[0x100]{}, lobby[0x40]{};
+    auto pointer = [](void* at, const void* value) { std::memcpy(at, &value, sizeof(value)); };
+    pointer(world + 0xC0, session);  // online (7859A0)
+    pointer(world + 0xD0, session);
+    pointer(session + 0x30, lobby);  // 734F00 compares the local member with the lobby owner
+    auto* singleton = const_cast<unsigned char*>(base) + 0x20B2AC0;
+    void* previous = nullptr;
+    std::memcpy(&previous, singleton, sizeof(previous));
+    DWORD old = 0;
+    const bool writable = VirtualProtect(singleton, sizeof(previous), PAGE_READWRITE, &old) != FALSE;
+    Check(writable, "the vehicle test can supply a private world snapshot");
+    if (!writable) return;
+    pointer(singleton, world + 0x98);
+    struct Control { void* table = nullptr; long uses = 1, weaks = 2; } vehicleControl, riderControl, lastControl;
+    alignas(16) std::uint8_t vehicle[0x1000]{}, seat[0x340]{}, rider[0x200]{}, last[0x200]{}, target[0x800]{};
+    // This real vehicle vtable carries the RTTI that 22FCA0 uses to return its NetworkObject at +0x120.
+    Check(Slot(0x17D8B50, 34) == 0x6347C0, "the native vehicle fixture has the VehicleBase acceptance rule");
+    pointer(vehicle, base + 0x17D8B50);
+    pointer(vehicle + 0x608, seat);
+    const std::uint64_t seats = 1;
+    std::memcpy(vehicle + 0x618, &seats, sizeof(seats));
+    const std::uint32_t local = 2;
+    std::memcpy(vehicle + 0x128, &local, sizeof(local));
+    std::memcpy(target + 0x128, &local, sizeof(local));
+    std::memcpy(last + 0x128, &local, sizeof(local));
+    pointer(seat + 0x300, last);
+    pointer(seat + 0x308, &lastControl);  // the client's previous local driver, still alive
+    alignas(16) std::uint8_t gdi[kGdiBytes]{};
+    pointer(gdi + kGdiAttacker, vehicle);
+    pointer(gdi + kGdiAttacker + 8, &vehicleControl);
+    const float damage = 50.0f;
+    std::memcpy(gdi + kGdiDamage, &damage, sizeof(damage));
+    SetHitRuleForTest(true, true);
+    int deciders = 0;
+    for (int state = 0; state < 6; ++state) {
+        const bool host = state == 0 || state == 4;
+        pointer(lobby + 0x18, host ? nullptr : lobby);  // local member is null: equal only on the host
+        Check(Fn<bool(__fastcall*)(const void*)>(0x784210)(nullptr) == host, "native host lookup matches the machine snapshot");
+        pointer(seat + 0x260, state == 1 ? nullptr : rider);
+        pointer(seat + 0x268, state == 1 ? nullptr : &riderControl);
+        riderControl.uses = state == 2 ? 0 : 1;  // host Dummy, client empty / expired / Dummy
+        const std::uint32_t riderFlags = state == 4 ? 1 : state == 5 ? 2 : 0;
+        std::memcpy(rider + 0x128, &riderFlags, sizeof(riderFlags));
+        Check(Fn<int(__fastcall*)(const void*, bool, bool)>(0x630F90)(vehicle, true, true) == (state == 4 ? 2 : 1),
+              "stock runner reads current registered riders, or the Dummy and the client's last local driver");
+        std::uint32_t message = kDamageMessage;
+        void* payload = gdi;
+        CpuContext ctx{};
+        ctx.rcx = reinterpret_cast<std::uint64_t>(target);
+        ctx.rdx = reinterpret_cast<std::uint64_t>(&message);
+        ctx.r8 = reinterpret_cast<std::uint64_t>(&payload);
+        HitPreFilterHandler(&ctx);
+        const bool decides = message == kDamageMessage;
+        if (state < 2) deciders += decides;
+        Check(decides == (state < 4 ? host : state == 5),
+              "only a live registered driver replaces the host as vehicle damage authority");
+        Check(vehicleControl.uses == 1 && vehicleControl.weaks == 2, "the native attacker lookup balances its references");
+    }
+    Check(deciders == 1, "host Dummy plus client empty seat has exactly one damage authority");
+    ClearHitRuleForTest();
+    std::memcpy(singleton, &previous, sizeof(previous));
+    VirtualProtect(singleton, sizeof(previous), old, &old);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -839,6 +908,7 @@ int main(int argc, char** argv) {
         TestGameCode();
         TestPreFilter();
         TestForwardReferenceOwnership();
+        TestVehicleSeatAuthority();
     }
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

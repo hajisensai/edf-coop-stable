@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <vector>
 
@@ -111,14 +112,7 @@ void Put(void* object, std::size_t offset, T value) {
 }
 
 double NowMs() {
-    static const double perMs = [] {
-        LARGE_INTEGER f{};
-        QueryPerformanceFrequency(&f);
-        return static_cast<double>(f.QuadPart) / 1000.0;
-    }();
-    LARGE_INTEGER c{};
-    QueryPerformanceCounter(&c);
-    return static_cast<double>(c.QuadPart) / perMs;
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool Remote(const void* soldier) { return (Get<std::uint8_t>(soldier, kNetFlags) & 1) != 0; }

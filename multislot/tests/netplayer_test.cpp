@@ -410,7 +410,8 @@ void TestReviewFixes() {
         AcceptSample(t, s, 0.0, p);
         Vec3 copy{};
         float furthest = 0.0f;
-        for (double now = 0.0; now < p.staleMs; now += 1000.0 / 60.0) {
+        for (int frame = 0; frame * 1000.0 / 60.0 < p.staleMs; ++frame) {
+            const double now = frame * 1000.0 / 60.0;
             const RemoteStep step = StepRemote(t, copy, now, p);
             copy = copy + step.add;  // the copy has no motion of its own
             furthest = (std::max)(furthest, copy.x);

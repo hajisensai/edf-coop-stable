@@ -60,14 +60,20 @@ std::atomic<std::uint64_t> packedCount{0}, savedBytes{0}, unpackedCount{0}, dama
 // own operator new/delete the way its std::allocator<char> does: blocks of 4096 bytes and more over-allocated by
 // 0x27, aligned to 32, the raw pointer kept just before (the game frees them so, 12CEB72..12CEB97).
 struct GameString {
-    union {
-        char buffer[16];
-        char* pointer;
-    };
+    char storage[16];  // the characters (capacity < 16) or the pointer to them
     std::size_t size;
     std::size_t capacity;
 };
 static_assert(sizeof(GameString) == 32, "std::string");
+
+char* GameStringData(GameString& s) {
+    if (s.capacity < 16) return s.storage;
+    char* pointer = nullptr;
+    std::memcpy(&pointer, s.storage, sizeof(pointer));
+    return pointer;
+}
+
+void SetGameStringPointer(GameString& s, char* pointer) { std::memcpy(s.storage, &pointer, sizeof(pointer)); }
 
 char* GameAllocate(std::size_t bytes) {
     if (bytes < 0x1000) return static_cast<char*>(gameNew(bytes));
@@ -89,11 +95,11 @@ bool AssignGameString(GameString& s, const std::uint8_t* data, std::size_t size)
         const std::size_t capacity = size | 0xF;
         char* block = GameAllocate(capacity + 1);
         if (!block) return false;
-        if (s.capacity >= 16) GameFree(s.pointer, s.capacity + 1);
-        s.pointer = block;
+        if (s.capacity >= 16) GameFree(GameStringData(s), s.capacity + 1);
+        SetGameStringPointer(s, block);
         s.capacity = capacity;
     }
-    char* to = s.capacity >= 16 ? s.pointer : s.buffer;
+    char* to = GameStringData(s);
     std::memcpy(to, data, size);
     to[size] = '\0';
     s.size = size;
@@ -115,7 +121,7 @@ bool __fastcall NetEncryptHook(void* cipher, const std::uint8_t* data, std::size
 bool __fastcall NetDecryptHook(void* cipher, const std::uint8_t* data, std::size_t size) {
     if (!decrypt(cipher, data, size)) return false;
     auto& s = *static_cast<GameString*>(cipher);
-    const auto* plain = reinterpret_cast<const std::uint8_t*>(s.capacity >= 16 ? s.pointer : s.buffer);
+    const auto* plain = reinterpret_cast<const std::uint8_t*>(GameStringData(s));
     if (!IsPackedPlaintext(plain, s.size)) return true;
     thread_local std::vector<std::uint8_t> unpacked;
     // A damaged one is left as it is: its CRC fails and the game drops it as it drops any damaged datagram.

@@ -104,7 +104,7 @@ add_library(EDF6Coop SHARED
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/hostdataprompt.cpp src/weaponguard.cpp
     src/userslots.cpp src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp src/netplayer_members.cpp
-    src/widecmp.cpp src/interest.cpp)
+    src/widecmp.cpp src/interest.cpp src/vectoralloc.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -167,7 +167,7 @@ if(NOT EXISTS "${EDF_DLL}")
 endif()
 
 add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp
-    src/userslots.cpp)
+    src/userslots.cpp src/vectoralloc.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
 add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
 set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

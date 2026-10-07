@@ -137,6 +137,10 @@ std::vector<Patch> SessionPatches() {
     };
 }
 
+std::vector<CallSite> SessionCalls() {
+    return {{"voice chat HUD records allocation call", 0x9606AE, 0x12D85B0}};
+}
+
 std::vector<WideCompare> SessionCompares() {
     return {
         // Users (12B77E0): `cmp rcx, 4; jbe` (shrink only above the size) and `cmp rax, 4; jae` (grow below it).

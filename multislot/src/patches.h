@@ -103,6 +103,12 @@ std::vector<Patch> SessionPatches();
 // The bounds of four in the same three constructors that only an imm8 held: Users' slot vector size and capacity
 // checks, and the voice chat HUD's record reserve check and move limit, widened to kMaxPlayers (widecmp.h).
 std::vector<WideCompare> SessionCompares();
+// The voice chat HUD's record allocation (`mov ecx, 0x140; call operator new`, 9606A9/9606AE), redirected to
+// VectorOperatorNew (vectoralloc.h). SessionPatches grow its size to 0x50 * kMaxPlayers, past the 4096 bytes from
+// which the HUD's destructor (961930, called when a mission's HUD goes) frees it as an aligned STL block: a plain
+// operator new block of that size made every mission end, retreat or win, fail fast in 961930 (2.4.1, tester
+// reports of 2026-10-07).
+std::vector<CallSite> SessionCalls();
 // Redirected to RoomCountAndCapacity and RoomFullCount (rooms.h), in this order.
 std::vector<CallSite> GuestCalls();
 // Room screen member pages (roomview.h): two calls to BuildPanelsHook, then UpdateVoiceIconsHook.

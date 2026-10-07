@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -47,6 +48,7 @@
 #include "rooms.h"
 #include "smoothing.h"
 #include "updatecheck.h"
+#include "vectoralloc.h"
 #include "spawn.h"
 #include "hitauthgame.h"
 #include "netfeature.h"
@@ -257,6 +259,10 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     const auto guest = GuestCalls();
     redirects.push_back({guest[0], reinterpret_cast<void*>(&RoomCountAndCapacity)});
     redirects.push_back({guest[1], reinterpret_cast<void*>(&RoomFullCount)});
+    // The voice chat HUD's records, grown past 4096 bytes by SessionPatches: allocated the way its destructor frees them.
+    const auto sessionCalls = SessionCalls();
+    SetGameOperatorNew(std::bit_cast<std::uintptr_t>(base + sessionCalls[0].target));
+    for (const auto& call : sessionCalls) redirects.emplace_back(call, std::bit_cast<void*>(&VectorOperatorNew));
     const auto room = RoomViewCalls();
     redirects.push_back({room[0], reinterpret_cast<void*>(&BuildPanelsHook)});
     redirects.push_back({room[1], reinterpret_cast<void*>(&BuildPanelsHook)});

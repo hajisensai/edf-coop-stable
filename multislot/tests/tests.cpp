@@ -6,14 +6,15 @@
 
 #include <bit>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <string>
 #include <utility>
@@ -145,44 +146,47 @@ void CheckClearOfVr(const Spans& spans) {
 
 // What 961930 (and every std::vector of the game) checks before it frees a buffer of `bytes`: the address it passes to
 // operator delete, or 0 where it fails fast.
-std::uintptr_t GameFreeAddress(const void* buffer, std::size_t bytes) {
-    const auto at = reinterpret_cast<std::uintptr_t>(buffer);
+std::uintptr_t GameFreeAddress(const std::byte* buffer, std::size_t bytes) {
+    const auto at = std::bit_cast<std::uintptr_t>(buffer);
     if (bytes < 0x1000) return at;
-    const std::uintptr_t block = reinterpret_cast<const std::uintptr_t*>(at)[-1];
+    std::uintptr_t block = 0;
+    std::memcpy(&block, buffer - sizeof(block), sizeof(block));
     return at - block - 8 > 0x1F ? 0 : block;
 }
 
-std::size_t requested = 0;
-void* Recording(std::size_t bytes) {
-    requested = bytes;
-    return std::malloc(bytes);
-}
-
 void CheckVectorBlocks() {
-    // Below the threshold: the game's own call, unchanged.
-    void* small = AllocateVectorBlock(0x140, &Recording);
-    Check(small && requested == 0x140 && GameFreeAddress(small, 0x140) == reinterpret_cast<std::uintptr_t>(small),
+    // Storage ownership stays in the fixture while the callback records the allocator's request.
+    std::vector<std::byte> storage;
+    std::size_t requested = 0;
+    const auto recording = [&](std::size_t bytes) {
+        requested = bytes;
+        storage.resize(bytes);
+        return storage.data();
+    };
+    const auto* small = AllocateVectorBlock(0x140, recording);
+    Check(small && requested == 0x140 && GameFreeAddress(small, 0x140) == std::bit_cast<std::uintptr_t>(small),
           "a small vector block is operator new's own");
-    std::free(small);
-    // At and past it, for every room size up to kMaxPlayers: an aligned block 961930 frees without failing, and the
-    // records fit inside what was allocated.
-    for (std::size_t records : {std::size_t{52}, std::size_t{64}, std::size_t{kMaxPlayers}}) {
-        const std::size_t bytes = 0x50 * records;
-        void* buffer = AllocateVectorBlock(bytes, &Recording);
-        const std::uintptr_t block = GameFreeAddress(buffer, bytes);
-        const auto at = reinterpret_cast<std::uintptr_t>(buffer);
-        Check(buffer && requested == bytes + kBigAllocationExtra && block != 0 && at % kBigAllocationAlignment == 0 &&
+    // Cover the exact alignment threshold as well as actual HUD record capacities.
+    for (std::size_t bytes : {std::size_t{0x1000}, std::size_t{0x50 * 52}, std::size_t{0x50 * 64},
+                              std::size_t{0x50 * kMaxPlayers}}) {
+        const auto* buffer = AllocateVectorBlock(bytes, recording);
+        const auto block = GameFreeAddress(buffer, bytes);
+        const auto at = std::bit_cast<std::uintptr_t>(buffer);
+        Check(buffer && requested == bytes + kBigAllocationExtra &&
+                  block == std::bit_cast<std::uintptr_t>(storage.data()) && at % kBigAllocationAlignment == 0 &&
                   at + bytes <= block + requested,
               "a large vector block frees as the game's std::vector frees it");
-        std::free(reinterpret_cast<void*>(block));
     }
-    // The 2.4.1 crash: a plain block of the grown size is what 961930 refuses.
+    requested = 0;
+    Check(!AllocateVectorBlock(std::numeric_limits<std::size_t>::max(), recording) && requested == 0,
+          "an overflowing request never reaches the backing allocator");
+    Check(!AllocateVectorBlock(0x1000, [](std::size_t) -> std::byte* { return nullptr; }),
+          "a failed backing allocation propagates without writing a header");
+    // The 2.4.1 crash: an ordinary grown block without a backlink is rejected.
     const std::size_t grown = 0x50 * kMaxPlayers;
-    void* plain = std::malloc(grown + 16);
-    std::memset(plain, 0, grown + 16);
-    auto* misaligned = static_cast<std::uint8_t*>(plain) + 16;
-    Check(GameFreeAddress(misaligned, grown) == 0, "a plain operator new block of the grown size fails 961930's check");
-    std::free(plain);
+    const std::vector<std::byte> plain(grown + 16);
+    Check(GameFreeAddress(plain.data() + 16, grown) == 0,
+          "a plain operator new block of the grown size fails 961930's check");
 }
 
 }  // namespace
@@ -338,11 +342,11 @@ int main(int argc, char** argv) {
     // std::allocator does: a size of 0x1000 or more (`cmp rdx, 0x1000; jb`) is an aligned block whose address is at
     // [buffer-8] (`mov r8, [rcx-8]`), and anything but 8..0x27 bytes below the buffer fails fast (`cmp rax, 0x1f; ja`).
     // The grown allocation is past that size, so it has to be such a block (VectorOperatorNew).
-    const std::uint8_t freeBigCheck[] = {0x48, 0x81, 0xFA, 0x00, 0x10, 0x00, 0x00};  // cmp rdx, 0x1000
-    const std::uint8_t freeBlockRead[] = {0x4C, 0x8B, 0x41, 0xF8};                    // mov r8, [rcx-8]
-    const std::uint8_t freeShiftCheck[] = {0x48, 0x83, 0xF8, 0x1F};                   // cmp rax, 0x1f
-    Check(std::memcmp(image.At(0x961A25, 7), freeBigCheck, 7) == 0 && std::memcmp(image.At(0x961A32, 4), freeBlockRead, 4) == 0 &&
-              std::memcmp(image.At(0x961A3D, 4), freeShiftCheck, 4) == 0 && CallTargets(image.At(0x961A46, 5), 0x961A46, 0x12D85EC),
+    constexpr std::array<std::uint8_t, 7> freeBigCheck = {0x48, 0x81, 0xFA, 0x00, 0x10, 0x00, 0x00};  // cmp rdx, 0x1000
+    constexpr std::array<std::uint8_t, 4> freeBlockRead = {0x4C, 0x8B, 0x41, 0xF8};                    // mov r8, [rcx-8]
+    constexpr std::array<std::uint8_t, 4> freeShiftCheck = {0x48, 0x83, 0xF8, 0x1F};                   // cmp rax, 0x1f
+    Check(std::memcmp(image.At(0x961A25, 7), freeBigCheck.data(), 7) == 0 && std::memcmp(image.At(0x961A32, 4), freeBlockRead.data(), 4) == 0 &&
+              std::memcmp(image.At(0x961A3D, 4), freeShiftCheck.data(), 4) == 0 && CallTargets(image.At(0x961A46, 5), 0x961A46, 0x12D85EC),
           "961930 frees records of 0x1000 bytes or more as an aligned STL block", 0x961A25);
     Check(CallTargets(image.At(0x9609CF, 5), 0x9609CF, 0x961930) && CallTargets(image.At(0x960B48, 5), 0x960B48, 0x961930),
           "UiVoiceChat_Notify's destructors free the records through 961930", 0x9609CF);

@@ -6,8 +6,10 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include "native_runtime.h"
 
 #include <climits>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -128,38 +130,12 @@ bool RedirectedInto(const unsigned char* site, HMODULE plugin) {
 
 // The private EDF mapping has no imports or DllMain. Its allocator, record copies and destructor only need
 // CRT imports here; resolve those from this process, as the stream native tests do, without starting the game.
-bool ResolveRuntimeImports(HMODULE module) {
-    auto* image = reinterpret_cast<unsigned char*>(module);
-    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
-    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
-    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    for (auto d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(image + directory.VirtualAddress); d->Name; ++d) {
-        const char* dll = reinterpret_cast<const char*>(image + d->Name);
-        if (_strnicmp(dll, "VCRUNTIME", 9) && _strnicmp(dll, "api-ms-win-crt-", 15)) continue;
-        const HMODULE runtime = LoadLibraryA(dll);
-        if (!runtime) return false;
-        auto names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(image + d->OriginalFirstThunk);
-        auto slots = reinterpret_cast<std::uint64_t*>(image + d->FirstThunk);
-        for (; names->u1.AddressOfData; ++names, ++slots) {
-            if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal)) continue;
-            const auto name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(image + names->u1.AddressOfData);
-            const FARPROC proc = GetProcAddress(runtime, reinterpret_cast<const char*>(name->Name));
-            if (!proc) return false;
-            DWORD old = 0;
-            if (!VirtualProtect(slots, sizeof(*slots), PAGE_READWRITE, &old)) return false;
-            *slots = reinterpret_cast<std::uint64_t>(proc);
-            if (!VirtualProtect(slots, sizeof(*slots), old, &old)) return false;
-        }
-    }
-    return true;
-}
-
 void CheckVoiceHudLifetime(const unsigned char* base, HMODULE game, HMODULE plugin) {
     const auto call = SessionCalls().at(0);
     const bool redirected = RedirectedInto(base + call.rva, plugin);
     Check(redirected, "voice HUD allocation reaches the plugin through a stub");
     if (!redirected) return;
-    const bool imports = ResolveRuntimeImports(game);
+    const bool imports = native_test::ResolveCrtImports(game);
     Check(imports, "voice HUD native lifetime has its CRT imports");
     if (!imports) return;
     std::int32_t displacement = 0;
@@ -173,20 +149,21 @@ void CheckVoiceHudLifetime(const unsigned char* base, HMODULE game, HMODULE plug
     // Native vector: +8 data, +0x10 capacity, +0x18 count. The template record has two empty wstrings
     // (inline capacity 7) followed by the HUD's flags. Exercise real record construction and destruction,
     // not a C++ copy of the alignment check. Repeat so a leaked/stale vector state cannot pass silently.
-    alignas(16) std::uint64_t record[10]{};
-    record[3] = record[7] = 7;
+    alignas(16) std::array<std::uint64_t, 10> record{};
+    record[3] = 7;
+    record[7] = 7;
     for (const std::size_t count : {std::size_t{4}, std::size_t{52}, std::size_t{kMaxPlayers}}) {
         for (int cycle = 0; cycle < 3; ++cycle) {
             void* buffer = allocate(0x50 * count);
             Check(buffer != nullptr, "voice HUD native allocation succeeds");
             if (!buffer) return;
-            std::uint64_t vector[4]{0, reinterpret_cast<std::uint64_t>(buffer), count, 0};
-            resize(vector, count, record);
+            std::array<std::uint64_t, 4> vector{0, reinterpret_cast<std::uint64_t>(buffer), count, 0};
+            resize(vector.data(), count, record.data());
             Check(vector[3] == count, "native voice HUD resize initializes every record");
-            destroy(vector);
+            destroy(vector.data());
             Check(vector[1] == 0 && vector[2] == 0 && vector[3] == 0,
                   "native voice HUD destructor releases and clears the grown vector");
-            destroy(vector);
+            destroy(vector.data());
         }
     }
 }

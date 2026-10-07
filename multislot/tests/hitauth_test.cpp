@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include "native_runtime.h"
 
 #include <cmath>
 #include <cstdio>
@@ -477,35 +478,6 @@ void ToReader(const Stream& written, Stream& reader) {
     Fn<void(__fastcall*)(void*, const void*, std::size_t)>(kStreamFrom)(reader.bytes, written.bytes + 0x10, size);
 }
 
-// The image is mapped without its imports; the stream code copies with the C runtime's memcpy, through the import
-// table. Only the C runtime's imports are filled in (from this process's own copies); nothing else of the game's
-// imports is reachable from the code called here.
-bool ResolveRuntimeImports(HMODULE module) {
-    auto* image = reinterpret_cast<std::uint8_t*>(module);
-    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
-    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
-    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    for (auto d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(image + directory.VirtualAddress); d->Name; ++d) {
-        const char* dll = reinterpret_cast<const char*>(image + d->Name);
-        if (_strnicmp(dll, "VCRUNTIME", 9) && _strnicmp(dll, "api-ms-win-crt-", 15)) continue;
-        const HMODULE runtime = LoadLibraryA(dll);
-        if (!runtime) return false;
-        auto names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(image + d->OriginalFirstThunk);
-        auto slots = reinterpret_cast<std::uint64_t*>(image + d->FirstThunk);
-        for (; names->u1.AddressOfData; ++names, ++slots) {
-            if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal)) continue;
-            const auto byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(image + names->u1.AddressOfData);
-            const FARPROC proc = GetProcAddress(runtime, reinterpret_cast<const char*>(byName->Name));
-            if (!proc) continue;
-            DWORD old = 0;
-            if (!VirtualProtect(slots, 8, PAGE_READWRITE, &old)) return false;
-            *slots = reinterpret_cast<std::uint64_t>(proc);
-            VirtualProtect(slots, 8, old, &old);
-        }
-    }
-    return true;
-}
-
 void TestGameCode() {
     const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
@@ -900,7 +872,7 @@ int main(int argc, char** argv) {
             std::printf("FAIL: EDF.dll cannot be mapped (error %lu)\n", GetLastError());
             return 1;
         }
-        if (!ResolveRuntimeImports(game)) {
+        if (!native_test::ResolveCrtImports(game)) {
             std::printf("FAIL: the C runtime imports of EDF.dll cannot be filled in (error %lu)\n", GetLastError());
             return 1;
         }

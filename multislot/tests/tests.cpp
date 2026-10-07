@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include "../src/smoothing.h"
 #include "../src/rooms.h"
 #include "../src/userslots.h"
+#include "../src/vectoralloc.h"
 #include "../src/joinlog.h"
 #include "../src/peertimeout.h"
 
@@ -141,9 +143,53 @@ void CheckClearOfVr(const Spans& spans) {
             Check(span.second <= vr.rva || span.first >= vr.rva + vr.size, "write stays clear of EDF6VR's patches", span.first);
 }
 
+// What 961930 (and every std::vector of the game) checks before it frees a buffer of `bytes`: the address it passes to
+// operator delete, or 0 where it fails fast.
+std::uintptr_t GameFreeAddress(const void* buffer, std::size_t bytes) {
+    const auto at = reinterpret_cast<std::uintptr_t>(buffer);
+    if (bytes < 0x1000) return at;
+    const std::uintptr_t block = reinterpret_cast<const std::uintptr_t*>(at)[-1];
+    return at - block - 8 > 0x1F ? 0 : block;
+}
+
+std::size_t requested = 0;
+void* Recording(std::size_t bytes) {
+    requested = bytes;
+    return std::malloc(bytes);
+}
+
+void CheckVectorBlocks() {
+    // Below the threshold: the game's own call, unchanged.
+    void* small = AllocateVectorBlock(0x140, &Recording);
+    Check(small && requested == 0x140 && GameFreeAddress(small, 0x140) == reinterpret_cast<std::uintptr_t>(small),
+          "a small vector block is operator new's own");
+    std::free(small);
+    // At and past it, for every room size up to kMaxPlayers: an aligned block 961930 frees without failing, and the
+    // records fit inside what was allocated.
+    for (std::size_t records : {std::size_t{52}, std::size_t{64}, std::size_t{kMaxPlayers}}) {
+        const std::size_t bytes = 0x50 * records;
+        void* buffer = AllocateVectorBlock(bytes, &Recording);
+        const std::uintptr_t block = GameFreeAddress(buffer, bytes);
+        const auto at = reinterpret_cast<std::uintptr_t>(buffer);
+        Check(buffer && requested == bytes + kBigAllocationExtra && block != 0 && at % kBigAllocationAlignment == 0 &&
+                  at + bytes <= block + requested,
+              "a large vector block frees as the game's std::vector frees it");
+        std::free(reinterpret_cast<void*>(block));
+    }
+    // The 2.4.1 crash: a plain block of the grown size is what 961930 refuses.
+    const std::size_t grown = 0x50 * kMaxPlayers;
+    void* plain = std::malloc(grown + 16);
+    std::memset(plain, 0, grown + 16);
+    auto* misaligned = static_cast<std::uint8_t*>(plain) + 16;
+    Check(GameFreeAddress(misaligned, grown) == 0, "a plain operator new block of the grown size fails 961930's check");
+    std::free(plain);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Needs no game: also runs when the tests against EDF.dll are skipped.
+    CheckVectorBlocks();
     if (argc < 2) {
         std::printf("usage: MultiSlotTests EDF.dll\n");
         return 2;
@@ -151,7 +197,7 @@ int main(int argc, char** argv) {
     // CMake registers this test with or without the game; without it the test says so and counts as skipped.
     if (GetFileAttributesA(argv[1]) == INVALID_FILE_ATTRIBUTES) {
         std::printf("SKIPPED: %s is not there (set EDF6_GAME_DIR to the game folder to run this test)\n", argv[1]);
-        return 77;
+        return failures ? 1 : 77;
     }
     Image image;
     std::ifstream in(argv[1], std::ios::binary);
@@ -176,6 +222,11 @@ int main(int argc, char** argv) {
     Check(memberListCalls.size() == 3, "all three member list calls are redirected");
     for (const auto& call : memberListCalls) Check(call.target == 0x7468C0, "the member list builder is the target", call.rva);
     calls.insert(calls.end(), memberListCalls.begin(), memberListCalls.end());
+    // The voice chat HUD's record allocation goes to VectorOperatorNew (vectoralloc.h).
+    const auto sessionCalls = SessionCalls();
+    Check(sessionCalls.size() == 1 && sessionCalls[0].rva == 0x9606AE && sessionCalls[0].target == 0x12D85B0,
+          "the voice chat HUD's operator new call is redirected", 0x9606AE);
+    calls.insert(calls.end(), sessionCalls.begin(), sessionCalls.end());
     // The helpers the harness uses to grow that list: reserve (748E70) and append-copies (749040), as the
     // builder itself uses them.
     Check(CallTargets(image.At(0x746A30, 5), 0x746A30, 0x748E70) && CallTargets(image.At(0x746B49, 5), 0x746B49, 0x748E70),
@@ -283,6 +334,19 @@ int main(int argc, char** argv) {
     Check(CallTargets(image.At(0x9606AE, 5), 0x9606AE, 0x12D85B0) && CallTargets(image.At(0x960789, 5), 0x960789, 0x9621A0),
           "the voice chat HUD allocates and resizes its records in the constructor", 0x960789);
     Check(SlotTargets(image.At(0x1811998, 8), image.nt->OptionalHeader.ImageBase, 0x961140), "961140 is UiVoiceChat_Notify's update", 0x1811998);
+    // ...and frees them in 961930 (from its destructor 960990 / 960A20, which a mission's HUD runs when it goes) the way
+    // std::allocator does: a size of 0x1000 or more (`cmp rdx, 0x1000; jb`) is an aligned block whose address is at
+    // [buffer-8] (`mov r8, [rcx-8]`), and anything but 8..0x27 bytes below the buffer fails fast (`cmp rax, 0x1f; ja`).
+    // The grown allocation is past that size, so it has to be such a block (VectorOperatorNew).
+    const std::uint8_t freeBigCheck[] = {0x48, 0x81, 0xFA, 0x00, 0x10, 0x00, 0x00};  // cmp rdx, 0x1000
+    const std::uint8_t freeBlockRead[] = {0x4C, 0x8B, 0x41, 0xF8};                    // mov r8, [rcx-8]
+    const std::uint8_t freeShiftCheck[] = {0x48, 0x83, 0xF8, 0x1F};                   // cmp rax, 0x1f
+    Check(std::memcmp(image.At(0x961A25, 7), freeBigCheck, 7) == 0 && std::memcmp(image.At(0x961A32, 4), freeBlockRead, 4) == 0 &&
+              std::memcmp(image.At(0x961A3D, 4), freeShiftCheck, 4) == 0 && CallTargets(image.At(0x961A46, 5), 0x961A46, 0x12D85EC),
+          "961930 frees records of 0x1000 bytes or more as an aligned STL block", 0x961A25);
+    Check(CallTargets(image.At(0x9609CF, 5), 0x9609CF, 0x961930) && CallTargets(image.At(0x960B48, 5), 0x960B48, 0x961930),
+          "UiVoiceChat_Notify's destructors free the records through 961930", 0x9609CF);
+    Check(0x50u * kMaxPlayers >= kBigAllocationThreshold, "the grown record allocation is an aligned STL block", 0x9606A9);
     const std::uint8_t recordBase[] = {0x48, 0x8B, 0x98, 0x40, 0x01, 0x00, 0x00};  // mov rbx, [rax+0x140]
     const std::uint8_t recordStep[] = {0x49, 0x83, 0xC5, 0x50};                    // add r13, 0x50
     Check(std::memcmp(image.At(0x961560, 7), recordBase, 7) == 0 && std::memcmp(image.At(0x9616DD, 4), recordStep, 4) == 0,

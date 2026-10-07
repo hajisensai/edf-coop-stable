@@ -51,6 +51,14 @@ constexpr const char* kStatusDelayVariable = "EDF6NET_STATUS_DELAY";
 constexpr const char* kStatusPairVariable = "EDF6NET_STATUS_PAIR";
 // "<n>" - EDF6NET_STATUS_DELAY applies only once this machine has seen the room hold n members (the room fills as usual).
 constexpr const char* kStatusDelayAfterVariable = "EDF6NET_STATUS_DELAY_AFTER";
+// "1" - once the room filled (EDF6NET_STATUS_DELAY_AFTER), a member's JOINED reaches this machine only once its
+// EDF6Coop follows the host's member slots and knows that member's slot (EDF6Coop_HostSlot), and a LEFT only right after
+// the next JOINED: the order "Epic's join of the newcomer, with its slot known, before Epic's leave of the member whose
+// slot it takes" made by the test, not by timing.
+constexpr const char* kJoinWhenSlottedVariable = "EDF6NET_JOIN_WHEN_SLOTTED";
+// "<member>" - Epic's PROMOTED reaches this machine only once its EDF6Coop follows a host list without the old owner and
+// with <member> (EDF6Coop_HostSlot): the new host's list comes before PROMOTED, made by the test, not by timing.
+constexpr const char* kPromotedAfterSlotVariable = "EDF6NET_PROMOTED_AFTER_SLOT";
 
 struct Attribute {
     char key[kKeyText];

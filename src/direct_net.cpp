@@ -746,9 +746,10 @@ void DirectNet::setRoomMembers(std::vector<std::string> members) {
     rosterChanged();  // the room list goes out with the roster
 }
 
-std::vector<std::string> DirectNet::hostRoom(uint64_t* version) {
+std::vector<std::string> DirectNet::hostRoom(uint64_t* version, std::string* from) {
     std::lock_guard<std::mutex> lock(mu_);
     if (version) *version = hostRoomVersion_;
+    if (from) *from = hostRoomFrom_;
     return hostRoom_;
 }
 
@@ -1367,8 +1368,9 @@ void DirectNet::onClientDatagram(const Received& r, const sockaddr_storage& from
                 roomPages_.applied = m.room.version;
                 list = m.room.members;
             }
-            if (hostRoom_ != list) {
+            if (hostRoom_ != list || hostRoomFrom_ != hostLink_->puid) {
                 hostRoom_ = std::move(list);
+                hostRoomFrom_ = hostLink_->puid;
                 ++hostRoomVersion_;
             }
         }

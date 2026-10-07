@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -575,7 +576,15 @@ void TestHold() {
 int bulkPeer = 0, otherPeer = 0;
 std::uint64_t bulkInFlight = 0;  // what the fragment layer says of bulkPeer
 std::size_t bulkSize = 0;
+// Many members, each with a bulk on its way at once (kHeldBytesCap).
+int manyPeers[24]{};
+bool manyInFlight = false;
 std::uint64_t FakeIncoming(const void* peer, std::size_t* total) {
+    for (std::size_t i = 0; manyInFlight && i < std::size(manyPeers); ++i)
+        if (peer == &manyPeers[i]) {
+            if (total) *total = 200 * 1024;
+            return 0x5000 + i;
+        }
     if (peer != &bulkPeer || !bulkInFlight) return 0;
     if (total) *total = bulkSize;
     return bulkInFlight;
@@ -656,6 +665,25 @@ void TestBulkHold() {
     got = GameReadsAll();
     Check(Sequence(got, &bulkPeer, 0, static_cast<int>(cap + 10)) && HeldPacketCount() == 0,
           "past BulkHoldCapacity the bulk is let go and every packet reaches the game, in order");
+
+    // Many members' bulks at once, each within what one bulk may hold back, together past kHeldBytesCap: every bulk is
+    // let go and every packet reaches the game, each member's in order - the store never grows without a bound.
+    bulkInFlight = 0;
+    manyInFlight = true;
+    constexpr std::size_t kEach = kBulkHoldMinPackets - 4;
+    for (std::size_t n = 0; n < kEach; ++n)
+        for (int& peer : manyPeers) {
+            auto bytes = Numbered(n);
+            bytes.resize(1100, 0xEE);
+            incoming.push_back({bytes, &peer, 0});
+        }
+    static_assert(kEach * std::size(manyPeers) * 1100 > kHeldBytesCap, "the test outgrows the cap");
+    got = GameReadsAll();
+    bool ordered = true;
+    for (int& peer : manyPeers) ordered = ordered && Sequence(got, &peer, 0, static_cast<int>(kEach));
+    Check(ordered && got.size() == kEach * std::size(manyPeers) && HeldPacketCount() == 0,
+          "past kHeldBytesCap in all, every bulk is let go and every packet reaches the game, in order");
+    manyInFlight = false;
 
     // Held as long as the bulk takes at 32 KiB/s, then let go (the start message waits for the records instead).
     bulkInFlight = 0x4444;

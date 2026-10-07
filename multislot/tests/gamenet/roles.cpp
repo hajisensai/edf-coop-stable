@@ -879,8 +879,11 @@ int SlotRoom(Machine& machine, const std::string& how) {
             if (status == 0 && !has && listed) transport.Add(m);
             if ((status == 1 || status == 2 || status == 3) && has) transport.Remove(m);
         }
-        // Then whatever the room lists that no status said (the members that were there when we came in): one
-        // that left before one that came after it.
+        // Then whatever the room lists that no status said: the game re-reads the room's members only when a status
+        // reaches it (12BD460), so this runs only then - reading the room every frame would add a member the room
+        // lists before its JOINED (and the LEFT of the member whose slot it takes) reached the game. One that left
+        // before one that came after it.
+        if (told.empty()) return;
         for (const auto& m : transport.Members())
             if (m != machine.user && std::find(members.begin(), members.end(), m) == members.end()) transport.Remove(m);
         for (const auto& m : members) {
@@ -924,7 +927,8 @@ int SlotRoom(Machine& machine, const std::string& how) {
     }
     std::vector<std::string> final = SplitList(Variable("EDF6NET_FINAL"));
     std::sort(final.begin(), final.end());
-    const bool everyone = TickUntil(machine, 40000, [&] {
+    // A room whose new host never says its slots holds joins for up to 20 s (eos_hooks kNewHostSlotsMs): room for that.
+    const bool everyone = TickUntil(machine, 60000, [&] {
         frame();
         std::vector<std::string> have = transport.Members();
         std::sort(have.begin(), have.end());
@@ -940,7 +944,14 @@ int SlotRoom(Machine& machine, const std::string& how) {
     std::string slots;
     for (const auto& m : byIndex) slots += (slots.empty() ? "" : " ") + std::to_string(transport.NetworkIndex(m)) + ":" + m;
     Result("slots", "%s", slots.c_str());
+    // Whether this machine follows a host's member slots now (EDF6Coop_HostSlot of itself: -1 when not).
+    if (const HMODULE plugin = GetModuleHandleA("EDF6Coop.dll"))
+        if (const auto hostSlot = reinterpret_cast<int (*)(const char*)>(
+                reinterpret_cast<void*>(GetProcAddress(plugin, "EDF6Coop_HostSlot"))))
+            Result("followsHost", "%d", hostSlot(machine.user.c_str()));
     if (!everyone) return 1;
+    // EDF6NET_SLOTS_ONLY=1: the numbering is what is checked; a room whose games cannot agree on it plays no start sync.
+    if (Variable("EDF6NET_SLOTS_ONLY") == "1") return 0;
     room.members = byIndex;
     return MissionIn(machine, host, room, &transport);
 }

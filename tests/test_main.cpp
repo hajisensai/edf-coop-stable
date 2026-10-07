@@ -3104,22 +3104,89 @@ void testRoomView() {
     printf("room view: a change of host drops the old host's slots; joins wait for the new host's\n");
     v.reset(kB, {kHost, kA, kB});
     v.heardHost({kHost, kA, kB});
-    CHECK(v.slotted() && !v.awaitingHost(0, 20000));
+    CHECK(v.slotted() && !v.awaitingHost());
     v.promoted(kA, 1000);  // the host left, A hosts now
     CHECK(!v.slotted() && v.hostSlot(kB) < 0 && v.followHost().empty());
-    CHECK(v.awaitingHost(1000, 20000) && v.awaitingHost(20999, 20000) && !v.awaitingHost(21000, 20000));
-    v.heardHost({kD, kA, kB});  // the new host's slots: D took the old host's slot 0
-    CHECK(v.slotted() && !v.awaitingHost(1500, 20000) && v.hostSlot(kD) == 0);
+    CHECK(v.awaitingHost() && v.releaseHeld(20999, 20000, 20000).empty() && v.awaitingHost());
+    v.heardHost({kHost, kA, kB}, kHost);  // the old host's list, read again after the change: not heard
+    CHECK(!v.slotted() && v.awaitingHost());
+    v.heardHost({kD, kA, kB}, kA);  // the new host's slots: D took the old host's slot 0
+    CHECK(v.slotted() && !v.awaitingHost() && v.hostSlot(kD) == 0);
     v.reset(kB, {kHost, kB});  // a member that never followed slots does not wait for any
     v.promoted(kA, 1000);
-    CHECK(!v.awaitingHost(1000, 20000));
+    CHECK(!v.awaitingHost());
+
+    printf("room view: joins held while the new host never says its slots are not lost - they come in Epic's order\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    v.promoted(kA, 1000);
+    v.holdJoin(kD, 2000);
+    v.holdJoin(kC, 3000);
+    v.holdJoin(kD, 3500);  // the same join again (settle): held once
+    CHECK(v.heldCount() == 2 && v.held(kD) && v.awaitingHost());
+    CHECK(v.releaseHeld(20999, 20000, 60000).empty());                                  // still waiting
+    CHECK((v.releaseHeld(21000, 20000, 60000) == std::vector<std::string>{kD, kC}));    // the wait ran out: as they came
+    CHECK(!v.awaitingHost() && v.heldCount() == 0);
+    CHECK(v.consumeRelease(kD) && !v.consumeRelease(kD));  // let past the hold once
+    CHECK(v.admit(kD, dn::kJoined) && v.has(kD) && v.consumeRelease(kC));
+    v.holdJoin(kHost, 22000);
+    CHECK(v.admit(kHost, dn::kLeft) == false && !v.held(kHost));  // gone before it reached our game: nothing to bring
+
+    printf("room view: becoming the host, the joins we held take the old host's slots first, in slot order\n");
+    {
+        const std::string kE = "0004ffffffffffffffffffffffffffff";
+        v.reset(kB, {kHost, kB});
+        v.heardHost({kHost, kB, kC, kD});  // C and D are in the old host's game, not yet in ours
+        v.holdJoin(kE, 100);
+        v.holdJoin(kD, 200);
+        v.holdJoin(kC, 300);
+        CHECK((v.promoted(kB, 1000) == std::vector<std::pair<std::string, int>>{{kC, 2}, {kD, 3}, {kE, -1}}));
+    }
+
+    printf("new host: a held join takes its old slot when it is the one our game gives next, waits for a lower one\n");
+    {
+        using P = dn::InheritedPlacement;
+        const auto same = [](P a, bool tell, bool fits) { return a.tell == tell && a.fits == fits; };
+        CHECK(same(dn::decideInheritedPlacement(3, {"d", "a", "b", ""}, false), true, true));   // slot 3 is next
+        CHECK(same(dn::decideInheritedPlacement(3, {"", "a", "b"}, false), false, false));      // slot 0 still empty
+        CHECK(same(dn::decideInheritedPlacement(3, {"", "a", "b"}, true), true, false));        // waited long enough
+        CHECK(same(dn::decideInheritedPlacement(1, {"d", "", "b"}, false), true, true));
+        CHECK(same(dn::decideInheritedPlacement(1, {"d", "a", ""}, false), true, false));       // taken: as it came
+        CHECK(same(dn::decideInheritedPlacement(-1, {"", "a"}, false), true, true));            // no old slot
+        CHECK(same(dn::decideInheritedPlacement(2, {}, false), true, true));                   // our slots not known
+    }
+
+    printf("room view: a join held too long by the host's slots goes anyway, once\n");
+    v.reset(kB, {kHost, kB});
+    v.heardHost({kHost, kB});
+    v.holdJoin(kC, 1000);
+    CHECK(v.releaseHeld(20999, 20000, 20000).empty() && (v.releaseHeld(21000, 20000, 20000) == std::vector<std::string>{kC}));
+
+    printf("room view: a change of host forgets whom the old host listed - the new list missing a member is no leave\n");
+    v.reset(kB, {kHost, kA, kB, kC});
+    v.heardHost({kHost, kA, kB, kC});
+    v.adoptHost();
+    v.promoted(kA, 1000);
+    v.heardHost({"", kA, kB}, kA);  // A's game does not have C yet
+    CHECK(v.followHost().empty());   // C stays in our game
+
+    printf("room view: the room's list may come before PROMOTED - it is heard again from the new host\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    v.heardHost({kD, kA, kB});  // A's list, before Epic's PROMOTED reached us
+    v.promoted(kA, 1000);
+    CHECK(!v.slotted());
+    v.heardHost({kD, kA, kB}, kA);  // eos_hooks follows it again (followedVersion reset)
+    CHECK(v.slotted() && v.hostSlot(kD) == 0);
 
     printf("room view: becoming the host, our game's slots rule and nobody is held back by the old host's\n");
     v.reset(kB, {kHost, kA, kB});
     v.heardHost(dn::roomMessage({kHost, kA, kB}, {kD}));  // the host removed D
     CHECK(v.slotted() && v.banned(kD) && v.hostSlot(kD) < 0);
-    v.promoted(kB, 1000);
-    CHECK(!v.slotted() && !v.awaitingHost(1000, 20000));
+    v.holdJoin(kC, 900);
+    const auto placements = v.promoted(kB, 1000);
+    CHECK(!v.slotted() && !v.awaitingHost());
+    CHECK((placements == std::vector<std::pair<std::string, int>>{{kC, -1}}) && v.heldCount() == 0);
     CHECK(v.banned(kD) && v.bannedMembers().count(kD));  // the removal moves with the room to its new host
     CHECK((v.hostJoins({{kD, 9}}, 8).empty()));          // its direct link does not let it back in
 
@@ -3147,6 +3214,9 @@ void testRoomView() {
     CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs - 1, false, false, true) == O::Wait);
     CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, false, false, true) == O::GiveUp);
     CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, true, false, true) == O::Slotted);
+    // The room's owner changed to one without a direct link: nobody says slots there, so the game enters as without the plugin.
+    CHECK(dn::decideParkedEntry(100, false, false, true, dn::kParkedNoHostMs - 1) == O::Wait);
+    CHECK(dn::decideParkedEntry(100, false, false, true, dn::kParkedNoHostMs) == O::NoHost);
 }
 
 void testRoomWire() {

@@ -351,7 +351,7 @@ target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
 target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
 add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
-foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull mission8bulklost slotorder mission8bulkcut slotmigrate slotchurn slotchurnlate)
+foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull mission8bulklost slotorder mission8bulkcut slotmigrate slotmigratenodirect slotmigrateearlyroom slotchurn slotchurnlate)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

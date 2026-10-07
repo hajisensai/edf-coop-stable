@@ -231,7 +231,8 @@ public:
     void setRoomMembers(std::vector<std::string> members);
     // join: who the host's game has in the room, as last heard; `version` goes up whenever it changes.
     // Empty until the host first said (a host of protocol 6 says it right after welcoming us).
-    std::vector<std::string> hostRoom(uint64_t* version);
+    // `from`: the host that sent it.
+    std::vector<std::string> hostRoom(uint64_t* version, std::string* from = nullptr);
     std::string statusLine();
     WireTraffic takeWireTraffic();
     // Link datagrams dropped since start because they failed authentication: a bad tag (forged,
@@ -427,6 +428,7 @@ private:
     std::vector<std::string> roster_;
     std::vector<std::string> hostRoom_;  // see hostRoom
     uint64_t hostRoomVersion_ = 0;
+    std::string hostRoomFrom_;  // whose hostRoom_ is
     Pages rosterPages_, roomPages_;
     // Mesh: links other joiners dialled (we answered as a host does), our dials to them, introductions.
     std::map<std::string, Link> peerLinks_;

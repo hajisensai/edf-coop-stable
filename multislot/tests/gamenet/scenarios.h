@@ -308,6 +308,16 @@ inline std::string LastLine(const std::string& log, const std::string& prefix) {
     return found;
 }
 
+// NetStats keeps ticking after its send loop finishes, so the last interval can contain only control traffic.
+// Count state datagrams across the run rather than requiring them in that final idle interval.
+inline std::size_t StateDatagrams(const std::string& log) {
+    const std::string prefix = "NETCLASS datagrams: state ";
+    std::size_t total = 0;
+    for (std::size_t at = log.find(prefix); at != std::string::npos; at = log.find(prefix, at + prefix.size()))
+        total += static_cast<std::size_t>(std::strtoull(log.c_str() + at + prefix.size(), nullptr, 10));
+    return total;
+}
+
 // The kbps a PATHS line gives after `label` (e.g. "direct "), summed over every PATHS line of `log`.
 inline double PathKbps(const std::string& log, const std::string& label) {
     double total = 0;
@@ -386,9 +396,9 @@ inline void CheckNetStats(const std::vector<Spawned>& machines, const gamenet::N
         const std::string probe = LastLine(log, "NETTYPE 0x02700");
         Check(!probe.empty() && probe.find(" 0 reliable") == std::string::npos,
               machine.user + " logs the probe record type, sent reliably (" + probe + ")");
-        const std::string classes = LastLine(log, "NETCLASS datagrams: state ");
-        Check(!classes.empty() && classes.find("state 0 ") == std::string::npos,
-              machine.user + " learnt the state type: state datagrams counted (" + classes + ")");
+        const std::size_t states = StateDatagrams(log);
+        Check(states > 0,
+              machine.user + " learnt the state type: " + std::to_string(states) + " state datagrams counted");
         Check(LastLine(log, "NETCODE features in room").find(" on: TrafficClasses,Mesh,Fragments") != std::string::npos,
               machine.user + " sees every member run the same netcode");
     }

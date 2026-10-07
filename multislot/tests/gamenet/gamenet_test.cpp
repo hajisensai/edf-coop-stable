@@ -166,6 +166,16 @@ std::string Result(const Spawned& machine, const std::string& key) {
 #include "scenarios.h"
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--log-stats") {
+        const std::string idle = "[DN] NETCLASS datagrams: state 0 (0 kbps) event 0 (0 kbps) control 1 (0 kbps)\n";
+        const std::string active = "[DN] NETCLASS datagrams: state 16 (12 kbps) event 2 (1 kbps) control 0 (0 kbps)\n";
+        Check(StateDatagrams(active + idle) == 16, "an idle final interval preserves earlier state traffic");
+        Check(StateDatagrams(idle + active + active + idle) == 32, "all active intervals contribute their real counts");
+        Check(StateDatagrams(idle + idle) == 0, "control-only traffic never passes the state assertion");
+        Check(StateDatagrams("") == 0, "missing statistics never pass the state assertion");
+        Check(StateDatagrams("NETTYPE 0x02800 16 records\n" + idle) == 0, "record observations alone are not classified datagrams");
+        return failures ? 1 : 0;
+    }
     if (argc < 6) {
         std::printf("usage: GameNetTests <game folder> <EDF6Coop.dll> <GameMachine.exe> <work folder> <scenario>\n");
         return 2;

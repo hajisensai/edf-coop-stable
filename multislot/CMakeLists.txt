@@ -317,6 +317,7 @@ add_dependencies(GameMachine GameNetEos)
 add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
+add_test(NAME GameNetLogStats COMMAND GameNetTests --log-stats)
 foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon mission4slowpeer
         playersync mission16 mission32)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"

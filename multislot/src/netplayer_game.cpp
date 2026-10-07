@@ -5,7 +5,6 @@
 #include <Windows.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstring>
 #include <vector>
@@ -17,6 +16,7 @@
 #include "netaoi.h"
 #include "netplayer.h"
 #include "netplayer_members.h"
+#include "netplayer_tracks.h"
 #include "patches.h"
 
 namespace multislot {
@@ -125,36 +125,9 @@ Vec3 RecordPosition(const void* soldier) {
     return {Get<float>(soldier, kPosition), Get<float>(soldier, kPosition + 4), Get<float>(soldier, kPosition + 8)};
 }
 
-// Players by object address. A handful are ever alive; a slot unused for a while is reused.
-template <typename Track>
-class Tracks {
-public:
-    Track* Find(const void* soldier, double now, bool create) {
-        Entry* oldest = &entries_[0];
-        for (auto& entry : entries_) {
-            if (entry.soldier == soldier) {
-                entry.touched = now;
-                return &entry.track;
-            }
-            if (entry.touched < oldest->touched) oldest = &entry;
-        }
-        if (!create) return nullptr;
-        *oldest = Entry{soldier, now, Track{}};
-        return &oldest->track;
-    }
-
-private:
-    struct Entry {
-        const void* soldier = nullptr;
-        double touched = -1.0;
-        Track track{};
-    };
-    std::array<Entry, 64> entries_{};
-};
-
 SRWLOCK lock = SRWLOCK_INIT;
-Tracks<SendTrack> sent;
-Tracks<RemoteTrack> remotes;
+PlayerTracks<SendTrack> sent;
+PlayerTracks<RemoteTrack> remotes;
 struct Counters {
     std::uint64_t sent = 0, received = 0, refused = 0, driven = 0, warps = 0;
     double loggedMs = 0.0;

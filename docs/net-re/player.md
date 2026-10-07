@@ -72,3 +72,7 @@ NetworkUpdate = main slot55 0x596130（PW 0x5803C0 jmp 过去）。远端（+0x1
 - slot55 在物理步之前调用（推断自 +0x840 由步末清零，M）。
 - 关掉原版校正后 +0x1900=0，slot63 不再按校正方向转身（外观）；+0x1210 的翻面修正不再执行。
 - 单向延迟无法测出，显示约落后一个最短单向延迟；8 人房带宽见上。
+
+## Full-room tracking
+
+The send and receive track tables use `kMaxPlayers`, the same limit as the game room. A 64-entry receive table would evict still-active players in larger rooms before their frame updates, discarding their samples and convergence history. `TestRoomTrackCapacity` exercises the production table with 65 and 1024 players over successive receive/update passes, then replaces a departed player without losing the remaining tracks.

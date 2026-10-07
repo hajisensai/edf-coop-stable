@@ -15,6 +15,7 @@
 #include "../src/netaoi.h"
 #include "../src/netplayer.h"
 #include "../src/netplayer_members.h"
+#include "../src/netplayer_tracks.h"
 
 using namespace multislot;
 
@@ -441,6 +442,46 @@ void TestReviewFixes() {
     }
 }
 
+void TestRoomTrackCapacity() {
+    // Receive a whole room's samples before its frame update, including rooms larger than the EOS lobby.
+    // The old 64-entry table evicted players before UpdateHook could use their samples and convergence history.
+    for (const int count : {65, kMaxPlayers}) {
+        PlayerTracks<RemoteTrack> tracks;
+        std::vector<int> objects(static_cast<std::size_t>(count) + 1);
+        NetPlayerParams params;
+        for (int frame = 1; frame <= 3; ++frame) {
+            const double now = frame * 33.0;
+            for (int i = 0; i < count; ++i) {
+                auto* track = tracks.Find(&objects[i], now, true);
+                if (frame > 1) Check(track->stepped, "whole-room samples preserve prior convergence state");
+                PlayerSample sample;
+                sample.seq = static_cast<std::uint16_t>(frame);
+                sample.senderMs = static_cast<std::uint32_t>(now);
+                sample.position = {static_cast<float>(i), 0, 0};
+                Check(AcceptSample(*track, sample, now, params), "whole-room sample accepted");
+            }
+            for (int i = 0; i < count; ++i) {
+                auto* track = tracks.Find(&objects[i], now + 1, false);
+                Check(track && track->last.seq == frame && track->last.position.x == static_cast<float>(i),
+                      "every supported player remains available to the frame update");
+                if (track) {
+                    StepRemote(*track, track->last.position, now + 1, params);
+                    Check(track->stepped, "each player's convergence runs");
+                }
+            }
+        }
+        if (count == kMaxPlayers) {
+            // The first player departs; keep the others fresh, then admit its replacement.
+            for (int i = 1; i < count; ++i) tracks.Find(&objects[i], 200.0, false);
+            auto* newcomer = tracks.Find(&objects[count], 201.0, true);
+            Check(!newcomer->have && !newcomer->stepped, "replacement starts with fresh sync state");
+            Check(!tracks.Find(&objects[0], 202.0, false), "oldest departed player yields its slot");
+            for (int i = 1; i < count; ++i)
+                Check(tracks.Find(&objects[i], 202.0, false) != nullptr, "replacement retains other players");
+        }
+    }
+}
+
 void TestFeature() {
     // An INI without [Netcode]: every switch at its default.
     InitNetFeature(L"Z:\\no-such-folder\\netplayer_test.ini");
@@ -465,6 +506,7 @@ int main() {
     TestConverge();
     TestReviewFixes();
     TestMemberPlaces();
+    TestRoomTrackCapacity();
     TestFeature();
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

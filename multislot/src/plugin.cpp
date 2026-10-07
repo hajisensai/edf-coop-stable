@@ -965,6 +965,12 @@ extern "C" __declspec(dllexport) const std::uint8_t* EDF6Coop_LoadoutRecord(int 
     return multislot::LoadoutRecord(index);
 }
 
+// Read-only, for the game-code tests (tests/gamenet): the slot the room's host's game has `member` in, as this machine
+// follows it (-1: not following the host's slots, or the host's list does not have it).
+extern "C" __declspec(dllexport) int EDF6Coop_HostSlot(const char* member) {
+    return member ? dn::hostSlotOf(member) : -1;
+}
+
 // For the game-code tests (tests/gamenet): sends `size` bytes to `remote` in bulk (netfeature.h SendBulk).
 extern "C" __declspec(dllexport) bool EDF6Coop_SendBulk(const char* remote, std::uint16_t tag, const void* data,
                                                         std::size_t size) {

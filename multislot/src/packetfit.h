@@ -187,6 +187,10 @@ using BulkIncoming = std::uint64_t (*)(const void* peer, std::size_t* total);
 void SetBulkRecords(BulkReady ready, BulkSend send, BulkIncoming incoming = nullptr);
 constexpr std::size_t kBulkHoldPacketsPerSecond = 120;  // twice a game sending every 60 Hz frame
 constexpr std::size_t kBulkHoldMinPackets = 64;
+// What every member's held packets may cost together: past it every bulk that holds packets is let go (they go to the
+// game in order, as when one bulk outgrows BulkHoldCapacity), so many members' bulks at once never grow the store
+// without a bound.
+constexpr std::size_t kHeldBytesCap = 1 << 20;
 unsigned long long BulkHoldMs(std::size_t total);
 std::size_t BulkHoldCapacity(std::size_t total);
 // The receiver's side: a bulk message of tag kRecordsBulkTag arrived.

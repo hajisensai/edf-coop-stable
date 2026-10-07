@@ -240,6 +240,7 @@ struct HeldPacket {
 std::deque<HeldPacket> heldStore;  // arrival order
 std::uint64_t heldOrder = 0;
 std::atomic<std::size_t> heldCount{0};
+std::size_t heldBytes = 0;  // of every packet in heldStore (kHeldBytesCap)
 std::uint64_t heldEver = 0, deliveredEver = 0;  // since start: every held packet is delivered, and the log says so
 // Bulks whose packets were let go (it arrived, it was given up, or it outgrew what holding may cost): a resend that
 // starts one over at the receiver does not hold that member's packets a second time.
@@ -334,6 +335,7 @@ bool DeliverHeld(const void* options, void** peer, void* socket, std::uint8_t* c
         if (channel) *channel = it->channel;
         std::memcpy(data, it->bytes.data(), it->bytes.size());
         *size = static_cast<std::uint32_t>(it->bytes.size());
+        heldBytes -= it->bytes.size();
         heldStore.erase(it);
         heldCount = heldStore.size();
         ++deliveredEver;
@@ -364,7 +366,18 @@ void HoldLocked(void* peer, const void* socket, std::uint8_t channel, const std:
     packet.bytes.assign(data, data + size);
     heldStore.push_back(std::move(packet));
     heldCount = heldStore.size();
+    heldBytes += size;
     ++heldEver;
+    if (heldBytes > kHeldBytesCap) {
+        // Every bulk that holds packets now, oldest first: their packets go to the game in order, none is dropped.
+        std::vector<std::pair<void*, std::uint64_t>> holding;
+        for (const HeldPacket& held : heldStore)
+            if (held.bulk && std::find(holding.begin(), holding.end(), std::make_pair(held.peer, held.bulk)) == holding.end())
+                holding.emplace_back(held.peer, held.bulk);
+        for (const auto& [who, which] : holding)
+            ReleaseLocked(who, which, "the members' held packets outgrew what holding may cost in all; not waited for here");
+        return;
+    }
     if (!bulk) return;
     const std::size_t behind = static_cast<std::size_t>(std::count_if(
         heldStore.begin(), heldStore.end(), [&](const HeldPacket& p) { return p.peer == peer && p.bulk == bulk; }));
@@ -504,6 +517,7 @@ bool FindRecord(const StubInfo& stub, std::uint8_t* out) {
 void ClearRecords() {
     AcquireSRWLockExclusive(&heldLock);
     heldStore.clear();  // the room is gone: its packets with it
+    heldBytes = 0;
     released.clear();
     heldCount = 0;
     ReleaseSRWLockExclusive(&heldLock);

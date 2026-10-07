@@ -10,11 +10,20 @@ void eraseFrom(std::vector<std::string>& order, const std::string& member) {
 }
 }  // namespace
 
-ParkedEntryOutcome decideParkedEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing) {
+ParkedEntryOutcome decideParkedEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing, uint64_t noHostMs) {
     if (slotted) return ParkedEntryOutcome::Slotted;
     if (gone) return ParkedEntryOutcome::Gone;
+    if (noHostMs >= kParkedNoHostMs) return ParkedEntryOutcome::NoHost;
     if (waitedMs >= kParkedEntryCapMs || (waitedMs >= kParkedEntryMs && !progressing)) return ParkedEntryOutcome::GiveUp;
     return ParkedEntryOutcome::Wait;
+}
+
+InheritedPlacement decideInheritedPlacement(int oldSlot, const std::vector<std::string>& ours, bool late) {
+    size_t next = 0;  // the slot our game gives next
+    while (next < ours.size() && !ours[next].empty()) ++next;
+    const bool fits = oldSlot < 0 || ours.empty() || static_cast<size_t>(oldSlot) == next;
+    if (!fits && !late && static_cast<size_t>(oldSlot) > next) return {false, false};
+    return {true, fits};
 }
 
 std::vector<std::string> roomMessage(const std::vector<std::string>& slots, const std::set<std::string>& removed) {
@@ -70,12 +79,17 @@ bool RoomView::admit(const std::string& target, int32_t status) {
     switch (status) {
         case kJoined:
             banned_.erase(target);  // back in through Epic's lobby: the game let it in again
+            std::erase_if(held_, [&](const Held& h) { return h.member == target; });
+            releasing_.erase(target);
             if (!members_.insert(target).second) return false;
             order_.push_back(target);
             return true;
         case kLeft:
         case kDisconnected:
         case kKicked: {
+            // Gone before its held join reached our game: nothing to bring any more.
+            std::erase_if(held_, [&](const Held& h) { return h.member == target; });
+            releasing_.erase(target);
             if (!members_.erase(target)) return false;
             eraseFrom(order_, target);
             auto link = links_.find(target);
@@ -104,8 +118,9 @@ std::vector<StatusChange> RoomView::settle(const std::vector<StatusChange>& want
     return due;
 }
 
-void RoomView::heardHost(const std::vector<std::string>& message) {
+void RoomView::heardHost(const std::vector<std::string>& message, const std::string& from) {
     if (!active_) return;
+    if (!expectedHost_.empty() && !from.empty() && from != expectedHost_) return;  // the old host's, after a change
     heard_ = true;
     awaiting_ = false;
     parseRoomMessage(message, &hostSlots_, &hostBanned_);
@@ -130,23 +145,69 @@ std::vector<std::string> RoomView::hostMembers() const {
     return out;
 }
 
-void RoomView::promoted(const std::string& newHost, uint64_t nowMs) {
-    if (!active_ || newHost.empty()) return;
-    const bool followed = heard_;
+std::vector<std::pair<std::string, int>> RoomView::promoted(const std::string& newHost, uint64_t nowMs) {
+    std::vector<std::pair<std::string, int>> placements;
+    if (!active_ || newHost.empty()) return placements;
+    const bool followed = heard_ || awaiting_;
+    const std::vector<std::string> oldSlots = hostSlots_;
     heard_ = false;
     hostSlots_.clear();
     hostNow_.clear();
+    // Whom the old host listed says nothing about the new host's room: a member its list does not have (yet) is not
+    // told to leave for that (followHost).
+    hostEver_.clear();
     pending_.clear();
+    expectedHost_ = newHost;
     if (newHost == self_) {
         // Our game's slots are the room's now; whom the old host removed stays removed.
         banned_.insert(hostBanned_.begin(), hostBanned_.end());
         hostBanned_.clear();
         awaiting_ = false;
-        return;
+        // The joins we held: in the old host's slots where it had them (slot order), the others after (as they came).
+        for (const Held& h : held_) {
+            const auto at = std::find(oldSlots.begin(), oldSlots.end(), h.member);
+            placements.push_back({h.member, at == oldSlots.end() ? -1 : static_cast<int>(at - oldSlots.begin())});
+        }
+        std::stable_sort(placements.begin(), placements.end(), [](const auto& a, const auto& b) {
+            if ((a.second < 0) != (b.second < 0)) return a.second >= 0;
+            return a.second >= 0 && a.second < b.second;
+        });
+        held_.clear();
+        return placements;
     }
     awaiting_ = followed;
     awaitingSinceMs_ = nowMs;
+    return placements;
 }
+
+void RoomView::holdJoin(const std::string& member, uint64_t nowMs) {
+    if (!active_ || member.empty() || members_.count(member) || held(member)) return;
+    held_.push_back({member, nowMs});
+}
+
+bool RoomView::held(const std::string& member) const {
+    return std::any_of(held_.begin(), held_.end(), [&](const Held& h) { return h.member == member; });
+}
+
+std::vector<std::string> RoomView::releaseHeld(uint64_t nowMs, uint64_t waitMs, uint64_t capMs) {
+    std::vector<std::string> out;
+    if (!active_) return out;
+    const bool waitOver = awaiting_ && !heard_ && nowMs - awaitingSinceMs_ >= waitMs;
+    if (waitOver) awaiting_ = false;
+    std::vector<Held> still;
+    for (const Held& h : held_) {
+        if (waitOver || nowMs - h.sinceMs >= capMs) {
+            out.push_back(h.member);
+            releasing_.insert(h.member);
+        } else {
+            still.push_back(h);
+        }
+    }
+    held_ = std::move(still);
+    return out;
+}
+
+bool RoomView::consumeRelease(const std::string& member) { return releasing_.erase(member) != 0; }
 
 std::set<std::string> RoomView::bannedMembers() const {
     std::set<std::string> out = banned_;

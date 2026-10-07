@@ -1,0 +1,199 @@
+// Interest management (interest.h): a byte budget per tick decides who is sent, priorities accumulate by relevance,
+// nobody starves, and a link with room for everyone sends everyone every tick.
+#include <cstdint>
+#include <cstdio>
+#include <map>
+#include <vector>
+
+#include "../src/interest.h"
+
+using namespace multislot::interest;
+
+namespace {
+
+int failures = 0;
+int checks = 0;
+
+void Check(bool condition, const char* what, long long value = 0) {
+    ++checks;
+    if (!condition) {
+        ++failures;
+        std::printf("FAIL: %s (%lld)\n", what, value);
+    }
+}
+
+constexpr std::uint32_t kTickMs = 50;
+constexpr std::uint32_t kBytes = 100;
+constexpr int kSubjects = 20;
+
+// Subjects on a line in front of the observer: 0 at 5 m ... 19 at 5 + 19*40 m. 0..4 are engaged.
+std::vector<Subject> Line() {
+    std::vector<Subject> subjects;
+    for (int i = 0; i < kSubjects; ++i) {
+        Subject s;
+        s.id = static_cast<SubjectId>(i);
+        s.position = {0, 0, 5.0f + 40.0f * static_cast<float>(i)};
+        s.team = 0;
+        s.engaged = i < 5;
+        s.bytes = kBytes;
+        subjects.push_back(s);
+    }
+    return subjects;
+}
+
+struct Run {
+    std::map<SubjectId, int> sends;
+    std::map<SubjectId, std::uint64_t> longestGap;
+    int ticks = 0;
+};
+
+// Runs `ticks` ticks from `start` with the budget the link gives; returns per-subject send counts and gaps (the gap
+// before a subject's first send counts from `start`).
+Run Play(Scheduler& scheduler, const Observer& observer, const std::vector<Subject>& subjects, std::uint64_t start,
+         int ticks) {
+    Run run;
+    std::map<SubjectId, std::uint64_t> last;
+    for (const Subject& s : subjects) last[s.id] = start;
+    for (int t = 0; t < ticks; ++t) {
+        const std::uint64_t now = start + static_cast<std::uint64_t>(t) * kTickMs;
+        const std::uint32_t budget = TickBudgetBytes(LinkBudgetBytesPerSec(observer.id), kTickMs);
+        for (const SubjectId id : scheduler.PickSendsThisTick(observer, subjects, budget, now)) {
+            ++run.sends[id];
+            const std::uint64_t gap = now - last[id];
+            if (gap > run.longestGap[id]) run.longestGap[id] = gap;
+            last[id] = now;
+        }
+        ++run.ticks;
+    }
+    // A subject never sent waited the whole run.
+    const std::uint64_t end = start + static_cast<std::uint64_t>(ticks - 1) * kTickMs;
+    for (const Subject& s : subjects)
+        if (end - last[s.id] > run.longestGap[s.id]) run.longestGap[s.id] = end - last[s.id];
+    return run;
+}
+
+}  // namespace
+
+int main() {
+    Observer observer;
+    observer.id = 7;
+    const auto subjects = Line();
+    const std::uint32_t everyone = kSubjects * kBytes * (1000 / kTickMs);  // bytes per second for all, every tick
+
+    // Relevance: near beats far, engaged and in view and friendly raise it, nothing goes below the floor.
+    const Subject near{1, {0, 0, 5}, 0, false, kBytes}, far{2, {0, 0, 800}, 0, false, kBytes};
+    Check(Relevance(observer, near) > Relevance(observer, far), "near is more relevant than far");
+    Subject engaged = far;
+    engaged.engaged = true;
+    Check(Relevance(observer, engaged) > Relevance(observer, far) * 3.9f, "engaged weighs four times");
+    const Subject behind{3, {0, 0, -5}, 0, false, kBytes};
+    Check(Relevance(observer, near) > Relevance(observer, behind) * 1.9f, "in view weighs twice");
+    Subject enemy = near;
+    enemy.team = 1;
+    Check(Relevance(observer, near) > Relevance(observer, enemy), "a teammate weighs more");
+    const Subject lost{4, {0, 0, 100000}, 1, false, kBytes};
+    Check(Relevance(observer, lost) >= kMinRelevance, "nothing falls below the floor");
+    Check(TickBudgetBytes(64000, 90) == 5760 && TickBudgetBytes(0, 90) == 0, "a tick's share of the link budget");
+    Check(LinkBudgetBytesPerSec(12345) == kStubLinkBudget, "the stub budget until W1 measures links");
+    SetLinkBudgetSource([](PeerId peer) -> std::uint32_t { return peer == 12345 ? 1000u : 2000u; });
+    Check(LinkBudgetBytesPerSec(12345) == 1000 && LinkBudgetBytesPerSec(1) == 2000, "W1's estimator answers once set");
+    SetLinkBudgetSource(nullptr);
+
+    // 1. Enough bandwidth: everyone every tick.
+    SetLinkBudget(observer.id, everyone);
+    Scheduler scheduler;
+    Run full = Play(scheduler, observer, subjects, 1000, 40);
+    bool allFull = true;
+    for (const Subject& s : subjects) allFull = allFull && full.sends[s.id] == full.ticks;
+    Check(allFull, "ample budget: every subject is sent every tick");
+
+    // 2. Half the bandwidth: the relevant ones keep a high rate, the far ones slow down, nobody starves.
+    SetLinkBudget(observer.id, everyone / 2);
+    Run half = Play(scheduler, observer, subjects, 1000 + 40 * kTickMs, 200);
+    int total = 0;
+    for (const auto& entry : half.sends) total += entry.second;
+    Check(total <= half.ticks * kSubjects / 2 + kSubjects, "half budget: about half the sends", total);
+    Check(half.sends[0] >= half.ticks * 9 / 10, "half budget: the nearest engaged subject keeps (almost) full rate",
+          half.sends[0]);
+    Check(half.sends[0] > half.sends[kSubjects - 1] * 3, "half budget: near and engaged far more often than far",
+          half.sends[kSubjects - 1]);
+    bool everyoneSent = true, bounded = true;
+    for (const Subject& s : subjects) {
+        everyoneSent = everyoneSent && half.sends[s.id] > 0;
+        bounded = bounded && half.longestGap[s.id] <= kMaxIntervalMs;
+    }
+    Check(everyoneSent, "half budget: every subject is still sent");
+    Check(bounded, "half budget: no subject waits longer than the maximum interval");
+    bool monotonic = true;  // non-engaged ones: the nearer, the more often (one send of slack)
+    for (int i = 6; i < kSubjects; ++i) monotonic = monotonic && half.sends[i - 1] + 1 >= half.sends[i];
+    Check(monotonic, "half budget: the rate falls with distance");
+
+    // 3. Bandwidth back: everyone every tick again (after the backlog of one tick).
+    SetLinkBudget(observer.id, everyone);
+    Play(scheduler, observer, subjects, 1000 + 240 * kTickMs, 1);
+    Run back = Play(scheduler, observer, subjects, 1000 + 241 * kTickMs, 40);
+    bool allBack = true;
+    for (const Subject& s : subjects) allBack = allBack && back.sends[s.id] == back.ticks;
+    Check(allBack, "budget restored: every subject every tick again");
+
+    // 4. No bandwidth at all: the maximum interval still sends everyone once a second, nothing is lost.
+    SetLinkBudget(observer.id, 1);  // one byte a second: nothing fits
+    Scheduler starved;
+    Run none = Play(starved, observer, subjects, 5000, 100);
+    bool interval = true, once = true;
+    for (const Subject& s : subjects) {
+        interval = interval && none.longestGap[s.id] <= kMaxIntervalMs;
+        // A new subject counts its interval from when it was first listed: 5 s of ticks hold 4 forced sends.
+        once = once && none.sends[s.id] >= 100 * static_cast<int>(kTickMs) / static_cast<int>(kMaxIntervalMs) - 1;
+    }
+    Check(interval && once, "no budget: every subject is still sent at least once per maximum interval");
+    Check(none.sends[kSubjects - 1] <= 100 * static_cast<int>(kTickMs) / static_cast<int>(kMaxIntervalMs) + 1,
+          "no budget: only the forced sends go out", none.sends[kSubjects - 1]);
+
+    // A subject never sent goes out before the others; a subject no longer listed is forgotten.
+    SetLinkBudget(observer.id, everyone / 4);
+    Scheduler fresh;
+    auto some = subjects;
+    fresh.PickSendsThisTick(observer, some, TickBudgetBytes(everyone, kTickMs), 100);  // all sent once
+    Subject late = subjects.back();
+    late.id = 99;
+    late.position = {0, 0, 5000};
+    some.push_back(late);
+    const auto picked = fresh.PickSendsThisTick(observer, some, TickBudgetBytes(everyone / 4, kTickMs), 150);
+    Check(!picked.empty() && picked.front() == 99, "a subject never sent goes out before the others");
+    some.pop_back();
+    fresh.PickSendsThisTick(observer, some, 0, 200);
+    Check(fresh.LastSent(observer.id, 99) == 0, "a subject no longer listed is forgotten");
+    fresh.Forget(observer.id);
+    Check(fresh.Accumulated(observer.id, 0) == 0, "a forgotten observer keeps nothing");
+
+    // 1024 players: one observer, 1023 subjects with compact 40-byte updates (a once-a-second floor of 41 KB/s), a
+    // 64 KiB/s link and 90 ms ticks: everyone within a second, and no tick past its budget.
+    SetLinkBudget(observer.id, 0);
+    std::vector<Subject> room;
+    for (int i = 0; i < 1023; ++i) {
+        Subject s;
+        s.id = static_cast<SubjectId>(i);
+        s.position = {static_cast<float>(i % 32) * 20.0f, 0, static_cast<float>(i / 32) * 20.0f};
+        s.bytes = 40;
+        room.push_back(s);
+    }
+    Scheduler big;
+    std::map<SubjectId, int> sent;
+    const std::uint32_t tickBudget = TickBudgetBytes(LinkBudgetBytesPerSec(observer.id), 90);
+    bool withinBudget = true;
+    for (int t = 0; t < 11; ++t) {
+        const auto ids = big.PickSendsThisTick(observer, room, tickBudget, static_cast<std::uint64_t>(10000 + t * 90));
+        withinBudget = withinBudget && ids.size() * 40 <= tickBudget;
+        for (const SubjectId id : ids) ++sent[id];
+    }
+    Check(sent.size() == room.size(), "1024 players: everyone is sent within a second", static_cast<long long>(sent.size()));
+    Check(withinBudget, "1024 players: no tick sends more than its budget");
+
+    // A first tick with no budget sends nothing new: a room's start is no burst.
+    Scheduler quiet;
+    Check(quiet.PickSendsThisTick(observer, room, 0, 1).empty(), "new subjects wait for budget, not forced at once");
+
+    std::printf("%d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}

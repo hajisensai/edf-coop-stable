@@ -6,8 +6,8 @@
 //    peer on that socket) waits, and the connection request is announced on the next EOS_Platform_Tick;
 //  - completions and notifications run inside EOS_Platform_Tick: connection requests and establishments, and the
 //    room's member joins, leaves and updates;
-//  - order is kept per channel only; with EDF6NET_DELAY one channel arrives later, with EDF6NET_DROP unreliable
-//    packets get lost (net_shared.h).
+//  - order is kept per channel only; with EDF6NET_DELAY one channel arrives later, with EDF6NET_DELAY_FROM one
+//    member's packets, with EDF6NET_DROP unreliable packets get lost (net_shared.h).
 // Everything else EDF.dll imports is exported too, as a stub that returns 0 and is reported (FakeNet_Unimplemented),
 // so a test can tell when the game reached a part of EOS this fake does not model.
 #include "net_shared.h"
@@ -82,9 +82,26 @@ struct Fake {
     // EDF6NET_DELAY / EDF6NET_DROP
     int delayedChannel = -1;
     ULONGLONG delayMs = 0;
+    std::string delayedSender;  // EDF6NET_DELAY_FROM
+    ULONGLONG senderDelayMs = 0;
     std::uint32_t dropMinimum = 0;
     int dropsLeft = 0;
     ULONGLONG lobbyDelayMs = 0;  // EDF6NET_LOBBY_DELAY
+    std::uint32_t lobbyCap = 0;  // EDF6NET_LOBBY_CAP (0: none)
+    std::set<std::int32_t> delayedStatuses;  // EDF6NET_STATUS_DELAY
+    ULONGLONG statusDelayMs = 0;
+    bool pairStatuses = false;                       // EDF6NET_STATUS_PAIR
+    std::size_t delayAfter = 0;                      // EDF6NET_STATUS_DELAY_AFTER
+    std::size_t mostSeen = 0;                        // the most members this machine saw in its room
+    std::vector<std::function<void()>> heldLeaves;   // LEFTs waiting for the next JOINED
+    bool joinWhenSlotted = false;                    // EDF6NET_JOIN_WHEN_SLOTTED
+    std::vector<std::pair<std::string, std::function<void()>>> joinsUntilSlotted;
+    std::vector<std::function<void()>> leavesAfterJoin;
+    std::string promotedAfterSlot;  // EDF6NET_PROMOTED_AFTER_SLOT
+    std::string oldOwner;           // whose PROMOTED waits
+    std::vector<std::function<void()>> promotedHeld;
+    std::deque<std::pair<ULONGLONG, std::function<void()>>> later;  // delayed status notifications, by due time
+    std::string ownerSeen;  // the room's owner at the last tick (PROMOTED)
 };
 
 Fake& F() {
@@ -120,8 +137,31 @@ bool Open() {
             f.delayMs = ms;
         }
     }
+    if (GetEnvironmentVariableA(gamenet::kDelayFromVariable, setting, sizeof(setting))) {
+        const char* colon = std::strrchr(setting, ':');
+        if (colon) {
+            f.delayedSender.assign(setting, static_cast<std::size_t>(colon - setting));
+            f.senderDelayMs = std::strtoull(colon + 1, nullptr, 10);
+        }
+    }
     if (GetEnvironmentVariableA(gamenet::kLobbyDelayVariable, setting, sizeof(setting)))
         f.lobbyDelayMs = std::strtoull(setting, nullptr, 10);
+    if (GetEnvironmentVariableA(gamenet::kLobbyCapVariable, setting, sizeof(setting)))
+        f.lobbyCap = static_cast<std::uint32_t>(std::strtoul(setting, nullptr, 10));
+    if (GetEnvironmentVariableA(gamenet::kStatusDelayVariable, setting, sizeof(setting))) {
+        const char* colon = std::strrchr(setting, ':');
+        if (colon) {
+            f.statusDelayMs = std::strtoull(colon + 1, nullptr, 10);
+            for (const char* at = setting; at < colon; ++at)
+                if (*at >= '0' && *at <= '9') f.delayedStatuses.insert(*at - '0');
+        }
+    }
+    if (GetEnvironmentVariableA(gamenet::kStatusPairVariable, setting, sizeof(setting))) f.pairStatuses = setting[0] == '1';
+    if (GetEnvironmentVariableA(gamenet::kJoinWhenSlottedVariable, setting, sizeof(setting)))
+        f.joinWhenSlotted = setting[0] == '1';
+    if (GetEnvironmentVariableA(gamenet::kPromotedAfterSlotVariable, setting, sizeof(setting))) f.promotedAfterSlot = setting;
+    if (GetEnvironmentVariableA(gamenet::kStatusDelayAfterVariable, setting, sizeof(setting)))
+        f.delayAfter = static_cast<std::size_t>(std::strtoul(setting, nullptr, 10));
     if (GetEnvironmentVariableA(gamenet::kDropVariable, setting, sizeof(setting))) {
         unsigned bytes = 0, count = 0;
         if (sscanf_s(setting, "%u:%u", &bytes, &count) == 2) {
@@ -169,7 +209,8 @@ void Drain() {
         gamenet::PacketHeader header{};
         gamenet::RingPeek(inbox, inbox.head, &header, sizeof(header));
         if (inbox.tail - inbox.head < sizeof(header) + header.size) break;  // not all written (yet)
-        const ULONGLONG due = GetTickCount64() + (header.channel == f.delayedChannel ? f.delayMs : 0);
+        const ULONGLONG due = GetTickCount64() + (header.channel == f.delayedChannel ? f.delayMs : 0) +
+                              (!f.delayedSender.empty() && f.delayedSender == header.from ? f.senderDelayMs : 0);
         Fake::Incoming packet{header.from, header.socket, header.channel, std::vector<std::uint8_t>(header.size), due};
         gamenet::RingPeek(inbox, inbox.head + sizeof(header), packet.data.data(), header.size);
         inbox.head += sizeof(header) + header.size;
@@ -349,6 +390,17 @@ EXPORT std::uint32_t FakeNet_Finish(int finish) {
     return f.net->finished;
 }
 
+// Counts this machine as ready for the start sync (`ready` 1) and returns how many are: a sync begun before
+// another machine listens would lose its first message there.
+EXPORT std::uint32_t FakeNet_Ready(int ready) {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open()) return 0;
+    Locked locked(f.netLock);
+    if (ready) ++f.net->ready;
+    return f.net->ready;
+}
+
 // --- EOS: platform ---
 EXPORT void* EOS_Platform_Create(const void*) { return reinterpret_cast<void*>(0x1000); }
 EXPORT void EOS_Platform_Release(void*) {}
@@ -414,14 +466,33 @@ void NoticeRoomChanges() {
     const std::string id = lobby.id;
     if (!in || id != f.lobbySeen) {
         f.membersSeen = in ? members : std::vector<std::string>();
+        f.mostSeen = in ? members.size() : 0;
         f.lobbySeen = in ? id : std::string();
+        f.ownerSeen = in ? lobby.owner : "";
         return;
     }
+    // Whether the room had filled before this change (EDF6NET_STATUS_DELAY_AFTER): the change that fills it is on time.
+    const bool delaying = f.mostSeen >= f.delayAfter;
+    f.mostSeen = std::max(f.mostSeen, members.size());
     const auto queue = [&](int kind, const std::string& member, std::int32_t status) {
         for (const auto& notify : f.lobbyNotifies) {
             if (notify.kind != kind) continue;
             const auto n = notify;
-            f.completions.push_back([=]() {
+            const bool late = kind == 0 && delaying && f.delayedStatuses.count(status) != 0;
+            const bool held = f.pairStatuses && kind == 0 && status == 1;
+            if (f.pairStatuses && kind == 0 && status == 0 && !f.heldLeaves.empty()) {
+                for (auto& leave : f.heldLeaves) f.completions.push_back(std::move(leave));
+                f.heldLeaves.clear();
+            }
+            const bool slotGated = f.joinWhenSlotted && delaying && kind == 0;
+            const bool promotedGated = !f.promotedAfterSlot.empty() && kind == 0 && status == 4;
+            auto& target = promotedGated              ? f.promotedHeld.emplace_back()
+                           : held                     ? f.heldLeaves.emplace_back()
+                           : slotGated && status == 0 ? f.joinsUntilSlotted.emplace_back(member, nullptr).second
+                           : slotGated && status == 1 ? f.leavesAfterJoin.emplace_back()
+                           : late ? f.later.emplace_back(GetTickCount64() + f.statusDelayMs, nullptr).second
+                                  : f.completions.emplace_back();
+            target = ([=]() {
                 const void* user = member.empty() ? nullptr : Handle(member);
                 if (kind == 0) {
                     MemberStatusInfo info{n.clientData, id.c_str(), user, status};
@@ -436,10 +507,18 @@ void NoticeRoomChanges() {
             });
         }
     };
-    for (const auto& member : members)
-        if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
+    // Departures before arrivals: Epic tells each change as it happens, and a member that came while another left
+    // (between two of our ticks) could only have taken the seat that one freed.
     for (const auto& member : f.membersSeen)
         if (std::find(members.begin(), members.end(), member) == members.end()) queue(0, member, 1);
+    for (const auto& member : members)
+        if (std::find(f.membersSeen.begin(), f.membersSeen.end(), member) == f.membersSeen.end()) queue(0, member, 0);
+    // Epic makes another member the owner when the owner leaves (PROMOTED, after its LEFT).
+    if (lobby.owner[0] && f.ownerSeen != lobby.owner) {
+        f.oldOwner = f.ownerSeen;
+        queue(0, lobby.owner, 4);
+    }
+    f.ownerSeen = lobby.owner;
     for (const auto& member : members) queue(1, member, 0);
     queue(2, std::string(), 0);
     f.membersSeen = members;
@@ -465,11 +544,65 @@ void NoticeEstablished(const std::string& peer, const std::string& socket) {
 }
 }  // namespace
 
+// EDF6NET_JOIN_WHEN_SLOTTED: which held joins this machine's EDF6Coop knows the slot of now. Asked without the fake's
+// lock (EDF6Coop takes its own locks and calls EOS).
+int PluginHostSlot(const std::string& member) {
+    const HMODULE plugin = GetModuleHandleA("EDF6Coop.dll");
+    const auto hostSlot = plugin ? reinterpret_cast<int (*)(const char*)>(
+                                       reinterpret_cast<void*>(GetProcAddress(plugin, "EDF6Coop_HostSlot")))
+                                 : nullptr;
+    return hostSlot ? hostSlot(member.c_str()) : -1;
+}
+
+std::set<std::string> SlottedNow() {
+    Fake& f = F();
+    std::vector<std::string> waiting;
+    {
+        const std::scoped_lock guard(f.lock);
+        for (const auto& held : f.joinsUntilSlotted) waiting.push_back(held.first);
+    }
+    std::set<std::string> slotted;
+    for (const auto& member : waiting)
+        if (PluginHostSlot(member) >= 0) slotted.insert(member);
+    return slotted;
+}
+
+// EDF6NET_PROMOTED_AFTER_SLOT: the plugin follows a host list without the old owner and with the named member.
+bool PromotedDue() {
+    Fake& f = F();
+    std::string old;
+    {
+        const std::scoped_lock guard(f.lock);
+        if (f.promotedHeld.empty()) return false;
+        old = f.oldOwner;
+    }
+    return PluginHostSlot(old) < 0 && PluginHostSlot(f.promotedAfterSlot) >= 0;
+}
+
 EXPORT void EOS_Platform_Tick(void*) {
     Fake& f = F();
     std::deque<std::function<void()>> run;
+    const std::set<std::string> slotted = SlottedNow();
+    const bool promotedDue = PromotedDue();
     {
         const std::scoped_lock guard(f.lock);
+        if (promotedDue) {
+            for (auto& promoted : f.promotedHeld) f.completions.push_back(std::move(promoted));
+            f.promotedHeld.clear();
+            std::printf("RESULT promoted-after-slot released\n");
+            std::fflush(stdout);
+        }
+        // Joins whose slot the plugin knows now, each followed by the leaves that waited for a join.
+        for (auto it = f.joinsUntilSlotted.begin(); it != f.joinsUntilSlotted.end();) {
+            if (!slotted.count(it->first)) {
+                ++it;
+                continue;
+            }
+            f.completions.push_back(std::move(it->second));
+            for (auto& leave : f.leavesAfterJoin) f.completions.push_back(std::move(leave));
+            f.leavesAfterJoin.clear();
+            it = f.joinsUntilSlotted.erase(it);
+        }
         Drain();
         // A connection request for every peer that sent on a socket this machine has not accepted.
         for (const auto& packet : f.incoming) {
@@ -490,6 +623,11 @@ EXPORT void EOS_Platform_Tick(void*) {
             }
         }
         NoticeRoomChanges();
+        const ULONGLONG now = GetTickCount64();
+        while (!f.later.empty() && f.later.front().first <= now) {
+            f.completions.push_back(std::move(f.later.front().second));
+            f.later.pop_front();
+        }
         run.swap(f.completions);
     }
     for (auto& completion : run) completion();
@@ -734,7 +872,7 @@ EXPORT void EOS_Lobby_CreateLobby(void*, const CreateLobbyOptionsHead* options, 
         lobby = gamenet::Lobby{};
         Copy(lobby.id, sizeof(lobby.id), id);
         Copy(lobby.owner, sizeof(lobby.owner), f.self);
-        lobby.maxMembers = options->MaxLobbyMembers;
+        lobby.maxMembers = f.lobbyCap && f.lobbyCap < options->MaxLobbyMembers ? f.lobbyCap : options->MaxLobbyMembers;
         lobby.count = 1;
         Copy(lobby.members[0].user, sizeof(lobby.members[0].user), f.self);
         ++lobby.version;
@@ -781,11 +919,41 @@ void Leave(const LeaveOptions* options, void* clientData, void* callback, bool d
                 --lobby.count;
                 break;
             }
+        // The owner leaving: as EOS does, the member who has been in the lobby longest owns it now.
+        if (f.self == lobby.owner && lobby.count) Copy(lobby.owner, sizeof(lobby.owner), lobby.members[0].user);
     }
     ++lobby.version;
     Complete(callback, clientData, EOS_Success, id);
 }
 }  // namespace
+
+// The room owner removes a member (netcode version gate): as EOS does, the member is out of the lobby and everyone
+// left sees it go.
+struct KickMemberOptions {
+    std::int32_t ApiVersion;
+    const char* LobbyId;
+    const void* LocalUserId;
+    const void* TargetUserId;
+};
+EXPORT void EOS_Lobby_KickMember(void*, const KickMemberOptions* options, void* clientData, void* callback) {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open() || !options || !options->LobbyId || !options->TargetUserId)
+        return Complete(callback, clientData, EOS_InvalidParameters, "");
+    const std::string id = options->LobbyId;
+    const std::string target = Text(options->TargetUserId);
+    Locked locked(f.netLock);
+    gamenet::Lobby& lobby = f.net->lobby;
+    if (id != lobby.id || f.self != lobby.owner) return Complete(callback, clientData, EOS_InvalidParameters, id);
+    for (std::uint32_t i = 0; i < lobby.count; ++i)
+        if (target == lobby.members[i].user) {
+            for (std::uint32_t j = i + 1; j < lobby.count; ++j) lobby.members[j - 1] = lobby.members[j];
+            --lobby.count;
+            ++lobby.version;
+            return Complete(callback, clientData, EOS_Success, id);
+        }
+    Complete(callback, clientData, EOS_NotFound, id);
+}
 
 EXPORT void EOS_Lobby_LeaveLobby(void*, const LeaveOptions* options, void* clientData, void* callback) {
     Leave(options, clientData, callback, false);
@@ -825,7 +993,18 @@ EXPORT EOS_EResult EOS_LobbyModification_AddMemberAttribute(void* handle, const 
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_LobbyModification_AddAttribute(void* handle, const AddAttributeOptions* options) {
-    if (!handle || !options || !options->Attribute) return EOS_InvalidParameters;
+    if (!handle || !options || !options->Attribute || !options->Attribute->Key) return EOS_InvalidParameters;
+    gamenet::Attribute value{};
+    Copy(value.key, sizeof(value.key), options->Attribute->Key);
+    if (options->Attribute->ValueType == kString) {
+        if (!options->Attribute->Value.AsUtf8 || !*options->Attribute->Value.AsUtf8) return EOS_InvalidParameters;
+        value.type = 4;
+        Copy(value.text, sizeof(value.text), options->Attribute->Value.AsUtf8);
+    } else {
+        value.type = 1;
+        value.number = options->Attribute->Value.AsInt64;
+    }
+    static_cast<Modification*>(handle)->lobby.push_back(value);
     return EOS_Success;
 }
 EXPORT EOS_EResult EOS_LobbyModification_SetMaxMembers(void*, const void*) { return EOS_Success; }
@@ -845,6 +1024,21 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
     for (auto value : modification->member) {
         value.visibleAt = GetTickCount64() + f.lobbyDelayMs;
         SetAttribute(*self, value);
+    }
+    // The lobby's own attributes: only from its owner (EOS refuses them from anyone else, and the whole update).
+    if (!modification->lobby.empty() && f.self != lobby.owner) return Complete(callback, clientData, EOS_InvalidParameters, lobby.id);
+    for (const auto& value : modification->lobby) {
+        gamenet::Attribute* free = nullptr;
+        bool set = false;
+        for (auto& attribute : lobby.attributes) {
+            if (!std::strcmp(attribute.key, value.key)) {
+                attribute = value;
+                set = true;
+                break;
+            }
+            if (!free && !attribute.key[0]) free = &attribute;
+        }
+        if (!set && free) *free = value;
     }
     ++lobby.version;
     Complete(callback, clientData, EOS_Success, lobby.id);
@@ -913,9 +1107,39 @@ EXPORT EOS_EResult EOS_LobbyDetails_CopyMemberAttributeByIndex(void* details, co
         }
     return EOS_NotFound;
 }
-EXPORT std::uint32_t EOS_LobbyDetails_GetAttributeCount(void*, const void*) { return 0; }
-EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByIndex(void*, const void*, Attribute**) { return EOS_NotFound; }
-EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByKey(void*, const void*, Attribute**) { return EOS_NotFound; }
+EXPORT std::uint32_t EOS_LobbyDetails_GetAttributeCount(void* details, const void*) {
+    std::uint32_t count = 0;
+    if (details)
+        for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes) count += attribute.key[0] ? 1 : 0;
+    return count;
+}
+struct CopyAttributeByIndexOptions {
+    std::int32_t ApiVersion;
+    std::uint32_t AttrIndex;
+};
+EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByIndex(void* details, const CopyAttributeByIndexOptions* options, Attribute** out) {
+    if (!details || !options || !out) return EOS_InvalidParameters;
+    std::uint32_t index = 0;
+    for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes)
+        if (attribute.key[0] && index++ == options->AttrIndex) {
+            *out = NewAttribute(attribute);
+            return EOS_Success;
+        }
+    return EOS_NotFound;
+}
+struct CopyAttributeByKeyOptions {
+    std::int32_t ApiVersion;
+    const char* AttrKey;
+};
+EXPORT EOS_EResult EOS_LobbyDetails_CopyAttributeByKey(void* details, const CopyAttributeByKeyOptions* options, Attribute** out) {
+    if (!details || !options || !options->AttrKey || !out) return EOS_InvalidParameters;
+    for (const auto& attribute : static_cast<Details*>(details)->lobby.attributes)
+        if (attribute.key[0] && !_stricmp(attribute.key, options->AttrKey)) {
+            *out = NewAttribute(attribute);
+            return EOS_Success;
+        }
+    return EOS_NotFound;
+}
 namespace {
 struct OwnedInfo {
     LobbyDetailsInfo api{};

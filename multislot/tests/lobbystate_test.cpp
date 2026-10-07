@@ -163,8 +163,20 @@ void TestKinds() {
     Check(KindOf({static_cast<std::uint32_t>(kRoomSize), true, 0x93}) == LobbyKind::Normal,
           "a vanilla SEARCH_TYPE is a normal room");
     Check(CapacityToKeep({10, false, 0}) == (kMaxPlayers >= 10 ? 10 : kMaxPlayers) &&
-              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored)}) == kMaxPlayers,
-          "a MultiSlot lobby keeps its own size, at most this build's");
+              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored)}) == 4 &&
+              CapacityToKeep({0, true, static_cast<std::int64_t>(kMirrored)}) == kMaxPlayers,
+          "a MultiSlot lobby keeps its own size (a room of four is one), at most this build's");
+    // Rooms larger than an EOS lobby, and rooms of two to four, publish their size (kRoomSizeKey).
+    Check(CapacityToKeep({static_cast<std::uint32_t>(kEosLobbyMembers), true, static_cast<std::int64_t>(kMirrored), 1024}) == 1024 &&
+              CapacityToKeep({4, true, static_cast<std::int64_t>(kMirrored), 3}) == 3 &&
+              CapacityToKeep({64, true, static_cast<std::int64_t>(kMirrored), 5000}) == 64,
+          "the published room size is kept over MaxMembers, within 2..kMaxPlayers");
+    Check(KindOf({3, false, 0, 3}) == LobbyKind::MultiSlot && KindOf({3, false, 0, 0}) == LobbyKind::Normal,
+          "a room of three that published its size is MultiSlot before its first SEARCH_TYPE");
+    Check(KindOf({64, true, 0x93, 1024}) == LobbyKind::Normal, "SEARCH_TYPE still decides over a room size");
+    Check(PublishesRoomSize(LobbyKind::MultiSlot, true) && !PublishesRoomSize(LobbyKind::MultiSlot, false) &&
+              !PublishesRoomSize(LobbyKind::Normal, true) && !PublishesRoomSize(LobbyKind::Unknown, true),
+          "only the owner of a MultiSlot lobby adds its size to an update");
 }
 
 void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
@@ -299,6 +311,35 @@ void TestLobby(const wchar_t* fakePath, const std::wstring& log) {
               Logged(log, "LOBBY LeaveLobby lobby-ghost (a stale membership that refused a join): result 0"),
           "the refusal and the leave are logged");
     Fake<void (*)(void*)>("EOS_LobbyDetails_Release")(ghost);
+
+    // A room larger than an EOS lobby: its owner's updates carry its size and how many its game has in it (the
+    // members beyond Epic's lobby among them), which a room list entry shows.
+    EnterLobby("lobby-big", "self");
+    SetMaxMembers(static_cast<std::uint32_t>(kEosLobbyMembers));
+    SetSearchType(static_cast<std::int64_t>(kMirrored));
+    Fake<void (*)(const char*, std::int64_t)>("FakeEos_SetLobbyAttribute")(kRoomSizeKey, 200);
+    NoteLobbyEntered(Lobby(), User("self"), "lobby-big", 0);
+    NextBeat();
+    static std::string countedLobby;
+    SetRoomMemberCountSource([](void*, const void*, const char* lobbyId) -> std::uint32_t {
+        countedLobby = lobbyId ? lobbyId : "";
+        return 70;
+    });
+    const auto lobbyAttribute = Fake<std::int64_t (*)(const char*)>("FakeEos_LobbyAttribute");
+    {
+        using ModificationFn = std::int32_t (*)(void*, const UpdateModificationOptions*, void**);
+        void* bigModification = nullptr;
+        const UpdateModificationOptions modifyBig{1, User("self"), "lobby-big"};
+        Fake<ModificationFn>("EOS_Lobby_UpdateLobbyModification")(Lobby(), &modifyBig, &bigModification);
+        const UpdateOptions bigUpdate{1, bigModification};
+        Call("EOS_Lobby_UpdateLobby", &bigUpdate);
+        Fake<void (*)(void*)>("EOS_LobbyModification_Release")(bigModification);
+        Tick();
+    }
+    Check(lobbyAttribute(kRoomSizeKey) == 200 && lobbyAttribute(kRoomMembersKey) == 70 && countedLobby == "lobby-big",
+          "a room larger than an EOS lobby publishes its size and the members its game has");
+    SetRoomMemberCountSource(nullptr);
+    Fake<void (*)(const char*)>("FakeEos_Reset")("self");
 
     // Updates and leaves report their results.
     EnterLobby("lobby-last", "self");

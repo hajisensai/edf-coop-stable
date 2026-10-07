@@ -162,7 +162,7 @@ int main() {
     NoteRoomUpdate(room.data(), 20000);
     view = RoomPageAt(20000);
     Check(view.active && view.shown == 3 && view.pages == 1 && view.page == 0, "three members: one page, page clamped");
-    *members = {real.data(), 200, 200};
+    *members = {real.data(), kMaxPlayers + 200, kMaxPlayers + 200};
     NoteRoomUpdate(room.data(), 30000);
     Check(RoomPageAt(30000).shown == 0, "a vector that is not one shows nothing");
 

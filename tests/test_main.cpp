@@ -23,6 +23,7 @@
 #include "../src/fake_lobby.h"
 #include "../src/hold.h"
 #include "../src/iat.h"
+#include "../src/netclass.h"
 #include "../src/netif.h"
 #include "../src/reliable.h"
 #include "../src/room_view.h"
@@ -1175,14 +1176,14 @@ void testReplayedHelloIgnored() {
 
 void testOlderProtocolStaysOnEos(uint8_t protocol) {
     printf("direct: peers speaking protocol %u (%s) are ignored both ways, nothing breaks\n", protocol,
-           protocol == 2 ? "0.3.6" : protocol == 3 ? "0.4.0" : "0.4.1");
+           protocol == 2 ? "0.3.6" : protocol == 3 ? "0.4.0" : protocol == 4 ? "0.4.1" : "EDF6Coop 2.4");
     // An old hello: header with the old protocol, nonce, (protocol 3: session,) id.
     std::vector<uint8_t> old = {0x45, 0x44, 0x4E, 0x31, 1, 0, protocol, 0, 7, 0, 0, 0};
     if (protocol == 3) old.insert(old.end(), 8, 1);
     old.push_back(static_cast<uint8_t>(kA.size()));
     old.insert(old.end(), kA.begin(), kA.end());
     if (protocol == 3) old.insert(old.end(), 8 + 64 + 64, 0);  // cookie, public key, signature
-    if (protocol == 4) {  // the handshake of 0.4.1 is ours; only the version differs
+    if (protocol >= 4) {  // the handshake of 0.4.1 (and EDF6Coop 2.4's) is ours; only the version differs
         dn::Message hello = sampleMessages()[0];
         old = dn::encode(hello, "");
         old[6] = protocol;
@@ -1233,7 +1234,7 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
         // 0.3.6 answers a hello it understood with a Welcome, 0.4.0 with a Challenge; send one anyway.
         std::vector<uint8_t> answer = {0x45, 0x44, 0x4E, 0x31, 2, 0, protocol, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0};
         if (protocol == 3) answer = {0x45, 0x44, 0x4E, 0x31, 9, 0, 3, 0, 7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-        if (protocol == 4) {  // a Challenge for this very hello, as 0.4.1 answers it
+        if (protocol >= 4) {  // a Challenge for this very hello, as 0.4.1 answers it
             dn::Message hello = *dn::decode(buf, static_cast<size_t>(got), "", nullptr);
             dn::Message c;
             c.type = dn::MsgType::Challenge;
@@ -1249,7 +1250,7 @@ void testOlderProtocolStaysOnEos(uint8_t protocol) {
 }
 
 void testOlderPluginStaysOnEos() {
-    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}, uint8_t{4}}) testOlderProtocolStaysOnEos(protocol);
+    for (uint8_t protocol : {uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{6}}) testOlderProtocolStaysOnEos(protocol);
 }
 
 void testRetiredInstanceIsFreed() {
@@ -3058,6 +3059,166 @@ void testRoomView() {
     CHECK(!v.banned(kB));  // a ban is for one room
     v.clear();
     CHECK((!v.active() && v.followHost().empty() && v.hostJoins({{kA, 1}}, 8).empty()));
+
+    printf("room view: members in the order the game added them, joins in the host's order\n");
+    v.reset(kB, {kHost, kB});
+    CHECK((v.members() == std::vector<std::string>{kHost, kB}));
+    v.heardHost({kHost, kB, kC, kA});  // the host's order, not the ids' (kA sorts before kC)
+    auto ordered = v.followHost();
+    CHECK((ordered == std::vector<dn::StatusChange>{{kC, dn::kJoined}, {kA, dn::kJoined}}));
+    for (const auto& c : ordered) v.admit(c.target, c.status);
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC, kA}));
+    v.admit(kC, dn::kLeft);
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kA}));
+    v.reset(kC, {kHost, kB, kC, kA});  // entering with the host's list keeps its order
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC, kA}));
+
+    printf("room view: the host's slots - a member joins our game once the host's game has it, in its slot\n");
+    v.reset(kB, {kHost, kB, kA});  // Epic listed A, the host's game does not have it yet
+    CHECK(!v.slotted());
+    v.heardHost({kHost, "", kB, kC});  // slot 1 empty (someone left), C beyond Epic's lobby
+    CHECK(v.slotted() && v.hostSlot(kHost) == 0 && v.hostSlot(kB) == 2 && v.hostSlot(kC) == 3 && v.hostSlot(kA) == -1);
+    CHECK((v.hostMembers() == std::vector<std::string>{kHost, kB, kC}));
+    v.adoptHost();  // the game enters with the host's members: A is not among them
+    CHECK((v.members() == std::vector<std::string>{kHost, kB, kC}) && !v.has(kA));
+    CHECK(v.followHost().empty());
+    v.heardHost({kHost, kA, kB, kC});  // the host's game took A in the empty slot
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kA, dn::kJoined}}) && v.hostSlot(kA) == 1);
+    v.heardHost({kHost, kA});  // a host list without us
+    CHECK(!v.slotted());
+
+    printf("room order: Epic's members in Epic's order, then the others in the game's\n");
+    CHECK((dn::roomOrder({kHost, kB}, {kHost, kC, kB, kA}) == std::vector<std::string>{kHost, kB, kC, kA}));
+    CHECK((dn::roomOrder({kHost, kB, kA}, {kHost, kB}) == std::vector<std::string>{kHost, kB}));  // A not in yet
+    CHECK((dn::roomOrder({}, {kB, kHost}) == std::vector<std::string>{kB, kHost}));
+
+    printf("room view: one leaving and one taking its slot in the same round - the departure goes first\n");
+    const std::string kD = "0003eeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    v.reset(kB, {kHost, kB, kC});
+    v.heardHost({kHost, kB, kC});
+    v.adoptHost();
+    v.heardHost({kHost, kB, kD});  // C left, D took its slot 2 in the host's game
+    CHECK((v.followHost() == std::vector<dn::StatusChange>{{kC, dn::kLeft}, {kD, dn::kJoined}}));
+    CHECK(v.hostSlot(kD) == 2);
+
+    printf("room view: a change of host drops the old host's slots; joins wait for the new host's\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    CHECK(v.slotted() && !v.awaitingHost());
+    v.promoted(kA, 1000);  // the host left, A hosts now
+    CHECK(!v.slotted() && v.hostSlot(kB) < 0 && v.followHost().empty());
+    CHECK(v.awaitingHost() && v.releaseHeld(20999, 20000, 20000).empty() && v.awaitingHost());
+    v.heardHost({kHost, kA, kB}, kHost);  // the old host's list, read again after the change: not heard
+    CHECK(!v.slotted() && v.awaitingHost());
+    v.heardHost({kD, kA, kB}, kA);  // the new host's slots: D took the old host's slot 0
+    CHECK(v.slotted() && !v.awaitingHost() && v.hostSlot(kD) == 0);
+    v.reset(kB, {kHost, kB});  // a member that never followed slots does not wait for any
+    v.promoted(kA, 1000);
+    CHECK(!v.awaitingHost());
+
+    printf("room view: joins held while the new host never says its slots are not lost - they come in Epic's order\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    v.promoted(kA, 1000);
+    v.holdJoin(kD, 2000);
+    v.holdJoin(kC, 3000);
+    v.holdJoin(kD, 3500);  // the same join again (settle): held once
+    CHECK(v.heldCount() == 2 && v.held(kD) && v.awaitingHost());
+    CHECK(v.releaseHeld(20999, 20000, 60000).empty());                                  // still waiting
+    CHECK((v.releaseHeld(21000, 20000, 60000) == std::vector<std::string>{kD, kC}));    // the wait ran out: as they came
+    CHECK(!v.awaitingHost() && v.heldCount() == 0);
+    CHECK(v.consumeRelease(kD) && !v.consumeRelease(kD));  // let past the hold once
+    CHECK(v.admit(kD, dn::kJoined) && v.has(kD) && v.consumeRelease(kC));
+    const std::string kGone = "0005aaaaaaaaaaaaaaaaaaaaaaaaaaaa";  // a member our game never had
+    v.holdJoin(kGone, 22000);
+    CHECK(v.held(kGone));
+    CHECK(v.admit(kGone, dn::kLeft) == false && !v.held(kGone));  // gone before it reached our game: nothing to bring
+
+    printf("room view: becoming the host, the joins we held take the old host's slots first, in slot order\n");
+    {
+        const std::string kE = "0004ffffffffffffffffffffffffffff";
+        v.reset(kB, {kHost, kB});
+        v.heardHost({kHost, kB, kC, kD});  // C and D are in the old host's game, not yet in ours
+        v.holdJoin(kE, 100);
+        v.holdJoin(kD, 200);
+        v.holdJoin(kC, 300);
+        CHECK((v.promoted(kB, 1000) == std::vector<std::pair<std::string, int>>{{kC, 2}, {kD, 3}, {kE, -1}}));
+    }
+
+    printf("new host: a held join takes its old slot when it is the one our game gives next, waits for a lower one\n");
+    {
+        using P = dn::InheritedPlacement;
+        const auto same = [](P a, bool tell, bool fits) { return a.tell == tell && a.fits == fits; };
+        CHECK(same(dn::decideInheritedPlacement(3, {"d", "a", "b", ""}, false), true, true));   // slot 3 is next
+        CHECK(same(dn::decideInheritedPlacement(3, {"", "a", "b"}, false), false, false));      // slot 0 still empty
+        CHECK(same(dn::decideInheritedPlacement(3, {"", "a", "b"}, true), true, false));        // waited long enough
+        CHECK(same(dn::decideInheritedPlacement(1, {"d", "", "b"}, false), true, true));
+        CHECK(same(dn::decideInheritedPlacement(1, {"d", "a", ""}, false), true, false));       // taken: as it came
+        CHECK(same(dn::decideInheritedPlacement(-1, {"", "a"}, false), true, true));            // no old slot
+        CHECK(same(dn::decideInheritedPlacement(2, {}, false), true, true));                   // our slots not known
+    }
+
+    printf("room view: a join held too long by the host's slots goes anyway, once\n");
+    v.reset(kB, {kHost, kB});
+    v.heardHost({kHost, kB});
+    v.holdJoin(kC, 1000);
+    CHECK(v.releaseHeld(20999, 20000, 20000).empty() && (v.releaseHeld(21000, 20000, 20000) == std::vector<std::string>{kC}));
+
+    printf("room view: a change of host forgets whom the old host listed - the new list missing a member is no leave\n");
+    v.reset(kB, {kHost, kA, kB, kC});
+    v.heardHost({kHost, kA, kB, kC});
+    v.adoptHost();
+    v.promoted(kA, 1000);
+    v.heardHost({"", kA, kB}, kA);  // A's game does not have C yet
+    CHECK(v.followHost().empty());   // C stays in our game
+
+    printf("room view: the room's list may come before PROMOTED - it is heard again from the new host\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost({kHost, kA, kB});
+    v.heardHost({kD, kA, kB});  // A's list, before Epic's PROMOTED reached us
+    v.promoted(kA, 1000);
+    CHECK(!v.slotted());
+    v.heardHost({kD, kA, kB}, kA);  // eos_hooks follows it again (followedVersion reset)
+    CHECK(v.slotted() && v.hostSlot(kD) == 0);
+
+    printf("room view: becoming the host, our game's slots rule and nobody is held back by the old host's\n");
+    v.reset(kB, {kHost, kA, kB});
+    v.heardHost(dn::roomMessage({kHost, kA, kB}, {kD}));  // the host removed D
+    CHECK(v.slotted() && v.banned(kD) && v.hostSlot(kD) < 0);
+    v.holdJoin(kC, 900);
+    const auto placements = v.promoted(kB, 1000);
+    CHECK(!v.slotted() && !v.awaitingHost());
+    CHECK((placements == std::vector<std::pair<std::string, int>>{{kC, -1}}) && v.heldCount() == 0);
+    CHECK(v.banned(kD) && v.bannedMembers().count(kD));  // the removal moves with the room to its new host
+    CHECK((v.hostJoins({{kD, 9}}, 8).empty()));          // its direct link does not let it back in
+
+    printf("room message: slots, then whom the room removed\n");
+    std::vector<std::string> slots;
+    std::set<std::string> removed;
+    dn::parseRoomMessage(dn::roomMessage({kHost, "", kB}, {kC, kD}), &slots, &removed);
+    CHECK((slots == std::vector<std::string>{kHost, "", kB}) && (removed == std::set<std::string>{kC, kD}));
+    CHECK((dn::roomMessage({kHost, kB}, {}) == std::vector<std::string>{kHost, kB}));  // nothing removed: the old list
+    dn::parseRoomMessage({kHost, kB}, &slots, &removed);
+    CHECK(slots.size() == 2 && removed.empty());
+    v.reset(kB, {kHost, kB});
+    v.heardHost(dn::roomMessage({kHost, kB}, {kA}));
+    CHECK(v.slotted() && (v.hostMembers() == std::vector<std::string>{kHost, kB}) && v.hostSlot(kA) < 0);
+    v.heardHost({kHost, kB});  // the host let A back in (through Epic): no longer removed
+    CHECK(!v.banned(kA));
+
+    printf("parked entry: waits while the link to the host gets somewhere, gives up instead of entering misnumbered\n");
+    using O = dn::ParkedEntryOutcome;
+    CHECK(dn::decideParkedEntry(100, true, false, false) == O::Slotted);
+    CHECK(dn::decideParkedEntry(100, false, true, false) == O::Gone);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs - 1, false, false, false) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs, false, false, false) == O::GiveUp);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryMs, false, false, true) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs - 1, false, false, true) == O::Wait);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, false, false, true) == O::GiveUp);
+    CHECK(dn::decideParkedEntry(dn::kParkedEntryCapMs, true, false, true) == O::Slotted);
+    // The room's owner changed to one without a direct link: nobody says slots there, so the game enters as without the plugin.
+    CHECK(dn::decideParkedEntry(100, false, false, true, dn::kParkedNoHostMs - 1) == O::Wait);
+    CHECK(dn::decideParkedEntry(100, false, false, true, dn::kParkedNoHostMs) == O::NoHost);
 }
 
 void testRoomWire() {
@@ -3127,19 +3288,268 @@ void testRoomFollowsHost() {
     host.setRoomMembers({kHost, kA, kB});
     CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kA, kB}); }, 5000));
     CHECK(version > before);
+    CHECK((a.hostRoom(&version) == std::vector<std::string>{kHost, kA, kB}));  // in the host's order
     const uint64_t same = version;
-    host.setRoomMembers({kB, kA, kHost});  // the same room in another order: not a change
+    host.setRoomMembers({kHost, kA, kB});  // the same list again: not a change
     host.setRoomMembers({kHost, kB});
-    CHECK(waitFor([&] { return sorted(a.hostRoom(&version)) == sorted({kHost, kB}); }, 5000));
+    CHECK(waitFor([&] { return a.hostRoom(&version) == std::vector<std::string>{kHost, kB}; }, 5000));
     CHECK(version == same + 1);
+    // Another order is another room to the games (they number the members by it, room_view.h roomOrder).
+    host.setRoomMembers({kB, kHost});
+    CHECK(waitFor([&] { return a.hostRoom(&version) == std::vector<std::string>{kB, kHost}; }, 5000));
+    CHECK(version == same + 2);
     CHECK(host.linkId(kA) != 0 && host.linkId(kB) == 0 && a.linkId(kHost) != 0);
     a.setActive(false);  // our game left the room: what the host said no longer applies
     CHECK(a.hostRoom(&version).empty());
 }
 
+
+// --- Netcode rewrite W1: the joiners' direct links (mesh) and the paths between them ---
+
+struct Mesh {
+    dn::DirectNet host, a, b;
+    std::string port;
+    bool start(double drop = 0.0) {
+        dn::DirectOptions ho = hostOptions(0, drop);
+        if (!host.start(ho)) return false;
+        host.setLocalUser(kHost);
+        port = std::to_string(host.boundPort());
+        dn::DirectOptions ao = joinOptions("127.0.0.1:" + port, drop), bo = joinOptions("127.0.0.1:" + port, drop);
+        const std::string id = dn::processIdentity()->commitment();
+        ao.memberIds = bo.memberIds = {{kHost, id}, {kA, id}, {kB, id}};
+        if (!a.start(ao) || !b.start(bo)) return false;
+        a.setLocalUser(kA);
+        b.setLocalUser(kB);
+        return waitFor([&] { return a.canRoute(kB) && b.canRoute(kA); }, 10000);
+    }
+};
+
+// Sends `count` datagrams of `cls` from `from` to `toId` every `everyMs`, and returns what `to` got, in order of
+// arrival, and the longest gap between two arrivals.
+struct Arrivals {
+    std::vector<uint32_t> ids;
+    uint64_t longestGapMs = 0;
+};
+Arrivals stream(dn::DirectNet& from, const std::string& toId, dn::DirectNet& to, uint8_t cls, uint32_t count,
+                uint32_t everyMs, const std::function<void(uint32_t)>& each = nullptr) {
+    Arrivals got;
+    uint64_t last = 0;
+    auto drain = [&] {
+        dn::Delivered d;
+        uint8_t ch = 1;
+        while (to.pop(&ch, 1170, d)) {
+            uint32_t id = 0;
+            memcpy(&id, d.data.data(), 4);
+            got.ids.push_back(id);
+            const uint64_t now = GetTickCount64();
+            if (last) got.longestGapMs = std::max(got.longestGapMs, now - last);
+            last = now;
+        }
+    };
+    for (uint32_t i = 0; i < count; ++i) {
+        if (each) each(i);
+        std::vector<uint8_t> p(100, static_cast<uint8_t>(i));
+        memcpy(p.data(), &i, 4);
+        from.sendClassified(toId, "EDF6", 1, 0, p.data(), p.size(), cls);
+        std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+        drain();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    drain();
+    return got;
+}
+
+void testMeshLinksJoiners() {
+    printf("mesh: two joiners link directly; state goes over the direct link, not through the host\n");
+    Mesh m;
+    CHECK(m.start());
+    CHECK(m.a.pathTo(kB) == dn::Path::Relay);  // until the direct link is up and proven
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);  // the first datagram asks for the link
+    CHECK(waitFor([&] { return m.a.peerLinked(kB) && m.b.peerLinked(kA); }, 10000));
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 5000));
+    dn::Delivered first;
+    while (m.b.pop(nullptr, 1170, first)) {}  // the datagram that asked for the link
+    m.host.takeWireTraffic();
+    const Arrivals got = stream(m.a, kB, m.b, 1, 100, 10);
+    printf("  %zu of 100 state datagrams arrived\n", got.ids.size());
+    CHECK(got.ids.size() == 100);
+    const dn::WireTraffic hostSaw = m.host.takeWireTraffic();
+    CHECK(hostSaw.relayed == 0);  // the host relayed none of it
+    CHECK(m.a.takeWireTraffic().direct > 0);
+    CHECK(m.a.linkBudget(kB) >= dn::RateController::kMinRate);
+    CHECK(m.a.statusLine().find("direct-to-joiners=1") != std::string::npos);
+}
+
+void testMeshBlockedFromTheStart() {
+    printf("mesh: joiners that cannot reach each other stay on the relay, and lose nothing\n");
+    Mesh m;
+    m.a.setTestBlockPeers(0, UINT64_MAX);
+    m.b.setTestBlockPeers(0, UINT64_MAX);
+    CHECK(m.start());
+    const Arrivals got = stream(m.a, kB, m.b, 1, 200, 10);
+    printf("  %zu of 200 state datagrams arrived through the host\n", got.ids.size());
+    CHECK(got.ids.size() == 200);
+    CHECK(!m.a.peerLinked(kB) && m.a.pathTo(kB) == dn::Path::Relay);
+    CHECK(m.host.takeWireTraffic().relayed > 0);
+}
+
+void testMeshFailsOverAndBack() {
+    printf("mesh: the direct link breaks and comes back - state keeps flowing, events arrive once each\n");
+    Mesh m;
+    CHECK(m.start());
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 10000));
+    std::vector<dn::Path> paths;
+    // 400 datagrams 10 ms apart (4 s); from the 50th on (0.5 s) the direct link loses everything for 1.5 s.
+    const Arrivals got = stream(m.a, kB, m.b, 1, 400, 10, [&](uint32_t i) {
+        if (i == 50) {
+            m.a.setTestBlockPeers(0, 1500);
+            m.b.setTestBlockPeers(0, 1500);
+        }
+        if (i % 20 == 0) paths.push_back(m.a.pathTo(kB));
+    });
+    const bool wentRelay = std::find(paths.begin(), paths.end(), dn::Path::Relay) != paths.end();
+    printf("  %zu of 400 arrived, longest gap %llu ms, went through the host %s, back on the direct link %s\n",
+           got.ids.size(), static_cast<unsigned long long>(got.longestGapMs), wentRelay ? "yes" : "NO",
+           m.a.pathTo(kB) == dn::Path::Direct ? "yes" : "NO");
+    CHECK(wentRelay);
+    CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 5000));
+    // Lost only until the direct link turned suspect (two pings' time) and the relay took copies: a gap of well
+    // under a second, against 1.5 s of outage.
+    CHECK(got.ids.size() >= 400 - 80);
+    CHECK(got.longestGapMs < 900);
+    // Events: both paths, the receiver gets two copies of each while both work (the filter drops the second).
+    dn::DuplicateFilter filter;
+    uint32_t firsts = 0, copies = 0;
+    for (uint32_t i = 0; i < 50; ++i) {
+        std::vector<uint8_t> e(60, 0xE0);
+        memcpy(e.data(), &i, 4);
+        const dn::SendReport r = m.a.sendClassified(kB, "EDF6", 1, 0, e.data(), e.size(), 2);
+        CHECK(r.sent && r.paths == 2);
+    }
+    waitFor(
+        [&] {
+            dn::Delivered d;
+            uint8_t ch = 1;
+            while (m.b.pop(&ch, 1170, d)) (filter.first(d.src, d.data.data(), d.data.size(), GetTickCount64()) ? firsts : copies)++;
+            return firsts + copies >= 100;
+        },
+        5000);
+    printf("  events: %u delivered once, %u copies dropped\n", firsts, copies);
+    CHECK(firsts == 50 && copies == 50);
+}
+
+void testMeshAndShedSwitches() {
+    printf("mesh: [Netcode] ShedState and Mesh act after start\n");
+    Mesh m;
+    CHECK(m.start());
+    std::vector<uint8_t> big(1000, 0x33);
+    auto burst = [&] {
+        m.host.takeWireTraffic();
+        for (int i = 0; i < 300; ++i) m.host.sendClassified(kA, "EDF6", 1, 0, big.data(), big.size(), 1);  // 300 KB at once
+        return m.host.takeWireTraffic().stateShed;
+    };
+    const uint64_t shedOn = burst();
+    printf("  a 300 KB burst of state over a fresh path: %llu dropped for its budget\n", static_cast<unsigned long long>(shedOn));
+    CHECK(shedOn > 0);
+    m.host.setShedState(false);
+    CHECK(burst() == 0);
+    // Mesh: linked, then switched off - the direct link closes, the relay carries.
+    auto p = payloadFor(1);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    CHECK(waitFor([&] { return m.a.peerLinked(kB); }, 10000));
+    m.a.setMesh(false);
+    m.b.setMesh(false);
+    CHECK(!m.a.peerLinked(kB) && m.a.pathTo(kB) == dn::Path::Relay);
+    m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(!m.a.peerLinked(kB));  // no new link while off
+}
+
+void testUnlistedMembersProveTheirEosId() {
+    printf("direct: beyond a full lobby only an EOS id proven over EOS comes in, never a lobby member or a removed one\n");
+    dn::DirectNet host;
+    dn::DirectOptions ho = hostOptions(0, 0);
+    ho.memberIds.clear();  // nobody published an identity
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    const std::string port = std::to_string(host.boundPort());
+    const std::string commitment = dn::processIdentity()->commitment();
+    auto dial = [&](const std::string& id) {
+        auto a = std::make_unique<dn::DirectNet>();
+        a->start(joinOptions("127.0.0.1:" + port, 0));
+        a->setLocalUser(id);
+        return a;
+    };
+    // The lobby not full: nobody it does not list comes in, proof or not.
+    host.proveEosIdentity(kA, commitment);
+    auto a = dial(kA);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(!host.canRoute(kA));
+    // Full: kB is listed by Epic (without an identity), kC was removed from this room.
+    const std::string kC = "0002dddddddddddddddddddddddddddd";
+    host.setUnlistedPolicy(true, {kHost, kB}, {kC});
+    CHECK(waitFor([&] { return host.canRoute(kA); }, 5000));  // proven over EOS
+    auto b = dial(kB);
+    host.proveEosIdentity(kB, commitment);  // even with a proof: Epic lists it
+    host.proveEosIdentity(kC, commitment);
+    auto c = dial(kC);
+    const std::string kD = "0002ffffffffffffffffffffffffffff";
+    auto d = dial(kD);  // never proven
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    CHECK(!host.canRoute(kB) && !host.canRoute(kC) && !host.canRoute(kD));
+    // kD said hello without a proof: the host asks for it (eos_hooks accepts its EOS connection on the proof socket).
+    const auto asked = host.takeProofRequests();
+    CHECK(std::find(asked.begin(), asked.end(), kD) != asked.end());
+    // Proven with another key than its hellos carry: still out.
+    host.proveEosIdentity(kD, std::string(32, '0'));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(!host.canRoute(kD));
+    // Proven with its key (a new process proves again, and rebinds): in.
+    host.proveEosIdentity(kD, commitment);
+    CHECK(waitFor([&] { return host.canRoute(kD); }, 5000));
+}
+
+void testRosterPages() {
+    printf("wire: member lists of large rooms go in pages\n");
+    dn::Message m;
+    m.type = dn::MsgType::Roster;
+    m.roster.hostNonce = 3;
+    for (int i = 0; i < 32; ++i) m.roster.roster.push_back("member" + std::to_string(i));
+    m.roster.version = 9;
+    m.roster.total = 1000;
+    m.roster.offset = 960;
+    auto dg = dn::encode(m, "");
+    dn::DecodeError err;
+    auto back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->roster.total == 1000 && back->roster.offset == 960 && back->roster.version == 9 &&
+          back->roster.roster.size() == 32);
+    m.roster.offset = 980;  // runs past the list: no valid sender writes it
+    dg = dn::encode(m, "");
+    CHECK(!dn::decode(dg.data(), dg.size(), "", &err) && err == dn::DecodeError::Malformed);
+    dn::Message q;
+    q.type = dn::MsgType::PeerInfo;
+    q.peer = {kB, "[2001:db8::1]:27015"};
+    dg = dn::encode(q, "");
+    back = dn::decode(dg.data(), dg.size(), "", &err);
+    CHECK(back && back->peer.puid == kB && back->peer.address == q.peer.address);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--mesh") {
+        testRosterPages();
+        testMeshLinksJoiners();
+        testMeshBlockedFromTheStart();
+        testMeshFailsOverAndBack();
+        testMeshAndShedSwitches();
+        testUnlistedMembersProveTheirEosId();
+        printf("\n%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--receive-lifecycle") {
         testReceiveStateFollowsSession();
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
@@ -3211,6 +3621,12 @@ int wmain(int argc, wchar_t** argv) {
     testRoomWire();
     testFakeLobbies();
     testRoomFollowsHost();
+    testRosterPages();
+    testMeshLinksJoiners();
+    testMeshBlockedFromTheStart();
+    testMeshFailsOverAndBack();
+    testMeshAndShedSwitches();
+    testUnlistedMembersProveTheirEosId();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

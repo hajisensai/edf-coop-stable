@@ -1,8 +1,26 @@
 // Direct UDP transport between EDF6 players, used instead of EOS P2P for peers that run the plugin.
 //
-// Topology is a star: the host listens on a public UDP port; every joining player opens one link
-// to the host. Packets between two joining players are forwarded by the host, so only the host
-// needs a reachable address (public IPv4 + port forward/UPnP, or public IPv6).
+// The host listens on a public UDP port; every joining player opens one link to the host, so only the host
+// needs a reachable address (public IPv4 + port forward/UPnP, or public IPv6). Two joining players also link to
+// each other (protocol 7, DirectOptions::mesh): when one has game data for the other, it asks the host where the
+// other is (PeerQuery); the host tells both where the other one is as it sees them (PeerInfo), the one with the
+// lower EOS id dials the other's address while the other opens its NAT towards it (Punch), and the two shake
+// hands as a joiner and a host do (each proves the identity it published in the room). Until that link is up,
+// and whenever it fails, their packets go through the host as before.
+//
+// Paths between two joiners (multipath): the direct link, the relay through the host, and EOS (whatever the
+// direct link does not take falls back to it in eos_hooks.cpp). Every link measures itself with what it carries
+// anyway - its pings (see pingIntervalFor: often while it carries game data, less often the more links there
+// are), their answers (round trip, loss) - and its RateController (congestion.h) turns that into a budget. Which
+// path carries a datagram depends on its class (netclass.h):
+//   State    the best path only, never resent: the direct link while it is healthy(), otherwise the relay. A
+//            state datagram over the path's budget is dropped (the next replaces it). While the direct link is
+//            congested() state goes through the relay.
+//   Event,   the direct link and the relay at once, untracked (the game resends them, and the receiver takes the
+//   Control  first copy: DuplicateFilter in eos_hooks.cpp). With one path, eos_hooks sends the second copy over EOS.
+//   Unknown  the best path, repaired until ReliableSender::kExpireMs as before this classification existed.
+// A direct link that went unhealthy is used again once it has been healthy for kPathRecoverMs; the relay carried
+// everything meanwhile, so the switch loses nothing.
 #pragma once
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -14,11 +32,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "auth.h"
+#include "congestion.h"
 #include "reliable.h"
 #include "wire.h"
 
@@ -69,6 +89,27 @@ struct DirectOptions {
     // Tests only: an uplink of this many bytes per second (0 = unlimited) with a 100 ms queue; what does
     // not fit is dropped, as a full router queue does.
     uint64_t testUplinkBytesPerSecond = 0;
+    // join: link to the room's other joiners directly (protocol 7), the host relaying only what that cannot carry.
+    bool mesh = true;
+    // host: what the host forwards between joiners comes out of its own uplink. State datagrams relayed beyond
+    // this many bytes a second are dropped (the next one replaces them); events and the rest always go.
+    uint64_t relayBytesPerSecond = 2u << 20;
+    // A state datagram over the path's budget (linkBudget) is dropped instead of sent into a queue.
+    bool shedState = true;
+    // Our netcode protocol and features for our hellos, and whether a host refuses another protocol (setNetcode).
+    uint32_t netProtocol = 0, netCaps = 0;
+    bool refuseOtherProtocols = false;
+};
+
+// The paths a datagram can take to another member (see the file comment).
+enum class Path : uint8_t { None, Direct, Relay };
+const char* pathName(Path p);
+
+// What one send did: whether the direct transport took it, and over how many paths a copy left (0: dropped
+// as intended - a state datagram over its path's budget).
+struct SendReport {
+    bool sent = false;
+    int paths = 0;
 };
 
 // UDP payload bytes on our socket since the last takeWireTraffic(), retransmits and pings included.
@@ -76,6 +117,12 @@ struct WireTraffic {
     uint64_t out = 0;
     uint64_t in = 0;
     uint64_t relayed = 0;  // host: game data forwarded from one client to another
+    // Game data bytes we sent, by path: over a link to the member itself (a joiner's to the host included),
+    // and through the host for another member.
+    uint64_t direct = 0;
+    uint64_t viaRelay = 0;
+    uint64_t stateShed = 0;  // state datagrams dropped for the path's budget (count)
+    uint64_t relayShed = 0;  // host: state datagrams of others not relayed for the relay budget (count)
 };
 
 struct Delivered {
@@ -83,6 +130,7 @@ struct Delivered {
     std::string socketName;
     uint8_t channel = 0;
     std::vector<uint8_t> data;
+    uint8_t cls = 0;  // TrafficClass it was sent as: a classified datagram may come over two paths (a copy)
 };
 
 class DirectNet {
@@ -113,6 +161,52 @@ public:
     // Sends a game packet over the direct transport. Returns false when `remote` is not routable.
     bool send(const std::string& remote, const std::string& socketName, uint8_t channel, uint8_t reliability,
               const uint8_t* data, size_t size);
+    // The same, for a datagram of class `cls` (netclass.h TrafficClass): over the path(s) its class takes.
+    SendReport sendClassified(const std::string& remote, const std::string& socketName, uint8_t channel,
+                              uint8_t reliability, const uint8_t* data, size_t size, uint8_t cls);
+    // Bytes per second the path a state datagram to `remote` takes now carries (its congestion controller); 0 when
+    // `remote` is not routable.
+    uint32_t linkBudget(const std::string& remote);
+    // The path a state datagram to `remote` takes now.
+    Path pathTo(const std::string& remote);
+    // join: whether a direct link to the joiner `remote` is up (not through the host).
+    bool peerLinked(const std::string& remote);
+    // Tests only: every datagram to and from member `puid` over a link of our own to it (not through the host) is
+    // lost, as when the NAT between two joiners stops letting it through.
+    void setTestBlockPeer(const std::string& puid, bool blocked);
+    // Tests only: the same for every joiner, from `afterMs` from now for `forMs` (UINT64_MAX: for good).
+    void setTestBlockPeers(uint64_t afterMs, uint64_t forMs);
+    // [Netcode] Mesh (and whether the room runs it) and ShedState, after start: DirectOptions::mesh / shedState.
+    void setMesh(bool on);
+    // Our netcode protocol and features, said in every hello; a host refuses a hello of another protocol when
+    // `refuseOthers` (multislot netfeature.h RejectMismatched). 0: nothing said, nothing checked.
+    void setNetcode(uint32_t protocol, uint32_t caps, bool refuseOthers);
+    // host: members beyond Epic's lobby (rooms above its 64). Only while `lobbyFull` (Epic's lobby holds all it can
+    // and the room holds more) does a hello of an EOS id Epic does not list count at all, and then only from an id
+    // that is not a lobby member (`lobby`: every EOS id Epic lists now, with or without the plugin), was not removed
+    // from this room (`banned`), and proved over EOS itself that it holds the key its hello brings (proveEosIdentity).
+    // An EOS id cannot be proven by a key it signs itself; EOS's P2P layer authenticates the sender of every packet
+    // (the ProductUserId a packet arrives from is the one Epic signed in), so a proof that arrives over EOS P2P from
+    // that id, naming the key's commitment, binds the key to the id. A newer proof rebinds it (a new process, a new key).
+    void setUnlistedPolicy(bool lobbyFull, std::set<std::string> lobby, std::set<std::string> banned);
+    // host: an EOS P2P packet from `puid` named `commitment` as its direct-link key (eos_hooks.cpp reads it).
+    void proveEosIdentity(const std::string& puid, const std::string& commitment);
+    // host: the EOS ids that said hello without a proof yet: eos_hooks.cpp accepts their EOS connection on the proof
+    // socket so that the proof can arrive. Taken (cleared) by the call.
+    std::vector<std::string> takeProofRequests();
+    // host: the netcode protocol and features each linked client said in its hello.
+    struct MemberNetcode {
+        uint32_t protocol = 0;
+        uint32_t caps = 0;
+    };
+    std::map<std::string, MemberNetcode> clientNetcode();
+    void setShedState(bool on);
+    bool mesh();
+    // host: asked before a joiner's state datagram is relayed to another (observer = the receiver, subject = the
+    // sender); false drops it (interest management: the next one replaces it). Null: always relayed.
+    using RelayStateFilter = bool (*)(const std::string& observer, const std::string& subject, uint32_t bytes, uint32_t budget,
+                                      uint64_t nowMs);
+    void setRelayStateFilter(RelayStateFilter filter) { relayFilter_ = filter; }
     // Pops the next packet for the local player; `channel` filters like EOS RequestedChannel.
     bool pop(const uint8_t* channel, uint32_t maxSize, Delivered& out);
 
@@ -137,7 +231,8 @@ public:
     void setRoomMembers(std::vector<std::string> members);
     // join: who the host's game has in the room, as last heard; `version` goes up whenever it changes.
     // Empty until the host first said (a host of protocol 6 says it right after welcoming us).
-    std::vector<std::string> hostRoom(uint64_t* version);
+    // `from`: the host that sent it.
+    std::vector<std::string> hostRoom(uint64_t* version, std::string* from = nullptr);
     std::string statusLine();
     WireTraffic takeWireTraffic();
     // Link datagrams dropped since start because they failed authentication: a bad tag (forged,
@@ -161,6 +256,7 @@ private:
         // sent a datagram with the link keys (proof it got the welcome): until then data sent to it
         // would be dropped unread.
         bool up = false;
+        bool peer = false;  // a link between two joiners (mesh), not to or from the host
         uint64_t id = 0;  // linkId(): set when it comes up
         uint64_t lastRecvMs = 0;
         uint64_t lastPingMs = 0;
@@ -175,10 +271,71 @@ private:
         PublicKey peerEcdh{};  // host: the client's ECDH key of this session
         WelcomeMsg welcome;  // host: what we answer this session's hellos with (signed on demand)
         std::vector<uint8_t> welcomeDatagram;  // ...and its last encoding, reused while the roster stays
+        // Path measurements (see the file comment).
+        RateController cc;
+        double loss = 0.0;            // share of pings lost, smoothed
+        uint64_t pingOutMs = 0;       // the ping still unanswered (its time), 0: none
+        uint64_t lastDataMs = 0;      // game data sent or received over it
+        uint64_t healthySinceMs = 0;  // healthy without a break since (0: not healthy)
+        double stateTokens = 0.0;     // state bytes it may send now (its budget, 250 ms worth at most)
+        uint64_t stateTokensMs = 0;
+    };
+
+    // A handshake we make with another joiner (mesh): we dial its address as a joiner dials the host.
+    struct Dial {
+        sockaddr_storage addr{};
+        int addrLen = 0;
+        uint32_t nonce = 0;
+        uint64_t session = 0;
+        std::shared_ptr<EcdhKey> ecdh;
+        std::optional<Cookie> cookie;
+        uint64_t startMs = 0, lastHelloMs = 0;
+        std::optional<Link> link;
+    };
+    // Asking the host to introduce another joiner (PeerQuery), per joiner.
+    struct Intro {
+        uint64_t lastQueryMs = 0;
+        uint32_t failures = 0;      // introductions in a row that gave no link
+        uint64_t retryAfterMs = 0;  // after kIntroFailures of them, not before this
+    };
+    // A member list (Roster or Room) arriving in pages.
+    struct Pages {
+        uint32_t version = 0;
+        uint16_t total = 0;
+        uint32_t applied = 0;  // the newest version applied
+        std::map<uint16_t, std::vector<std::string>> pages;  // by offset
     };
 
     // A link that carries game packets now: up, and not being closed for an unacknowledged backlog.
     static bool usable(const Link& link) { return link.up && !link.tx.overloaded(); }
+    // Usable, heard lately, losing few pings and not congested (see the file comment).
+    bool healthy(const Link& link, uint64_t now) const;
+    bool congested(const Link& link) const;
+    uint64_t pingIntervalFor(const Link& link, uint64_t now) const;
+    // join: our own link to joiner `remote` (either direction of the handshake), when it is up.
+    Link* peerLink(const std::string& remote);
+    // The link a datagram of `cls` to `remote` takes first, and the second one for Event/Control (null: none).
+    struct Route {
+        Link* first = nullptr;
+        Link* second = nullptr;
+        Path path = Path::None;
+    };
+    Route routeFor(const std::string& remote, uint8_t cls, uint64_t now);
+    bool takeStateBudget(Link& link, size_t bytes, uint64_t now);
+    void wantPeer(const std::string& remote, uint64_t now);
+    void onPeerQuery(Link& from, const std::string& wanted, uint64_t now);
+    void onPeerInfo(const PeerMsg& info, uint64_t now);
+    void onPeerHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);
+    void onPeerWelcome(const std::string& puid, Dial& dial, const WelcomeMsg& w, uint64_t now);
+    void sendPeerHello(const std::string& puid, Dial& dial, uint64_t now);
+    void tickPeers(uint64_t now);
+    void dropPeer(const std::string& puid, const char* why);
+    // Takes a page of a member list; true (and the list in `out`) once every page of a newer version is in.
+    bool applyPage(Pages& pages, uint32_t version, uint16_t total, uint16_t offset, const std::vector<std::string>& entries,
+                   std::vector<std::string>& out);
+    void sendListPages(Link& link, MsgType type, const std::vector<std::string>& list, uint32_t version);
+    void measure(Link& link, uint64_t now);
+    bool blockedPeer(const std::string& puid) const;
     void run();
     // A received datagram: its bytes (a link message's tag is checked against them) and decoding.
     struct Received {
@@ -187,6 +344,8 @@ private:
         const Message& msg;
     };
 
+    // A datagram for one of our joiner-to-joiner links; false when it is for none of them.
+    bool onPeerDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void processDatagram(const uint8_t* data, size_t size, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostDatagram(const Received& r, const sockaddr_storage& from, int fromLen, uint64_t now);
     void onHostHello(const HelloMsg& h, const sockaddr_storage& from, int fromLen, uint64_t now);
@@ -227,6 +386,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> testBlackhole_{false};
     std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0}, rejected_{0}, sendFailures_{0};
+    std::atomic<uint64_t> directOut_{0}, viaRelayOut_{0}, stateShed_{0}, relayShed_{0};
     std::shared_ptr<RetransmitBudget> retransmitBudget_;
     double testUplinkTokens_ = 0;  // bytes, see DirectOptions::testUplinkBytesPerSecond
     uint64_t testUplinkMs_ = 0;
@@ -254,6 +414,10 @@ private:
     uint64_t rosterBurstUntilMs_ = 0;
     std::vector<std::string> roomMembers_;  // see setRoomMembers
     bool roomSet_ = false;
+    uint32_t rosterVersion_ = 0, roomVersion_ = 0;  // bumped when the list sent changes (its pages carry it)
+    double relayTokens_ = 0.0;  // state bytes we may relay now (relayBytesPerSecond)
+    uint64_t relayTokensMs_ = 0;
+    std::map<std::pair<std::string, std::string>, uint64_t> introduced_;  // pair -> last PeerInfo sent
 
     // Join mode.
     std::optional<Link> hostLink_;
@@ -264,6 +428,26 @@ private:
     std::vector<std::string> roster_;
     std::vector<std::string> hostRoom_;  // see hostRoom
     uint64_t hostRoomVersion_ = 0;
+    std::string hostRoomFrom_;  // whose hostRoom_ is
+    Pages rosterPages_, roomPages_;
+    // Mesh: links other joiners dialled (we answered as a host does), our dials to them, introductions.
+    std::map<std::string, Link> peerLinks_;
+    std::map<std::string, Seen> peerSeen_;
+    std::map<std::string, Dial> dials_;
+    std::map<std::string, Intro> intros_;
+    std::map<std::string, bool> testBlocked_;
+    uint64_t testBlockFromMs_ = 0, testBlockToMs_ = 0;  // setTestBlockPeers, on nowMs()
+    std::atomic<RelayStateFilter> relayFilter_{nullptr};
+    uint32_t netProtocol_ = 0, netCaps_ = 0;
+    bool refuseOtherProtocols_ = false;
+    bool lobbyFull_ = false;
+    std::set<std::string> lobbyIds_, bannedIds_;
+    std::map<std::string, std::string> provenIds_;  // host: EOS id -> commitment proven over EOS (bounded)
+    std::deque<std::string> provenOrder_;           // oldest first, for the bound
+    std::set<std::string> proofRequests_;
+    std::map<std::string, MemberNetcode> clientNetcode_;  // host: as said in each client's hello
+
+    std::atomic<uint64_t> relayFiltered_{0};
     uint64_t linkIds_ = 0;  // the last Link::id handed out
     sockaddr_storage hostAddr_{};  // where we send: the address we dialled
     int hostAddrLen_ = 0;

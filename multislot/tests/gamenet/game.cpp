@@ -12,7 +12,7 @@ constexpr std::uintptr_t kInternalCoreVtable = 0x17EBBB0;  // eos::internal_Core
 constexpr std::uintptr_t kObservableCtor = 0x7267C0;       // ev::Observable (0x28 bytes)
 constexpr std::uintptr_t kCoreUpdate = 0x12ADB30;          // internal_Core::Update
 constexpr std::uintptr_t kUsersRef = 0x1AF4548, kUsersCtor = 0x12B77E0, kUsersSize = 0x150;
-constexpr std::uintptr_t kUsersAdd = 0x12B7F50;
+constexpr std::uintptr_t kUsersAdd = 0x12B7F50, kUsersRemove = 0x12B87C0;
 constexpr std::uintptr_t kManagerRef = 0x1AF4570, kManagerCtor = 0x12C6280, kManagerSize = 0x218;
 constexpr std::uintptr_t kManagerInitialize = 0x12C80B0;
 constexpr std::uintptr_t kEpicIdRef = 0x1AF42A8, kEpicIdCtor = 0x12B5C20, kEpicIdSize = 0x48;  // PlatformId::ID_EPIC
@@ -20,7 +20,7 @@ constexpr std::uintptr_t kControllerRef = 0x1AF4598, kControllerCtor = 0x12D2640
 constexpr std::uintptr_t kConnectInfoCtor = 0x12B6030;
 constexpr std::uintptr_t kSubscribe = 0x735480;          // Controller::DataEventObservable (at +0x1818)
 constexpr std::uintptr_t kDataObservable = 0x1818;
-constexpr std::uintptr_t kSendReliable = 0x12D0AC0;
+constexpr std::uintptr_t kSendReliable = 0x12D0AC0, kSendUnreliable = 0x12D1040;
 constexpr std::uintptr_t kUserFlags = 0x10, kUserNetworkIndex = 0x40;
 
 // Room+0x30 in the game: the local user as p2p::Manager::Initialize takes it.
@@ -123,22 +123,46 @@ bool Transport::Start(const Machine& machine, const std::string& lobbyId, const 
         controller_.object, core_, &usersForController, &managerForController, lobbyId.c_str());
 
     Result("start-step", "%s", "controller ctor");
-    for (const std::string& member : members) {
-        UserDesc desc{};
-        desc.puid = Puid(member);
-        desc.remote = member != self;
-        game_.Fn<void(*)(void*)>(kConnectInfoCtor)(&desc.info);
-        if (!desc.remote) {
-            desc.info.id = AddRef(local.id);
-            desc.info.name = local.name;
-        }
-        Shared user;
-        game_.Fn<void(*)(void*, Shared*, UserDesc*)>(kUsersAdd)(users_.object, &user, &desc);
-        if (!user.object) return false;
-        members_.emplace_back(member, user);
-        Result("start-step", "added %s", member.c_str());
-    }
+    local_ = &local;
+    for (const std::string& member : members)
+        if (!Add(member)) return false;
     return true;
+}
+
+bool Transport::Add(const std::string& member) {
+    auto& local = *static_cast<LocalUser*>(local_);
+    UserDesc desc{};
+    desc.puid = Puid(member);
+    desc.remote = member != game_.machine->user;
+    game_.Fn<void(*)(void*)>(kConnectInfoCtor)(&desc.info);
+    if (!desc.remote) {
+        desc.info.id = AddRef(local.id);
+        desc.info.name = local.name;
+    }
+    Shared user;
+    game_.Fn<void(*)(void*, Shared*, UserDesc*)>(kUsersAdd)(users_.object, &user, &desc);
+    if (!user.object) return false;
+    members_.emplace_back(member, user);
+    Result("start-step", "added %s", member.c_str());
+    return true;
+}
+
+bool Transport::Remove(const std::string& member) {
+    for (auto it = members_.begin(); it != members_.end(); ++it) {
+        if (it->first != member) continue;
+        Shared user = AddRef(it->second);  // taken by value: the callee lets go of it
+        game_.Fn<void(*)(void*, Shared*)>(kUsersRemove)(users_.object, &user);
+        members_.erase(it);
+        Result("start-step", "removed %s", member.c_str());
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> Transport::Members() const {
+    std::vector<std::string> out;
+    for (const auto& [id, user] : members_) out.push_back(id);
+    return out;
 }
 
 void Transport::Tick() const { game_.Fn<void(*)(void*)>(kCoreUpdate)(core_); }
@@ -171,6 +195,14 @@ bool Transport::SendReliable(const std::string& member, std::uint32_t type, cons
     const std::vector<IndexKey> to{{index, 0}};
     using Send = bool (*)(void*, const std::vector<IndexKey>*, std::uint32_t, const void*, std::size_t, int);
     return game_.Fn<Send>(kSendReliable)(controller_.object, &to, type, data, size, 6);
+}
+
+bool Transport::SendUnreliable(const std::string& member, std::uint32_t type, const void* data, std::size_t size) const {
+    const int index = NetworkIndex(member);
+    if (index < 0) return false;
+    const std::vector<IndexKey> to{{index, 0}};
+    using Send = bool (*)(void*, const std::vector<IndexKey>*, std::uint32_t, const void*, std::size_t);
+    return game_.Fn<Send>(kSendUnreliable)(controller_.object, &to, type, data, size);
 }
 
 void Transport::Subscribe(std::uint32_t type, Handler handler) {

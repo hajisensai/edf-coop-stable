@@ -5,6 +5,7 @@
 #include <Windows.h>
 
 #include <bit>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,6 +24,7 @@
 #include "../src/patches.h"
 #include "../src/smoothing.h"
 #include "../src/rooms.h"
+#include "../src/userslots.h"
 #include "../src/joinlog.h"
 #include "../src/peertimeout.h"
 
@@ -258,7 +260,7 @@ int main(int argc, char** argv) {
     // Room tables: each patch turns one operand 4 into 8 (or 4 records into 8 records) in the three constructors that
     // size a table per room member.
     const auto sessions = SessionPatches();
-    Check(sessions.size() == 11, "session patch table size");
+    Check(sessions.size() == 7, "session patch table size");
     for (const auto& patch : sessions) {
         Check(Matches(image.At(patch.rva, patch.original.size()), patch), patch.name, patch.rva);
         Check(patch.original.size() == patch.replacement.size() && patch.original != patch.replacement, "session patch changes bytes in place", patch.rva);
@@ -267,14 +269,11 @@ int main(int argc, char** argv) {
                   "the voice chat HUD allocates eight 0x50-byte records", patch.rva);
             continue;
         }
-        int changed = 0;
-        bool fourToEight = true;
-        for (std::size_t i = 0; fourToEight && i < patch.original.size(); ++i) {
-            if (patch.original[i] == patch.replacement[i]) continue;
-            ++changed;
-            fourToEight = patch.original[i] == kVanillaPlayers && patch.replacement[i] == kMaxPlayers;
-        }
-        Check(fourToEight && changed == 1, "session patch changes a 4 into 8 and nothing else", patch.rva);
+        // Every other one is an imm32 that ends the instruction: 4 becomes the room size, the opcode stays.
+        const std::size_t at = patch.original.size() - 4;
+        Check(Operand(patch.original, at, 4) == kVanillaPlayers && Operand(patch.replacement, at, 4) == kMaxPlayers &&
+                  std::equal(patch.original.begin(), patch.original.begin() + at, patch.replacement.begin()),
+              "session patch changes an imm32 4 into the room size and nothing else", patch.rva);
         Check((patch.rva > 0x12B77E0 && patch.rva < 0x12B79A3) || (patch.rva > 0x12CB5F0 && patch.rva < 0x12CBA54) ||
                   (patch.rva > 0x9605E0 && patch.rva < 0x960844),
               "session patch lies in the Users, packet Controller or UiVoiceChat_Notify constructor", patch.rva);
@@ -314,7 +313,53 @@ int main(int argc, char** argv) {
         Check(hook.original.size() >= 5 && hook.displacedOffset + hook.displacedSize <= hook.original.size(), "hook covers a jump", hook.rva);
     }
     for (const auto& call : missionCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
-    Check(missionPatches.size() == 27 && missionHooks.size() == 24 && missionCalls.size() == 5, "mission table sizes");
+    Check(missionPatches.size() == 16 && missionHooks.size() == 25 && missionCalls.size() == 5, "mission table sizes");
+    // The script VM's player table: four 0x18-byte entries built at +0x168 by its constructor (eh vector constructor
+    // 12D8D44 with size 0x18, count 4), and the four unbounded readers BvmPlayerTableHooks bound.
+    const std::uint8_t bvmTable[] = {0x48, 0x8D, 0x8F, 0x68, 0x01, 0x00, 0x00};  // 20DCAC lea rcx, [rdi+0x168]
+    const std::uint8_t bvmShape[] = {0x8D, 0x56, 0x18, 0x44, 0x8D, 0x46, 0x04};  // 20DCCB lea edx, [rsi+0x18]; lea r8d, [rsi+4]
+    Check(std::memcmp(image.At(0x20DCAC, 7), bvmTable, 7) == 0 && std::memcmp(image.At(0x20DCCB, 7), bvmShape, 7) == 0 &&
+              CallTargets(image.At(0x20DCD2, 5), 0x20DCD2, 0x12D8D44),
+          "the script VM builds its player table of four 0x18-byte entries at +0x168", 0x20DCAC);
+    const std::uint8_t bvmCount[] = {0x8B, 0x80, 0xF8, 0x4F, 0x01, 0x00};  // 2252B9 mov eax, [rax+0x14FF8]
+    Check(std::memcmp(image.At(0x2252B9, 6), bvmCount, 6) == 0 && CallTargets(image.At(0x21F3B2, 5), 0x21F3B2, 0x225290) &&
+              CallTargets(image.At(0x21F8CA, 5), 0x21F8CA, 0x225290),
+          "21F380 loops over the online player count (225290)", 0x21F3B2);
+    const std::uint8_t indexed[] = {0x48, 0x63, 0xC2};  // movsxd rax, edx
+    for (const std::uint32_t entry : {0x22274Fu, 0x228ADDu, 0x22A671u})
+        Check(std::memcmp(image.At(entry, 3), indexed, 3) == 0, "a BVM entry reader takes its index in edx", entry);
+    for (const auto& hook : BvmPlayerTableHooks()) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(BvmPlayerTableHandler(hook.rva) != nullptr, "every BVM table site has a handler", hook.rva);
+    }
+    // The bounds an imm8 could not hold (widecmp.h): each is the game's `cmp, 4` and the jcc after it.
+    const auto compares = [] {
+        auto all = SessionCompares();
+        const auto mission = MissionCompares();
+        all.insert(all.end(), mission.begin(), mission.end());
+        return all;
+    }();
+    for (const auto& site : compares) {
+        const Patch verify{site.name, site.rva, site.original, site.original};
+        Check(Matches(image.At(site.rva, site.original.size()), verify), site.name, site.rva);
+        Check(site.original.size() >= 5, "a widened compare covers a jump", site.rva);
+    }
+    // FindPlayerIndex: the "not found" `lea eax, [rbp-5]` is reached only by the loop's fall-through, and the
+    // epilogue after it reads no flags, so `or eax, -1` stands for it at any count.
+    Check(image.At(0x1DA405, 2)[0] == 0xEB && image.At(0x1DA405, 2)[1] == 0x03,
+          "FindPlayerIndex jumps from its not-found value to the epilogue", 0x1DA405);
+    {
+        const auto* code = IMAGE_FIRST_SECTION(image.nt);
+        const std::uint8_t* text = image.At(code->VirtualAddress, code->SizeOfRawData);
+        int into = 0;
+        // Short and near jumps inside FindPlayerIndex (1DA340..1DA429) that land on 1DA402.
+        for (std::uint32_t rva = 0x1DA340; text && rva < 0x1DA429; ++rva) {
+            const std::uint8_t* at = image.At(rva, 6);
+            if ((at[0] & 0xF0) == 0x70 || at[0] == 0xEB) into += rva + 2 + static_cast<std::int8_t>(at[1]) == 0x1DA402;
+        }
+        Check(into == 0, "nothing in FindPlayerIndex jumps to its not-found value", 0x1DA402);
+    }
     // The ninth remote flag would land on the user vector CreatePlayers keeps at rsp+0x30 and re-reads
     // every pass of the loop that writes the flags (mission.cpp, RemoteFlagHandler).
     const std::uint8_t vectorBegin[] = {0x48, 0x8B, 0x7C, 0x24, 0x30};  // 1D98E9 mov rdi, [rsp+0x30]
@@ -392,6 +437,34 @@ int main(int argc, char** argv) {
                   "every HUD site has a handler", hook.rva);
         }
     Check(hudPatches.size() == 15 && hudHooks.size() == 4 && hudWrap.size() == 1, "HUD table sizes");
+    // The radar's index comes from 7FFBD0's two stores to [r14] (rdx = rsp+0x44 of the radar, 82A1FC): online
+    // 7FFD99 `mov [r14], ecx` after `movsxd rcx, [rsi+0x48]` (the site PlayerTagIndexHandler replaces and wraps),
+    // offline 7FFDFA after `mov ecx, [rdx+0x338]` (the split-screen number); before both it stores -1 through rdx
+    // itself (7FFC17, r14 = rdx).
+    const std::uint8_t indexOnline[] = {0x48, 0x63, 0x4E, 0x48, 0x41, 0x89, 0x0E};  // 7FFD95
+    const std::uint8_t indexOffline[] = {0x8B, 0x8A, 0x38, 0x03, 0x00, 0x00, 0x41, 0x89, 0x0E};  // 7FFDF4
+    const std::uint8_t minusOne[] = {0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x3A};  // 7FFC10 mov rdi, -1; mov [rdx], edi
+    Check(std::memcmp(image.At(0x7FFD95, sizeof(indexOnline)), indexOnline, sizeof(indexOnline)) == 0 &&
+              std::memcmp(image.At(0x7FFDF4, sizeof(indexOffline)), indexOffline, sizeof(indexOffline)) == 0 &&
+              std::memcmp(image.At(0x7FFC10, sizeof(minusOne)), minusOne, sizeof(minusOne)) == 0,
+          "7FFBD0 stores the radar's index as -1, the online index or the split-screen number", 0x7FFD95);
+    {
+        // Every `mov [r14], r32` (41 89 /r, mod 00, r/m r14) in 7FFBD0 (7FFBD0..7FFEE6 by its unwind entry): the two.
+        int stores = 0;
+        const std::uint8_t* body = image.At(0x7FFBD0, 0x316);
+        for (std::uint32_t i = 0; body && i + 3 <= 0x316; ++i)
+            if (body[i] == 0x41 && body[i + 1] == 0x89 && (body[i + 2] & 0xC7) == 0x06) ++stores;
+        Check(stores == 2, "7FFBD0 writes a player index out at 7FFD99 and 7FFDFA and nowhere else", 0x7FFBD0);
+    }
+    // Whatever index reaches the radar: a player's wraps around the colour table, a negative one keeps the game's
+    // in-frame address.
+    const std::uint64_t frame = 0x10000;
+    for (const std::int32_t index : {0, 3, 31, 32, 33, 1023, 0x7FFFFFFF}) {
+        const std::uint64_t address = RadarColourAddress(index, frame);
+        Check(address == reinterpret_cast<std::uintptr_t>(RadarColour(index % kHudColourCount)),
+              "a player's radar colour is a table entry, wrapped", static_cast<std::uint32_t>(index));
+    }
+    Check(RadarColourAddress(-1, frame) == frame + 0x150 - 16, "a unit that is no player keeps the game's address");
     // What the hooks replace: the lamp texture name, the chat balloon names (in the order of the colours) and
     // the radar's four colours - the game's own are the first four entries of hudcolours.h.
     const auto wideAt = [&](std::uint32_t rva) { return reinterpret_cast<const wchar_t*>(image.At(rva, 2)); };
@@ -616,6 +689,24 @@ int main(int argc, char** argv) {
     const auto ghostHooks = GhostHooks();
     allHooks.insert(allHooks.end(), ghostHooks.begin(), ghostHooks.end());
     allHooks.insert(allHooks.end(), peerTimeoutHooks.begin(), peerTimeoutHooks.end());
+    // Member slots (userslots.h): Users::Add takes the first empty slot - the loop from 12B802E (`mov [rbp], r14d`,
+    // index 0) over the slots (r9, 16 bytes each, r8 of them) stops at the first null, keeping the index in ecx and
+    // [rbp] - and the User's constructor (12B7610) gets &[rbp]; Users::Remove empties slots[User+0x40] and moves nothing.
+    const auto slotHooks = UserSlotHooks();
+    Check(slotHooks.size() == 2, "member slot hook table size");
+    for (const auto& hook : slotHooks) {
+        const Patch verify{hook.name, hook.rva, hook.original, hook.original};
+        Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
+        Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the slot hooks run their site unchanged",
+              hook.rva);
+        Check(UserSlotHookHandler(hook.rva) != nullptr, "every slot hook has a handler", hook.rva);
+    }
+    Check(Bytes(0x12B802E, {0x44, 0x89, 0x75, 0x00}) && Bytes(0x12B8058, {0x4D, 0x39, 0x34, 0xC1}) &&
+              Bytes(0x12B8061, {0x89, 0x4D, 0x00}) && Bytes(0x12B8074, {0x75, 0x55}) && Bytes(0x12B80D2, {0x48, 0x8D, 0x55, 0x00}),
+          "Users::Add: the first empty slot in ecx and [rbp], whose address the User's constructor gets", 0x12B806E);
+    Check(Bytes(0x12B8869, {0x49, 0x8B, 0x1E, 0x48, 0x63, 0x6B, 0x40}) && Bytes(0x12B8A2B, {0x49, 0x03, 0x07, 0x33, 0xC9, 0x48, 0x89, 0x08}),
+          "Users::Remove: rbp = User+0x40, that slot of [r15] is emptied", 0x12B8A24);
+    allHooks.insert(allHooks.end(), slotHooks.begin(), slotHooks.end());
     // Host data (hostdataopen.h): the file open EDFModLoader wraps. After `call [vtable+0x10]` on rcx, rdi is the
     // path wstring (rdx), turned into its characters when not stored inline (capacity 8+); the moves at the site
     // hand them to the open (752E0); after it rdi only holds a result byte (`sete dil`/`setne dil`).
@@ -736,6 +827,74 @@ int main(int argc, char** argv) {
     Check(CapacityFromInfo(3, 3, 5) == 0, "capacity: members + available != max is rejected");
     Check(CapacityFromInfo(0, 0, 0) == 0, "capacity: zero max is rejected");
     Check(CapacityFromInfo(1, 70, 71) == 0, "capacity: more than EOS's 64 is rejected");
+    // Rooms larger than an EOS lobby (kRoomSizeKey): a full-sized lobby stands for the room's published size.
+    Check(CapacityFromInfo(64, 0, 64, 1024) == 1024 && CapacityFromInfo(10, 54, 64, 200) == 200,
+          "capacity: a 64-member lobby with a larger published room size is that room");
+    Check(CapacityFromInfo(3, 2, 5, 1024) == 5, "capacity: a published size counts only for a full-sized lobby");
+    Check(CapacityFromInfo(64, 0, 64, 0) == 64 && CapacityFromInfo(64, 0, 64, 32) == 64 &&
+              CapacityFromInfo(64, 0, 64, kMaxPlayers + 1) == 64,
+          "capacity: a published size below the lobby's, or past this build's, is ignored");
+    Check(CapacityFromInfo(1, 70, 71, 1024) == 0, "capacity: an inconsistent lobby stays rejected with a room size");
+    // Members beyond Epic's lobby (docs/net-re/roomsize.md §4): the room this machine is in reads them through the
+    // game's member count; a room list entry has its owner's published count.
+    const auto same = [](RoomCount a, std::uint32_t members, std::uint32_t capacity) {
+        return a.members == members && a.capacity == capacity;
+    };
+    Check(same(RoomCountFromInfo(70, 0, 64, 200), 70, 200) && same(RoomCountFromInfo(63, 4, 64, 200), 63, 200),
+          "count: our own room counts its members beyond Epic's lobby, full or not");
+    Check(same(RoomCountFromInfo(64, 0, 64, 200, 150), 150, 200) && same(RoomCountFromInfo(70, 0, 64, 200, 65), 70, 200),
+          "count: a room list entry shows the owner's published members, never fewer than are read");
+    Check(same(RoomCountFromInfo(64, 0, 64, 200, 500), 64, 200), "count: a published count past the room's size is ignored");
+    Check(RoomCountFromInfo(60, 0, 64, 200).capacity == 0, "count: fewer than Epic lists is inconsistent");
+    Check(RoomCountFromInfo(9, 0, 8).capacity == 0 && same(RoomCountFromInfo(8, 0, 8, 0, 20), 8, 8),
+          "count: a room EOS holds whole counts exactly Epic's members, published counts aside");
+    // The host's HIDDEN check: a room of 200 with 70 in it is not full, one of 200 with 200 is.
+    Check(RoomCountFromInfo(70, 0, 64, 200).members < RoomCountFromInfo(70, 0, 64, 200).capacity &&
+              RoomCountFromInfo(200, 0, 64, 200).members >= RoomCountFromInfo(200, 0, 64, 200).capacity,
+          "count: a room beyond Epic's lobby is full at its own size");
+
+    // Which slot a member takes: the host's when known, in the table and empty here; else the game's first empty one.
+    Check(ChooseUserSlot(1, 3, 1024, true) == 3 && ChooseUserSlot(1, 3, 1024, false) == 1 && ChooseUserSlot(1, -1, 1024, true) == 1 &&
+              ChooseUserSlot(1, 1024, 1024, true) == 1 && ChooseUserSlot(0, 0, 1024, true) == 0,
+          "a member takes the host's slot when it is empty here, the first empty one otherwise");
+    {
+        // The Add handler on a stand-in of Users::Add's registers: slots 0 and 2 taken, the host has "D" in 3.
+        std::uint64_t slots[8]{};  // 4 shared_ptr {object, control}
+        slots[0] = 1;
+        slots[4] = 1;
+        const char* puid = "D";
+        std::int32_t index = 1;
+        SetUserSlotSources([](const std::string& m) { return m == "D" ? 3 : m == "E" ? 2 : -1; },
+                           [](const void* id, char* out, std::size_t size) -> const char* {
+                               strcpy_s(out, size, static_cast<const char*>(id));
+                               return out;
+                           });
+        CpuContext add{};
+        add.rcx = 1;  // the first empty slot
+        add.r8 = 4;
+        add.r9 = reinterpret_cast<std::uintptr_t>(slots);
+        add.r13 = 0x5000;
+        add.rbx = reinterpret_cast<std::uintptr_t>(&puid);
+        add.rbp = reinterpret_cast<std::uintptr_t>(&index);
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check(static_cast<std::int32_t>(add.rcx) == 3 && index == 3, "Users::Add puts D in the host's slot 3");
+        const char* taken = "E";  // the host's slot 2 is taken here: the game's choice stands
+        add.rcx = 1;
+        index = 1;
+        add.rbx = reinterpret_cast<std::uintptr_t>(&taken);
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check(static_cast<std::int32_t>(add.rcx) == 1 && index == 1, "a host slot taken here leaves the first empty one");
+        Check((GameSlotTable() == std::vector<std::string>{"", "E", "", "D"}), "the slot table follows the adds");
+        CpuContext remove{};
+        remove.rbp = 3;
+        remove.r15 = 0x5000;
+        UserSlotHookHandler(0x12B8A24)(&remove);
+        Check((GameSlotTable() == std::vector<std::string>{"", "E"}), "a removed member's slot is empty, nothing moves up");
+        add.r13 = 0x6000;  // another room's Users
+        UserSlotHookHandler(0x12B806E)(&add);
+        Check((GameSlotTable() == std::vector<std::string>{"", "E"}), "another room starts its own table");
+        SetUserSlotSources(nullptr, nullptr);
+    }
 
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

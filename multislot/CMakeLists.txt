@@ -102,7 +102,9 @@ add_library(EDF6Coop SHARED
     src/plugin.cpp src/coop.cpp src/patches.cpp src/rooms.cpp src/roomview.cpp src/fakemembers.cpp src/hostmode.cpp src/modfile.cpp src/hud.cpp
     src/mission.cpp src/spawn.cpp src/joinlog.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/crashlog.cpp src/log.cpp
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
-    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp)
+    src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/weaponguard.cpp
+    src/userslots.cpp src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp src/netplayer_members.cpp
+    src/widecmp.cpp src/interest.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -164,10 +166,23 @@ if(NOT EXISTS "${EDF_DLL}")
                     "(PatchTablesMatchEDF, PluginLoad_*, GameNet_*) will be reported as skipped")
 endif()
 
-add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp)
+add_executable(MultiSlotTests tests/tests.cpp src/hud.cpp src/patches.cpp src/rooms.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/log.cpp src/smoothing.cpp
+    src/userslots.cpp)
 target_compile_options(MultiSlotTests PRIVATE ${WARNINGS})
 add_test(NAME PatchTablesMatchEDF COMMAND MultiSlotTests "${EDF_DLL}")
 set_tests_properties(PatchTablesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+
+# Hit authority (src/hitauth.h): the event, the decision, the owner's checks; and against EDF.dll, the hook sites,
+# the game facts the rule rests on and the event's round trip through the game's own stream code.
+add_executable(HitAuthTests tests/hitauth_test.cpp src/hitauth.cpp src/hitauthgame.cpp src/netfeature.cpp
+    src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp
+    src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
+target_include_directories(HitAuthTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(HitAuthTests PRIVATE ${WARNINGS})
+target_link_libraries(HitAuthTests PRIVATE DirectNetPart)
+add_test(NAME HitAuthority COMMAND HitAuthTests)
+add_test(NAME HitAuthorityGameCode COMMAND HitAuthTests "${EDF_DLL}")
+set_tests_properties(HitAuthorityGameCode PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
 
 add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
@@ -177,6 +192,16 @@ add_test(NAME RoomViewPaging COMMAND RoomViewTests)
 add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
+
+# Room size (docs/net-re/roomsize.md): widened compares run in-process.
+add_executable(WideCompareTests tests/widecmp_test.cpp src/widecmp.cpp src/code.cpp src/patches.cpp)
+target_compile_options(WideCompareTests PRIVATE ${WARNINGS})
+add_test(NAME WideCompares COMMAND WideCompareTests)
+
+# Interest management for large rooms (src/interest.h): bandwidth-driven priority accumulation.
+add_executable(InterestTests tests/interest_test.cpp src/interest.cpp)
+target_compile_options(InterestTests PRIVATE ${WARNINGS})
+add_test(NAME InterestManagement COMMAND InterestTests)
 
 add_executable(MissionTests tests/mission_test.cpp src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp)
 target_compile_options(MissionTests PRIVATE ${WARNINGS})
@@ -189,6 +214,14 @@ target_link_libraries(HostModeTests PRIVATE winhttp)
 target_compile_options(HostModeTests PRIVATE ${WARNINGS})
 add_test(NAME HostModeAndMenuLabel COMMAND HostModeTests)
 
+# W2 player sync: block format, the game's bin element, sender velocity, extrapolation and convergence.
+add_executable(NetPlayerTests tests/netplayer_test.cpp src/netplayer.cpp src/netplayer_members.cpp src/netaoi.cpp
+    src/interest.cpp src/netfeature.cpp src/netcompress.cpp
+    src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
+target_include_directories(NetPlayerTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetPlayerTests PRIVATE ${WARNINGS})
+target_link_libraries(NetPlayerTests PRIVATE DirectNetPart)
+add_test(NAME NetPlayerSync COMMAND NetPlayerTests)
 add_executable(WeaponGuardTests tests/weaponguard_test.cpp src/weaponguard.cpp src/log.cpp)
 target_compile_options(WeaponGuardTests PRIVATE ${WARNINGS})
 add_test(NAME WeaponGuard COMMAND WeaponGuardTests)
@@ -218,6 +251,18 @@ add_executable(SpawnTests tests/spawn_test.cpp src/spawn.cpp src/mission.cpp src
 target_compile_options(SpawnTests PRIVATE ${WARNINGS})
 add_test(NAME EnemySpawnCounts COMMAND SpawnTests)
 
+# Netcode W4 (src/networld.h): the enemy target decision and its hook against a fake game; with EDF.dll also the
+# hook site against the game's code (skipped without it).
+add_executable(NetWorldTests tests/networld_test.cpp src/networld.cpp src/worldrng.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp
+    src/packetfit.cpp src/identity.cpp src/mission.cpp src/midhook.cpp
+    src/code.cpp src/patches.cpp src/log.cpp)
+target_include_directories(NetWorldTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetWorldTests PRIVATE ${WARNINGS})
+target_link_libraries(NetWorldTests PRIVATE DirectNetPart)
+add_test(NAME NetWorldEnemyTargets COMMAND NetWorldTests)
+add_test(NAME NetWorldSitesMatchEDF COMMAND NetWorldTests "${EDF_DLL}")
+set_tests_properties(NetWorldSitesMatchEDF PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+
 add_executable(FakeMemberTests tests/fakemembers_test.cpp src/fakemembers.cpp src/roomview.cpp src/armor.cpp
     src/mission.cpp src/midhook.cpp src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
 
@@ -245,7 +290,7 @@ target_compile_options(RefusalTests PRIVATE ${WARNINGS})
 add_dependencies(RefusalTests EDF6Coop)
 add_test(NAME PluginRefusalUnloads COMMAND RefusalTests "$<TARGET_FILE:EDF6Coop>" "${CMAKE_BINARY_DIR}/refusaltest")
 
-add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp)
+add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook.cpp src/code.cpp src/widecmp.cpp)
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6Coop)
@@ -264,7 +309,7 @@ set_target_properties(GameNetEos PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping RU
     ARCHIVE_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_compile_options(GameNetEos PRIVATE ${WARNINGS})
 add_executable(GameMachine tests/gamenet/machine.cpp tests/gamenet/roles.cpp tests/gamenet/game.cpp
-    tests/gamenet/missionsync.cpp)
+    tests/gamenet/missionsync.cpp src/netplayer.cpp)
 set_target_properties(GameMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_include_directories(GameMachine PRIVATE ${MODLOADER_INCLUDE})
 target_compile_options(GameMachine PRIVATE ${WARNINGS})
@@ -272,7 +317,9 @@ add_dependencies(GameMachine GameNetEos)
 add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
-foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon)
+add_test(NAME GameNetLogStats COMMAND GameNetTests --log-stats)
+foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon mission4slowpeer
+        playersync mission16 mission32)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
@@ -288,3 +335,32 @@ add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
 target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(DirectNetProbeJoin PRIVATE DirectNetCore)
+
+# --- Netcode rewrite W1 (transport): datagram classes, fragments, congestion budgets, multipath direct link ---
+target_sources(DirectNetCore PRIVATE "${DIRECTNET_DIR}/netclass.cpp" "${DIRECTNET_DIR}/fragment.cpp"
+    "${DIRECTNET_DIR}/congestion.cpp")
+add_executable(NetTransportTests "${CMAKE_SOURCE_DIR}/../tests/net_transport_test.cpp")
+target_compile_definitions(NetTransportTests PRIVATE ${DIRECTNET_DEFINES})
+target_compile_options(NetTransportTests PRIVATE /W4 /WX /utf-8 /EHsc)
+target_link_libraries(NetTransportTests PRIVATE DirectNetCore)
+add_test(NAME NetTransport COMMAND NetTransportTests)
+target_sources(EDF6Coop PRIVATE src/nettraffic.cpp)
+target_sources(EDF6Coop PRIVATE src/netfeature.cpp src/netcompress.cpp src/netaoi.cpp)
+add_executable(NetFeatureTests tests/netfeature_test.cpp src/netfeature.cpp src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp
+    src/identity.cpp src/log.cpp)
+target_include_directories(NetFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
+target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
+add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
+foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull mission8bulklost slotorder mission8bulkcut slotmigrate slotmigratenodirect slotmigrateearlyroom slotgiveup slotchurn slotchurnlate)
+    add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
+             "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
+    set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
+endforeach()
+add_executable(NetInterestTests tests/netaoi_test.cpp src/netaoi.cpp src/interest.cpp src/netfeature.cpp src/netcompress.cpp
+    src/lobbystate.cpp src/hostmode.cpp src/roomview.cpp src/mission.cpp src/armor.cpp src/midhook.cpp src/code.cpp src/patches.cpp
+    src/joinlog.cpp src/updatecheck.cpp src/widecmp.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
+target_include_directories(NetInterestTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
+target_compile_options(NetInterestTests PRIVATE ${WARNINGS})
+target_link_libraries(NetInterestTests PRIVATE DirectNetPart winhttp)
+add_test(NAME NetInterestOnTheWire COMMAND NetInterestTests)

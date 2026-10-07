@@ -52,6 +52,7 @@ Guests join one after another in seat order, so seat n is player n+1.
 | `GameNet_mission2` | 2 | the start sync with `[Test] SplitSyncBudget=200`, so the second record goes beside the start message |
 | `GameNet_mission4` | 4 | a start message that fits: nothing goes beside it |
 | `GameNet_mission4modweapon` | 4 | player 4 has a mod's weapon table (1590 rows) and two weapons past the stock 1564: the others replace them with their own (weapon guard), player 4 keeps them |
+| `GameNet_mission4slowpeer` | 4 | player 2 gets player 4's packets 1.5 s late, so it is still in its handshake with player 4 when the host, done with its own, sends the sync: player 2 takes that message during the handshake |
 | `GameNet_mission8` | 8 | 8 players: 1132 bytes do not fit the 1100 the message may have, a record goes beside it |
 | `GameNet_mission8late` | 8 | the side packets' channel arrives 400 ms after the message: every guest reads the message first and waits |
 | `GameNet_mission8lossy` | 8 | without the direct link's reliable layer, the network loses the first start message; the game resends it |
@@ -66,7 +67,8 @@ when it does not fit, and none may go missing. Each imperfect scenario also chec
 (the guests waited, a datagram was lost, a record was shared).
 
 Network imperfections, set per scenario: `EDF6NET_DELAY=<channel>:<ms>`, `EDF6NET_DROP=<bytes>:<count>` (only
-unreliable packets), `EDF6NET_LOBBY_DELAY=<ms>`, `EDF6NET_CHATTER=<bytes>`, `EDF6NET_RUSH=1`.
+unreliable packets), `EDF6NET_LOBBY_DELAY=<ms>`, `EDF6NET_CHATTER=<bytes>`, `EDF6NET_RUSH=1`; per seat
+`EDF6NET_DELAY_FROM=<user>:<ms>` (everything that machine receives from that member).
 
 ## What they caught
 
@@ -79,6 +81,15 @@ unreliable packets), `EDF6NET_LOBBY_DELAY=<ms>`, `EDF6NET_CHATTER=<bytes>`, `EDF
   player from an empty record again. `GameNet_mission8rushed` failed 23 checks; the records now go to every member.
 - With `kRecordWaitMs` set to 0, `mission8` and `mission8late` fail: guests do read the message before its
   records arrive.
+- The tests themselves: a role subscribed to the game's packet controller only after its handshakes with every
+  other member ended (`Connect`). The controller delivers a record on the tick it arrives, to whoever listens then,
+  and acknowledges it either way, so its sender never resends it. In a room of 32 the host is done with its
+  handshakes before some guests are done with each other's, and its first sync message reached a few of them in
+  their last handshake tick: lost, those guests never answered, and no machine finished the sync (`mission32`
+  failed about one run in four with 1183 checks, every guest "got no records beside the start message"). The
+  game's event controller listens from the moment the network exists; the roles now subscribe right after
+  `Transport::Start` (`Connect`'s `listen`). `mission4slowpeer` makes the late handshake certain: it failed every
+  run before (no machine finished the sync), with no plugin change.
 - The game without EDF6Coop cannot read a split start message: it writes past its player records (heap
   corruption, measured). That is why a room of five or more needs EDF6Coop and `SplitSyncBudget` is only for rooms
   where everyone runs it.

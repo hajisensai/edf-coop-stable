@@ -4,7 +4,9 @@
 
 namespace multislot {
 namespace {
-constexpr std::size_t kPage = 0x4000;
+// Every stub, hook thunk (about 0x110 bytes each) and compare cave of a full install, with room to spare: 16 KiB ran
+// out at the room-size hooks (2026-10-07, "compare cave ... out of reach"). One allocation granule.
+constexpr std::size_t kPage = 0x10000;
 constexpr std::size_t kStub = 12;
 // A rel32 reaches +/-2 GB; stay well inside that on both sides of the anchor.
 constexpr std::uintptr_t kReach = 0x60000000;

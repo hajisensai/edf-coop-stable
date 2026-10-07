@@ -8,7 +8,7 @@
 
 namespace multislot {
 
-static_assert(kMaxPlayers <= kHudColourCount, "every player of a room needs a HUD colour (hudcolours.h)");
+static_assert(kHudTablePlayers == kHudColourCount, "one HUD table entry per colour (hudcolours.h)");
 
 namespace {
 
@@ -36,9 +36,14 @@ static_assert(kSearchTypeCenter <= 0x80 && Mirror(0x91) < 0x90, "the mirror must
 // Sign-extended imm8/disp8 operands above: each must stay below 0x80 or the rewritten code means something else.
 static_assert(Mirror(0x94) <= 0x80 && 0x90 - Mirror(0x94) < 0x80 && 0x91 - kSearchTypeCenter < 0x80,
               "the centre's operands must fit the rewritten SEARCH_TYPE code");
-// A family of its own: below every earlier one (the lowest, EDF6Coop 32p up to 2.2.x, is 0x20..0x23), so no
-// build with fewer slots ever lists or accepts these rooms.
-static_assert(Mirror(0x91) < 0x20, "the 32-slot family must not share a value with an earlier one");
+// A family of its own: below every earlier one (the lowest, EDF6Coop 2.3.0-2.4.x with 32 slots, is 0x18..0x1B), so
+// no build with fewer slots ever lists or accepts these rooms.
+static_assert(Mirror(0x91) < 0x18, "the 1024-slot family must not share a value with an earlier one");
+
+// `cmp r/m, 4` + jcc, widened to kMaxPlayers.
+WideCompare Wide(const char* name, std::uint32_t rva, Bytes original, std::size_t compareSize) {
+    return {name, rva, std::move(original), compareSize, static_cast<std::uint32_t>(kMaxPlayers)};
+}
 
 }  // namespace
 
@@ -115,8 +120,7 @@ std::vector<Patch> SessionPatches() {
         // empty vector of shared_ptr<User>: Users::Add (12B7F50) puts a joining member in the first empty slot and
         // drops them when there is none, so the host never accepts their P2P connection. The slot index is the
         // user's UsrIndexKey. The shrink branch (`lea rbp, [rdx+0x40]`) cannot run on an empty vector.
-        Immediate("room user slots size check", 0x12B78EA, {0x48, 0x83, 0xF9, 0x04}, 3, 1, kMaxPlayers),
-        Immediate("room user slots capacity check", 0x12B7954, {0x48, 0x83, 0xF8, 0x04}, 3, 1, kMaxPlayers),
+        // The size and capacity checks before them (`cmp rcx, 4` / `cmp rax, 4`) are SessionCompares.
         Immediate("room user slots grow", 0x12B795F, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
         Immediate("room user slots fill", 0x12B796E, {0xB8, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
         // eos::packet::Controller (12CB5F0, built with the room's Users): `mov ebx, 4` is the reserve and resize count
@@ -126,12 +130,22 @@ std::vector<Patch> SessionPatches() {
         // capacity, +0x150 size, 0x50-byte records) is reserved and resized to four inline. Its update (961140, vtable
         // slot 1811998) writes one record per room member without a bound, so a fifth member overran the vector and
         // every machine in the room crashed in a string copy (2026-09-18 00:07, all five logs).
-        Immediate("voice chat HUD records reserve check", 0x96069E, {0x48, 0x83, 0x7F, 0x10, 0x04}, 4, 1, kMaxPlayers),
         Immediate("voice chat HUD records allocation", 0x9606A9, {0xB9, 0x40, 0x01, 0x00, 0x00}, 1, 4, 0x50 * kMaxPlayers),
-        Immediate("voice chat HUD records move limit", 0x9606C3, {0x48, 0x83, 0xFB, 0x04}, 3, 1, kMaxPlayers),
         Immediate("voice chat HUD records move count", 0x9606D4, {0xBB, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
         Immediate("voice chat HUD records capacity", 0x960774, {0x48, 0xC7, 0x47, 0x10, 0x04, 0x00, 0x00, 0x00}, 4, 4, kMaxPlayers),
         Immediate("voice chat HUD records count", 0x960781, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+    };
+}
+
+std::vector<WideCompare> SessionCompares() {
+    return {
+        // Users (12B77E0): `cmp rcx, 4; jbe` (shrink only above the size) and `cmp rax, 4; jae` (grow below it).
+        Wide("room user slots size check", 0x12B78EA, {0x48, 0x83, 0xF9, 0x04, 0x76, 0x57}, 4),
+        Wide("room user slots capacity check", 0x12B7954, {0x48, 0x83, 0xF8, 0x04, 0x73, 0x14}, 4),
+        // UiVoiceChat_Notify (9605E0): `cmp qword [rdi+0x10], 4; jae` (reserve) and `cmp rbx, 4; jae` (moved records).
+        Wide("voice chat HUD records reserve check", 0x96069E,
+             {0x48, 0x83, 0x7F, 0x10, 0x04, 0x0F, 0x83, 0xD3, 0x00, 0x00, 0x00}, 5),
+        Wide("voice chat HUD records move limit", 0x9606C3, {0x48, 0x83, 0xFB, 0x04, 0x73, 0x0B}, 4),
     };
 }
 
@@ -197,34 +211,23 @@ std::vector<Patch> MissionPatches() {
         return Patch{name, rva, std::move(original), std::move(replacement)};
     };
     return {
-        // MissionSync_Res (78D0E0, host): replies from players with index >= 4 were dropped.
-        Immediate("mission sync host keeps players 5+", 0x78D24C, {0x83, 0xF9, 0x04}, 2, 1, kMaxPlayers),
-        // MissionSync_Update (790600): the 0xA4-byte part of a record was only copied for index < 4.
-        Immediate("mission sync stores records 5+", 0x7908A0, {0x83, 0xF9, 0x04}, 2, 1, kMaxPlayers),
-        // CreateOnlinePlayerObject (595960) refused index >= 4; 59DC90 and 0DFCF0 skipped it.
-        Immediate("online player object accepts index 4+", 0x5959E1, {0x83, 0xFF, 0x04}, 2, 1, kMaxPlayers),
-        Immediate("player record lookup accepts index 4+", 0x59DCEA, {0x83, 0xF8, 0x04}, 2, 1, kMaxPlayers),
-        Immediate("player color lookup accepts index 4+", 0x0DFD19, {0x41, 0x83, 0xF8, 0x04}, 3, 1, kMaxPlayers),
+        // The index bounds of the mission sync, the player objects and the record lookups are MissionCompares.
 
         // MissionContext grows past its 0x2F8 bytes (+0x10 control block) to hold kMaxPlayers entries at +0x300.
         Immediate("MissionContext allocation", 0x1D6C9C, {0xB9, 0x08, 0x03, 0x00, 0x00}, 1, 4, kContextAllocation),
         Immediate("MissionContext snapshot allocation", 0x1DD5DC, {0xB9, 0x08, 0x03, 0x00, 0x00}, 1, 4, kContextAllocation),
         moved("MissionContext destructor player array", 0x1D6ECE, {0x48, 0x8D, 0x8E, 0x00, 0x01, 0x00, 0x00}),
-        // `lea r8d, [rdx-0xC]` with edx = the 0x10-byte entry size: the count of entries to destroy.
-        Immediate("MissionContext destructor player count", 0x1D6EE1, {0x44, 0x8D, 0x42, 0xF4}, 3, 1,
-                  static_cast<std::uint8_t>(kMaxPlayers - 0x10)),
+        // Its count of entries to destroy (`lea r8d, [rdx-0xC]`, a disp8 from the entry size) is a MissionHook.
         {"CreatePlayers stores into the moved array", 0x1D9A45, {0x48, 0x8D, 0xB9, 0x08, 0x01, 0x00, 0x00},
          {0x48, 0x8D, 0xB9, 0x08, 0x03, 0x00, 0x00}},
         moved("FindPlayerIndex array", 0x1DA361, {0x48, 0x8D, 0xB9, 0x00, 0x01, 0x00, 0x00}),
-        Immediate("FindPlayerIndex count", 0x1DA3F8, {0x48, 0x83, 0xFD, 0x04}, 3, 1, kMaxPlayers),
-        // lea eax, [rbp-(count+1)]: the loop leaves rbp = count, so this is the -1 of "not found".
-        Immediate("FindPlayerIndex not found", 0x1DA402, {0x8D, 0x45, 0xFB}, 2, 1,
-                  static_cast<std::uint8_t>(-(kMaxPlayers + 1))),
+        // `lea eax, [rbp-5]`: the loop (its bound is a MissionCompare) only falls through here with rbp = count, and
+        // nothing jumps here, so this is the -1 of "not found", whatever the count: `or eax, -1`. The `jmp` after it
+        // goes to the epilogue, which reads no flags.
+        {"FindPlayerIndex not found", 0x1DA402, {0x8D, 0x45, 0xFB}, {0x83, 0xC8, 0xFF}},
         moved("snapshot player array", 0x1DB0E1, {0x49, 0x8D, 0xBE, 0x00, 0x01, 0x00, 0x00}),
         // GetPlayerObject(i): (i + 0x10) << 4 -> (i + 0x30) << 4.
         {"GetPlayerObject array", 0x1B4F08, {0x48, 0x83, 0xC3, 0x10}, {0x48, 0x83, 0xC3, 0x30}},
-        Immediate("PlayerIgnoreDamageEventMode players", 0x1B8139, {0x83, 0xFD, 0x04}, 2, 1, kMaxPlayers),
-        Immediate("PlayerStealthMode players", 0x1B82B9, {0x83, 0xFD, 0x04}, 2, 1, kMaxPlayers),
         // Loops over the first four entries follow the array (players 5+ are not part of these checks yet).
         moved("player loop 1A1990", 0x1A19C4, {0x48, 0x81, 0xC7, 0x00, 0x01, 0x00, 0x00}),
         moved("Factor_PlayerAreaIn players", 0x1A31B4, {0x49, 0x81, 0xC6, 0x00, 0x01, 0x00, 0x00}),
@@ -235,9 +238,28 @@ std::vector<Patch> MissionPatches() {
         moved("player loop 1C2370", 0x1C2438, {0x49, 0x81, 0xC5, 0x00, 0x01, 0x00, 0x00}),
         moved("player loop 1DB9F0", 0x1DBA00, {0x48, 0x81, 0xC7, 0x00, 0x01, 0x00, 0x00}),
 
+        // ResultSync_Update's bounds of the item counts are MissionCompares.
+    };
+}
+
+std::vector<WideCompare> MissionCompares() {
+    return {
+        // MissionSync_Res (78D0E0, host): replies from players with index >= 4 were dropped.
+        Wide("mission sync host keeps players 5+", 0x78D24C, {0x83, 0xF9, 0x04, 0x0F, 0x83, 0x0E, 0x03, 0x00, 0x00}, 3),
+        // MissionSync_Update (790600): the 0xA4-byte part of a record was only copied for index < 4.
+        Wide("mission sync stores records 5+", 0x7908A0, {0x83, 0xF9, 0x04, 0x73, 0x74}, 3),
+        // CreateOnlinePlayerObject (595960) refused index >= 4; 59DC90 and 0DFCF0 skipped it.
+        Wide("online player object accepts index 4+", 0x5959E1, {0x83, 0xFF, 0x04, 0x72, 0x0F}, 3),
+        Wide("player record lookup accepts index 4+", 0x59DCEA, {0x83, 0xF8, 0x04, 0x0F, 0x83, 0x03, 0x01, 0x00, 0x00}, 3),
+        Wide("player color lookup accepts index 4+", 0x0DFD19, {0x41, 0x83, 0xF8, 0x04, 0x73, 0x42}, 4),
+        // FindPlayerIndex (1DA340): `cmp rbp, 4; jne` closes its loop over the moved array.
+        Wide("FindPlayerIndex count", 0x1DA3F8, {0x48, 0x83, 0xFD, 0x04, 0x0F, 0x85, 0x6F, 0xFF, 0xFF, 0xFF}, 4),
+        // The player loops of two script modes: `inc ebp; cmp ebp, 4; jne`.
+        Wide("PlayerIgnoreDamageEventMode players", 0x1B8139, {0x83, 0xFD, 0x04, 0x0F, 0x85, 0xCE, 0xFE, 0xFF, 0xFF}, 3),
+        Wide("PlayerStealthMode players", 0x1B82B9, {0x83, 0xFD, 0x04, 0x0F, 0x85, 0xCE, 0xFE, 0xFF, 0xFF}, 3),
         // ResultSync_Update (78FD70) resets and stores the item counts of the first four players only.
-        Immediate("result items reset players 5+", 0x78FFAC, {0x83, 0xFB, 0x04}, 2, 1, kMaxPlayers),
-        Immediate("result items store players 5+", 0x78FFDC, {0x41, 0x83, 0xFD, 0x04}, 3, 1, kMaxPlayers),
+        Wide("result items reset players 5+", 0x78FFAC, {0x83, 0xFB, 0x04, 0x72, 0xCF}, 3),
+        Wide("result items store players 5+", 0x78FFDC, {0x41, 0x83, 0xFD, 0x04, 0x73, 0x27}, 4),
     };
 }
 
@@ -253,6 +275,9 @@ std::vector<MidSite> MissionHooks() {
         {"loadout record color", 0x0DFD27, {0x48, 0x69, 0xD8, 0xD4, 0x00, 0x00, 0x00}, 0, 0},
         {"loadout record color index", 0x591914, {0x49, 0x69, 0xC7, 0xD4, 0x00, 0x00, 0x00}, 0, 0},
         // CreatePlayers (1D9520).
+        // MissionContext destructor (1D6E80): `mov edx, 0x10; lea r8d, [rdx-0xC]`, the entry size and the count of
+        // entries of the player array it destroys. The handler sets both; the call after them stays in place.
+        {"MissionContext destructor player count", 0x1D6EDC, {0xBA, 0x10, 0x00, 0x00, 0x00, 0x44, 0x8D, 0x42, 0xF4}, 0, 0},
         {"CreatePlayers spawn table count", 0x1D968E, {0x41, 0x8B, 0xF4, 0x44, 0x0F, 0x28, 0x4D, 0x90}, 3, 5},
         // The remote flag of each player: `mov [rsp+r15+0x28], al` fills eight bytes on the stack and
         // `lea r12, [rsp+0x28]` reads them back. Both move to a buffer of kMaxPlayers in mission.cpp.
@@ -291,13 +316,13 @@ std::vector<Patch> HudColourPatches() {
     return {
         // HudPlayer_MultiPlayStatus (806FE0): the lamp vector at this+0x20 (data +0x28, capacity +0x30, size
         // +0x38, 0x30 bytes an entry) is reserved, resized and filled for four.
-        Immediate("status lamps capacity check", 0x8073F5, {0x48, 0x83, 0x7F, 0x30, 0x04}, 4, 1, kMaxPlayers),
-        Immediate("status lamps allocation", 0x807400, {0xB9, 0xC0, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers * 0x30),
-        Immediate("status lamps moved entries", 0x80741A, {0x48, 0x83, 0xFE, 0x04}, 3, 1, kMaxPlayers),
-        Immediate("status lamps moved entries cap", 0x807427, {0xBE, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
-        Immediate("status lamps capacity", 0x8074AC, {0x48, 0xC7, 0x47, 0x30, 0x04, 0x00, 0x00, 0x00}, 4, 4, kMaxPlayers),
-        Immediate("status lamps resize", 0x8074B8, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
-        Immediate("status lamps fill loop", 0x80753D, {0x83, 0xFE, 0x04}, 2, 1, kMaxPlayers),
+        Immediate("status lamps capacity check", 0x8073F5, {0x48, 0x83, 0x7F, 0x30, 0x04}, 4, 1, kHudTablePlayers),
+        Immediate("status lamps allocation", 0x807400, {0xB9, 0xC0, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers * 0x30),
+        Immediate("status lamps moved entries", 0x80741A, {0x48, 0x83, 0xFE, 0x04}, 3, 1, kHudTablePlayers),
+        Immediate("status lamps moved entries cap", 0x807427, {0xBE, 0x04, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers),
+        Immediate("status lamps capacity", 0x8074AC, {0x48, 0xC7, 0x47, 0x30, 0x04, 0x00, 0x00, 0x00}, 4, 4, kHudTablePlayers),
+        Immediate("status lamps resize", 0x8074B8, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers),
+        Immediate("status lamps fill loop", 0x80753D, {0x83, 0xFE, 0x04}, 2, 1, kHudTablePlayers),
         // Lamp i is u = i * xmm6 .. + width of the lamp texture: player_lamps.dds holds kHudColourCount of them, so
         // both are 1/kHudColourCount instead of 0.25. `movss xmm6, [0.25]` is a shared constant, so the value is
         // loaded through eax (free here: the loop sets it before reading it).
@@ -305,12 +330,12 @@ std::vector<Patch> HudColourPatches() {
         Immediate("status lamp width", 0x807529, {0xC7, 0x43, 0x28, 0x00, 0x00, 0x80, 0x3E}, 3, 4, stride),
         // HudPlayer_Chat (802970): the balloon vector at this (data +8, capacity +0x10, size +0x18, 0x20 bytes an
         // entry), the same way.
-        Immediate("chat balloons capacity check", 0x802A8A, {0x48, 0x83, 0x7F, 0x10, 0x04}, 4, 1, kMaxPlayers),
-        Immediate("chat balloons allocation", 0x802A95, {0xB9, 0x80, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers * 0x20),
-        Immediate("chat balloons moved entries", 0x802AAF, {0x48, 0x83, 0xFB, 0x04}, 3, 1, kMaxPlayers),
-        Immediate("chat balloons moved entries cap", 0x802ABC, {0xBB, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
-        Immediate("chat balloons capacity", 0x802B31, {0x48, 0xC7, 0x47, 0x10, 0x04, 0x00, 0x00, 0x00}, 4, 4, kMaxPlayers),
-        Immediate("chat balloons resize", 0x802B3D, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kMaxPlayers),
+        Immediate("chat balloons capacity check", 0x802A8A, {0x48, 0x83, 0x7F, 0x10, 0x04}, 4, 1, kHudTablePlayers),
+        Immediate("chat balloons allocation", 0x802A95, {0xB9, 0x80, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers * 0x20),
+        Immediate("chat balloons moved entries", 0x802AAF, {0x48, 0x83, 0xFB, 0x04}, 3, 1, kHudTablePlayers),
+        Immediate("chat balloons moved entries cap", 0x802ABC, {0xBB, 0x04, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers),
+        Immediate("chat balloons capacity", 0x802B31, {0x48, 0xC7, 0x47, 0x10, 0x04, 0x00, 0x00, 0x00}, 4, 4, kHudTablePlayers),
+        Immediate("chat balloons resize", 0x802B3D, {0xBA, 0x04, 0x00, 0x00, 0x00}, 1, 4, kHudTablePlayers),
     };
 }
 
@@ -435,6 +460,15 @@ std::vector<CallSite> RecoveryCalls() {
     return {{"handshake final hello recovery", 0x12D5B9B, 0x12C8F50}};
 }
 
+std::vector<MidSite> UserSlotHooks() {
+    return {
+        // Users::Add (12B7F50) after the first-empty-slot search: `movsxd rax, ecx; cmp rax, r8` (then `jne 12B80CB`).
+        {"room user slot choice", 0x12B806E, {0x48, 0x63, 0xC1, 0x49, 0x3B, 0xC0}, 0, 6},
+        // Users::Remove (12B87C0) emptying the slot: `mov rax, rbp; shl rax, 4` (then `add rax, [r15]`).
+        {"room user slot emptied", 0x12B8A24, {0x48, 0x8B, 0xC5, 0x48, 0xC1, 0xE0, 0x04}, 0, 7},
+    };
+}
+
 std::vector<MidSite> PeerTimeoutHooks() {
     return {
         // Users::Add (12B7F50) right after make_shared<eos::User> (12B7610): `mov r12, [rax]; mov rsi, [rax+8]`
@@ -454,6 +488,17 @@ std::vector<PointerSlot> MissionSlots() {
         {"ResultSync item store", 0x17EEF70, 0x793670},
         {"Online_GameOverWait item store", 0x1791DF0, 0x1BC410},
         {"Online_GameOverWait item store (BVM)", 0x179DE90, 0x22BCF0},
+    };
+}
+
+std::vector<MidSite> BvmPlayerTableHooks() {
+    return {
+        // 21F380 (a script opcode): `for i < GetOnlinePlayerCount()`, entry i at r15 + r12*0x18 (r8 = r12*3).
+        {"BVM player table loop (21F380)", 0x21F3CF, {0x4B, 0x8B, 0x94, 0xC7, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        // 222740, 228AC0, 22A650: entry `movsxd rax, edx` (the script's index) at r8 / r9 / r10.
+        {"BVM player table entry (222740)", 0x222761, {0x49, 0x8B, 0x90, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        {"BVM player table entry (228AC0)", 0x228AED, {0x49, 0x8B, 0x91, 0x78, 0x01, 0x00, 0x00}, 0, 0},
+        {"BVM player table entry (22A650)", 0x22A685, {0x49, 0x8B, 0x92, 0x78, 0x01, 0x00, 0x00}, 0, 0},
     };
 }
 

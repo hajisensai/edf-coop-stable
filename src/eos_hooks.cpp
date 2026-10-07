@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <deque>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -23,15 +24,26 @@
 #include "iat.h"
 #include "lobby_marker.h"
 #include "log.h"
+#include "netclass.h"
+#include "netcode.h"
+#include "congestion.h"
+#include "fragment.h"
 #include "room_view.h"
 #include "traffic.h"
 #include "updater.h"
 
 namespace dn {
+// Defined with the netcode API at the end of the file, used by the hooks before it.
+void meshTick(uint64_t now);
+void bulkTick(uint64_t now);
+void ackBulk(const std::string& member, uint64_t id);
+DirectOptions withNetcode(DirectOptions o);
 namespace {
+void sendIdentityProof(EOS_ProductUserId local, const std::string& host);
+bool takeIdentityProof(const std::string& src, uint8_t channel, const uint8_t* data, uint32_t size);
+void identityProofTick();
 
 constexpr const char* kEosDll = "EOSSDK-Win64-Shipping.dll";
-constexpr ULONGLONG kStatsIntervalMs = 60000;
 constexpr uint64_t kMinQueueBytes = 64ull * 1024 * 1024;
 
 using PFN_EOS_Platform_Tick = void (*)(EOS_HPlatform);
@@ -170,6 +182,8 @@ struct VirtualRoom {
     std::shared_ptr<DirectNet> net;
     EOS_ProductUserId user = nullptr;
     uint64_t startMs = 0, attemptMs = 0, hostSeenMs = 0;
+    bool proveEos = false;  // Epic's lobby was full: our EOS id goes to the host over EOS (kIdentityProofSocket)
+    uint64_t provedMs = 0;
     EOS_Lobby_OnLobbyIdCallback callback = nullptr;  // the game's JoinLobby, until it completes
     void* clientData = nullptr;
 };
@@ -218,6 +232,86 @@ struct State {
     std::unordered_map<std::string, EOS_ProductUserId> idCache;
     std::atomic<uint64_t> directOut{0}, directIn{0}, eosOut{0}, eosIn{0}, eosSendFail{0}, eosUpgraded{0};
     TrafficMeter gameOut;  // everything the game sends, whichever way it goes
+    // What the game's datagrams hold, from their plaintext (netclass.h): per record type for the log, and which
+    // record types behave as state.
+    RecordTypeMeter recordTypes;
+    StateLearner stateTypes;
+    // The transport side of the netcode rewrite (netcode.h).
+    std::mutex netcodeMutex;
+    NetcodeOptions netcode;
+    std::atomic<RoomCapQuery> roomCaps{nullptr};
+    std::atomic<StateSendFilter> stateFilter{nullptr};
+    std::atomic<BulkHandler> bulkHandler{nullptr};
+    std::atomic<RoomCapacitySource> roomCapacity{nullptr};
+    std::atomic<GameSlotsSource> gameSlots{nullptr};
+    // A join through Epic into a room whose host hosts a direct link: the game's completion waits for the host's
+    // member slots (parkedEntryTick), so its game takes every member in the host's slots from the start.
+    struct ParkedEntry {
+        bool active = false;
+        EOS_Lobby_OnLobbyIdCallback callback = nullptr;
+        EOS_Lobby_LobbyIdCallbackInfo info{};
+        std::string lobbyId;
+        uint64_t sinceMs = 0;
+        uint64_t noHostSinceMs = 0;  // since when the room's owner advertises no direct link (0: it does)
+    };
+    std::mutex parkedMutex;
+    ParkedEntry parked;
+    std::atomic<bool> parkedActive{false};  // parked.active, read without parkedMutex
+    std::atomic<bool> testLoopbackHosts{false};
+    std::atomic<uint32_t> testBulkFragments{0};  // [Test] BulkFragmentsSent
+    std::atomic<uint32_t> netProtocol{0}, netCaps{0};
+    std::atomic<bool> refuseOtherProtocols{false};
+    // A game packet that came twice (over two paths, or the direct link and EOS) reaches the game once.
+    DuplicateFilter duplicates;
+    // Fragments (fragment.h): ours going out get ids from here, theirs come together here (receive thread only).
+    std::atomic<uint32_t> fragmentIds{0};
+    // This process's fragment id epoch (fragment.h): random, so ids of a restarted sender never repeat its last run's.
+    const uint64_t fragmentEpoch = [] {
+        uint32_t e = 0;
+        randomBytes(reinterpret_cast<uint8_t*>(&e), sizeof(e));
+        return static_cast<uint64_t>(e) << 32;
+    }();
+    std::mutex fragmentMutex;
+    Reassembler reassembler;
+    struct ReadyPacket {
+        std::string src;
+        std::string socket;
+        uint8_t channel = 0;
+        std::vector<uint8_t> data;
+    };
+    std::deque<ReadyPacket> ready;  // reassembled game datagrams, waiting for the game's receive (fragmentMutex)
+    // What the game's last send used, for the plugin's own sends (sendBulk) on its behalf.
+    std::mutex lastSendMutex;
+    EOS_ProductUserId lastLocal = nullptr;
+    std::string lastSocket;
+    std::atomic<uint64_t> eosCopies{0}, aoiSkipped{0}, fragmentsOut{0}, bulkIn{0}, dupBefore{0}, trailsSent{0};
+    // The newest state datagram to each member (noteTrail): sent once more, reliably, when no newer one follows.
+    struct Trail {
+        std::string member;
+        EOS_HP2P p2p = nullptr;
+        EOS_ProductUserId local = nullptr, remote = nullptr;
+        std::string socket;
+        uint8_t channel = 0;
+        std::vector<uint8_t> data;
+        uint64_t sentMs = 0;
+    };
+    std::mutex trailMutex;
+    std::map<std::string, Trail> trails;
+    // Bulk messages sent and not yet acknowledged (sendBulk): resent until their receiver says it has them.
+    struct PendingBulk {
+        std::string member;
+        EOS_HP2P p2p = nullptr;
+        EOS_ProductUserId local = nullptr, remote = nullptr;
+        std::string socket;
+        uint64_t id = 0;
+        uint16_t tag = 0;
+        std::vector<uint8_t> data;
+        uint64_t sentMs = 0, waitMs = 0;
+        uint32_t tries = 1;
+    };
+    std::mutex bulkMutex;
+    std::vector<PendingBulk> bulks;
+    std::atomic<uint64_t> bulkResent{0}, bulkLost{0};
     ULONGLONG lastStatsMs = 0;
     HMODULE eos = nullptr;
     Outer outer;
@@ -231,6 +325,10 @@ struct State {
     std::weak_ptr<DirectNet> followedNet;  // a member: the link whose host list was followed last...
     uint64_t followedVersion = 0;          // ...and that list's version
     std::map<std::string, std::string> roomIds;  // a host: every member identity seen in this room
+    // Becoming the room's host: the joins we held back, with the slot the old host's game had each in (-1 none), for
+    // our game to take before we publish our slots (RoomView::promoted, hostRoomTick); since when.
+    std::vector<std::pair<std::string, int>> inherited;
+    uint64_t inheritedSinceMs = 0;
     // Calls of the game answered by us, completed on the next tick: never inside the call itself.
     std::mutex deferredMutex;
     std::vector<std::function<void()>> deferred;
@@ -431,6 +529,8 @@ EOS_EResult hookCloseConnections(EOS_HP2P h, const EOS_P2P_CloseConnectionsOptio
 }
 
 void leftLobby(const char* why);
+void trailTick(uint64_t now);
+bool roomCap(uint32_t cap);
 void forgetLastRoom(const char* why);
 
 // What a lobby status means for us, applied when the game gets to see it.
@@ -472,6 +572,30 @@ bool endsRoomForUs(bool self, int32_t s) {
     return s == kClosed || (self && (s == kLeft || s == kDisconnected || s == kKicked));
 }
 
+// How long a member that followed the old host's slots holds joins back for the new host's (room_view.h awaitingHost),
+// and how long any join is held back at most: then it reaches our game in the order it came (RoomView::releaseHeld).
+constexpr uint64_t kNewHostSlotsMs = 20000;
+constexpr uint64_t kHeldJoinCapMs = 20000;
+
+// Why the JOINED of `target` cannot reach our game yet, or nullptr. Under viewMutex. In a room whose host's slots we
+// follow, a member joins our game once the host's game has it (then we know its slot) and that slot is empty in our
+// game: a member taking the slot of one whose departure has not reached our game yet waits for it, it never takes
+// another slot (eos::Users::Add would give it the first empty one, and nothing renumbers it later). The host's say
+// (followHost) brings every held join again. After a change of host, joins wait for the new host's slots.
+const char* joinHeldBack(const std::string& target) {
+    if (g.view.consumeRelease(target)) return nullptr;  // held back long enough (releaseHeld)
+    if (g.view.awaitingHost()) return "the room's new host says its member slots";
+    if (!g.view.slotted()) return nullptr;
+    const int slot = g.view.hostSlot(target);
+    if (slot < 0) return "the room's host's game has it (its slot is not known yet)";
+    if (GameSlotsSource source = g.gameSlots.load()) {
+        const std::vector<std::string> ours = source();
+        if (static_cast<size_t>(slot) < ours.size() && !ours[slot].empty() && ours[slot] != target)
+            return "its slot is empty in our game (the member that had it has not left our game yet)";
+    }
+    return nullptr;
+}
+
 // Whether a status reaches the game: one it already has that way is not repeated, as Epic and the room's
 // host may both report it (room_view.h). That the room ended for us, too, is told once: the host's say
 // may come before Epic's, and by then the view is gone. EDF.dll registers one member-status handler (its
@@ -481,22 +605,46 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
+    const uint64_t now = GetTickCount64();
+    // A new host: the old one's slots are not the room's any more (room_view.h promoted). Its list is followed from
+    // scratch, the one that may have come before this PROMOTED included.
+    if (status == kPromoted) {
+        auto placements = g.view.promoted(target, now);
+        g.followedNet.reset();
+        g.followedVersion = 0;
+        if (self) {
+            g.inherited = std::move(placements);
+            g.inheritedSinceMs = now;
+        }
+    }
+    if (status == kJoined && !self) {
+        const char* why = joinHeldBack(target);
+        if (why) {
+            // Remembered: the host's say or releaseHeld brings it, it is never lost. One line per member and reason.
+            g.view.holdJoin(target, now);
+            const std::string key = "room-held:" + std::string(why) + target;
+            logRateLimited(key.c_str(), 5000, "ROOM %s JOINED: held back until %s", shortId(target).c_str(), why);
+            return false;
+        }
+    }
     if (!g.view.admit(target, status)) return false;
     if (ends) g.endedRoom = lobbyId;
     return true;
 }
 
-void deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
+// Whether the game got it.
+bool deliverLobbyStatus(const std::shared_ptr<LobbyStatusEvent>& e) {
     // A repeat changes nothing: what it means for us was applied with the first.
     if (!admitStatus(e->lobbyId, e->target, e->self, e->info.CurrentStatus)) {
         logRateLimited("room-repeat", 10000, "ROOM %s %s: the game has it that way already, not told again",
                        shortId(e->target).c_str(), statusName(e->info.CurrentStatus));
-        return;
+        return false;
     }
     applyLobbyStatus(e->target, e->self, e->info.CurrentStatus);
-    if (e->handler->removed) return;  // the game unregistered; its clientData may be freed
+    if (e->handler->removed) return true;  // the game unregistered; its clientData may be freed
     e->info.LobbyId = e->lobbyId.c_str();
     e->handler->callback(&e->info);
+    return true;
 }
 
 // Tells the game a member status Epic did not send: the room host's say, or ours as the host. It goes the
@@ -510,8 +658,8 @@ void tellGame(const std::string& lobbyId, const std::string& target, int32_t sta
         for (MemberStatusHandler* handler : g.statusHandlers)
             if (!handler->removed) handlers.push_back(handler);
     }
-    logf("ROOM %s -> %s for the game: %s", shortId(target).c_str(), statusName(status), why);
     const bool self = target == idString(g.lobbyUser.load());
+    bool told = false;
     for (MemberStatusHandler* handler : handlers) {
         auto e = std::make_shared<LobbyStatusEvent>();
         e->handler = handler;
@@ -519,8 +667,10 @@ void tellGame(const std::string& lobbyId, const std::string& target, int32_t sta
         e->lobbyId = lobbyId;
         e->target = target;
         e->self = self;
-        deliverLobbyStatus(e);
+        told = deliverLobbyStatus(e) || told;
     }
+    // Only what reached the game: a join held back is said again every few seconds (settle) and has its own line.
+    if (told) logf("ROOM %s -> %s for the game: %s", shortId(target).c_str(), statusName(status), why);
 }
 
 // Runs `fn` on the next tick: a call of the game we answer ourselves completes after it returned, as EOS's do.
@@ -549,6 +699,7 @@ void completeLobbyCall(void* callback, void* clientData, EOS_EResult result, con
 void enterView(const std::string& lobbyId, const std::string& self, const std::vector<std::string>& members) {
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.reset(self, members);
+    g.inherited.clear();
     g.viewRoom = lobbyId;
     g.endedRoom.clear();
     g.viewCapacity = 0;
@@ -560,6 +711,7 @@ void enterView(const std::string& lobbyId, const std::string& self, const std::v
 void leaveView() {
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.clear();
+    g.inherited.clear();
     g.viewRoom.clear();
     g.followedNet.reset();
     g.followedVersion = 0;
@@ -694,7 +846,10 @@ void memberStatusWrapper(const EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo* 
     logf("LOBBY member %s -> %s%s", shortId(e->target).c_str(), s >= 0 && s < 6 ? names[s] : "?",
          s == kDisconnected ? " (lost its connection to Epic's lobby service, not the P2P link)" : "");
 
-    if (!g.lobbyHold || e->target.empty()) return deliverLobbyStatus(e);
+    if (!g.lobbyHold || e->target.empty()) {
+        deliverLobbyStatus(e);
+        return;
+    }
     if (holdLobbyStatus(e)) return;
     if (s == kJoined && e->target == g.ownerPin.pinned() && g.ownerPin.onPinnedJoined(idString(g.lobbyUser.load())))
         promoteBack("the pinned owner is back in the lobby");
@@ -766,6 +921,35 @@ EOS_NotificationId hookAddNotifyMemberUpdate(EOS_HLobby h, const EOS_Lobby_AddNo
 void endVirtualRoom(const char* why);
 void releaseVirtualRoom();
 
+bool entryParked() { return g.parkedActive.load(); }
+
+// Whether lobby `lobbyId` says its host hosts a direct link (kHostAddressKey, a lobby attribute every searcher reads):
+// then its member slots come over that link (room_view.h).
+bool lobbyAdvertisesHost(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user) {
+    const Api& a = g.api;
+    if (!lobby || !lobbyId || !user || !a.copyDetails || !a.attributeCount || !a.copyAttribute || !a.releaseAttribute ||
+        !a.releaseDetails)
+        return false;
+    EOS_Lobby_CopyLobbyDetailsHandleOptions co{};
+    co.ApiVersion = 1;
+    co.LobbyId = lobbyId;
+    co.LocalUserId = user;
+    EOS_HLobbyDetails details = nullptr;
+    if (a.copyDetails(lobby, &co, &details) != EOS_Success || !details) return false;
+    bool advertised = false;
+    EOS_LobbyDetails_GetAttributeCountOptions count{1};
+    const uint32_t n = a.attributeCount(details, &count);
+    for (uint32_t i = 0; i < n && !advertised; ++i) {
+        EOS_LobbyDetails_CopyAttributeByIndexOptions ai{1, i};
+        EOS_Lobby_Attribute* attribute = nullptr;
+        if (a.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data && attribute->Data->Key)
+            advertised = std::strcmp(attribute->Data->Key, kHostAddressKey) == 0;
+        if (attribute) a.releaseAttribute(attribute);
+    }
+    a.releaseDetails(details);
+    return advertised;
+}
+
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
 void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     auto* call = static_cast<LobbyCall*>(i->ClientData);
@@ -800,9 +984,25 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     EOS_Lobby_LobbyIdCallbackInfo copy = *i;
     copy.ClientData = call->clientData;
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
+    const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
+    // A join into a room whose host hosts a direct link: the game enters once the host's member slots are here.
+    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner && g.autoJoinOn &&
+        lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)) {
+        std::lock_guard<std::mutex> lock(g.parkedMutex);
+        g.parked.active = true;
+        g.parked.callback = cb;
+        g.parked.info = copy;
+        g.parked.lobbyId = i->LobbyId ? i->LobbyId : "";
+        g.parked.sinceMs = GetTickCount64();
+        g.parkedActive = true;
+        logf("ROOM entering room %s once its host's member slots are here (its game numbers the members by them)",
+             g.parked.lobbyId.c_str());
+        delete call;
+        return;
+    }
     // EOS runs the callback again after a non-final result (EOS_OperationWillRetry): keep the call
     // until the final one, or the next run reads freed memory.
-    if (!g.api.isComplete || g.api.isComplete(i->ResultCode)) delete call;
+    if (final) delete call;
     cb(&copy);
 }
 
@@ -842,6 +1042,22 @@ void stopAutoJoinLocked(const char* why) {
 
 void leftLobby(const char* why) {
     if (g.marker.inLobby()) logf("LOBBY %s", why);
+    g.stateTypes.forget();  // the next room's players and missions teach their own
+    // Datagrams put together, copies remembered and fragments waiting belong to the room just left.
+    {
+        std::lock_guard<std::mutex> lock(g.fragmentMutex);
+        g.ready.clear();
+        g.reassembler.clear();
+    }
+    g.duplicates.clear();
+    {
+        std::lock_guard<std::mutex> lock(g.trailMutex);
+        g.trails.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g.bulkMutex);  // unacknowledged bulk messages to the room just left
+        g.bulks.clear();
+    }
     endVirtualRoom(why);
     leaveView();
     {
@@ -1035,11 +1251,11 @@ std::pair<std::string, std::string> roomOwnerIdentity() {
 
 void startAutoJoinAttemptLocked(uint64_t now) {
     AutoJoin& a = g.autoJoin;
-    DirectOptions o = g.config.direct;
+    DirectOptions o = withNetcode(g.config.direct);
     o.mode = Mode::Join;
     o.listenPort = 0;
     o.hostAddress = a.candidates[a.next++];
-    o.advertisedHost = true;  // the room host chose it, not this player
+    o.advertisedHost = !g.testLoopbackHosts;  // the room host chose it, not this player
     std::tie(o.roomOwner, o.roomOwnerIdentity) = roomOwnerIdentity();  // who may answer on it
     auto net = std::make_shared<DirectNet>();
     if (!net->start(o)) {
@@ -1066,6 +1282,10 @@ constexpr uint64_t kAutoRetryMs = 60000;    // all candidates failed: try them a
 void autoJoinTick(uint64_t now) {
     AutoJoin& a = g.autoJoin;
     std::lock_guard<std::mutex> lock(a.mu);
+    // Made the room's owner (its host left): our link to the old host is no link to the room any more, and the game's
+    // packets must come and go through our own listener, which the members now connect to. At once, not at the next
+    // check: every packet of a member that came in meanwhile would be read from the dead link.
+    if (g.marker.inLobby() && g.marker.isOwner() && a.net) stopAutoJoinLocked("we host the room now");
     if (now - a.lastCheckMs < kAutoCheckMs) return;
     a.lastCheckMs = now;
     if (!g.marker.inLobby() || g.marker.isOwner()) return;
@@ -1088,6 +1308,8 @@ void autoJoinTick(uint64_t now) {
     if (advertised != a.advertised) {  // new room, or the host's address list changed
         a.advertised = advertised;
         a.candidates = orderHostCandidates(advertised);
+        if (g.testLoopbackHosts && a.candidates.empty())
+            a.candidates.push_back(advertised.substr(0, advertised.find(' ')));  // tests: a loopback host
         a.next = 0;
         a.retryAtMs = 0;
         a.hostPuid = idString(owner);
@@ -1200,7 +1422,8 @@ void noteLocalUser(EOS_HP2P h, EOS_ProductUserId id) {
 
 void maybeLogStats() {
     ULONGLONG now = GetTickCount64();
-    if (now - g.lastStatsMs < kStatsIntervalMs) return;
+    const ULONGLONG interval = netcodeOptions().statsIntervalMs;
+    if (now - g.lastStatsMs < interval) return;
     bool first = g.lastStatsMs == 0;
     g.lastStatsMs = now;
     if (first) return;
@@ -1217,18 +1440,33 @@ void maybeLogStats() {
     logKickRepeats();
     // One line: what the game sent, what that cost on our socket (resends, acks and pings included, so
     // "wire up" far above "game sends" is the transport's own overhead), and each link's resend state.
-    logf("STATS last 60s: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
+    const double seconds = static_cast<double>(interval) / 1000.0;
+    logf("STATS last %.0fs: game sends %.0f kbps avg, busiest second %.0f kbps, to %zu players, %.0f B/packet avg "
          "(largest %u), %.0f%% copies of the same data to another player, %.1f%% of packets repeat one sent to the "
          "same player within 5 s | wire up %.0f kbps down %.0f kbps, relayed for others %.0f kbps | direct packets "
          "out=%llu in=%llu | EOS out=%llu (sent reliably %llu) in=%llu send-failures=%llu%s%s",
-         kbps(t.bytes, 60.0), kbps(t.busiestSecondBytes, 1.0), t.peers,
+         seconds, kbps(t.bytes, seconds), kbps(t.busiestSecondBytes, 1.0), t.peers,
          t.packets ? static_cast<double>(t.bytes) / static_cast<double>(t.packets) : 0.0, t.largestPacket,
          t.bytes ? 100.0 * static_cast<double>(t.copyBytes) / static_cast<double>(t.bytes) : 0.0,
-         t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, 60.0),
-         kbps(w.in, 60.0), kbps(w.relayed, 60.0), static_cast<unsigned long long>(dOut),
+         t.packets ? 100.0 * static_cast<double>(t.repeatPackets) / static_cast<double>(t.packets) : 0.0, kbps(w.out, seconds),
+         kbps(w.in, seconds), kbps(w.relayed, seconds), static_cast<unsigned long long>(dOut),
          static_cast<unsigned long long>(dIn), static_cast<unsigned long long>(eOut), static_cast<unsigned long long>(upg),
          static_cast<unsigned long long>(eIn), static_cast<unsigned long long>(fail), net ? " | " : "",
          net ? net->statusLine().c_str() : "");
+    // The netcode rewrite's paths: what went where, and what was dropped on purpose.
+    const uint64_t dups = g.duplicates.duplicates();
+    logf("PATHS last %.0fs: direct %.0f kbps, through the host %.0f kbps, relayed for others %.0f kbps (%llu state "
+         "datagrams over the relay budget), %llu state datagrams over a path's budget, %llu event copies over EOS, "
+         "%llu state datagrams held back by interest management, %llu last state datagrams sent again reliably, %llu "
+         "fragments out, %llu bulk messages in, %llu copies dropped on arrival",
+         seconds, kbps(w.direct, seconds), kbps(w.viaRelay, seconds), kbps(w.relayed, seconds),
+         static_cast<unsigned long long>(w.relayShed), static_cast<unsigned long long>(w.stateShed),
+         static_cast<unsigned long long>(g.eosCopies.exchange(0)), static_cast<unsigned long long>(g.aoiSkipped.exchange(0)),
+         static_cast<unsigned long long>(g.trailsSent.exchange(0)),
+         static_cast<unsigned long long>(g.fragmentsOut.exchange(0)), static_cast<unsigned long long>(g.bulkIn.exchange(0)),
+         static_cast<unsigned long long>(dups - g.dupBefore.exchange(dups)));
+    // What the game's datagrams held (P0 of the netcode rewrite): per class, then per record type.
+    for (const std::string& line : g.recordTypes.take(seconds)) logf("%s", line.c_str());
 }
 
 // A direct-link host lets a player in only as the room member whose published identity it proves
@@ -1254,10 +1492,15 @@ void refreshMemberIdentities(uint64_t now) {
     if (now - lastMs < kIdentityRefreshMs || !g.markerReady) return;
     lastMs = now;
     std::shared_ptr<DirectNet> base = g.baseNet.load();
-    if (base && g.config.direct.mode == Mode::Host) base->setMemberIdentities(roomIdentities());
+    // Joiners too: two joiners linking directly (mesh) prove to each other the identities they published.
+    const std::map<std::string, std::string> ids = roomIdentities();
+    if (base) base->setMemberIdentities(ids);
     auto [owner, commitment] = roomOwnerIdentity();
     if (base && g.config.direct.mode == Mode::Join) base->setRoomOwner(owner, commitment);
-    if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) net->setRoomOwner(owner, commitment);
+    if (std::shared_ptr<DirectNet> net = g.net.load(); net && net != base) {
+        net->setRoomOwner(owner, commitment);
+        net->setMemberIdentities(ids);
+    }
 }
 
 // --- The host's say over who is in the room (P2) ---
@@ -1291,9 +1534,82 @@ uint32_t roomCapacity() {
         }
         a.releaseDetails(details);
     }
+    // A MultiSlot room's real size (up to 1024) is the room part's: Epic's lobby holds at most 64.
+    const uint32_t epic = capacity;
+    if (RoomCapacitySource source = g.roomCapacity.load()) {
+        if (const uint32_t real = source()) capacity = real;
+    }
+    // Members beyond Epic's lobby come in over the direct link only, and only while that lobby is full (see
+    // DirectNet::setUnlistedPolicy): never as someone Epic lists, never after this room removed them.
+    if (std::shared_ptr<DirectNet> base = g.baseNet.load(); base && g.config.direct.mode == Mode::Host) {
+        bool known = false;
+        const std::vector<std::string> listed = g.marker.members(&known);
+        std::set<std::string> banned;
+        {
+            std::lock_guard<std::mutex> lock(g.viewMutex);
+            banned = g.view.bannedMembers();
+        }
+        const bool full = known && epic && capacity > epic && listed.size() >= epic;
+        base->setUnlistedPolicy(full, std::set<std::string>(listed.begin(), listed.end()), std::move(banned));
+    }
     std::lock_guard<std::mutex> lock(g.viewMutex);
     if (capacity) g.viewCapacity = capacity;
     return g.viewCapacity;
+}
+
+// The joins we held back when we became the room's host (RoomView::promoted): each goes to our game when the slot the
+// old host's game had it in is the one our game gives next (eos::Users::Add takes the first empty slot), so that it
+// keeps the slot every other game has it in; the ones without such a slot after them. A slot our game cannot give
+// it (another member took it, or a lower one stays empty) is waited for until kHeldJoinCapMs, then the join goes as
+// it came.
+void placeInherited(const std::string& room, uint64_t now) {
+    std::vector<std::pair<std::string, const char*>> tell;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (g.inherited.empty() || g.viewRoom != room) return;
+        std::vector<std::string> ours;
+        if (GameSlotsSource source = g.gameSlots.load()) ours = source();
+        const bool late = now - g.inheritedSinceMs >= kHeldJoinCapMs;
+        while (!g.inherited.empty()) {
+            const auto [member, slot] = g.inherited.front();
+            if (g.view.has(member)) {  // Epic or a direct link brought it meanwhile
+                g.inherited.erase(g.inherited.begin());
+                continue;
+            }
+            const InheritedPlacement step = decideInheritedPlacement(slot, ours, late);
+            if (!step.tell) break;  // a lower slot is still empty: wait
+            const bool fits = step.fits;
+            tell.push_back({member, fits ? "it was held back when we became the room's host; the old host's game had it "
+                                           "in the slot our game gives next"
+                                         : "it was held back when we became the room's host; the slot the old host's "
+                                           "game had it in cannot be given, so it goes as it came"});
+            g.inherited.erase(g.inherited.begin());
+            if (fits && slot >= 0 && !ours.empty()) {  // it takes that slot: the next one waits for the slot after
+                if (static_cast<size_t>(slot) >= ours.size()) ours.resize(static_cast<size_t>(slot) + 1);
+                ours[static_cast<size_t>(slot)] = member;
+            }
+        }
+    }
+    for (const auto& [member, why] : tell) tellGame(room, member, kJoined, why);
+}
+
+// Every join held back too long - the room's new host never said its slots, or the host's game never took the member
+// in a slot our game has free - reaches our game now, in the order they came (RoomView::releaseHeld), with one line.
+void releaseHeldJoins(uint64_t now) {
+    std::string room;
+    std::vector<std::string> released;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (!g.view.active() || !g.view.heldCount()) return;
+        const bool awaiting = g.view.awaitingHost();
+        released = g.view.releaseHeld(now, kNewHostSlotsMs, kHeldJoinCapMs);
+        if (released.empty()) return;
+        room = g.viewRoom;
+        logf("ROOM %zu held join(s) go to the game in the order they came: %s", released.size(),
+             awaiting && !g.view.awaitingHost() ? "the room's new host did not say its member slots in time"
+                                                : "the room's host's game did not take them in a free slot in time");
+    }
+    for (const std::string& m : released) tellGame(room, m, kJoined, "held back too long");
 }
 
 // A host: its game is told who plays in the room by the direct links, and every member is told who the
@@ -1332,22 +1648,30 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (g.viewRoom == room) g.view.markDirect(c.target);
     }
+    placeInherited(room, now);
     std::vector<std::string> members;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
-        members = g.view.members();
+        // Our game's slots (room_view.h): every member's game takes each member in the same one. Until the game has
+        // its slots, the order they would take them in.
+        if (GameSlotsSource slots = g.gameSlots.load()) members = slots();
+        if (members.empty()) members = known ? roomOrder(epic, g.view.members()) : g.view.members();
+        // Whom the room removed goes with it: whoever hosts the room next keeps them out.
+        members = roomMessage(members, g.view.bannedMembers());
     }
     base->setRoomMembers(std::move(members));
 }
 
 bool inVirtualRoom();
+bool entryParked();
 
 // A member: its game follows who the host's game has in the room (RoomView::followHost), once Epic had its
 // chance to say the same. In a room Epic does not know we are in, the host is all there is to hear.
 void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
     uint64_t version = 0;
-    const std::vector<std::string> host = net->hostRoom(&version);
+    std::string from;
+    const std::vector<std::string> host = net->hostRoom(&version, &from);
     const uint64_t delay = inVirtualRoom() ? 0 : kEpicFirstMs;
     std::string room;
     std::vector<StatusChange> due;
@@ -1359,20 +1683,129 @@ void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
         if (!host.empty() && (g.followedNet.lock() != net || g.followedVersion != version)) {
             g.followedNet = net;
             g.followedVersion = version;
-            g.view.heardHost(host);
+            g.view.heardHost(host, from);
         }
         room = g.viewRoom;
+        if (entryParked()) return;  // the game is not in the room yet: it enters with the host's members
         due = g.view.settle(g.view.followHost(), now, delay);
+    }
+    // One round that frees a slot and fills it: the departures go first (followHost), so the newcomer finds its
+    // slot empty. Logged so a test can tell such a round happened.
+    const size_t joins = static_cast<size_t>(
+        std::count_if(due.begin(), due.end(), [](const StatusChange& c) { return c.status == kJoined; }));
+    if (joins && joins < due.size()) {
+        std::string order;
+        for (const StatusChange& c : due) order += std::string(order.empty() ? "" : ", ") + statusName(c.status) + " " + shortId(c.target);
+        logf("ROOM following the host: %zu departure(s) and %zu join(s) in one round (%s)", due.size() - joins, joins,
+             order.c_str());
     }
     for (const StatusChange& c : due)
         tellGame(room, c.target, c.status,
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");
 }
 
+// A parked entry given up: the game was told its join failed, so it will not leave Epic's lobby itself.
+void leaveParkedLobby(const std::string& lobbyId) {
+    struct LeaveOptions {  // EOS_Lobby_LeaveLobbyOptions, ApiVersion 1
+        int32_t ApiVersion;
+        EOS_ProductUserId LocalUserId;
+        const char* LobbyId;
+    };
+    EOS_HLobby lobby = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        lobby = g.roomLobby;
+    }
+    const PFN_EOS_Lobby_LeaveOrDestroy leave = g.outer.leave ? g.outer.leave : g.api.gameLeaveLobby;
+    EOS_ProductUserId user = g.lobbyUser.load();
+    leftLobby("the join was given up: its host's member slots did not come");
+    // A room we could not enter is nothing to come back into either (it would show up as REJOIN).
+    forgetLastRoom("the join was given up");
+    if (!leave || !lobby || !user) return;
+    const LeaveOptions options{1, user, lobbyId.c_str()};
+    // The id is copied by EOS; the completion only logs.
+    leave(lobby, &options, nullptr, reinterpret_cast<void*>(static_cast<EOS_Lobby_OnLobbyIdCallback>(
+                                        [](const EOS_Lobby_LobbyIdCallbackInfo* i) {
+                                            logf("ROOM left lobby %s after the given-up join: %s",
+                                                 i && i->LobbyId ? i->LobbyId : "?", i ? resultName(i->ResultCode) : "?");
+                                        })));
+}
+
+// Whether our direct link to the room's host is getting anywhere: up (its member slots are on their way) or an attempt
+// at one of its addresses still running.
+bool hostLinkProgressing(uint64_t now) {
+    AutoJoin& a = g.autoJoin;
+    std::lock_guard<std::mutex> lock(a.mu);
+    if (!a.net) return false;
+    if (a.connected || a.net->canRoute(a.hostPuid)) return true;
+    return now - a.attemptMs < kAutoAttemptMs;
+}
+
+// The parked entry (lobbyEnteredWrapper) completes once we follow the host's slots (or the room is gone). Entering
+// without them would number the members by Epic's order, and nothing renumbers a member once our game added it: the
+// first one the host's game has elsewhere and every later one after it would be off for the rest of the room. So the
+// wait is not cut short at a fixed time while the link to the host gets somewhere, and when it cannot (the link is
+// going nowhere after kParkedEntryMs, or kParkedEntryCapMs passed) the join fails as a join that could not connect -
+// with a log line saying why - and we leave Epic's lobby again.
+void parkedEntryTick(uint64_t now) {
+    EOS_Lobby_OnLobbyIdCallback callback = nullptr;
+    EOS_Lobby_LobbyIdCallbackInfo info{};
+    std::string lobbyId;
+    ParkedEntryOutcome outcome = ParkedEntryOutcome::Wait;
+    uint64_t waited = 0;
+    const bool progressing = hostLinkProgressing(now);
+    EOS_ProductUserId owner = nullptr;
+    const bool hostLink = !g.marker.ownerAddress(&owner).empty() || !owner;  // an owner not known yet: not "none"
+    {
+        std::lock_guard<std::mutex> lock(g.parkedMutex);
+        if (!g.parked.active) return;
+        waited = now - g.parked.sinceMs;
+        if (hostLink)
+            g.parked.noHostSinceMs = 0;
+        else if (!g.parked.noHostSinceMs)
+            g.parked.noHostSinceMs = now;
+        const uint64_t noHost = g.parked.noHostSinceMs ? now - g.parked.noHostSinceMs : 0;
+        {
+            std::lock_guard<std::mutex> view(g.viewMutex);
+            const bool slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
+            const bool gone = g.viewRoom != g.parked.lobbyId;
+            outcome = decideParkedEntry(waited, slotted, gone, progressing, noHost);
+            if (outcome == ParkedEntryOutcome::Wait) return;
+            if (outcome == ParkedEntryOutcome::Slotted) g.view.adoptHost();
+        }
+        callback = g.parked.callback;
+        info = g.parked.info;
+        lobbyId = g.parked.lobbyId;
+        g.parked = {};
+        g.parkedActive = false;
+    }
+    info.LobbyId = lobbyId.c_str();
+    if (outcome == ParkedEntryOutcome::GiveUp) {
+        logf("ROOM NOT entering room %s: its host's member slots did not come (%llu s, the direct link to its host %s); "
+             "entering without them would put members in other slots than the host's game has them. The join fails "
+             "and we leave the lobby",
+             lobbyId.c_str(), static_cast<unsigned long long>(waited / 1000),
+             progressing ? "was still connecting" : "got nowhere");
+        leaveParkedLobby(lobbyId);
+        info.ResultCode = EOS_NoConnection;
+        callback(&info);
+        return;
+    }
+    logf("ROOM entering room %s %s", lobbyId.c_str(),
+         outcome == ParkedEntryOutcome::Slotted ? "with its host's member slots"
+         : outcome == ParkedEntryOutcome::NoHost
+             ? "without member slots: its host (the room's owner changed) hosts no direct link, so nobody says slots in "
+               "this room and the game goes as it would without the plugin"
+             : "(the room is gone)");
+    callback(&info);
+}
+
 void roomTick(uint64_t now) {
     static uint64_t lastMs = 0;
     if (now - lastMs < kRoomTickMs) return;
     lastMs = now;
+    parkedEntryTick(now);
+    releaseHeldJoins(now);
     std::shared_ptr<DirectNet> base = g.baseNet.load();
     const bool hosting = g.marker.inLobby() && g.marker.isOwner();
     if (hosting) {
@@ -1555,11 +1988,11 @@ void endVirtualRoom(const char* why) {
 // Dials the next of the host's addresses. Caller holds virtualMutex.
 bool startVirtualAttemptLocked(uint64_t now) {
     VirtualRoom& v = g.virtualRoom;
-    DirectOptions o = g.config.direct;
+    DirectOptions o = withNetcode(g.config.direct);
     o.mode = Mode::Join;
     o.listenPort = 0;
     o.hostAddress = v.candidates[v.next++ % v.candidates.size()];
-    o.advertisedHost = true;  // the room's host advertised it, not this player
+    o.advertisedHost = !g.testLoopbackHosts;  // the room's host advertised it, not this player
     o.roomOwner = v.room.host;
     o.roomOwnerIdentity = v.room.hostIdentity;  // only that host may answer on it
     auto net = std::make_shared<DirectNet>();
@@ -1578,9 +2011,70 @@ bool startVirtualAttemptLocked(uint64_t now) {
 
 // The game joins the room it was last in, from the entry the room list got for it: over the direct link to
 // its host, whose game lets us in (hostRoomTick). The join completes once the host lists us in its room.
+void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
+                          EOS_Lobby_OnLobbyIdCallback callback, bool proveEos);
+
+// Our EOS id to `host` over EOS P2P (see kIdentityProofSocket): EOS vouches for the sender, the packet names the key
+// our direct-link hellos are signed with. Delayed delivery: it waits until the host accepts the connection.
+void sendIdentityProof(EOS_ProductUserId local, const std::string& host) {
+    std::shared_ptr<const Identity> identity = processIdentity();
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId remote = idHandle(host);
+    if (!identity || !p2p || !local || !remote) return;
+    const std::string commitment = identity->commitment();
+    std::vector<uint8_t> proof = {'E', 'D', 'I', 'D'};
+    proof.insert(proof.end(), commitment.begin(), commitment.end());
+    EOS_P2P_SocketId socket{1, {}};
+    strncpy_s(socket.SocketName, kIdentityProofSocket, _TRUNCATE);
+    EOS_P2P_SendPacketOptions o{};
+    o.ApiVersion = 3;
+    o.LocalUserId = local;
+    o.RemoteUserId = remote;
+    o.SocketId = &socket;
+    o.Channel = kIdentityProofChannel;
+    o.DataLengthBytes = static_cast<uint32_t>(proof.size());
+    o.Data = proof.data();
+    o.Reliability = EOS_PR_ReliableOrdered;
+    o.bAllowDelayedDelivery = 1;
+    g.api.send(p2p, &o);
+}
+
+// The host: an identity proof that arrived over EOS (never over the direct link: only EOS vouches for its sender).
+bool takeIdentityProof(const std::string& src, uint8_t channel, const uint8_t* data, uint32_t size) {
+    if (channel != kIdentityProofChannel || size < 4 || memcmp(data, "EDID", 4) != 0) return false;
+    std::shared_ptr<DirectNet> base = g.baseNet.load();
+    const std::string commitment(reinterpret_cast<const char*>(data) + 4, size - 4);
+    if (base && g.config.direct.mode == Mode::Host && !src.empty() && commitment.size() <= 64) {
+        base->proveEosIdentity(src, commitment);
+        logRateLimited(("proof-" + src).c_str(), 10000, "DIRECT %s proved its EOS id over EOS", shortId(src).c_str());
+    }
+    return true;  // never the game's
+}
+
+// The host lets the proofs in: it accepts the EOS connection on the proof socket from each EOS id that said hello
+// without one. On the EOS tick.
+void identityProofTick() {
+    std::shared_ptr<DirectNet> base = g.baseNet.load();
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId local = g.lobbyUser.load();
+    if (!base || g.config.direct.mode != Mode::Host || !p2p || !local || !g.api.accept) return;
+    for (const std::string& puid : base->takeProofRequests()) {
+        EOS_ProductUserId remote = idHandle(puid);
+        if (!remote) continue;
+        EOS_P2P_SocketId socket{1, {}};
+        strncpy_s(socket.SocketName, kIdentityProofSocket, _TRUNCATE);
+        EOS_P2P_PeerConnectionOptions o{1, local, remote, &socket};
+        g.api.accept(p2p, &o);
+    }
+}
+
 void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* clientData,
                       EOS_Lobby_OnLobbyIdCallback callback) {
-    const LastRoom room = rememberedRoom();
+    startVirtualJoinRoom(rememberedRoom(), user, roomId, clientData, callback, false);
+}
+
+void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
+                          EOS_Lobby_OnLobbyIdCallback callback, bool proveEos) {
     const uint64_t now = GetTickCount64();
     std::lock_guard<std::mutex> lock(g.virtualMutex);
     VirtualRoom& v = g.virtualRoom;
@@ -1599,8 +2093,11 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
     v.joining = true;
     v.room = room;
     v.candidates = orderHostCandidates(room.hostAddress);
+    if (g.testLoopbackHosts && v.candidates.empty() && !room.hostAddress.empty())
+        v.candidates.push_back(room.hostAddress.substr(0, room.hostAddress.find(' ')));  // tests: a loopback host
     v.user = user;
     v.startMs = now;
+    v.proveEos = proveEos;
     v.callback = callback;
     v.clientData = clientData;
     logf("REJOIN joining room %s of %s over the direct link: Epic's lobby is not asked", roomId.c_str(),
@@ -1624,13 +2121,19 @@ void virtualRoomTick(uint64_t now) {
         std::lock_guard<std::mutex> lock(g.virtualMutex);
         VirtualRoom& v = g.virtualRoom;
         if (!v.joining && !v.in) return;
+        if (v.joining && v.proveEos && now - v.provedMs >= 500) {
+            v.provedMs = now;
+            sendIdentityProof(v.user, v.room.host);
+        }
         net = v.net;
         user = v.user;
         self = idString(user);
         roomId = v.roomId;
         list = net ? net->hostRoom(&version) : std::vector<std::string>{};
+        std::vector<std::string> slots;
+        parseRoomMessage(list, &slots, nullptr);
         if (v.joining) {
-            if (std::find(list.begin(), list.end(), self) != list.end()) {
+            if (std::find(slots.begin(), slots.end(), self) != slots.end()) {
                 v.joining = false;
                 v.in = true;
                 v.hostSeenMs = now;
@@ -1662,7 +2165,9 @@ void virtualRoomTick(uint64_t now) {
     if (callback && result == EOS_Success) {
         logf("REJOIN in room %s again, over the direct link to its host", roomId.c_str());
         g.lobbyUser = user;
-        enterView(roomId, self, list);
+        std::vector<std::string> slots;
+        parseRoomMessage(list, &slots, nullptr);
+        enterView(roomId, self, slots);
         {
             std::lock_guard<std::mutex> lock(g.viewMutex);
             g.view.heardHost(list);  // the list we entered with
@@ -1696,6 +2201,10 @@ void hookPlatformTick(EOS_HPlatform platform) {
         noteGameRunning();  // an update on trial starts its health clock here
     }
     maybeLogStats();
+    trailTick(GetTickCount64());
+    meshTick(GetTickCount64());
+    bulkTick(GetTickCount64());
+    identityProofTick();
     g.marker.tick();
     refreshMemberIdentities(GetTickCount64());
     if (g.autoJoinOn) autoJoinTick(GetTickCount64());
@@ -1721,6 +2230,120 @@ EOS_HP2P hookGetP2PInterface(EOS_HPlatform platform) {
     return h;
 }
 
+// The class of a packet the game sends (netclass.h), from the records its packet controller flushed into it on
+// this thread just before. Only the game's own datagrams (sent UnreliableUnordered) have them; anything else - the
+// plugin's packets, sent with a reliability of their own - is Unknown and goes as it asks.
+TrafficClass classifyGameSend(const std::string& remote, const EOS_P2P_SendPacketOptions& o) {
+    std::optional<PlainDatagram> plain = takePendingDatagram(o.DataLengthBytes);
+    if (o.Reliability != EOS_PR_UnreliableUnordered) return TrafficClass::Unknown;
+    if (!plain) {
+        g.recordTypes.recordUnmatched();
+        return TrafficClass::Unknown;
+    }
+    const uint64_t now = GetTickCount64();
+    for (const RecordInfo& r : plain->records)
+        if (!r.reliable && !isControllerRecord(r.type) && g.stateTypes.observe(remote, r.type, now))
+            logf("NETCLASS record type 0x%05X behaves as state (sent to %s %u times in a row): its datagrams go unreliably "
+                 "from now on", r.type, shortId(remote).c_str(), StateLearner::kSamples);
+    g.recordTypes.record(remote, plain->records, now);
+    const TrafficClass cls = classify(plain->records, plain->parsed, g.stateTypes);
+    g.recordTypes.recordDatagram(cls, o.DataLengthBytes);
+    return cls;
+}
+
+bool roomCap(uint32_t cap) {
+    RoomCapQuery query = g.roomCaps.load();
+    return query && query(cap);
+}
+
+// A state datagram is carried unreliably because the next one replaces it. The last one before a pause has nothing
+// after it (a player stopped, a state that changes no more): kTrailMs after the newest state datagram to a member,
+// that datagram goes once more, reliably. The game drops it as a copy when the first one arrived (its datagram
+// number and CRC, 12CE1F3), and so does DuplicateFilter.
+constexpr uint64_t kTrailMs = 300;
+void noteTrail(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, const std::string& remote) {
+    if (!o.Data || remote.empty()) return;
+    std::lock_guard<std::mutex> lock(g.trailMutex);
+    State::Trail& t = g.trails[remote];
+    t.p2p = h;
+    t.local = o.LocalUserId;
+    t.remote = o.RemoteUserId;
+    t.socket = socketName(o.SocketId);
+    t.channel = o.Channel;
+    t.data.assign(static_cast<const uint8_t*>(o.Data), static_cast<const uint8_t*>(o.Data) + o.DataLengthBytes);
+    t.sentMs = GetTickCount64();
+}
+
+void trailTick(uint64_t now) {
+    std::vector<State::Trail> due;
+    {
+        std::lock_guard<std::mutex> lock(g.trailMutex);
+        for (auto it = g.trails.begin(); it != g.trails.end();) {
+            if (now - it->second.sentMs < kTrailMs) {
+                ++it;
+                continue;
+            }
+            due.push_back(std::move(it->second));
+            due.back().member = it->first;
+            it = g.trails.erase(it);
+        }
+    }
+    for (const State::Trail& t : due) {
+        std::shared_ptr<DirectNet> net = g.net.load();
+        if (net && net->send(t.member, t.socket, t.channel, EOS_PR_ReliableUnordered, t.data.data(), t.data.size())) {
+            ++g.trailsSent;
+            continue;
+        }
+        EOS_P2P_SocketId socket{1, {}};
+        strncpy_s(socket.SocketName, t.socket.c_str(), _TRUNCATE);
+        EOS_P2P_SendPacketOptions copy{};
+        copy.ApiVersion = 3;
+        copy.LocalUserId = t.local;
+        copy.RemoteUserId = t.remote;
+        copy.SocketId = &socket;
+        copy.Channel = t.channel;
+        copy.DataLengthBytes = static_cast<uint32_t>(t.data.size());
+        copy.Data = t.data.data();
+        copy.Reliability = EOS_PR_ReliableUnordered;
+        if (g.api.send(t.p2p, &copy) == EOS_Success) ++g.trailsSent;
+    }
+}
+
+// One packet over EOS as the game would send it, except for channel, data and reliability.
+EOS_EResult sendOverEos(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, uint8_t channel, const uint8_t* data,
+                        uint32_t size, EOS_EPacketReliability reliability) {
+    EOS_P2P_SendPacketOptions copy = o;
+    copy.Channel = channel;
+    copy.Data = data;
+    copy.DataLengthBytes = size;
+    copy.Reliability = reliability;
+    return g.api.send(h, &copy);
+}
+
+// A message above EOS's packet size, in fragments (fragment.h): reliably over the direct link when it reaches
+// `remote`, otherwise reliably over EOS. EOS_Success once every fragment left.
+EOS_EResult sendFragments(EOS_HP2P h, const EOS_P2P_SendPacketOptions& o, const std::string& remote, uint8_t flags,
+                          uint16_t tag, const uint8_t* data, size_t size, uint64_t id = 0) {
+    const auto parts = splitIntoFragments(id ? id : g.fragmentEpoch | ++g.fragmentIds, flags, tag, data, size);
+    if (parts.empty()) return EOS_LimitExceeded;
+    std::shared_ptr<DirectNet> net = g.net.load();
+    const bool direct = net && net->canRoute(remote);
+    const uint32_t cut = (flags & kFragmentBulk) ? g.testBulkFragments.load() : 0;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const auto& part = parts[i];
+        if (cut && i >= cut) break;  // [Test]: the rest is lost on the way, every time
+        bool sent = direct && net->send(remote, socketName(o.SocketId), kFragmentChannel, EOS_PR_ReliableOrdered,
+                                        part.data(), part.size());
+        if (!sent) {
+            EOS_EResult r = sendOverEos(h, o, kFragmentChannel, part.data(), static_cast<uint32_t>(part.size()),
+                                        EOS_PR_ReliableOrdered);
+            if (r != EOS_Success) return r;
+        }
+        ++g.fragmentsOut;
+    }
+    return EOS_Success;
+}
+
 EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     if (g_shutdown) return g.api.send(h, o);
     configureHandle(h);
@@ -1728,8 +2351,32 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     std::string remote = o ? idString(o->RemoteUserId) : std::string();
     if (o && o->Data)
         g.gameOut.record(remote, o->DataLengthBytes, TrafficMeter::hash(o->Data, o->DataLengthBytes), GetTickCount64());
+    const NetcodeOptions netcode = netcodeOptions();
+    TrafficClass cls = o ? classifyGameSend(remote, *o) : TrafficClass::Unknown;
+    // Measured always (the log), acted on only while every member runs the classes: a member of the game as it
+    // ships, or of an older EDF6Coop, keeps getting everything as before (reliable, unfiltered).
+    if (!netcode.trafficClasses || !roomCap(kCapTrafficClasses)) cls = TrafficClass::Unknown;
+    if (cls == TrafficClass::State) noteTrail(h, *o, remote);
+    if (o && o->ApiVersion >= 3) {
+        std::lock_guard<std::mutex> lock(g.lastSendMutex);
+        g.lastLocal = o->LocalUserId;
+        g.lastSocket = socketName(o->SocketId);
+    }
+    // Interest management (W6) may hold a state datagram back: the next one replaces it.
+    if (cls == TrafficClass::State) {
+        StateSendFilter filter = g.stateFilter.load();
+        if (filter && !filter(remote, idString(o->LocalUserId), o->DataLengthBytes, linkBudgetBytesPerSec(remote),
+                              GetTickCount64())) {
+            ++g.aoiSkipped;
+            return EOS_Success;
+        }
+    }
     // EOS refuses anything above its packet limit, and so does the direct link (its receivers' games read
-    // with that limit too). The game then retries for about 26 s and disbands the room.
+    // with that limit too). The game then retries for about 26 s and disbands the room - unless the whole room
+    // reads fragments.
+    if (o && o->Data && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE && !remote.empty() && netcode.fragments &&
+        roomCap(kCapFragments))
+        return sendFragments(h, *o, remote, 0, o->Channel, static_cast<const uint8_t*>(o->Data), o->DataLengthBytes);
     if (o && o->DataLengthBytes > EOS_P2P_MAX_PACKET_SIZE)
         logRateLimited("oversize", 10000,
                        "GAME sends a %u-byte packet (channel %u) to %s: over the %u-byte packet limit, so it cannot be "
@@ -1737,15 +2384,24 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
                        o->DataLengthBytes, static_cast<unsigned>(o->Channel), peerLabel(o->RemoteUserId).c_str(),
                        static_cast<unsigned>(EOS_P2P_MAX_PACKET_SIZE));
     std::shared_ptr<DirectNet> net = g.net.load();
-    if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty() &&
-        net->send(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
-                    static_cast<const uint8_t*>(o->Data), o->DataLengthBytes)) {
-        ++g.directOut;
-        return EOS_Success;
+    if (net && o && o->Data && o->DataLengthBytes <= EOS_P2P_MAX_PACKET_SIZE && !remote.empty()) {
+        const SendReport sent =
+            net->sendClassified(remote, socketName(o->SocketId), o->Channel, static_cast<uint8_t>(o->Reliability),
+                                static_cast<const uint8_t*>(o->Data), o->DataLengthBytes, static_cast<uint8_t>(cls));
+        if (sent.sent) {
+            ++g.directOut;
+            // An event goes twice only where two different direct paths lead (the direct link and the relay,
+            // DirectNet::routeFor). Over one path (a joiner and its host) a copy over EOS too would double the
+            // host's uplink for every acknowledgement; the game resends what was lost.
+            return EOS_Success;
+        }
     }
     EOS_EResult r;
     bool held = g.hold && o && o->ApiVersion >= 3 && g.hold->isHeld(remote);
-    bool upgrade = g.config.reliableGameTraffic && o && o->ApiVersion >= 3 && o->Reliability == EOS_PR_UnreliableUnordered;
+    // State is replaced by the next datagram: carried unreliably, as the game sent it. Everything else the game
+    // sent unreliably keeps EOS's repair (an event's loss would otherwise wait for the game's resend).
+    bool upgrade = g.config.reliableGameTraffic && o && o->ApiVersion >= 3 &&
+                   o->Reliability == EOS_PR_UnreliableUnordered && cls != TrafficClass::State;
     if (held || upgrade) {
         EOS_P2P_SendPacketOptions copy = *o;
         // The connection is being rebuilt: let EOS queue the packet instead of discarding it.
@@ -1770,34 +2426,133 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
     return r;
 }
 
+// A packet that arrived (over the direct link or EOS): a fragment goes into its message, a copy of one already
+// delivered is dropped. True when the game gets it as it is.
+bool takeArrival(const std::string& src, const std::string& socket, uint8_t channel, const uint8_t* data, uint32_t size,
+                 bool mayBeCopy) {
+    uint64_t acked = 0;
+    if (channel == kFragmentChannel && parseFragmentAck(data, size, acked)) {
+        std::lock_guard<std::mutex> lock(g.bulkMutex);
+        g.bulks.erase(std::remove_if(g.bulks.begin(), g.bulks.end(),
+                                     [&](const State::PendingBulk& b) { return b.member == src && b.id == acked; }),
+                      g.bulks.end());
+        return false;
+    }
+    if (channel == kFragmentChannel && isFragment(data, size)) {
+        std::optional<FragmentMessage> done;
+        bool again = false;
+        {
+            std::lock_guard<std::mutex> lock(g.fragmentMutex);
+            done = g.reassembler.add(src, data, size, GetTickCount64(), &again);
+        }
+        const bool bulk = done ? (done->flags & kFragmentBulk) != 0 : again && (data[5] & kFragmentBulk) != 0;
+        if (bulk) ackBulk(src, Reassembler::idOf(data, size));  // its sender stops resending
+        if (!done) return false;
+        if (done->flags & kFragmentBulk) {
+            ++g.bulkIn;
+            if (BulkHandler handler = g.bulkHandler.load()) handler(src, done->tag, done->bytes.data(), done->bytes.size());
+            else logRateLimited("bulk-unhandled", 10000, "NETCODE a bulk message (tag %u, %zu bytes) from %s has no handler",
+                                done->tag, done->bytes.size(), shortId(src).c_str());
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g.fragmentMutex);
+        g.ready.push_back({src, socket, static_cast<uint8_t>(done->tag), std::move(done->bytes)});
+        return false;
+    }
+    // Only what the sender may have sent over two paths (a classified game datagram over the direct link and the
+    // relay) is checked for a copy: anything else - the plugin's channels, a room of the game as it ships, a
+    // datagram that came once by design - reaches the game as it came, also when its bytes repeat.
+    return !mayBeCopy || channel != 0 || g.duplicates.first(src, data, size, GetTickCount64());
+}
+
+// A reassembled datagram the game asked for (channel and size), into its receive buffers.
+bool deliverReady(const EOS_P2P_ReceivePacketOptions* o, EOS_ProductUserId* outPeer, EOS_P2P_SocketId* outSocket,
+                  uint8_t* outChannel, void* outData, uint32_t* outBytes) {
+    const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
+    std::lock_guard<std::mutex> lock(g.fragmentMutex);
+    for (auto it = g.ready.begin(); it != g.ready.end(); ++it) {
+        if (channel && it->channel != *channel) continue;
+        EOS_ProductUserId peer = idHandle(it->src);
+        if (!peer || it->data.size() > o->MaxDataSizeBytes) {
+            logRateLimited("ready-drop", 10000, "NETCODE a reassembled %zu-byte packet does not fit the game's %u-byte buffer",
+                           it->data.size(), o->MaxDataSizeBytes);
+            g.ready.erase(it);
+            return false;
+        }
+        *outPeer = peer;
+        if (outSocket) {
+            outSocket->ApiVersion = 1;
+            strncpy_s(outSocket->SocketName, it->socket.c_str(), _TRUNCATE);
+        }
+        if (outChannel) *outChannel = it->channel;
+        memcpy(outData, it->data.data(), it->data.size());
+        *outBytes = static_cast<uint32_t>(it->data.size());
+        g.ready.erase(it);
+        return true;
+    }
+    return false;
+}
+
 EOS_EResult hookReceivePacket(EOS_HP2P h, const EOS_P2P_ReceivePacketOptions* o, EOS_ProductUserId* outPeer,
                               EOS_P2P_SocketId* outSocket, uint8_t* outChannel, void* outData, uint32_t* outBytes) {
     if (g_shutdown) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     configureHandle(h);
     if (o) noteLocalUser(h, o->LocalUserId);
+    if (!o || !outPeer || !outData || !outBytes) return g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
     std::shared_ptr<DirectNet> net = g.net.load();
-    if (net && o && outPeer && outData && outBytes) {
-        const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
-        Delivered d;
-        if (net->pop(channel, o->MaxDataSizeBytes, d)) {
-            EOS_ProductUserId peer = idHandle(d.src);
-            if (peer) {
-                *outPeer = peer;
-                if (outSocket) {
-                    outSocket->ApiVersion = 1;
-                    strncpy_s(outSocket->SocketName, d.socketName.c_str(), _TRUNCATE);
-                }
-                if (outChannel) *outChannel = d.channel;
-                memcpy(outData, d.data.data(), d.data.size());
-                *outBytes = static_cast<uint32_t>(d.data.size());
-                ++g.directIn;
-                return EOS_Success;
-            }
+    const uint8_t* channel = o->ApiVersion >= 2 ? o->RequestedChannel : nullptr;
+    // Fragments travel on a channel of their own; a receive that asks for one channel only must not leave them
+    // waiting. A bounded number per call: the game's frame goes on meanwhile.
+    if (channel && *channel != kFragmentChannel) {
+        for (int i = 0; i < 64; ++i) {
+            Delivered d;
+            if (!net || !net->pop(&kFragmentChannel, kFragmentPacket, d)) break;
+            takeArrival(d.src, d.socketName, d.channel, d.data.data(), static_cast<uint32_t>(d.data.size()), false);
+        }
+        EOS_P2P_ReceivePacketOptions fragments = *o;
+        fragments.RequestedChannel = &kFragmentChannel;
+        std::vector<uint8_t> buf(kFragmentPacket);
+        fragments.MaxDataSizeBytes = static_cast<uint32_t>(buf.size());
+        for (int i = 0; i < 64; ++i) {
+            EOS_ProductUserId peer = nullptr;
+            EOS_P2P_SocketId socket{};
+            uint8_t ch = 0;
+            uint32_t n = 0;
+            if (g.api.receive(h, &fragments, &peer, &socket, &ch, buf.data(), &n) != EOS_Success) break;
+            takeArrival(idString(peer), std::string(socket.SocketName, strnlen(socket.SocketName, sizeof(socket.SocketName))),
+                        ch, buf.data(), n, false);
         }
     }
-    EOS_EResult r = g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
-    if (r == EOS_Success) ++g.eosIn;
-    return r;
+    for (;;) {
+        if (deliverReady(o, outPeer, outSocket, outChannel, outData, outBytes)) return EOS_Success;
+        Delivered d;
+        if (net && net->pop(channel, o->MaxDataSizeBytes, d)) {
+            if (!takeArrival(d.src, d.socketName, d.channel, d.data.data(), static_cast<uint32_t>(d.data.size()), d.cls != 0))
+                continue;
+            EOS_ProductUserId peer = idHandle(d.src);
+            if (!peer) continue;
+            *outPeer = peer;
+            if (outSocket) {
+                outSocket->ApiVersion = 1;
+                strncpy_s(outSocket->SocketName, d.socketName.c_str(), _TRUNCATE);
+            }
+            if (outChannel) *outChannel = d.channel;
+            memcpy(outData, d.data.data(), d.data.size());
+            *outBytes = static_cast<uint32_t>(d.data.size());
+            ++g.directIn;
+            return EOS_Success;
+        }
+        EOS_EResult r = g.api.receive(h, o, outPeer, outSocket, outChannel, outData, outBytes);
+        if (r != EOS_Success) return r;
+        ++g.eosIn;
+        const std::string src = idString(*outPeer);
+        const std::string socket =
+            outSocket ? std::string(outSocket->SocketName, strnlen(outSocket->SocketName, sizeof(outSocket->SocketName)))
+                      : std::string();
+        if (takeIdentityProof(src, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes)) continue;
+        if (takeArrival(src, socket, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes, false))
+            return EOS_Success;
+    }
 }
 
 // --- The room list and the virtual room, in front of every other wrapper (installVirtualRoomHooks) ---
@@ -1902,11 +2657,83 @@ void hookSearchRelease(EOS_HLobbySearch search) {
     g.outer.releaseSearch(search);
 }
 
+// A room Epic lists, read for coming in over the direct link when its lobby is full (rooms above 64): its owner,
+// the address and identity the owner put on the lobby, its members, size and attributes. Not usable (roomId empty
+// or no address) for any other room.
+LastRoom fullRoomFrom(EOS_HLobbyDetails details) {
+    LastRoom r;
+    const Outer& o = g.outer;
+    if (!details || !o.owner || !o.attributeCount || !o.copyAttribute || !o.releaseAttribute || !o.copyInfo ||
+        !o.releaseInfo)
+        return r;
+    EOS_LobbyDetails_CopyInfoOptions io{1};
+    EOS_LobbyDetails_Info* info = nullptr;
+    if (o.copyInfo(details, &io, &info) != EOS_Success || !info) return r;
+    r.roomId = info->LobbyId ? info->LobbyId : "";
+    r.maxMembers = info->MaxMembers;
+    o.releaseInfo(info);
+    EOS_LobbyDetails_GetLobbyOwnerOptions oo{1};
+    r.host = idString(o.owner(details, &oo));
+    EOS_LobbyDetails_GetAttributeCountOptions co{1};
+    const uint32_t count = o.attributeCount(details, &co);
+    for (uint32_t i = 0; i < count; ++i) {
+        EOS_LobbyDetails_CopyAttributeByIndexOptions ai{1, i};
+        EOS_Lobby_Attribute* attribute = nullptr;
+        if (o.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data) {
+            LobbyAttribute a = ownAttribute(*attribute);
+            if (a.key == kHostAddressKey) r.hostAddress = a.text;
+            if (a.key == kHostIdentityKey) r.hostIdentity = a.text;
+            r.attributes.push_back(std::move(a));
+        }
+        if (attribute) o.releaseAttribute(attribute);
+    }
+    return r;
+}
+
+// The game's JoinLobby of a room Epic lists. Epic turns a player away from a lobby holding its 64: when the room's
+// owner put its direct-link address and identity on the lobby, the join goes on over the direct link to it instead
+// (the same way back into a room as REJOIN), and the room's host lets the player in by its own member list.
+struct EpicJoin {
+    EOS_Lobby_OnLobbyIdCallback callback;
+    void* clientData;
+    EOS_ProductUserId user;
+    LastRoom room;
+    bool full;  // the lobby listed as many members as it holds
+};
+
+void epicJoined(const EOS_Lobby_LobbyIdCallbackInfo* i) {
+    auto* call = static_cast<EpicJoin*>(i->ClientData);
+    const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
+    // Epic's code for a full lobby is not one this plugin can rely on: a lobby that listed its 64 when the game found
+    // it, or EOS_LimitExceeded, is taken as full.
+    const bool full = i->ResultCode != EOS_Success && (call->full || i->ResultCode == EOS_LimitExceeded);
+    if (final && full && !g_shutdown && call->room.usable()) {
+        logf("REJOIN Epic's lobby of room %s is full (%s): coming in over the direct link to its host %s",
+             call->room.roomId.c_str(), resultName(i->ResultCode), shortId(call->room.host).c_str());
+        startVirtualJoinRoom(call->room, call->user, call->room.roomId, call->clientData, call->callback, true);
+        delete call;
+        return;
+    }
+    EOS_Lobby_LobbyIdCallbackInfo copy = *i;
+    copy.ClientData = call->clientData;
+    EOS_Lobby_OnLobbyIdCallback cb = call->callback;
+    if (final) delete call;
+    cb(&copy);
+}
+
 void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void* clientData,
                      EOS_Lobby_OnLobbyIdCallback cb) {
     FakeDetails d;
-    if (g_shutdown || !o || !cb || !g.fakes.lookup(o->LobbyDetailsHandle, &d)) return g.outer.join(h, o, clientData, cb);
-    startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    if (g_shutdown || !o || !cb) return g.outer.join(h, o, clientData, cb);
+    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    LastRoom room = fullRoomFrom(o->LobbyDetailsHandle);
+    if (!room.usable()) return g.outer.join(h, o, clientData, cb);
+    bool full = false;
+    if (g.outer.memberCount) {
+        EOS_LobbyDetails_GetMemberCountOptions mc{1};
+        full = room.maxMembers && g.outer.memberCount(o->LobbyDetailsHandle, &mc) >= room.maxMembers;
+    }
+    g.outer.join(h, o, new EpicJoin{cb, clientData, o->LocalUserId, std::move(room), full}, epicJoined);
 }
 
 struct LeaveOptionsHead {  // EOS_Lobby_LeaveLobbyOptions and EOS_Lobby_DestroyLobbyOptions, ApiVersion 1
@@ -1950,7 +2777,7 @@ EOS_EResult hookCopyDetails(EOS_HLobby h, const EOS_Lobby_CopyLobbyDetailsHandle
     }
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
-        d.members = g.view.members();
+        d.members = g.view.slotted() ? g.view.hostMembers() : g.view.members();
     }
     *out = g.fakes.make(std::move(d));
     return EOS_Success;
@@ -2000,9 +2827,46 @@ std::vector<std::string> extraMembers(EOS_HLobbyDetails h, uint32_t epicCount) {
     return extra;
 }
 
+// Epic's copy `h` of the room we are in while we follow its host's slots (or wait for a new host's): the members its host's game has that our
+// game was told of, in slot order - the members the game may take now (room_view.h; one Epic lists that the host's
+// game does not have yet comes once it has, and is told then). False for every other lobby, and while we do not
+// follow the host's slots.
+bool slottedMembers(EOS_HLobbyDetails h, std::vector<std::string>* out) {
+    std::string room;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        if (!g.view.active()) return false;
+        const bool awaiting = g.view.awaitingHost();
+        if (!g.view.slotted() && !awaiting) return false;
+        room = g.viewRoom;
+        out->clear();
+        if (awaiting) {
+            // A new host whose slots are not here yet: the members our game was told of, no one Epic lists besides
+            // (the game reads its members whenever any status reaches it, and would take that one in the first empty
+            // slot).
+            *out = g.view.members();
+        } else {
+            for (const std::string& m : g.view.hostMembers())
+                if (g.view.has(m)) out->push_back(m);
+            // One our game took before we followed the host's slots, which the host's game does not have (yet): it stays.
+            for (const std::string& m : g.view.members())
+                if (g.view.hostSlot(m) < 0) out->push_back(m);
+        }
+    }
+    const Api& a = g.api;
+    EOS_LobbyDetails_CopyInfoOptions io{1};
+    EOS_LobbyDetails_Info* info = nullptr;
+    if (!a.copyInfo || !a.releaseInfo || a.copyInfo(h, &io, &info) != EOS_Success || !info) return false;
+    const bool ours = info->LobbyId && room == info->LobbyId;
+    a.releaseInfo(info);
+    return ours;
+}
+
 uint32_t hookDetailsMemberCount(EOS_HLobbyDetails h, const EOS_LobbyDetails_GetMemberCountOptions* o) {
     FakeDetails d;
     if (g.fakes.lookup(h, &d)) return static_cast<uint32_t>(d.members.size());
+    std::vector<std::string> slotted;
+    if (!g_shutdown && slottedMembers(h, &slotted)) return static_cast<uint32_t>(slotted.size());
     const uint32_t count = g.outer.memberCount(h, o);
     return g_shutdown ? count : count + static_cast<uint32_t>(extraMembers(h, count).size());
 }
@@ -2012,6 +2876,8 @@ EOS_ProductUserId hookDetailsMemberByIndex(EOS_HLobbyDetails h, const EOS_LobbyD
     if (g.fakes.lookup(h, &d))
         return o && o->MemberIndex < d.members.size() ? idHandle(d.members[o->MemberIndex]) : nullptr;
     if (g_shutdown || !o) return g.outer.memberByIndex(h, o);
+    std::vector<std::string> slotted;
+    if (slottedMembers(h, &slotted)) return o->MemberIndex < slotted.size() ? idHandle(slotted[o->MemberIndex]) : nullptr;
     EOS_LobbyDetails_GetMemberCountOptions co{1};
     const uint32_t count = g.outer.memberCount(h, &co);
     if (o->MemberIndex < count) return g.outer.memberByIndex(h, o);
@@ -2070,9 +2936,11 @@ void eosHooksShutdown() { g_shutdown = true; }
 
 bool installVirtualRoomHooks(HMODULE game) {
     const Api& a = g.api;
-    // Needs the direct transport, the lobby tracking and the tick that completes our answers (installEosHooks),
-    // and what a room snapshot reads.
-    if (!g.baseNet.load() || !g.lobbyTracked || !g.ticking || !a.copyDetails || !a.attributeCount ||
+    // Needs the direct link (a Mode=host/join transport, or AutoJoin: the virtual room dials a link of its own), the
+    // lobby tracking and the tick that completes our answers (installEosHooks), and what a room snapshot reads.
+    // Players on the defaults (Mode=off, AutoJoin=1) have no base transport: they come back into a room, or into one
+    // whose Epic lobby is full, the same way.
+    if (!(g.baseNet.load() || g.autoJoinOn) || !g.lobbyTracked || !g.ticking || !a.copyDetails || !a.attributeCount ||
         !a.copyAttribute || !a.copyInfo || !a.releaseInfo || !a.releaseAttribute || !a.releaseDetails) {
         logf("REJOIN unavailable: needs the direct link, the EOS tick and EOS's lobby functions");
         return false;
@@ -2219,4 +3087,232 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
     return ok;
 }
 
+
+// --- netcode.h ---
+
+void setNetcodeOptions(const NetcodeOptions& options) {
+    {
+        std::lock_guard<std::mutex> lock(g.netcodeMutex);
+        g.netcode = options;
+        if (g.netcode.statsIntervalMs < 1000) g.netcode.statsIntervalMs = 1000;
+    }
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net) net->setShedState(options.shedState);
+}
+
+// A direct transport made later (AutoJoin, the virtual room) starts with the netcode options; mesh comes on once the
+// whole room runs it (meshTick).
+DirectOptions withNetcode(DirectOptions o) {
+    const NetcodeOptions n = netcodeOptions();
+    o.netProtocol = g.netProtocol;
+    o.netCaps = g.netCaps;
+    o.refuseOtherProtocols = g.refuseOtherProtocols;
+    o.shedState = n.shedState;
+    o.mesh = false;
+    return o;
+}
+
+// Joiners link to each other only while every member runs the mesh ([Netcode] Mesh and NetFeature::Mesh).
+void meshTick(uint64_t now) {
+    static uint64_t lastMs = 0;
+    if (now - lastMs < 500) return;
+    lastMs = now;
+    const bool on = netcodeOptions().mesh && roomCap(kCapMesh);
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net && net->mesh() != on) net->setMesh(on);
+}
+
+NetcodeOptions netcodeOptions() {
+    std::lock_guard<std::mutex> lock(g.netcodeMutex);
+    return g.netcode;
+}
+
+void setRoomCapQuery(RoomCapQuery query) { g.roomCaps = query; }
+// The host relays joiners' state too: the same filter decides there (observer = receiver, subject = sender).
+bool relayFilter(const std::string& observer, const std::string& subject, uint32_t bytes, uint32_t budget, uint64_t nowMs) {
+    StateSendFilter filter = g.stateFilter.load();
+    return !filter || filter(observer, subject, bytes, budget, nowMs);
+}
+
+void setStateSendFilter(StateSendFilter filter) {
+    g.stateFilter = filter;
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net) net->setRelayStateFilter(filter ? &relayFilter : nullptr);
+}
+
+void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source; }
+
+void setGameSlotsSource(GameSlotsSource source) { g.gameSlots = source; }
+
+int hostSlotOf(const std::string& member) {
+    std::lock_guard<std::mutex> lock(g.viewMutex);
+    return g.view.active() && g.view.slotted() ? g.view.hostSlot(member) : -1;
+}
+
+uint64_t bulkUndelivered() { return g.bulkLost.load(); }
+
+uint64_t bulkIncoming(const std::string& src, uint16_t tag, size_t* total) {
+    std::lock_guard<std::mutex> lock(g.fragmentMutex);
+    return g.reassembler.pending(src, kFragmentBulk, tag, GetTickCount64(), total);
+}
+
+bool hostAdvertisement(std::string& address, std::string& identity) {
+    if (g.config.direct.mode != Mode::Host) return false;
+    address = g.marker.ownAddress();
+    identity = g.marker.ownIdentity();
+    return !address.empty() && !identity.empty();
+}
+
+void setNetcodeIdentity(uint32_t protocol, uint32_t caps, bool refuseOthers) {
+    g.netProtocol = protocol;
+    g.netCaps = caps;
+    g.refuseOtherProtocols = refuseOthers;
+    for (std::shared_ptr<DirectNet> net : {g.baseNet.load(), g.net.load()})
+        if (net) net->setNetcode(protocol, caps, refuseOthers);
+}
+
+std::map<std::string, std::pair<uint32_t, uint32_t>> directMemberNetcode() {
+    std::map<std::string, std::pair<uint32_t, uint32_t>> out;
+    std::shared_ptr<DirectNet> base = g.baseNet.load();
+    if (!base || g.config.direct.mode != Mode::Host) return out;
+    for (const auto& [id, n] : base->clientNetcode()) out[id] = {n.protocol, n.caps};
+    return out;
+}
+
+void setTestLoopbackHosts(bool on) { g.testLoopbackHosts = on; }
+void setTestBulkFragmentsSent(uint32_t count) { g.testBulkFragments = count; }
+void setBulkHandler(BulkHandler handler) { g.bulkHandler = handler; }
+
+void setTestPeerBlock(uint32_t afterMs, uint32_t forMs) {
+    const uint64_t length = forMs == UINT32_MAX ? UINT64_MAX : forMs;
+    if (std::shared_ptr<DirectNet> base = g.baseNet.load()) base->setTestBlockPeers(afterMs, length);
+    if (std::shared_ptr<DirectNet> net = g.net.load()) net->setTestBlockPeers(afterMs, length);
+}
+
+
+uint32_t linkBudgetBytesPerSec(const std::string& peer) {
+    if (peer.empty()) return 0;
+    std::shared_ptr<DirectNet> net = g.net.load();
+    if (net && net->canRoute(peer)) {
+        if (uint32_t budget = net->linkBudget(peer)) return budget;
+    }
+    // EOS only: nobody measures Epic's path. The game's own budget for its routine state (about 320 kbps).
+    return RateController::kMinRate;
+}
+
+// Tells `member` its bulk message `id` arrived: over the direct link when it reaches it, else EOS (reliably: a lost
+// acknowledgement only costs a resend, but a resend of 140 KiB is worth avoiding).
+void ackBulk(const std::string& member, uint64_t id) {
+    const std::vector<uint8_t> ack = fragmentAck(id);
+    std::shared_ptr<DirectNet> net = g.net.load();
+    if (net && net->send(member, "", kFragmentChannel, EOS_PR_ReliableOrdered, ack.data(), ack.size())) return;
+    std::string socketName;
+    EOS_ProductUserId local = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g.lastSendMutex);
+        socketName = g.lastSocket;
+        local = g.lastLocal;
+    }
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId remote = idHandle(member);
+    if (!p2p || !local || !remote) return;
+    EOS_P2P_SocketId socket{1, {}};
+    strncpy_s(socket.SocketName, socketName.c_str(), _TRUNCATE);
+    EOS_P2P_SendPacketOptions o{};
+    o.ApiVersion = 3;
+    o.LocalUserId = local;
+    o.RemoteUserId = remote;
+    o.SocketId = &socket;
+    o.Channel = kFragmentChannel;
+    o.DataLengthBytes = static_cast<uint32_t>(ack.size());
+    o.Data = ack.data();
+    o.Reliability = EOS_PR_ReliableOrdered;
+    o.bAllowDelayedDelivery = 1;
+    g.api.send(p2p, &o);
+}
+
+// Bulk messages not acknowledged in time go again (the same id: the receiver takes it once), with twice the wait;
+// after kBulkTries the loss is logged and counted (sendBulk's caller learns it from bulkUndelivered).
+constexpr uint32_t kBulkTries = 5;
+void bulkTick(uint64_t now) {
+    std::vector<State::PendingBulk> due;
+    {
+        std::lock_guard<std::mutex> lock(g.bulkMutex);
+        for (auto& b : g.bulks)
+            if (now - b.sentMs >= b.waitMs) due.push_back(b);
+    }
+    for (const State::PendingBulk& b : due) {
+        bool lost = false;
+        {
+            std::lock_guard<std::mutex> lock(g.bulkMutex);
+            for (auto it = g.bulks.begin(); it != g.bulks.end(); ++it) {
+                if (it->member != b.member || it->id != b.id) continue;
+                if (it->tries >= kBulkTries) {
+                    g.bulks.erase(it);
+                    lost = true;
+                } else {
+                    ++it->tries;
+                    it->sentMs = now;
+                    it->waitMs *= 2;
+                }
+                break;
+            }
+        }
+        if (lost) {
+            ++g.bulkLost;
+            logf("NETCODE a bulk message (tag %u, %zu bytes) to %s was not acknowledged after %u tries: NOT delivered", b.tag,
+                 b.data.size(), shortId(b.member).c_str(), kBulkTries);
+            continue;
+        }
+        EOS_P2P_SocketId socket{1, {}};
+        strncpy_s(socket.SocketName, b.socket.c_str(), _TRUNCATE);
+        EOS_P2P_SendPacketOptions o{};
+        o.ApiVersion = 3;
+        o.LocalUserId = b.local;
+        o.RemoteUserId = b.remote;
+        o.SocketId = &socket;
+        o.bAllowDelayedDelivery = 1;
+        ++g.bulkResent;
+        logRateLimited("bulk-resend", 5000, "NETCODE resending a bulk message (tag %u, %zu bytes) to %s: not acknowledged yet",
+                       b.tag, b.data.size(), shortId(b.member).c_str());
+        sendFragments(b.p2p, o, b.member, kFragmentBulk, b.tag, b.data.data(), b.data.size(), b.id);
+    }
+}
+
+bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size_t size) {
+    if (g_shutdown || remote.empty() || !data || !size || size > kMaxBulkBytes || !netcodeOptions().fragments ||
+        !roomCap(kCapFragments))
+        return false;
+    EOS_P2P_SendPacketOptions o{};
+    EOS_P2P_SocketId socket{1, {}};
+    {
+        std::lock_guard<std::mutex> lock(g.lastSendMutex);
+        if (!g.lastLocal || g.lastSocket.empty()) return false;  // the game has not opened its socket yet
+        o.LocalUserId = g.lastLocal;
+        strncpy_s(socket.SocketName, g.lastSocket.c_str(), _TRUNCATE);
+    }
+    EOS_HP2P p2p = g.p2p;
+    o.ApiVersion = 3;
+    o.RemoteUserId = idHandle(remote);
+    o.SocketId = &socket;
+    o.bAllowDelayedDelivery = 1;
+    if (!p2p || !o.RemoteUserId) return false;
+    const uint64_t id = g.fragmentEpoch | ++g.fragmentIds;
+    if (sendFragments(p2p, o, remote, kFragmentBulk, tag, data, size, id) != EOS_Success) return false;
+    State::PendingBulk pending;
+    pending.member = remote;
+    pending.p2p = p2p;
+    pending.local = o.LocalUserId;
+    pending.remote = o.RemoteUserId;
+    pending.socket = socket.SocketName;
+    pending.id = id;
+    pending.tag = tag;
+    pending.data.assign(data, data + size);
+    pending.sentMs = GetTickCount64();
+    // Long enough for the whole message at the game's own budget (40 KB/s), a second at least.
+    pending.waitMs = 1000 + size * 1000 / RateController::kMinRate;
+    std::lock_guard<std::mutex> lock(g.bulkMutex);
+    g.bulks.push_back(std::move(pending));
+    return true;
+}
 }  // namespace dn

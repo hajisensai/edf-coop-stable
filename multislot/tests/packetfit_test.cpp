@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -332,7 +333,7 @@ void TestStubsAndSidePackets() {
     std::vector<std::uint8_t> copy(bytes.size());
     Check(FindRecord(stub, copy.data()) && copy == bytes, "a stored record is found by its stub");
     for (std::size_t i = 0; i < kRecordStoreEntries; ++i) {
-        std::uint8_t other[8] = {static_cast<std::uint8_t>(i), 1, 2, 3, 4, 5, 6, 7};
+        std::uint8_t other[8] = {static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(i >> 8), 2, 3, 4, 5, 6, 7};
         StubInfo filler{static_cast<int>(i & 0x0F), sizeof(other), RecordHash(other, sizeof(other))};
         StoreRecord(filler, other);
     }
@@ -536,35 +537,182 @@ void TestHold() {
               size == second.size() && buffer[0] == 0x22 && HeldPacketCount() == 0,
           "and the next one after it");
 
-    // Never more than kHeldPackets: the oldest go, the rest reach the game in order.
+    // However many come while the game's frame waits, none is dropped (EOS will not send them again): all reach the
+    // game, in order.
     ClearRecords();
     GameReceivesNothing();
     incoming.clear();
-    for (std::size_t i = 0; i < kHeldPackets + 2; ++i) {
+    constexpr std::size_t kMany = 1500;
+    for (std::size_t i = 0; i < kMany; ++i) {
         std::vector<std::uint8_t> numbered(64, 0);
         numbered[0] = static_cast<std::uint8_t>(i);
         numbered[1] = static_cast<std::uint8_t>(i >> 8);
         incoming.push_back({numbered, nullptr, 0});
     }
-    Check(!ReadStub(message) && HeldPacketCount() == kHeldPackets, "held packets are bounded");
-    bool newestKept = true;
-    for (std::size_t i = 2; i < kHeldPackets + 2; ++i)
-        newestKept = newestKept &&
-                     PacketFitReceive(nullptr, &kAnyChannel, &from, &socket, &channel, buffer.data(), &size) == 0 &&
-                     (buffer[0] | buffer[1] << 8) == static_cast<int>(i);
-    Check(newestKept && HeldPacketCount() == 0, "the oldest held packets are the ones dropped");
+    Check(!ReadStub(message) && HeldPacketCount() == kMany, "every packet that came while the frame waited is held");
+    bool inOrder = true;
+    for (std::size_t i = 0; i < kMany; ++i)
+        inOrder = inOrder && PacketFitReceive(nullptr, &kAnyChannel, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+                  (buffer[0] | buffer[1] << 8) == static_cast<int>(i);
+    Check(inOrder && HeldPacketCount() == 0, "and every one reaches the game, oldest first");
     ClearRecords();
     Check(HeldPacketCount() == 0, "leaving the room drops held packets");
 
-    // Given up after kHeldPacketMs.
+    // Not given up however long the game takes to read it.
     GameReceivesNothing();
     incoming.clear();
     incoming.push_back({first, nullptr, 0});
     ReadStub(message);
-    fakeNow += kHeldPacketMs;
-    Check(PacketFitReceive(nullptr, &kAnyChannel, &from, &socket, &channel, buffer.data(), &size) == kNotFound &&
-              HeldPacketCount() == 0,
-          "a packet held too long is dropped");
+    fakeNow += 10 * 60 * 1000;
+    Check(PacketFitReceive(nullptr, &kAnyChannel, &from, &socket, &channel, buffer.data(), &size) == 0 &&
+              size == first.size() && HeldPacketCount() == 0,
+          "a packet held for minutes still reaches the game");
+    SetPacketFitClock(nullptr);
+    ClearRecords();
+    incoming.clear();
+}
+
+// --- holding a member's packets behind its records bulk (packetfit.h BulkIncoming) ---
+int bulkPeer = 0, otherPeer = 0;
+std::uint64_t bulkInFlight = 0;  // what the fragment layer says of bulkPeer
+std::size_t bulkSize = 0;
+// Many members, each with a bulk on its way at once (kHeldBytesCap).
+int manyPeers[24]{};
+bool manyInFlight = false;
+std::uint64_t FakeIncoming(const void* peer, std::size_t* total) {
+    for (std::size_t i = 0; manyInFlight && i < std::size(manyPeers); ++i)
+        if (peer == &manyPeers[i]) {
+            if (total) *total = 200 * 1024;
+            return 0x5000 + i;
+        }
+    if (peer != &bulkPeer || !bulkInFlight) return 0;
+    if (total) *total = bulkSize;
+    return bulkInFlight;
+}
+
+std::vector<std::uint8_t> Numbered(std::size_t i) {
+    std::vector<std::uint8_t> bytes(40, 0xEE);
+    bytes[0] = static_cast<std::uint8_t>(i);
+    bytes[1] = static_cast<std::uint8_t>(i >> 8);
+    return bytes;
+}
+
+// The game's receive, until EOS has nothing: every packet it got, as numbered, with the member it came from.
+std::vector<std::pair<int, const void*>> GameReadsAll() {
+    std::vector<std::pair<int, const void*>> got;
+    std::vector<std::uint8_t> buffer(0x1000);
+    std::uint32_t size = 0;
+    std::uint8_t channel = 0;
+    void* from = nullptr;
+    SocketId socket{};
+    while (PacketFitReceive(nullptr, &kAnyChannel, &from, &socket, &channel, buffer.data(), &size) == 0)
+        got.emplace_back(buffer[0] | buffer[1] << 8, from);
+    return got;
+}
+
+bool Sequence(const std::vector<std::pair<int, const void*>>& got, const void* peer, int from, int to) {
+    int next = from;
+    for (const auto& [n, who] : got)
+        if (who == peer) {
+            if (n != next) return false;
+            ++next;
+        }
+    return next == to;
+}
+
+void TestBulkHold() {
+    SetPacketFitClock(&FakeClock);
+    SetBulkRecords(nullptr, nullptr, &FakeIncoming);
+    ClearRecords();
+    incoming.clear();
+    bulkSize = 1200;
+    Check(BulkHoldMs(143 * 1024) <= 6000 && BulkHoldMs(1200) == kRecordWaitMs + 2 * kBulkWaitMsPerKiB &&
+              BulkHoldCapacity(1200) >= kBulkHoldMinPackets,
+          "a room of 1024's bulk (143 KiB) is waited for at most 6 s: far inside the ~26 s the game resends for");
+
+    // While the bulk is on its way the member's packets wait; another member's reach the game at once.
+    bulkInFlight = 0x1111;
+    for (int i = 0; i < 5; ++i) incoming.push_back({Numbered(i), &bulkPeer, 0});
+    incoming.push_back({Numbered(100), &otherPeer, 0});
+    auto got = GameReadsAll();
+    Check(got.size() == 1 && got[0].second == &otherPeer && HeldPacketCount() == 5,
+          "packets of a member whose bulk is on its way wait; the others' do not");
+    // Its sender gave up (the fragment layer lets the bulk go): every held packet reaches the game in order, and
+    // the member's later packets are not held at all.
+    bulkInFlight = 0;
+    for (int i = 5; i < 8; ++i) incoming.push_back({Numbered(i), &bulkPeer, 0});
+    got = GameReadsAll();
+    Check(Sequence(got, &bulkPeer, 0, 8) && HeldPacketCount() == 0,
+          "once the bulk is no longer on its way, every held packet goes to the game in order, then the new ones");
+    // The sender's resend starts the same bulk over at the receiver: its member's packets are not held again.
+    bulkInFlight = 0x1111;
+    incoming.push_back({Numbered(8), &bulkPeer, 0});
+    got = GameReadsAll();
+    Check(got.size() == 1 && got[0].first == 8 && HeldPacketCount() == 0, "a bulk let go once holds nothing again");
+
+    // A new bulk that arrives: the packets held behind it go once it is here.
+    bulkInFlight = 0x2222;
+    for (int i = 0; i < 3; ++i) incoming.push_back({Numbered(i), &bulkPeer, 0});
+    Check(GameReadsAll().empty() && HeldPacketCount() == 3, "a new bulk holds the member's packets");
+    bulkInFlight = 0;
+    got = GameReadsAll();
+    Check(Sequence(got, &bulkPeer, 0, 3), "and they go once it arrived");
+
+    // More packets than the bulk may hold back: the bulk is let go, not one packet is dropped.
+    bulkInFlight = 0x3333;
+    const std::size_t cap = BulkHoldCapacity(bulkSize);
+    for (std::size_t i = 0; i < cap + 10; ++i) incoming.push_back({Numbered(i), &bulkPeer, 0});
+    got = GameReadsAll();
+    Check(Sequence(got, &bulkPeer, 0, static_cast<int>(cap + 10)) && HeldPacketCount() == 0,
+          "past BulkHoldCapacity the bulk is let go and every packet reaches the game, in order");
+
+    // Many members' bulks at once, each within what one bulk may hold back, together past kHeldBytesCap: every bulk is
+    // let go and every packet reaches the game, each member's in order - the store never grows without a bound.
+    bulkInFlight = 0;
+    manyInFlight = true;
+    constexpr std::size_t kEach = kBulkHoldMinPackets - 4;
+    for (std::size_t n = 0; n < kEach; ++n)
+        for (int& peer : manyPeers) {
+            auto bytes = Numbered(n);
+            bytes.resize(1100, 0xEE);
+            incoming.push_back({bytes, &peer, 0});
+        }
+    static_assert(kEach * std::size(manyPeers) * 1100 > kHeldBytesCap, "the test outgrows the cap");
+    got = GameReadsAll();
+    bool ordered = true;
+    for (int& peer : manyPeers) ordered = ordered && Sequence(got, &peer, 0, static_cast<int>(kEach));
+    Check(ordered && got.size() == kEach * std::size(manyPeers) && HeldPacketCount() == 0,
+          "past kHeldBytesCap in all, every bulk is let go and every packet reaches the game, in order");
+    manyInFlight = false;
+
+    // Held as long as the bulk takes at 32 KiB/s, then let go (the start message waits for the records instead).
+    bulkInFlight = 0x4444;
+    for (int i = 0; i < 4; ++i) incoming.push_back({Numbered(i), &bulkPeer, 0});
+    Check(GameReadsAll().empty(), "held behind the bulk");
+    fakeNow += BulkHoldMs(bulkSize) - 1;
+    Check(GameReadsAll().empty() && HeldPacketCount() == 4, "still held just before BulkHoldMs");
+    fakeNow += 1;
+    got = GameReadsAll();
+    Check(Sequence(got, &bulkPeer, 0, 4) && HeldPacketCount() == 0, "and let go, every one in order, at BulkHoldMs");
+
+    // A packet that came while the game's frame waited for a record is held behind the bulk as well: nothing of
+    // that member overtakes what waits behind its bulk.
+    std::vector<std::uint8_t> message;
+    Sides(message);  // a start message whose records went beside it
+    ClearRecords();  // and never came: reading its stub waits (record wait 0: one pass over what EOS has)
+    bulkInFlight = 0x5555;
+    incoming.push_back({Numbered(0), &bulkPeer, 0});
+    Check(GameReadsAll().empty(), "held behind the bulk");
+    incoming.push_back({Numbered(1), &bulkPeer, 0});
+    incoming.push_back({Numbered(200), &otherPeer, 0});
+    ReadStub(message);
+    got = GameReadsAll();
+    Check(got.size() == 1 && got[0].second == &otherPeer && HeldPacketCount() == 2,
+          "what the frame received meanwhile keeps its member's order behind the bulk");
+    bulkInFlight = 0;
+    Check(Sequence(GameReadsAll(), &bulkPeer, 0, 2), "and follows it once the bulk is here");
+
+    SetBulkRecords(nullptr, nullptr, nullptr);
     SetPacketFitClock(nullptr);
     ClearRecords();
     incoming.clear();
@@ -618,10 +766,10 @@ std::size_t Count(const std::string& text, const char* needle) {
 
 void TestLogLines(const std::wstring& path) {
     const std::string log = ReadLog(path);
-    // Eight players: the round trip, then the send (twice) and hold tests build that sync again; records sent in
-    // between keep the log from folding any of them.
-    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 4 &&
-              Count(log, "1 of them are sent beside it") == 4 && Count(log, "12 loadout records") == 1,
+    // Eight players: the round trip, then the send (twice), hold and bulk hold tests build that sync again; records
+    // sent in between keep the log from folding any of them.
+    Check(Count(log, "MISSION sync: 8 loadout records would make the start message") == 5 &&
+              Count(log, "1 of them are sent beside it") == 5 && Count(log, "12 loadout records") == 1,
           "the host logs each sync that sends records beside the message");
     Check(Count(log, "MISSION sync: 7 loadout records") == 0, "a sync that fits logs nothing");
     Check(Count(log, "loadout record of player index 7 sent beside the start message: result 0") > 0,
@@ -630,8 +778,13 @@ void TestLogLines(const std::wstring& path) {
           "a member logs the records that arrive and each wait for one");
     Check(Count(log, "never arrived; that player is left out") > 0 && Count(log, "still missing") > 0,
           "and a record that never came");
-    Check(Count(log, "the oldest is dropped") > 0 && Count(log, "the game did not read them within 30 s") == 1,
-          "dropped held packets are logged");
+    Check(Count(log, "held game packet(s) dropped") == 0 && Count(log, "the oldest is dropped") == 0,
+          "no held packet is ever dropped");
+    Check(Count(log, "its game packets wait behind it") > 0 && Count(log, "the bulk arrived, or its sender gave it up") > 0 &&
+              Count(log, "more of them came than the bulk may hold back") == 1 &&
+              Count(log, "they waited as long as the bulk takes at 32 KiB/s") == 1 &&
+              Count(log, "every held game packet reached the game") > 0,
+          "holding behind a bulk, and each way it ends, is logged");
     std::vector<std::uint8_t> packet(1181, 0x33);
     LogOversizePacket(0x12C8C5A, 0, 0, packet.data(), 1170, 0);
     LogOversizePacket(0x5000, 1, 0, packet.data(), 1181, 1);
@@ -671,6 +824,7 @@ int main(int argc, char** argv) {
     TestRoundTrip(12, true);
     TestSendToEveryMember();
     TestHold();
+    TestBulkHold();
     TestOversizeDiagnostic();
     if (!logPath.empty()) TestLogLines(logPath);
     if (failures) {

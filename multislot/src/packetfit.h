@@ -109,8 +109,9 @@ MidHandler PacketFitHookHandler(std::uint32_t rva);
 // encrypted by the game): the sync is written before it is sent, so the records go before it. Every member gets
 // them, marker or not (SendRecordsAhead says why). A member takes side packets out of what its game receives. When
 // its game reads a stub whose record is not here yet (they travel apart), RecordReadHook waits for it up to
-// kRecordWaitMs, receiving from EOS itself: side packets are stored, anything else is held (kHeldPackets, oldest
-// dropped) and handed to the game, in order, before anything newer.
+// kRecordWaitMs, receiving from EOS itself: side packets are stored, anything else is held and handed to the game,
+// in order, before anything newer. A held packet is never dropped (EOS acknowledged it and will not send it again):
+// it waits only for as long as the game's frame waits.
 using EosResult = std::int32_t;
 struct EosSendOptions {
     std::int32_t ApiVersion;
@@ -135,11 +136,11 @@ EosResult PacketFitReceive(void* handle, const void* options, void** peer, void*
                            std::uint32_t* size);
 void SetEosFunctions(EosSendFn send, EosReceiveFn receive);
 constexpr EosResult kEosLimitExceeded = 22;  // EOS_LimitExceeded
-constexpr std::size_t kHeldPackets = 512;
 constexpr unsigned long long kRecordWaitMs = 1500;
 // How long RecordReadHook waits for a missing record (tests: 0, only what has arrived).
 void SetRecordWait(unsigned long long ms);
-constexpr unsigned long long kHeldPacketMs = 30000;
+// How long the records of the last sync still go ahead of packets to members that have not had them.
+constexpr unsigned long long kRecordsAheadMs = 30000;
 // Asked about every member the records of a split sync go to (syncmarker.h: PeerReadsSplitSync), which logs the
 // members that show no marker that they read one. It decides nothing: they get the records all the same.
 using SplitSyncReaders = bool (*)(const void* remote);
@@ -155,6 +156,53 @@ using ImportRedirect = bool (*)(HMODULE game, const char* dll, const char* funct
 // Redirects EOS_P2P_SendPacket and EOS_P2P_ReceivePacket; returns how many. Install it before the net log so the
 // net log's wrappers (which need the game as their caller) sit in front.
 int InstallPacketFit(HMODULE game, ImportRedirect redirect);
+
+// --- every record in bulk (I1: rooms of up to 1024) ---
+// About 50 players fill the start message with stubs alone (21 bytes each), and the game's stream (0x5E0 bytes) the
+// same way. When the whole room reads fragments (src/netcode.h, NetFeature::Fragments) and the records do not fit,
+// the message keeps none of them: one bulk marker (kStubBytes, laid out as a stub with kBulkMagic, index 0xFF, then
+// the record count and the bulk's id) stands for all, and every record goes to every member as one bulk message
+// (SendBulk, tag kRecordsBulkTag: 1024 records are about 140 KiB). Everyone's MissionSync_Update reads the marker
+// back as each record in turn (RecordReadHook stays on it until the last), waiting for the bulk up to kRecordWaitMs
+// plus kBulkWaitMsPerKiB per KiB. A room that does not read fragments keeps the stubs and side packets above.
+constexpr std::uint16_t kRecordsBulkTag = 0x5352;
+constexpr unsigned long long kBulkWaitMsPerKiB = 30;  // 32 KiB/s, half the game's own budget for a member
+// Whether the room reads bulk messages now, and how one goes to `remote` (an EOS_ProductUserId): the room part wires
+// them to netfeature.h. Unset: never bulk.
+using BulkReady = bool (*)();
+using BulkSend = bool (*)(const void* remote, std::uint16_t tag, const void* data, std::size_t size);
+// The bulk of records from `peer` (an EOS_ProductUserId) on its way: its id (0: none; some of its fragments here,
+// not all), its size in `total`. One its receiver gave up on (no progress for a while, src/fragment.h) is not.
+using BulkIncoming = std::uint64_t (*)(const void* peer, std::size_t* total);
+// While one is, the game's packets from that member wait here (in order) instead of reaching the game: its start
+// message comes after its records, so the game reads the message once the records are here, and its frame never waits
+// for them (RecordReadHook waits only when the message overtook every fragment, at most once per bulk). The game's
+// start message is encrypted, so it cannot be told from the member's other packets: they all wait, and all reach the
+// game in order - none is ever dropped. They wait until the bulk arrives or stops being on its way (its sender gave
+// up), or for at most BulkHoldMs(total) (the bulk at 32 KiB/s, kBulkWaitMsPerKiB, plus kRecordWaitMs: 143 KiB, a room
+// of 1024, is 5.8 s, well inside the ~26 s the sender's game resends unacknowledged messages before it ends the
+// room) and BulkHoldCapacity(total) packets (kBulkHoldPacketsPerSecond over that time; per member, so the room's
+// size scales the whole), whichever comes first: then the bulk is no longer waited for here, the held packets go to
+// the game in order, and the start message waits for the records once inside RecordReadHook.
+void SetBulkRecords(BulkReady ready, BulkSend send, BulkIncoming incoming = nullptr);
+constexpr std::size_t kBulkHoldPacketsPerSecond = 120;  // twice a game sending every 60 Hz frame
+constexpr std::size_t kBulkHoldMinPackets = 64;
+// What every member's held packets may cost together: past it every bulk that holds packets is let go (they go to the
+// game in order, as when one bulk outgrows BulkHoldCapacity), so many members' bulks at once never grow the store
+// without a bound.
+constexpr std::size_t kHeldBytesCap = 1 << 20;
+unsigned long long BulkHoldMs(std::size_t total);
+std::size_t BulkHoldCapacity(std::size_t total);
+// The receiver's side: a bulk message of tag kRecordsBulkTag arrived.
+void TakeRecordsBulk(const std::uint8_t* data, std::size_t size);
+struct BulkRecord {
+    int index;
+    std::vector<std::uint8_t> bytes;
+};
+std::vector<std::uint8_t> BuildRecordsBulk(std::uint64_t id, const std::vector<BulkRecord>& records);
+bool ParseRecordsBulk(const std::uint8_t* data, std::size_t size, std::uint64_t& id, std::vector<BulkRecord>& records);
+void WriteBulkMarker(std::uint8_t* out, std::size_t count, std::uint64_t id);  // kStubBytes
+bool ParseBulkMarker(const std::uint8_t* at, std::size_t available, std::size_t& count, std::uint64_t& id);
 
 // Diagnostic: one line per kind (caller, channel, packet type) of game packet above kEosMaxPacket.
 bool FirstOversize(std::uintptr_t caller, std::uint8_t channel, const std::uint8_t* data, std::size_t size);

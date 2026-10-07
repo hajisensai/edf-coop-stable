@@ -21,7 +21,25 @@ using LobbyInfoCopyFn = std::int32_t (*)(void* details, const void* options, voi
 using LobbyInfoReleaseFn = void (*)(void* info);
 void RouteLobbyInfo(LobbyInfoCopyFn copy, LobbyInfoReleaseFn release);
 
-// Pure decision used by both, kept separate for tests. Returns 0 when EOS data is inconsistent.
-std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers);
+// What both show of a room: its members and its capacity (0: EOS data inconsistent, the vanilla view stands).
+struct RoomCount {
+    std::uint32_t members;
+    std::uint32_t capacity;
+};
+// Pure decision used by both, kept separate for tests. `members`: what the game's member count read (Epic's lobby
+// members; for the room this machine is in, also the members beyond Epic's lobby that the direct-link part lists to
+// the game, docs/net-re/roomsize.md §4). roomSize: the room's published size (kRoomSizeKey, patches.h; 0 none), which
+// counts once the room is larger than an EOS lobby holds; publishedMembers (kRoomMembersKey; 0 none): its owner's
+// count of the members its game has, which a room list entry - Epic's lobby only - shows for such a room.
+RoomCount RoomCountFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers,
+                            std::uint32_t roomSize = 0, std::uint32_t publishedMembers = 0);
+// Its capacity alone.
+std::uint32_t CapacityFromInfo(std::uint32_t members, std::uint32_t availableSlots, std::uint32_t maxMembers,
+                               std::uint32_t roomSize = 0);
+
+// The members the game reads in lobby `lobbyId` (EOS_Lobby_CopyLobbyDetailsHandle and EOS_LobbyDetails_GetMemberCount
+// through EDF.dll's imports, so with the members beyond Epic's lobby the direct-link part adds to its own room), 0
+// when there is no copy of it. What the owner of a room larger than an EOS lobby publishes (kRoomMembersKey).
+std::uint32_t GameRoomMemberCount(void* lobbyInterface, const void* user, const char* lobbyId);
 
 }  // namespace multislot

@@ -5,6 +5,7 @@
 #include <string>
 
 #include "crashlog.h"
+#include "hostmode.h"
 #include "identity.h"
 #include "log.h"
 #include "patches.h"
@@ -88,6 +89,16 @@ struct Attribute {
     AttributeData* Data;
     std::int32_t Visibility;
 };
+// EOS_Lobby_UpdateLobbyOptions and EOS_LobbyModification_AddAttributeOptions (version 2).
+struct UpdateLobbyOptions {
+    std::int32_t ApiVersion;
+    void* LobbyModificationHandle;
+};
+struct AddAttributeOptions {
+    std::int32_t ApiVersion;
+    const AttributeData* Attribute;
+    std::int32_t Visibility;  // 0 public
+};
 static_assert(offsetof(LobbyIdCallbackInfo, LobbyId) == 16, "EOS_Lobby_*CallbackInfo");
 static_assert(offsetof(LobbyDetailsInfo, MaxMembers) == 0x20, "EOS_LobbyDetails_Info");
 
@@ -98,6 +109,7 @@ using GetOwnerFn = const void* (*)(void* details, const VersionOnly*);
 using CopyAttributeFn = EosResult (*)(void* details, const CopyAttributeOptions*, Attribute** out);
 using ReleaseAttributeFn = void (*)(Attribute* attribute);
 using ReleaseDetailsFn = void (*)(void* details);
+using AddAttributeFn = EosResult (*)(void* modification, const AddAttributeOptions* options);
 // The room search, its options and its results: EOS's opaque handles and structs this file only passes on.
 struct LobbySearch;         // EOS_LobbySearchHandle
 struct LobbyDetailsHandle;  // EOS_LobbyDetailsHandle
@@ -124,6 +136,7 @@ struct Api {
     CopyAttributeFn copyAttribute = nullptr;
     ReleaseAttributeFn releaseAttribute = nullptr;
     ReleaseDetailsFn releaseDetails = nullptr;
+    AddAttributeFn addAttribute = nullptr;  // optional: without it rooms publish no kRoomSizeKey
     IsCompleteFn isComplete = nullptr;
     ToStringFn toString = nullptr;
     // What the game's imports pointed at before us: EOS itself, as this module is installed first.
@@ -191,6 +204,12 @@ void ReadDetails(void* details, LobbyFacts& facts, std::string* owner) {
         facts.searchType = attribute->Data->Value.AsInt64;
     }
     if (attribute) api.releaseAttribute(attribute);
+    const CopyAttributeOptions sizeKey{1, kRoomSizeKey};
+    Attribute* size = nullptr;
+    if (api.copyAttribute(details, &sizeKey, &size) == kEosSuccess && size && size->Data &&
+        size->Data->ValueType == kInt64 && size->Data->Value.AsInt64 > 0 && size->Data->Value.AsInt64 <= kMaxPlayers)
+        facts.roomSize = static_cast<std::uint32_t>(size->Data->Value.AsInt64);
+    if (size) api.releaseAttribute(size);
     if (owner) *owner = UserText(api.owner(details, &version));
 }
 
@@ -229,10 +248,10 @@ std::string KindText(LobbyKind kind, int capacity) {
 std::string FactsText(const LobbyFacts& facts) {
     char text[64]{};
     if (facts.hasSearchType)
-        _snprintf_s(text, _TRUNCATE, "MaxMembers %u, SEARCH_TYPE 0x%llX", facts.maxMembers,
-                    static_cast<unsigned long long>(facts.searchType));
+        _snprintf_s(text, _TRUNCATE, "MaxMembers %u, SEARCH_TYPE 0x%llX, room size %u", facts.maxMembers,
+                    static_cast<unsigned long long>(facts.searchType), facts.roomSize);
     else
-        _snprintf_s(text, _TRUNCATE, "MaxMembers %u, no SEARCH_TYPE yet", facts.maxMembers);
+        _snprintf_s(text, _TRUNCATE, "MaxMembers %u, no SEARCH_TYPE yet, room size %u", facts.maxMembers, facts.roomSize);
     return text;
 }
 
@@ -244,6 +263,7 @@ struct Current {
     const void* user = nullptr;
     std::string id;
     std::uint32_t createdCapacity = 0;  // 0: joined
+    int createdRoomSize = -1;           // what it was created as (NoteLobbyEntered), -1 joined or not known
     ULONGLONG nextBeat = 0;
     std::string owner;   // as last read
     bool copyLost = false;
@@ -379,6 +399,7 @@ struct GameCall {
     const void* user;
     std::string lobbyId;      // the lobby it is about
     std::uint32_t capacity;   // CreateLobby: MaxLobbyMembers
+    int roomSize = -1;        // CreateLobby: what hostmode created the room as (0 normal, n MultiSlot)
 };
 
 // Hands one run of EOS's completion to the game, with its own ClientData; the call goes after the final run.
@@ -448,8 +469,11 @@ void GameUpdated(const LobbyIdCallbackInfo* info) {
 
 void Entered(const LobbyIdCallbackInfo* info, const GameCall& call, const char* how) {
     if (info->ResultCode != kEosSuccess || !info->LobbyId) return;
-    NoteLobbyEntered(call.lobby, call.user, info->LobbyId, call.capacity);
-    if (call.capacity)
+    NoteLobbyEntered(call.lobby, call.user, info->LobbyId, call.capacity, call.roomSize);
+    if (call.capacity && call.roomSize > 0)
+        Log("LOBBY %s %s as a room for %d players by this machine (EOS lobby for %u)", IdText(info->LobbyId).c_str(), how,
+            call.roomSize, call.capacity);
+    else if (call.capacity)
         Log("LOBBY %s %s for %u players by this machine", IdText(info->LobbyId).c_str(), how, call.capacity);
     else
         Log("LOBBY %s %s", IdText(info->LobbyId).c_str(), how);
@@ -528,10 +552,48 @@ void DestroyLobbyHook(void* lobby, const void* options, void* clientData, LobbyI
     api.destroyLobby(lobby, options, call, &GameDestroyed);
 }
 
+std::atomic<RoomMemberCountFn> roomMemberCount{nullptr};
+
+bool AddCount(void* modification, const char* key, std::int64_t value) {
+    AttributeData data{};
+    data.ApiVersion = 1;
+    data.Key = key;
+    data.Value.AsInt64 = value;
+    data.ValueType = kInt64;
+    const AddAttributeOptions add{2, &data, 0};
+    const EosResult result = api.addAttribute(modification, &add);
+    static std::atomic<int> logged{0};
+    if (result != kEosSuccess && logged.fetch_add(1) < 4)
+        Log("LOBBY UpdateLobby: %s=%lld could not be added to the update (result %d)", key, static_cast<long long>(value), result);
+    return result == kEosSuccess;
+}
+
+// A MultiSlot room's own size in an update its owner makes (kRoomSizeKey): EOS holds 64 members at most, and a room
+// of two to four has a capacity a normal room could have. A room larger than an EOS lobby also publishes how many its
+// game has (kRoomMembersKey): Epic's lobby lists 64 at most, the room list shows this instead.
+void AddRoomSize(void* lobby, const void* options) {
+    const auto* update = static_cast<const UpdateLobbyOptions*>(options);
+    if (!api.addAttribute || !update || !update->LobbyModificationHandle) return;
+    AcquireSRWLockShared(&current.lock);
+    const LobbyKind kind = current.kind;
+    const int capacity = current.capacity;
+    const bool owner = current.owner.empty() ? current.createdCapacity != 0 : current.owner == UserText(current.user);
+    const void* user = current.user;
+    const std::string id = current.id;
+    ReleaseSRWLockShared(&current.lock);
+    if (!PublishesRoomSize(kind, owner) || capacity <= 0) return;
+    AddCount(update->LobbyModificationHandle, kRoomSizeKey, capacity);
+    if (capacity <= kEosLobbyMembers) return;
+    const RoomMemberCountFn count = roomMemberCount.load();
+    const std::uint32_t members = count ? count(lobby, user, id.c_str()) : 0;
+    if (members) AddCount(update->LobbyModificationHandle, kRoomMembersKey, members);
+}
+
 void UpdateLobbyHook(void* lobby, const void* options, void* clientData, LobbyIdCallback callback) {
     AcquireSRWLockShared(&current.lock);
     const std::string id = current.id.empty() ? std::string("?") : current.id;
     ReleaseSRWLockShared(&current.lock);
+    AddRoomSize(lobby, options);
     api.updateLobby(lobby, options, new GameCall{callback, clientData, lobby, nullptr, id, 0}, &GameUpdated);
 }
 
@@ -539,7 +601,8 @@ void CreateLobbyHook(void* lobby, const void* options, void* clientData, LobbyId
     const auto* create = static_cast<const CreateLobbyOptionsHead*>(options);
     if (!create) return api.createLobby(lobby, options, clientData, callback);
     api.createLobby(lobby, options,
-                    new GameCall{callback, clientData, lobby, create->LocalUserId, std::string(), create->MaxLobbyMembers},
+                    new GameCall{callback, clientData, lobby, create->LocalUserId, std::string(), create->MaxLobbyMembers,
+                                 CreatedRoomSize() > 0 ? CreatedRoomSize() : -1},
                     &Created);
 }
 
@@ -665,14 +728,19 @@ LobbyKind KindOf(const LobbyFacts& facts) {
     using enum LobbyKind;
     if (const LobbyKind kind = facts.hasSearchType ? SearchTypeKind(facts.searchType) : Unknown; kind != Unknown)
         return kind;
+    if (facts.roomSize) return MultiSlot;
     if (!facts.maxMembers) return Unknown;
     return facts.maxMembers > static_cast<std::uint32_t>(kVanillaPlayers) ? MultiSlot : Normal;
 }
 
 int CapacityToKeep(const LobbyFacts& facts) {
+    const auto size = static_cast<int>(facts.roomSize);
+    if (size >= 2 && size <= kMaxPlayers) return size;
     const auto members = static_cast<int>(facts.maxMembers);
-    return members > kVanillaPlayers && members <= kMaxPlayers ? members : kMaxPlayers;
+    return members >= 2 && members <= kMaxPlayers ? members : kMaxPlayers;
 }
+
+bool PublishesRoomSize(LobbyKind kind, bool owner) { return kind == LobbyKind::MultiSlot && owner; }
 
 RoomUpdate DecideRoomUpdate(std::uintptr_t room) {
     RoomLobby lobby;
@@ -692,10 +760,12 @@ RoomUpdate DecideRoomUpdate(std::uintptr_t room) {
     // what it created the lobby as, and nothing else does.
     AcquireSRWLockShared(&current.lock);
     const std::uint32_t created = current.id == lobby.id ? current.createdCapacity : 0;
+    const int createdSize = current.id == lobby.id ? current.createdRoomSize : -1;
     ReleaseSRWLockShared(&current.lock);
     if (created) {
         LobbyFacts creation;
         creation.maxMembers = created;
+        if (createdSize > 0) creation.roomSize = static_cast<std::uint32_t>(createdSize);
         const RoomUpdate update{KindOf(creation), CapacityToKeep(creation)};
         char detail[48]{};
         _snprintf_s(detail, _TRUNCATE, "created for %u players", created);
@@ -711,9 +781,13 @@ LobbyKind CurrentLobbyKind() { return static_cast<LobbyKind>(currentKind.load())
 int CurrentLobbyCapacity() { return currentCapacity.load(); }
 bool CreatedCurrentLobby() { return createdCurrent.load(); }
 
-void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::uint32_t createdCapacity) {
+void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::uint32_t createdCapacity,
+                      int createdRoomSize) {
     LobbyFacts creation;
     creation.maxMembers = createdCapacity;
+    if (createdCapacity && createdRoomSize > 0) creation.roomSize = static_cast<std::uint32_t>(createdRoomSize);
+    // Created as a normal room: a capacity above four (not seen; kept safe) says nothing more.
+    if (createdCapacity && createdRoomSize == 0) creation.maxMembers = static_cast<std::uint32_t>(kVanillaPlayers);
     // A lobby just created is what it was created as until the first read says otherwise.
     const LobbyKind kind = createdCapacity ? KindOf(creation) : LobbyKind::Unknown;
     AcquireSRWLockExclusive(&current.lock);
@@ -721,6 +795,7 @@ void NoteLobbyEntered(void* lobby, const void* user, const char* lobbyId, std::u
     current.user = user;
     current.id = lobbyId ? lobbyId : "";
     current.createdCapacity = createdCapacity;
+    current.createdRoomSize = createdCapacity ? createdRoomSize : -1;
     current.nextBeat = GetTickCount64() + kBeatMs;
     current.owner.clear();
     current.copyLost = false;
@@ -738,6 +813,7 @@ void NoteLobbyLeft() {
     current.user = nullptr;
     current.id.clear();
     current.createdCapacity = 0;
+    current.createdRoomSize = -1;
     current.owner.clear();
     current.copyLost = false;
     current.kind = LobbyKind::Unknown;
@@ -746,6 +822,8 @@ void NoteLobbyLeft() {
     createdCurrent.store(false);
     ReleaseSRWLockExclusive(&current.lock);
 }
+
+void SetRoomMemberCountSource(RoomMemberCountFn source) { roomMemberCount = source; }
 
 bool InstallLobbyState(HMODULE game, ImportRedirect redirect) {
     const HMODULE eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
@@ -763,6 +841,9 @@ bool InstallLobbyState(HMODULE game, ImportRedirect redirect) {
     ok &= Resolve(eos, "EOS_EResult_IsOperationComplete", api.isComplete);
     ok &= Resolve(eos, "EOS_EResult_ToString", api.toString);
     if (!ok) return false;
+    api.addAttribute = reinterpret_cast<AddAttributeFn>(
+        reinterpret_cast<void*>(GetProcAddress(eos, "EOS_LobbyModification_AddAttribute")));
+    if (!api.addAttribute) Log("LOBBY: EOS export EOS_LobbyModification_AddAttribute not found; rooms publish no room size");
     api.ready = true;
     // Leaving first, entering last, as syncmarker.cpp does: a lobby entered can always be left again.
     ok = Redirect(game, redirect, "EOS_Lobby_LeaveLobby", &LeaveLobbyHook, api.leaveLobby);

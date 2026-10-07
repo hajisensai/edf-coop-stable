@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -20,6 +21,7 @@
 #include "fakemembers.h"
 #include "hostdataopen.h"
 #include "weaponguard.h"
+#include "userslots.h"
 #include "hostdatanet.h"
 #include "hostmode.h"
 #include "joinlog.h"
@@ -27,10 +29,16 @@
 #include "loaderproxy.h"
 #include "lobbystate.h"
 #include "hud.h"
+#include "identity.h"
 #include "midhook.h"
 #include "modfile.h"
 #include "mission.h"
 #include "netlog.h"
+#include "netaoi.h"
+#include "netcompress.h"
+#include "netfeature.h"
+#include "netplayer_game.h"
+#include "nettraffic.h"
 #include "packetfit.h"
 #include "patches.h"
 #include "peertimeout.h"
@@ -40,7 +48,12 @@
 #include "smoothing.h"
 #include "updatecheck.h"
 #include "spawn.h"
+#include "hitauthgame.h"
+#include "netfeature.h"
+#include "widecmp.h"
 #include "coop.h"
+#include "netfeature.h"
+#include "networld.h"
 #include "src/config.h"
 #include "src/dn_part.h"
 #include "src/log.h"
@@ -187,6 +200,12 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
     patches.insert(patches.end(), sessionPatches.begin(), sessionPatches.end());
+    // Bounds of the room size an imm8 cannot hold (widecmp.h): the room tables always, the mission phase with it.
+    std::vector<WideCompare> compares = SessionCompares();
+    if (mission) {
+        const auto missionCompares = MissionCompares();
+        compares.insert(compares.end(), missionCompares.begin(), missionCompares.end());
+    }
     std::vector<Hook> hooks;
     for (const auto& site : HostModeHooks()) hooks.push_back({site, HostModeHookHandler(site.rva)});
     if (armor)
@@ -197,9 +216,12 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
     if (hostData)
         for (const auto& site : HostDataHooks()) hooks.push_back({site, &HostDataOpenHandler});
+    for (const auto& site : UserSlotHooks()) hooks.push_back({site, UserSlotHookHandler(site.rva)});
     const auto guard = WeaponGuardHooks();
     hooks.push_back({guard[0], &RoomWeaponsHandler});
     if (!mission) hooks.push_back({guard[1], &MissionWeaponsHandler});
+    // Netcode W4 (networld.h): its sites are checked on their own, so a mismatch turns only it off.
+    for (const auto& site : VerifiedWorldHooks(base)) hooks.push_back({site, WorldHookHandler(site.rva)});
     if (mission) {
         const auto missionPatches = MissionPatches();
         patches.insert(patches.end(), missionPatches.begin(), missionPatches.end());
@@ -215,14 +237,17 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
             const auto hudPatches = HudColourPatches();
             patches.insert(patches.end(), hudPatches.begin(), hudPatches.end());
             for (const auto& site : HudColourHooks()) hooks.push_back({site, HudColourHookHandler(site.rva)});
-        } else {
-            for (const auto& site : HudIndexWrapHooks()) hooks.push_back({site, MissionHookHandler(site.rva)});
         }
+        // The HUD's tables hold kHudTablePlayers with the archive and four without it; the index wraps around them
+        // either way, so no room size reads past them.
+        SetHudTableSize(hudColours ? kHudTablePlayers : kVanillaPlayers);
+        for (const auto& site : HudIndexWrapHooks()) hooks.push_back({site, MissionHookHandler(site.rva)});
         if (spawns)
             for (const auto& site : SpawnHooks()) hooks.push_back({site, SpawnHookHandler(site.rva)});
         if (ghosts > 0)
             for (const auto& site : GhostHooks()) hooks.push_back({site, GhostHookHandler(site.rva)});
         for (const auto& site : PacketFitHooks()) hooks.push_back({site, PacketFitHookHandler(site.rva)});
+        for (const auto& site : BvmPlayerTableHooks()) hooks.push_back({site, BvmPlayerTableHandler(site.rva)});
     }
     std::vector<Redirect> redirects;
     const auto guest = GuestCalls();
@@ -247,6 +272,9 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         if (ghosts > 0)
             for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
     }
+    // Netcode rewrite W1: the controller's plaintext datagrams, for their class and the per-type traffic log.
+    for (const auto& call : NetTrafficCalls()) redirects.push_back({call, NetTrafficCallHandler(call.rva)});
+    for (const auto& call : NetCompressCalls()) redirects.push_back({call, NetCompressCallHandler(call.rva)});
     std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook)},
                                  {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)}};
     if (mission)
@@ -265,6 +293,13 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         if (!hook.handler || site.original.size() < 5 || site.displacedOffset + site.displacedSize > site.original.size() ||
             site.rva + site.original.size() > kImageSize || !Matches(base + site.rva, verify)) {
             Log("REFUSED: EDF+%X (%s) is not the expected code; nothing was changed", site.rva, site.name);
+            return false;
+        }
+    }
+    for (const auto& site : compares) {
+        const Patch verify{site.name, site.rva, site.original, site.original};
+        if (!DecodeWideCompare(site).valid || site.rva + site.original.size() > kImageSize || !Matches(base + site.rva, verify)) {
+            Log("REFUSED: EDF+%X (%s) is not the expected compare; nothing was changed", site.rva, site.name);
             return false;
         }
     }
@@ -306,6 +341,17 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         auto bytes = thunk ? JumpBytes(at, thunk, site.original.size()) : std::vector<std::uint8_t>{};
         if (bytes.empty()) {
             Log("REFUSED: hook thunk for %s out of reach; nothing was changed", site.name);
+            thunks.Release();
+            return false;
+        }
+        writes.push_back({site.name, site.rva, site.original, std::move(bytes)});
+    }
+    for (const auto& site : compares) {
+        const unsigned char* at = base + site.rva;
+        const unsigned char* cave = EmitWideCompare(thunks, site, at);
+        auto bytes = cave ? JumpBytes(at, cave, site.original.size()) : std::vector<std::uint8_t>{};
+        if (bytes.empty()) {
+            Log("REFUSED: compare cave for %s out of reach; nothing was changed", site.name);
             thunks.Release();
             return false;
         }
@@ -354,9 +400,9 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     }
     // One line instead of one per site: the sites are the same on every start, a refused or failed one is logged
     // by name above, and the stub address places a crash inside a stub or hook thunk.
-    Log("Patched EDF.dll: %zu sites (%zu redirected calls, %zu hooks, %zu code patches, %zu vtable slots); stubs and hook "
-        "thunks at %p (%zu bytes)", writes.size(), redirects.size(), hooks.size(), patches.size(), slots.size(),
-        static_cast<const void*>(thunks.Base()), thunks.Used());
+    Log("Patched EDF.dll: %zu sites (%zu redirected calls, %zu hooks, %zu widened compares, %zu code patches, %zu vtable "
+        "slots); stubs and hook thunks at %p (%zu bytes)", writes.size(), redirects.size(), hooks.size(), compares.size(),
+        patches.size(), slots.size(), static_cast<const void*>(thunks.Base()), thunks.Used());
     return true;
 }
 
@@ -443,7 +489,7 @@ int ReadRoomSize(const wchar_t* iniPath) {
         return 8;
     }
     if (ValidRoomSize(size)) return size;
-    Log("[MultiSlot] RoomSize=%d is not 0, 8, 10, 12, 16, 24 or 32; hosting normal rooms", size);
+    Log("[MultiSlot] RoomSize=%d is not 0 or 2..%d; hosting normal rooms", size, kMaxPlayers);
     return 0;
 }
 
@@ -578,12 +624,13 @@ bool LoadRooms(const wchar_t* iniPath) {
         _snwprintf_s(copyArmorHint, _TRUNCATE, L"%ls%ls%ls", keyName, keyName[0] && padName[0] ? L"/" : L"",
                      padName);
     }
-    // 0.4.x let the INI multiply the 4-player factor; 0.5.0 follows fixed rules every player shares.
-    for (int players = kVanillaPlayers + 1; players <= kMaxPlayers; ++players) {
+    // 0.4.x let the INI multiply the 4-player factor; 0.5.0 follows fixed rules every player shares. Those builds had
+    // at most 32 slots, so no INI has a key past Scale32.
+    for (int players = kVanillaPlayers + 1; players <= 32; ++players) {
         wchar_t key[16];
         _snwprintf_s(key, _TRUNCATE, L"Scale%d", players);
         if (IniText(iniPath, L"Mission", key, L"").size()) {
-            Log("[Mission] Scale5..Scale%d are no longer used: 5+ players follow fixed rules (see README)", kMaxPlayers);
+            Log("[Mission] Scale5..Scale32 are no longer used: 5+ players follow fixed rules (see README)");
             break;
         }
     }
@@ -610,12 +657,17 @@ bool LoadRooms(const wchar_t* iniPath) {
     InitFakeMembers(base);
     InitMission(base, ghosts);
     InitPacketFit(base);
+    InitNetTraffic(base);
+    InitNetFeature(iniPath);
+    InitNetCompress(base, NetFeatureEnabledLocally(NetFeature::Compression));
     if (const UINT budget = GetPrivateProfileIntW(L"Test", L"SplitSyncBudget", 0, iniPath); budget && mission) {
         SetSyncBudget(budget);
         Log("TEST SplitSyncBudget=%u: start messages you host keep at most that many bytes inline and send the "
             "other loadout records beside them, even in small rooms (0 = normal)", budget);
     }
     InitWeaponGuard(base);
+    // Netcode W4 (networld.h): enemy random state interval and the insect pose interval (two immediate operands).
+    InitWorld(base, iniPath);
     InitJoinLog(base);
     InitFinalHello(base);
     InitPeerTimeout(base);
@@ -630,7 +682,10 @@ bool LoadRooms(const wchar_t* iniPath) {
         return false;
     }
     KeepMenuLayout(true);
-    Log("Joining: normal rooms and MultiSlot rooms of every size from EDF6Coop 2.3.0 on are joinable, and the room "
+    // Hit authority (hitauthgame.h, docs/net-re/damage.md): hooks and a thunk page of its own, so a site that is
+    // not the expected code leaves only it off and the game decides hits as it always did.
+    InstallHitAuthority(base);
+    Log("Joining: normal rooms and MultiSlot rooms of every size from this 1024-slot EDF6Coop on are joinable, and the room "
         "list shows both whatever the setting");
     Log("Rooms: %d user slots, packet sessions and voice chat HUD records (P2P links to every member of a %d-player "
         "room; 4 or fewer: the extra ones stay empty)", kMaxPlayers, kMaxPlayers);
@@ -639,7 +694,8 @@ bool LoadRooms(const wchar_t* iniPath) {
         _snprintf_s(hosting, _TRUNCATE, "%dPlayer MOD ON", roomSize);
     else
         _snprintf_s(hosting, _TRUNCATE, "Player MOD OFF");
-    Log("Hosting: %s (%ls on a menu screen outside a room steps OFF/8/10/12/16/24/32; inside one those page through "
+    Log("Hosting: %s (%ls on a menu screen outside a room steps OFF/8/10/12/16/24/32/48/64/128/256/512/1024; inside one "
+        "those page through "
         "the members instead): OFF = normal 4-player rooms anyone can join, N = MultiSlot rooms for N players, "
         "hidden from players without this mod",
         hosting, hostModeHint);
@@ -656,8 +712,8 @@ bool LoadRooms(const wchar_t* iniPath) {
         Log("Mission: players 5-%d get loadout sidecars, player slots 5-%d and spawn points (4 or fewer: unchanged)",
             kMaxPlayers, kMaxPlayers);
         if (hudColours)
-            Log("HUD: one colour per player for all %d - status lamp, chat balloon and radar marker (1-4 the game's own)",
-                kMaxPlayers);
+            Log("HUD: one colour per player for players 1-%d - status lamp, chat balloon and radar marker (1-4 the game's "
+                "own); players %d+ share those colours in turn", kHudTablePlayers, kHudTablePlayers + 1);
         else
             Log("HUD: players 5-%d share the colours of players 1-4", kMaxPlayers);
         Log("Mission: 5+ players online - enemy durability, damage and speed stay at the 4-player values");
@@ -680,6 +736,7 @@ bool LoadRooms(const wchar_t* iniPath) {
         Log("Test: GhostPlayers=%d - a mission started alone online gets %d idle copies of you as extra players", ghosts, ghosts);
     // First, so its wrappers sit next to EOS: what a room update publishes is read from the lobby, and a
     // machine never stays behind in a lobby it closed or left (lobbystate.h).
+    SetRoomMemberCountSource(&GameRoomMemberCount);
     if (InstallLobbyState(game, &RedirectGameImport))
         Log("Lobby state: room updates keep the lobby's own kind and size; a close of a lobby someone else owns, "
             "or one that fails, leaves it");
@@ -713,6 +770,39 @@ bool LoadRooms(const wchar_t* iniPath) {
     // this machine reads a split message: only true once both P2P imports are ours.
     const bool lobbyGlue = (imports == 2 || hostData) && InstallSyncMarker(game, &RedirectGameImport, imports == 2);
     const bool marker = imports == 2 && lobbyGlue;
+    // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
+    StartNetFeature(lobbyGlue);
+    // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
+    // datagrams follow interest management within each path's budget (netaoi.h).
+    dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });
+    // Member slots (userslots.h): a host sends its game's slots, every other game adds each member in the host's slot.
+    dn::setGameSlotsSource(&GameSlotTable);
+    SetUserSlotSources([](const std::string& member) { return dn::hostSlotOf(member); }, &ProductUserIdText);
+    // [Test] RoomCapacity: the room's size where the test network's lobby cannot say it (gamenet joinfull).
+    if (const UINT testCapacity = GetPrivateProfileIntW(L"Test", L"RoomCapacity", 0, iniPath)) {
+        static UINT capacity = 0;
+        capacity = testCapacity;
+        dn::setRoomCapacitySource([]() -> std::uint32_t { return capacity; });
+        Log("TEST RoomCapacity=%u: the room holds that many whatever its lobby says", testCapacity);
+    }
+    InstallNetInterest(GetPrivateProfileIntW(L"Netcode", L"Interest", 1, iniPath) != 0);
+    // I1: a start message too large even for stubs sends every record in bulk while the room reads fragments.
+    static const bool dropRecordsBulk = GetPrivateProfileIntW(L"Test", L"DropRecordsBulk", 0, iniPath) != 0;
+    if (dropRecordsBulk) Log("TEST DropRecordsBulk=1: the records of start messages this machine hosts are never sent");
+    SetBulkRecords([] { return NetFeatureActive(NetFeature::Fragments); },
+                   [](const void* remote, std::uint16_t tag, const void* data, std::size_t size) {
+                       char id[40]{};
+                       if (dropRecordsBulk) return true;  // [Test]: "sent", and lost
+                       return remote && *ProductUserIdText(remote, id, sizeof(id)) && SendBulk(id, tag, data, size);
+                   },
+                   [](const void* peer, std::size_t* total) -> std::uint64_t {
+                       char id[40]{};
+                       return peer && *ProductUserIdText(peer, id, sizeof(id)) ? dn::bulkIncoming(id, kRecordsBulkTag, total)
+                                                                               : 0;
+                   });
+    SetBulkHandlerForTag(kRecordsBulkTag, [](const std::string&, std::uint16_t, const std::uint8_t* data, std::size_t size) {
+        TakeRecordsBulk(data, size);
+    });
     if (marker) SetSplitSyncReaders(&ReadsSplitSync);
     if (mission) {
         if (imports == 2)
@@ -748,6 +838,9 @@ bool LoadRooms(const wchar_t* iniPath) {
     else
         Log("Remote players: the game's own position smoothing is untouched "
             "([Smoothing] RemotePlayerPercent in the INI raises it; 0 = leave alone)");
+    // W2 player sync (netplayer_game.h): its own slots and checks; refused alone, the rest stays as it is.
+    if (!InstallPlayerSync(base, ReadPlayerSyncSettings(iniPath)))
+        Log("PLAYER sync: not installed; every player keeps the game's own sync");
     // EDF.dll ends the game with TerminateProcess, so the shutdown marker needs that import wrapped, or
     // it never fires and every start wrongly reports the last one as cut (1.5.2-1.5.8 did exactly that:
     // 15 such lines in one friend's log, 9 in another's, none of them real).
@@ -870,6 +963,18 @@ bool LoadCoop(PluginInfo* info) {
 // player `index` - its own GameStatus records for 1-4, a sidecar of this plugin from 5 on.
 extern "C" __declspec(dllexport) const std::uint8_t* EDF6Coop_LoadoutRecord(int index) {
     return multislot::LoadoutRecord(index);
+}
+
+// Read-only, for the game-code tests (tests/gamenet): the slot the room's host's game has `member` in, as this machine
+// follows it (-1: not following the host's slots, or the host's list does not have it).
+extern "C" __declspec(dllexport) int EDF6Coop_HostSlot(const char* member) {
+    return member ? dn::hostSlotOf(member) : -1;
+}
+
+// For the game-code tests (tests/gamenet): sends `size` bytes to `remote` in bulk (netfeature.h SendBulk).
+extern "C" __declspec(dllexport) bool EDF6Coop_SendBulk(const char* remote, std::uint16_t tag, const void* data,
+                                                        std::size_t size) {
+    return remote && multislot::SendBulk(remote, tag, data, size);
 }
 
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo* info) {

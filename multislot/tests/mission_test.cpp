@@ -7,7 +7,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "../src/mission.h"
@@ -110,7 +112,7 @@ int main() {
     Check(sidecars, "the records above four land in their own sidecars, outside GameStatus");
     Check(LoadoutSidecar(5) - LoadoutSidecar(4) >= static_cast<std::ptrdiff_t>(kLoadoutRecordSize), "sidecars do not overlap");
     const std::uint64_t scratch = records + LoadoutRecordOffset(kMaxPlayers);
-    Check(records + LoadoutRecordOffset(-1) == scratch && records + LoadoutRecordOffset(1000) == scratch &&
+    Check(records + LoadoutRecordOffset(-1) == scratch && records + LoadoutRecordOffset(kMaxPlayers + 1000) == scratch &&
               Pointer(scratch) != LoadoutSidecar(4),
           "invalid indices share a scratch record");
 
@@ -425,6 +427,61 @@ int main() {
     InitMission(image, 0);
     GhostHookHandler(0x790BA6)(&count);
     Check(count.rax == 1 && ActiveGhosts() == 0, "GhostPlayers=0 leaves the count alone");
+
+    // Room size: the script VM's player table reads (BvmPlayerTableHooks), the HUD index wrap and the spawn layout.
+    std::uint64_t entries[4 * 3]{};
+    for (int i = 0; i < 4; ++i) entries[i * 3 + 2] = 0x1000 + static_cast<std::uint64_t>(i);
+    const auto entryAt = [&](std::int64_t i) {
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&entries[i * 3 + 2]));
+    };
+    Check(BvmPlayerEntry(0, entryAt(0)) == 0x1000 && BvmPlayerEntry(3, entryAt(3)) == 0x1003,
+          "the script VM's entries 0-3 read as the game reads them");
+    Check(BvmPlayerEntry(4, 0x10) == 0 && BvmPlayerEntry(1023, 0x10) == 0 && BvmPlayerEntry(-1, 0x10) == 0,
+          "an entry past the four (or below zero) is empty and is never read");
+    CpuContext bvmLoop{};
+    bvmLoop.r12 = 900;
+    bvmLoop.r8 = 900 * 3;
+    bvmLoop.r15 = 0x10;  // would fault if read
+    bvmLoop.rdx = 0xDEAD;
+    BvmPlayerTableHandler(0x21F3CF)(&bvmLoop);
+    Check(bvmLoop.rdx == 0, "21F380's loop finds player 901's entry empty");
+    CpuContext indexed{};
+    indexed.rax = 2;
+    indexed.r8 = entryAt(2) - 0x178;
+    BvmPlayerTableHandler(0x222761)(&indexed);
+    Check(indexed.rdx == 0x1002, "222740 reads entry 2 as the game does");
+    indexed.rax = static_cast<std::uint64_t>(-3);
+    BvmPlayerTableHandler(0x228AED)(&indexed);
+    Check(indexed.rdx == 0, "a negative script index is an empty entry");
+    Check(BvmPlayerTableHandler(0x1234) == nullptr, "unknown BVM site has no handler");
+
+    Check(WrapHudIndex(0, 32) == 0 && WrapHudIndex(31, 32) == 31 && WrapHudIndex(32, 32) == 0 &&
+              WrapHudIndex(1023, 32) == 31 && WrapHudIndex(5, 4) == 1 && WrapHudIndex(-1, 32) == -1,
+          "the HUD index wraps around the tables; no player stays -1");
+
+    // CreatePlayers' normalised table: player 1 at the origin, 2-4 three metres out.
+    const float spawnTable[16] = {0, 0, 0, 1, 3, 0, 0, 1, 0, 0, 3, 1, -3, 0, 0, 1};
+    float spot[4]{};
+    SpawnOffset(1, spawnTable, spot);
+    Check(spot[0] == 3 && spot[2] == 0, "players 1-4 keep the game's offsets");
+    SpawnOffset(4, spawnTable, spot);
+    Check(spot[0] == 6 && spot[2] == 0, "player 5 stands twice as far as player 2, as before");
+    SpawnOffset(31, spawnTable, spot);
+    Check(spot[0] == 33 && spot[2] == 0, "player 32 stands on player 2's line, as every 32-slot version placed it");
+    bool apart = true, within = true;
+    std::vector<std::pair<float, float>> placed;
+    for (std::uint32_t i = kSpawnLinePlayers; i < static_cast<std::uint32_t>(kMaxPlayers); ++i) {
+        SpawnOffset(i, spawnTable, spot);
+        const float r = std::sqrt(spot[0] * spot[0] + spot[2] * spot[2]);
+        within = within && r < 200.0f;
+        for (const auto& seat : placed) {
+            const float dx = seat.first - spot[0], dz = seat.second - spot[2];
+            apart = apart && dx * dx + dz * dz > 1.0f;
+        }
+        placed.emplace_back(spot[0], spot[2]);
+    }
+    Check(within, "players 33-1024 stand within 200 m of player 1");
+    Check(apart, "players 33-1024 never share a spot");
 
     VirtualFree(image, 0, MEM_RELEASE);
     if (failures) {

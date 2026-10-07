@@ -8,6 +8,10 @@
 #include <vector>
 
 #include "net_shared.h"
+#include "../../src/netprotocol.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -49,6 +53,30 @@ bool PrepareMachine(const std::wstring& work, const std::wstring& plugin, const 
 }
 
 std::wstring Wide(const std::string& text) { return std::wstring(text.begin(), text.end()); }
+
+// A UDP port nothing on this machine uses now, for a scenario's direct-link host (its INI says @PORT@): other
+// test runs on the same machine get ports of their own.
+std::string FreeUdpPort() {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    const SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in6 any{};
+    any.sin6_family = AF_INET6;
+    int len = sizeof(any);
+    std::string port = "0";
+    if (s != INVALID_SOCKET && bind(s, reinterpret_cast<sockaddr*>(&any), sizeof(any)) == 0 &&
+        getsockname(s, reinterpret_cast<sockaddr*>(&any), &len) == 0)
+        port = std::to_string(ntohs(any.sin6_port));
+    if (s != INVALID_SOCKET) closesocket(s);
+    return port;
+}
+
+// @PORT@ is the scenario's direct-link host's port, @PORT2@ a second one (a member that hosts once it owns the room).
+std::string WithPort(std::string ini, const std::string& port, const std::string& port2) {
+    for (std::size_t at = ini.find("@PORT2@"); at != std::string::npos; at = ini.find("@PORT2@", at)) ini.replace(at, 7, port2);
+    for (std::size_t at = ini.find("@PORT@"); at != std::string::npos; at = ini.find("@PORT@", at)) ini.replace(at, 6, port);
+    return ini;
+}
 
 bool Spawn(Spawned& machine, const std::wstring& exe, const std::wstring& gameFolder, const std::wstring& work,
            const std::string& section) {
@@ -138,6 +166,16 @@ std::string Result(const Spawned& machine, const std::string& key) {
 #include "scenarios.h"
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--log-stats") {
+        const std::string idle = "[DN] NETCLASS datagrams: state 0 (0 kbps) event 0 (0 kbps) control 1 (0 kbps)\n";
+        const std::string active = "[DN] NETCLASS datagrams: state 16 (12 kbps) event 2 (1 kbps) control 0 (0 kbps)\n";
+        Check(StateDatagrams(active + idle) == 16, "an idle final interval preserves earlier state traffic");
+        Check(StateDatagrams(idle + active + active + idle) == 32, "all active intervals contribute their real counts");
+        Check(StateDatagrams(idle + idle) == 0, "control-only traffic never passes the state assertion");
+        Check(StateDatagrams("") == 0, "missing statistics never pass the state assertion");
+        Check(StateDatagrams("NETTYPE 0x02800 16 records\n" + idle) == 0, "record observations alone are not classified datagrams");
+        return failures ? 1 : 0;
+    }
     if (argc < 6) {
         std::printf("usage: GameNetTests <game folder> <EDF6Coop.dll> <GameMachine.exe> <work folder> <scenario>\n");
         return 2;
@@ -182,12 +220,15 @@ int wmain(int argc, wchar_t** argv) {
                                  "EDF6NET_CHATTER", "EDF6NET_RUSH"})
         SetEnvironmentVariableA(variable, nullptr);
     for (const auto& [variable, value] : chosen->network) SetEnvironmentVariableA(variable.c_str(), value.c_str());
+    const std::string port = FreeUdpPort();  // a direct-link host's, when its INI asks for one
+    std::string port2 = FreeUdpPort();
+    for (int tries = 0; port2 == port && tries < 8; ++tries) port2 = FreeUdpPort();
     for (const auto& seat : chosen->seats) {
         Spawned machine;
         machine.user = seat.user;
         machine.role = seat.role;
         const std::wstring home = folder + L"\\" + Wide(seat.user);
-        Check(PrepareMachine(home, plugin, seat.ini), seat.user + ": work folder prepared");
+        Check(PrepareMachine(home, plugin, WithPort(seat.ini, port, port2)), seat.user + ": work folder prepared");
         machines.push_back(machine);
         for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), value.c_str());
         SetEnvironmentVariableA("EDF6NET_SEAT", std::to_string(machines.size() - 1).c_str());

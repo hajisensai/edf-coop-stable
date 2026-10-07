@@ -49,6 +49,9 @@ public:
     void setAddress(const std::string& address);
     // The commitment of this player's direct-link identity, published by every player. Thread-safe.
     void setIdentity(const std::string& commitment);
+    // What we publish: the address we host on ("" when not hosting) and our identity commitment. Thread-safe.
+    std::string ownAddress() const;
+    std::string ownIdentity() const;
 
     // Publishes our attributes when something changed. EOS calls: run on the EOS tick only.
     void tick();

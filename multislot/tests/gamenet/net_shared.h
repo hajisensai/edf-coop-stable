@@ -14,7 +14,9 @@
 namespace gamenet {
 
 constexpr std::uint32_t kMagic = 0x4E364445;  // "ED6N"
-constexpr int kMaxMachines = 8;
+// Rooms of up to 32 machines (docs/net-re/roomsize.md): a 32-player start sync is the largest one run here; each
+// machine is a process with the game's EDF.dll loaded, about 0.2 GB.
+constexpr int kMaxMachines = 32;
 constexpr int kMaxAttributes = 16;
 constexpr std::size_t kUserText = 33;
 constexpr std::size_t kSocketText = 33;
@@ -34,8 +36,29 @@ constexpr const char* kDelayVariable = "EDF6NET_DELAY";
 // "<bytes>:<count>" - each machine loses its first <count> unreliable packets of at least <bytes> (EOS delivers
 // unreliable packets at most once; the game resends what it needs).
 constexpr const char* kDropVariable = "EDF6NET_DROP";
+// "<user>:<ms>" - everything this machine receives from <user> reaches it that much later (set per seat): its P2P
+// handshake with that member ends late, while the others' packets come at once.
+constexpr const char* kDelayFromVariable = "EDF6NET_DELAY_FROM";
 // "<ms>" - a member's attribute reaches the other members that much later (Epic's lobby service relays them).
 constexpr const char* kLobbyDelayVariable = "EDF6NET_LOBBY_DELAY";
+// "<n>" - Epic's lobby holds at most n members whatever the room asks for (rooms above Epic's 64, played small).
+constexpr const char* kLobbyCapVariable = "EDF6NET_LOBBY_CAP";
+// "<status>[,<status>...]:<ms>" - this machine hears those member statuses (EOS_ELobbyMemberStatus: 0 joined, 1 left,
+// 4 promoted, ...) that much later than they happen (Epic's lobby service late with one member's notifications).
+constexpr const char* kStatusDelayVariable = "EDF6NET_STATUS_DELAY";
+// "1" - a member's LEFT reaches this machine only together with the next member's JOINED, in the same tick (slotchurn:
+// the host's game then frees a slot and fills it in one tick, and its next room message has both).
+constexpr const char* kStatusPairVariable = "EDF6NET_STATUS_PAIR";
+// "<n>" - EDF6NET_STATUS_DELAY applies only once this machine has seen the room hold n members (the room fills as usual).
+constexpr const char* kStatusDelayAfterVariable = "EDF6NET_STATUS_DELAY_AFTER";
+// "1" - once the room filled (EDF6NET_STATUS_DELAY_AFTER), a member's JOINED reaches this machine only once its
+// EDF6Coop follows the host's member slots and knows that member's slot (EDF6Coop_HostSlot), and a LEFT only right after
+// the next JOINED: the order "Epic's join of the newcomer, with its slot known, before Epic's leave of the member whose
+// slot it takes" made by the test, not by timing.
+constexpr const char* kJoinWhenSlottedVariable = "EDF6NET_JOIN_WHEN_SLOTTED";
+// "<member>" - Epic's PROMOTED reaches this machine only once its EDF6Coop follows a host list without the old owner and
+// with <member> (EDF6Coop_HostSlot): the new host's list comes before PROMOTED, made by the test, not by timing.
+constexpr const char* kPromotedAfterSlotVariable = "EDF6NET_PROMOTED_AFTER_SLOT";
 
 struct Attribute {
     char key[kKeyText];
@@ -57,6 +80,7 @@ struct Lobby {
     std::uint32_t count;
     Member members[kMaxMachines];
     std::uint32_t version;  // bumped on every change
+    Attribute attributes[kMaxAttributes];  // the lobby's own (its owner sets them), what a search result shows
 };
 
 // One packet as it travels: a header, then `size` bytes.
@@ -93,6 +117,7 @@ struct Network {
     std::uint32_t overflowed;  // packets refused because their receiver's inbox was full
     std::uint32_t dropped;   // unreliable packets the network lost on purpose (EDF6NET_DROP)
     std::uint32_t finished;  // machines done with their part (FakeNet_Finish)
+    std::uint32_t ready;     // machines ready for the start sync (FakeNet_Ready)
     Lobby lobby;
     Station machines[kMaxMachines];
     WireLog wire;

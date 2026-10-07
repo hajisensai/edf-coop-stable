@@ -35,6 +35,13 @@ const std::uint8_t* LoadoutSidecar(int index);  // nullptr outside 4..kMaxPlayer
 // before the game made its GameStatus. For the game-code tests (EDF6Coop_LoadoutRecord).
 const std::uint8_t* LoadoutRecord(std::int64_t index);
 
+// The entries the mission script VM's player table has (patches.h BvmPlayerTableHooks), and what an entry read of
+// player `index` at `entry` (the address of its control block pointer, entry base + 0x10) gives: the pointer there
+// for 0..3, null (an empty entry) for anything else.
+constexpr std::int64_t kBvmPlayerEntries = 4;
+std::uint64_t BvmPlayerEntry(std::int64_t index, std::uint64_t entry);
+MidHandler BvmPlayerTableHandler(std::uint32_t rva);
+
 // Mid-function hook handlers and call redirections for the tables in patches.h, by site RVA.
 MidHandler MissionHookHandler(std::uint32_t rva);
 void* MissionCallHandler(std::uint32_t rva);
@@ -54,5 +61,17 @@ bool GhostHarness();
 // before a mission (and for a machine that controls none). Online every player, this one included, is built
 // from the synced loadout records, so this is the only thing that says which record is ours (armor.h).
 int LocalPlayerIndex();
+
+// The index the online HUD's colour tables are read with (HudIndexWrapHooks): players past the tables share the
+// colour of player index % tableSize; a negative index (no player) stays as it is.
+std::int32_t WrapHudIndex(std::int32_t index, int tableSize);
+// The size of those tables: kVanillaPlayers (the game's own), or kHudTablePlayers with the plugin's HUD archive.
+void SetHudTableSize(int size);
+
+// Where player `index` starts, relative to the mission's start point: `table` is CreatePlayers' normalised offset
+// table of four float4 (x, y, z, w). Players 1-4 keep the game's; 5..kSpawnLinePlayers stand along players 2-4's
+// directions as every 32-slot version placed them; the rest fill rings around player 1, one spacing apart.
+constexpr int kSpawnLinePlayers = 32;
+void SpawnOffset(std::uint32_t index, const float* table, float* out);
 
 }  // namespace multislot

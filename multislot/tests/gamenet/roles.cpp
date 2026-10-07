@@ -1,6 +1,9 @@
 // What each machine of a game-code test does once EDF.dll and EDF6Coop.dll are in (machine.cpp). Every EOS call
 // goes through EDF.dll's import table, as the game makes it, so EDF6Coop's wrappers see it as they do in the game.
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <map>
 #include <functional>
 #include <vector>
 
@@ -9,6 +12,7 @@
 #include "machine.h"
 #include "net_shared.h"
 #include "../../../src/eos_min.h"
+#include "../../src/netplayer.h"
 
 namespace gamenet {
 namespace {
@@ -138,6 +142,8 @@ bool AllMarked(const Seen& seen, std::size_t members) {
 
 int expectedMembers() {
     char text[16]{};
+    // EDF6NET_EPIC_MEMBERS: how many Epic's lobby lists when it holds fewer than the room (joinfull).
+    if (GetEnvironmentVariableA("EDF6NET_EPIC_MEMBERS", text, sizeof(text))) return std::atoi(text);
     GetEnvironmentVariableA("EDF6NET_MEMBERS", text, sizeof(text));
     return text[0] ? std::atoi(text) : 2;
 }
@@ -154,7 +160,7 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
     if (host) {
         CreateOptions options;
         options.LocalUserId = Self(machine);
-        options.MaxLobbyMembers = 8;
+        options.MaxLobbyMembers = gamenet::kMaxMachines;
         Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
     } else {
         // Guests come in one after another, in seat order (EDF6NET_SEAT): seat n joins once n are in.
@@ -200,12 +206,17 @@ bool EnterRoom(Machine& machine, bool host, Room& room) {
 }
 
 // Starts the game's packet controller for the room and waits until the game's P2P handshake connected every
-// other member.
-bool Connect(Machine& machine, const Room& room, Transport& transport) {
+// other member. `listen` runs between the two and subscribes what the machine receives: a member done with its own
+// handshakes sends at once, while this machine may still be waiting for someone else's, and the game's controller
+// delivers what arrives on every tick of that wait - to whoever listens then, and nowhere else (it acknowledges the
+// record all the same, so its sender never sends it again). In the game the subscribers (the event controller among
+// them) exist before the network does.
+bool Connect(Machine& machine, const Room& room, Transport& transport, const std::function<bool()>& listen = {}) {
     if (!transport.Start(machine, room.lobby, room.members)) {
         Result("link", "the game's network objects could not be built");
         return false;
     }
+    if (listen && !listen()) return false;
     const bool connected = TickUntil(machine, 15000, [&] {
         transport.Tick();
         for (const auto& member : room.members)
@@ -252,13 +263,16 @@ int Link(Machine& machine, bool host, int sidePackets = 0) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
     Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
-    if (host && sidePackets) SendSidePackets(machine, room, sidePackets);
     std::vector<std::string> received;
-    transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
-        received.emplace_back(reinterpret_cast<const char*>(data), size);
-        Result("received", "from %d: %.*s", from, static_cast<int>(size), reinterpret_cast<const char*>(data));
-    });
+    const auto listen = [&] {
+        transport.Subscribe(kProbeType, [&](int from, const std::uint8_t* data, std::size_t size) {
+            received.emplace_back(reinterpret_cast<const char*>(data), size);
+            Result("received", "from %d: %.*s", from, static_cast<int>(size), reinterpret_cast<const char*>(data));
+        });
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    if (host && sidePackets) SendSidePackets(machine, room, sidePackets);
     const std::string probe = "PROBE-PLAINTEXT-FROM-" + machine.user;
     for (const auto& member : room.members)
         if (member != machine.user && !transport.SendReliable(member, kProbeType, probe.data(), probe.size()))
@@ -313,11 +327,22 @@ std::size_t ChatterBytes() {
 
 // The mission start sync: every machine runs MissionSync_Begin and then MissionSync_Update until it answers 0,
 // and reports what its game holds afterwards.
+int MissionIn(Machine& machine, bool host, const Room& room, Transport* existing = nullptr);
+
 int Mission(Machine& machine, bool host) {
     Room room;
     if (!EnterRoom(machine, host, room)) return 1;
-    Transport transport;
-    if (!Connect(machine, room, transport)) return 1;
+    // EDF6NET_SETTLE=<ms>: stay in the room that long first (the lobby beat lets features come on, netfeature.h).
+    char settle[16]{};
+    if (GetEnvironmentVariableA("EDF6NET_SETTLE", settle, sizeof(settle)))
+        TickUntil(machine, static_cast<unsigned>(std::atoi(settle)), [] { return false; });
+    return MissionIn(machine, host, room);
+}
+
+// The start sync among `room.members` (in the order the game adds them), once everyone is in.
+// `existing`: the game's network of the room, its members added as they came (SlotRoom); otherwise it is built here
+// with room.members.
+int MissionIn(Machine& machine, bool host, const Room& room, Transport* existing) {
     int place = 0;
     while (room.members[static_cast<std::size_t>(place)] != machine.user) ++place;
     Loadout loadout{place % 4, 500 + place, 1000 + 37 * place, 100 + 37 * place};
@@ -326,11 +351,29 @@ int Mission(Machine& machine, bool host) {
     if (GetEnvironmentVariableA("EDF6NET_FIRST_WEAPON", setting, sizeof(setting))) loadout.firstWeapon = std::atoi(setting);
     if (GetEnvironmentVariableA("EDF6NET_WEAPON_ROWS", setting, sizeof(setting)))
         loadout.weaponRows = static_cast<std::uint32_t>(std::atoi(setting));
+    Transport own;
+    Transport& transport = existing ? *existing : own;
     MissionSync sync;
-    if (!sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) {
+    // The event controller listens before the handshake ends (Connect): a member done with its own handshakes may
+    // be in the sync already.
+    const auto listen = [&] {
+        if (sync.Build(transport, room.members, loadout, host ? kHostMission : 0, host ? kHostDifficulty : 0)) return true;
         Result("mission", "the sync could not be set up");
+        return false;
+    };
+    if (existing) {
+        // Connected already: everyone listens before anyone begins.
+        if (!listen()) return 1;
+        const auto ready = FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready");
+        ready(1);
+        TickUntil(machine, 15000, [&] {
+            transport.Tick();
+            return ready(0) >= room.members.size();
+        });
+    } else if (!Connect(machine, room, transport, listen)) {
         return 1;
     }
+    Result("early-messages", "%zu", sync.Received());  // sync messages that came during the handshake
     Result("loadout", "%d class=%d marker=%d armor=%d", place, loadout.soldierClass, loadout.marker, loadout.armor);
     const std::size_t chatter = ChatterBytes();
     // A frame of the game: other messages, the network, the mission script, then the event builders go out.
@@ -370,6 +413,615 @@ int Mission(Machine& machine, bool host) {
     return done ? 0 : 1;
 }
 
+
+// Netcode rewrite W1: what the game's controller sends in a room, as the traffic classes see it. Every machine sends
+// every other one a state-like record (kStateType, unreliable, every 4th frame, a size no other datagram has) and
+// now and then a reliable one, for EDF6NET_SECONDS (default 4) s, with [Netcode] StatsSeconds=1 in its INI.
+constexpr std::uint32_t kStateType = 0x2800;
+constexpr std::size_t kStateBytes = 77;  // a datagram of only this record: 8 + 4 + 77 = 89 bytes
+
+int Seconds(int fallback) {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_SECONDS", text, sizeof(text));
+    return text[0] ? std::atoi(text) : fallback;
+}
+
+int NetStats(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    struct Count {
+        std::size_t states = 0, events = 0;
+        ULONGLONG last = 0, gap = 0;
+    };
+    std::map<int, Count> got;          // by sender's network index
+    std::map<std::string, Count> sent;  // by member
+    const auto listen = [&] {
+        transport.Subscribe(kStateType, [&](int from, const std::uint8_t*, std::size_t) {
+            Count& c = got[from];
+            const ULONGLONG now = GetTickCount64();
+            if (c.last) c.gap = (std::max)(c.gap, now - c.last);
+            c.last = now;
+            ++c.states;
+        });
+        transport.Subscribe(kProbeType, [&](int from, const std::uint8_t*, std::size_t) { ++got[from].events; });
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    const std::vector<std::uint8_t> state(kStateBytes, 0x5A);
+    const std::string probe = "EVENT-" + machine.user;
+    int frame = 0;
+    TickUntil(machine, static_cast<unsigned>(Seconds(4)) * 1000, [&] {
+        for (const auto& member : room.members) {
+            if (member == machine.user) continue;
+            if (frame % 4 == 0 && transport.SendUnreliable(member, kStateType, state.data(), state.size()))
+                ++sent[member].states;
+            if (frame % 30 == 15 && transport.SendReliable(member, kProbeType, probe.data(), probe.size()))
+                ++sent[member].events;
+        }
+        ++frame;
+        transport.Tick();
+        return false;
+    });
+    // The others still send: keep receiving (and acknowledging) until everyone is done.
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    finish(1);
+    TickUntil(machine, 15000, [&] {
+        transport.Tick();
+        return finish(0) >= room.members.size();
+    });
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    for (const auto& [member, c] : sent) Result("sent-to", "%s states=%zu events=%zu", member.c_str(), c.states, c.events);
+    for (const auto& member : room.members) {
+        if (member == machine.user) continue;
+        const Count& c = got[transport.NetworkIndex(member)];
+        Result("got-from", "%s states=%zu events=%zu gap=%llu", member.c_str(), c.states, c.events, c.gap);
+    }
+    return 0;
+}
+
+// Netcode rewrite W1: a message of 1024 loadout records' size (146432 bytes) from the host to every guest, in
+// fragments ([Test] BulkEcho=1 logs what arrives).
+int Bulk(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    if (!Connect(machine, room, transport)) return 1;
+    if (host) {
+        std::vector<std::uint8_t> message(1024 * 143);
+        for (std::size_t i = 0; i < message.size(); ++i) message[i] = static_cast<std::uint8_t>(i * 31 + (i >> 9));
+        Result("bulk-fnv", "%016llx", Fnv(message));
+        using SendBulk = bool (*)(const char*, std::uint16_t, const void*, std::size_t);
+        const auto send = reinterpret_cast<SendBulk>(GetProcAddress(machine.plugin, "EDF6Coop_SendBulk"));
+        std::size_t done = 0;
+        // Until the room shows that everyone reads fragments (the lobby beat, once a second).
+        TickUntil(machine, 8000, [&] {
+            transport.Tick();
+            done = 0;
+            for (const auto& member : room.members)
+                if (member != machine.user && send && send(member.c_str(), 7, message.data(), message.size())) ++done;
+            return done == room.members.size() - 1;
+        });
+        Result("bulk", "%s to %zu", done == room.members.size() - 1 ? "sent" : "NOT sent", done);
+    }
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    TickUntil(machine, 4000, [&] {
+        transport.Tick();
+        return false;
+    });
+    finish(1);
+    TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return finish(0) >= room.members.size();
+    });
+    return 0;
+}
+
+// Netcode rewrite W1: the version gate. Every machine stays in the room for EDF6NET_SECONDS (default 5) s, ticking,
+// and says how many the room has at the end.
+int VersionGate(Machine& machine, bool host) {
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    TickUntil(machine, static_cast<unsigned>(Seconds(5)) * 1000, [] { return false; });
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    return 0;
+}
+
+// W2 player sync (netplayer.h): a player record as EDF6Coop extends it - the game's own fields written with the
+// game's writers (mask, a float, the position as the game sends it), then the block as a bin element written by
+// EDF6Coop's writer, then the same block written by the game's own bin writer (EDF+12B5200) - goes through the
+// game's controller to the other machine, which reads it twice: with the game's readers and EDF6Coop's bin reader,
+// and with the game's readers and the game's bin reader (EDF+12B49D0). Both must give back every block exactly.
+constexpr std::uint32_t kPlayerType = 0x2701;  // a record type nothing in the game subscribes to
+constexpr int kPlayerRecords = 8;
+constexpr std::uintptr_t kSerializeWriter = 0x79A460, kSerializeReader = 0x79A430;
+constexpr std::uintptr_t kWriteInt16 = 0x12B54E0, kWriteFloat = 0x12B5350, kWriteVec3 = 0x761B20, kWriteBin = 0x12B5200;
+constexpr std::uintptr_t kReadInt16 = 0x12B4B80, kReadFloat = 0x12B4AD0, kReadVec3 = 0x760C50, kReadBin = 0x12B49D0;
+struct alignas(16) GameSerialize {
+    std::uint8_t bytes[0x600];
+};
+
+multislot::PlayerSample SampleFor(int seat, int i) {
+    multislot::PlayerSample s;
+    s.seq = static_cast<std::uint16_t>(100 + i);
+    s.senderMs = 0xFFFFFFF0u + static_cast<std::uint32_t>(33 * i);  // across the wrap
+    s.position = {700.3f + seat * 11.0f + i * 0.217f, 12.7f + i, -950.55f};
+    s.velocity = {6.25f, -9.8f + i, 0.125f * seat};
+    return s;
+}
+bool SameSample(const multislot::PlayerSample& a, const multislot::PlayerSample& b) {
+    return a.seq == b.seq && a.senderMs == b.senderMs && !std::memcmp(&a.position, &b.position, sizeof(a.position)) &&
+           !std::memcmp(&a.velocity, &b.velocity, sizeof(a.velocity));
+}
+
+int PlayerSync(Machine& machine, bool host) {
+    using namespace multislot;
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    const int seat = host ? 0 : 1;
+    int good = 0, bad = 0;
+    const auto onRecord = [&](int from, const std::uint8_t* data, std::size_t size) {
+        const Game& game = transport.game();
+        const int i = static_cast<int>(data[0]);
+        const PlayerSample expected = SampleFor(1 - seat, i);
+        bool ok = size > 1;
+        float halfError = 0.0f;
+        for (int pass = 0; ok && pass < 2; ++pass) {
+            GameSerialize reader{};
+            game.Fn<void* (*)(void*, const void*, std::size_t)>(kSerializeReader)(reader.bytes, data + 1, size - 1);
+            const std::uint16_t mask = game.Fn<std::uint16_t (*)(void*)>(kReadInt16)(reader.bytes);
+            const float heading = game.Fn<float (*)(void*)>(kReadFloat)(reader.bytes);
+            alignas(16) float position[4]{};
+            game.Fn<bool (*)(void*, float*)>(kReadVec3)(reader.bytes, position);
+            ok = ok && mask == (0x58 | kPlayerBlockBit) && std::fabs(heading - 1.5f) < 0.01f;
+            halfError = (std::max)(halfError, std::fabs(position[0] - expected.position.x));
+            for (int copy = 0; copy < 2; ++copy) {
+                std::uint8_t block[64]{};
+                std::size_t got = 0;
+                if (pass == 0) {
+                    ok = ok && ReadBinElement(reader.bytes, block, sizeof(block), got);
+                } else {
+                    std::size_t capacity = sizeof(block);
+                    ok = ok && game.Fn<bool (*)(void*, void*, std::size_t*)>(kReadBin)(reader.bytes, block, &capacity);
+                    got = capacity;
+                }
+                PlayerSample sample;
+                ok = ok && got == kPlayerBlockBytes && DecodePlayerBlock(block, got, sample) && SameSample(sample, expected);
+            }
+        }
+        if (ok)
+            ++good;
+        else
+            ++bad;
+        Result("player-record", "from %d #%d %s; the game's half-float position is off by %.3f m", from, i,
+               ok ? "ok" : "MISMATCH", halfError);
+    };
+    const auto listen = [&] {
+        transport.Subscribe(kPlayerType, onRecord);
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    const Game& game = transport.game();
+    for (int i = 0; i < kPlayerRecords; ++i) {
+        GameSerialize writer{};
+        game.Fn<void* (*)(void*)>(kSerializeWriter)(writer.bytes);
+        const PlayerSample sample = SampleFor(seat, i);
+        game.Fn<bool (*)(void*, std::int16_t)>(kWriteInt16)(writer.bytes, static_cast<std::int16_t>(0x58 | kPlayerBlockBit));
+        game.Fn<bool (*)(void*, float)>(kWriteFloat)(writer.bytes, 1.5f);
+        alignas(16) const float position[4] = {sample.position.x, sample.position.y, sample.position.z, 1.0f};
+        game.Fn<bool (*)(void*, const float*)>(kWriteVec3)(writer.bytes, position);
+        std::uint8_t block[kPlayerBlockBytes];
+        EncodePlayerBlock(sample, block, sizeof(block));
+        const bool ours = WriteBinElement(writer.bytes, block, sizeof(block));
+        game.Fn<bool (*)(void*, const void*, std::size_t)>(kWriteBin)(writer.bytes, block, sizeof(block));
+        std::uint64_t length = 0;
+        std::memcpy(&length, writer.bytes + kSerializeEnd, sizeof(length));
+        std::vector<std::uint8_t> record(1 + length);
+        record[0] = static_cast<std::uint8_t>(i);
+        std::memcpy(record.data() + 1, writer.bytes + kSerializeData, length);
+        for (const auto& member : room.members)
+            if (member != machine.user && (!ours || !transport.SendReliable(member, kPlayerType, record.data(), record.size())))
+                Result("send", "player record %d to %s refused", i, member.c_str());
+        if (i == 0) Result("player-record-bytes", "%llu", static_cast<unsigned long long>(length));
+    }
+    const bool all = TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return good + bad >= kPlayerRecords;
+    });
+    TickUntil(machine, 1500, [&] {
+        transport.Tick();
+        return false;
+    });
+    Result("player-records", "%d ok %d bad", good, bad);
+    return all && bad == 0 ? 0 : 1;
+}
+
+// I1: rooms above Epic's lobby (EDF6NET_LOBBY_CAP=2 plays Epic's 64 small). The host and the first guest are in
+// Epic's lobby; the last guest finds it full and comes in over the direct link to the host, which lets it in by its
+// own member list.
+// The game's P2P receive, as its network polls it every frame: EDF6Coop learns the local EOS user from it (a direct
+// link host welcomes nobody before), and it drains what arrives.
+void PollP2P(const Machine& machine) {
+    EOS_P2P_ReceivePacketOptions options{2, static_cast<EOS_ProductUserId>(const_cast<void*>(Self(machine))), 4096, nullptr};
+    std::vector<std::uint8_t> data(4096);
+    EOS_ProductUserId peer = nullptr;
+    EOS_P2P_SocketId socket{};
+    std::uint8_t channel = 0;
+    std::uint32_t size = 0;
+    const auto receive = Import<EOS_EResult (*)(void*, const EOS_P2P_ReceivePacketOptions*, EOS_ProductUserId*, EOS_P2P_SocketId*,
+                                                std::uint8_t*, void*, std::uint32_t*)>(machine, "EOS_P2P_ReceivePacket");
+    while (receive(kPlatform, &options, &peer, &socket, &channel, data.data(), &size) == EOS_Success) {
+    }
+}
+
+// The game's lobby manager listens to member statuses (012B3380 registers one handler): what EDF6Coop tells the game
+// about members beyond Epic's lobby goes there, and the room the game has follows it. Each one is reported
+// ("member-status <id> <status>", EOS_ELobbyMemberStatus: 0 joined, 1 left).
+struct MemberStatusInfo {  // EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo
+    void* ClientData;
+    const char* LobbyId;
+    const void* TargetUserId;
+    std::int32_t CurrentStatus;
+};
+// The statuses the game was told, in that order (the member sync of SlotRoom plays them as the game does).
+std::vector<std::pair<std::string, std::int32_t>> toldStatuses;
+void OnMemberStatus(const MemberStatusInfo* info) {
+    char text[64]{};
+    std::int32_t length = sizeof(text);
+    if (info && info->TargetUserId)
+        FakeExport<std::int32_t (*)(const void*, char*, std::int32_t*)>("EOS_ProductUserId_ToString")(info->TargetUserId, text, &length);
+    Result("member-status", "%s %d", text, info ? info->CurrentStatus : -1);
+    if (info) toldStatuses.emplace_back(text, info->CurrentStatus);
+}
+void ListenToMembers(const Machine& machine) {
+    struct Options {
+        std::int32_t ApiVersion;
+    } options{1};
+    Import<std::uint64_t (*)(void*, const void*, void*, void (*)(const MemberStatusInfo*))>(
+        machine, "EOS_Lobby_AddNotifyLobbyMemberStatusReceived")(kLobbyInterface, &options, nullptr, &OnMemberStatus);
+}
+
+// The room's members as the game reads them when it is told one joined (12BD460: EOS_Lobby_CopyLobbyDetailsHandle,
+// then EOS_LobbyDetails_GetMemberCount / GetMemberByIndex, through EDF.dll's imports - where EDF6Coop's wrappers
+// are), in that order: each gets an eos::User (Users::Add) flagged as in the room (User+0x10 bit 2), and those are
+// what the room member list (7468C0: the room screen, the voice chat HUD) and the start sync have.
+std::vector<std::string> GameRoomMembers(const Machine& machine, const std::string& lobby) {
+    struct CopyOptions {
+        std::int32_t ApiVersion;
+        const char* LobbyId;
+        const void* LocalUserId;
+    } copy{1, lobby.c_str(), Self(machine)};
+    void* details = nullptr;
+    std::vector<std::string> members;
+    const std::int32_t copied = Import<std::int32_t (*)(void*, const void*, void**)>(machine, "EOS_Lobby_CopyLobbyDetailsHandle")(
+        kLobbyInterface, &copy, &details);
+    if (copied != 0 || !details) {
+        static std::int32_t reported = 0;
+        if (copied != reported) Result("copy", "the room's details could not be copied: %d", reported = copied);
+        return members;
+    }
+    struct CountOptions {
+        std::int32_t ApiVersion;
+    } countOptions{1};
+    const std::uint32_t count =
+        Import<std::uint32_t (*)(void*, const void*)>(machine, "EOS_LobbyDetails_GetMemberCount")(details, &countOptions);
+    for (std::uint32_t i = 0; i < count && i < 64; ++i) {
+        struct ByIndex {
+            std::int32_t ApiVersion;
+            std::uint32_t MemberIndex;
+        } byIndex{1, i};
+        const void* member = Import<const void* (*)(void*, const void*)>(machine, "EOS_LobbyDetails_GetMemberByIndex")(details, &byIndex);
+        char text[64]{};
+        std::int32_t length = sizeof(text);
+        if (member) FakeExport<std::int32_t (*)(const void*, char*, std::int32_t*)>("EOS_ProductUserId_ToString")(member, text, &length);
+        members.push_back(text);
+    }
+    Import<void (*)(void*)>(machine, "EOS_LobbyDetails_Release")(details);
+    return members;
+}
+
+// Waits until the game reads `expected` members in the room, reports them ("game-members <n> <ids>"), and plays the
+// start sync among them in that order.
+int FullRoomMission(Machine& machine, bool host, Room room, std::size_t expected) {
+    std::vector<std::string> members;
+    TickUntil(machine, 20000, [&] {
+        PollP2P(machine);
+        members = GameRoomMembers(machine, room.lobby);
+        return members.size() >= expected;
+    });
+    std::string list;
+    for (const auto& member : members) list += " " + member;
+    Result("game-members", "%zu%s", members.size(), list.c_str());
+    Result("room-count", "%u", FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount")());
+    if (members.size() < expected) return 1;
+    room.members = members;
+    return MissionIn(machine, host, room);
+}
+
+// EDF6NET_ROOM_MEMBERS: how many the room holds once everyone is in (joinfull: 3).
+std::size_t RoomMembers() {
+    char text[16]{};
+    GetEnvironmentVariableA("EDF6NET_ROOM_MEMBERS", text, sizeof(text));
+    return text[0] ? static_cast<std::size_t>(std::atoi(text)) : 3;
+}
+
+// --- Member slots (userslots.h): every game has every member in the slot the host's game has it in ---
+//
+// Each machine plays its game's member sync: the members it reads from the room (GameRoomMembers, as 12BD460 does
+// when told a member joined or left) are added to its eos::Users (Users::Add) as they appear and removed as they go.
+// How it comes into the room: "host" creates it; "epic" joins through Epic in seat order; "direct" finds Epic's lobby
+// full and comes in over the direct link; "late" joins through Epic once a member left the full lobby; "leave" joins
+// through Epic and leaves once the room holds EDF6NET_LEAVE_AT members. Those that stay play the start sync once their
+// game has exactly the members of EDF6NET_FINAL (comma separated) and is connected to them, in the order of the
+// network indices (User+0x40) its game gave them, and report that order ("slots").
+
+std::vector<std::string> SplitList(const std::string& text) {
+    std::vector<std::string> out;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t comma = text.find(',', at);
+        const std::string item = text.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        if (!item.empty()) out.push_back(item);
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    return out;
+}
+
+std::string Variable(const char* name) {
+    char text[512]{};
+    GetEnvironmentVariableA(name, text, sizeof(text));
+    return text;
+}
+
+bool JoinThrough(Machine& machine, void* details, Entered& entered, unsigned waitMs = 20000) {
+    JoinOptions options;
+    options.LobbyDetailsHandle = details;
+    options.LocalUserId = Self(machine);
+    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+    // A join into a room whose host hosts a direct link completes once its host's member slots are here (eos_hooks).
+    TickUntil(machine, waitMs, [&] {
+        PollP2P(machine);
+        return entered.done;
+    });
+    FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
+    return entered.done && entered.result == 0;
+}
+
+int SlotRoom(Machine& machine, const std::string& how) {
+    ListenToMembers(machine);
+    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+    const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+    // "hostleave" creates the room and leaves it like "leave"; "heir" joins like "epic" and is made the room's owner when
+    // the first one leaves, so it hosts the start sync.
+    const bool creator = how == "host" || how == "hostleave";
+    const bool host = how == "host" || how == "heir";
+    const auto epic = static_cast<std::uint32_t>(expectedMembers());  // Epic's lobby holds that many (EDF6NET_LOBBY_CAP)
+    Entered entered;
+    if (creator) {
+        CreateOptions options;
+        options.LocalUserId = Self(machine);
+        options.MaxLobbyMembers = gamenet::kMaxMachines;
+        Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+        TickUntil(machine, 5000, [&] { return entered.done; });
+    } else {
+        char seatText[8]{};
+        GetEnvironmentVariableA("EDF6NET_SEAT", seatText, sizeof(seatText));
+        const auto seat = static_cast<std::uint32_t>(std::atoi(seatText));
+        void* details = nullptr;
+        bool wasFull = false;
+        const bool found = TickUntil(machine, 30000, [&] {
+            PollP2P(machine);
+            const std::uint32_t count = roomCount();
+            wasFull = wasFull || count >= epic;
+            if (how == "direct" ? count < epic : how == "late" ? !(wasFull && count < epic) : count < seat) return false;
+            if (details) FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
+            details = roomDetails();
+            // "giveup" too: its join is parked only once the host's address is on the lobby.
+            if (!details || (how != "direct" && how != "giveup")) return details != nullptr;
+            // Coming in over the direct link needs the host's address on the lobby (FullJoin).
+            struct ByKey {
+                std::int32_t ApiVersion;
+                const char* AttrKey;
+            } key{1, "EDF6DN_HOSTADDR"};
+            void* attribute = nullptr;
+            if (FakeExport<std::int32_t (*)(void*, const void*, void**)>("EOS_LobbyDetails_CopyAttributeByKey")(details, &key,
+                                                                                                             &attribute) != 0)
+                return false;
+            FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
+            return true;
+        });
+        if (!found) {
+            Result("room", "no room to join (%s)", how.c_str());
+            return 1;
+        }
+        // "giveup": the host's direct link is out of reach, so the join is given up (eos_hooks parkedEntryTick); then
+        // the room must not be offered for coming back (REJOIN): ticks a while longer, so a remembered room would show.
+        if (how == "giveup") {
+            const bool joined = JoinThrough(machine, details, entered, 60000);
+            Result("giveup", "%s %d", entered.done ? (joined ? "joined" : "failed") : "pending", entered.result);
+            TickUntil(machine, 5000, [&] {
+                PollP2P(machine);
+                return false;
+            });
+            return entered.done && !joined ? 0 : 1;
+        }
+        if (!JoinThrough(machine, details, entered)) {
+            Result("room", "%s join failed (%d)", how.c_str(), entered.result);
+            return 1;
+        }
+    }
+    if (!entered.done || entered.result != 0) {
+        Result("room", "%s failed (%d)", how.c_str(), entered.result);
+        return 1;
+    }
+    Room room;
+    room.lobby = entered.lobby;
+    Result("entered", "%s", how.c_str());
+
+    Transport transport;
+    bool started = false;
+    std::vector<std::string> members;
+    std::string seen;
+    const auto follow = [&] {
+        members = GameRoomMembers(machine, room.lobby);
+        std::string now;
+        for (const auto& m : members) now += " " + m;
+        if (now != seen) Result("seen", "%zu%s", members.size(), (seen = now).c_str());
+        if (!started) {
+            toldStatuses.clear();  // the start takes the room as it lists it now
+            if (std::find(members.begin(), members.end(), machine.user) == members.end()) return;
+            started = transport.Start(machine, room.lobby, members);
+            return;
+        }
+        // Each status as the game is told it, in that order (12BD460 adds a member when told it joined, the
+        // member-status handler removes one that left): told "joined" before the "left" of the member whose slot it
+        // takes, the newcomer gets another slot.
+        std::vector<std::pair<std::string, std::int32_t>> told;
+        told.swap(toldStatuses);
+        for (const auto& [m, status] : told) {
+            if (m.empty() || m == machine.user) continue;
+            const auto had = transport.Members();
+            const bool has = std::find(had.begin(), had.end(), m) != had.end();
+            const bool listed = std::find(members.begin(), members.end(), m) != members.end();
+            if (status == 0 && !has && listed) transport.Add(m);
+            if ((status == 1 || status == 2 || status == 3) && has) transport.Remove(m);
+        }
+        // Then whatever the room lists that no status said: the game re-reads the room's members only when a status
+        // reaches it (12BD460), so this runs only then - reading the room every frame would add a member the room
+        // lists before its JOINED (and the LEFT of the member whose slot it takes) reached the game. One that left
+        // before one that came after it.
+        if (told.empty()) return;
+        for (const auto& m : transport.Members())
+            if (m != machine.user && std::find(members.begin(), members.end(), m) == members.end()) transport.Remove(m);
+        for (const auto& m : members) {
+            const auto had = transport.Members();
+            if (std::find(had.begin(), had.end(), m) == had.end()) transport.Add(m);
+        }
+    };
+    const auto frame = [&] {
+        if (started)
+            transport.Tick();
+        else
+            PollP2P(machine);
+        follow();
+    };
+    if (how == "leave" || how == "hostleave") {
+        const auto leaveAt = static_cast<std::size_t>(std::atoi(Variable("EDF6NET_LEAVE_AT").c_str()));
+        TickUntil(machine, 30000, [&] {
+            frame();
+            return members.size() >= leaveAt;
+        });
+        // EDF6NET_LEAVE_AFTER_MS: stay that much longer (everyone's direct link up and following the host's slots).
+        if (const int after = std::atoi(Variable("EDF6NET_LEAVE_AFTER_MS").c_str()); after > 0)
+            TickUntil(machine, static_cast<unsigned>(after), [&] {
+                frame();
+                return false;
+            });
+        const std::size_t before = members.size();
+        struct LeaveOptions {
+            std::int32_t ApiVersion;
+            const void* LocalUserId;
+            const char* LobbyId;
+        } leave{1, Self(machine), room.lobby.c_str()};
+        Entered left;
+        Import<LobbyCall>(machine, "EOS_Lobby_LeaveLobby")(kLobbyInterface, &leave, &left, &OnEntered);
+        TickUntil(machine, 5000, [&] {
+            frame();
+            return left.done;
+        });
+        Result("left", "%zu members %d", before, left.result);
+        return left.done && left.result == 0 ? 0 : 1;
+    }
+    std::vector<std::string> final = SplitList(Variable("EDF6NET_FINAL"));
+    std::sort(final.begin(), final.end());
+    // A room whose new host never says its slots holds joins for up to 20 s (eos_hooks kNewHostSlotsMs): room for that.
+    const bool everyone = TickUntil(machine, 60000, [&] {
+        frame();
+        std::vector<std::string> have = transport.Members();
+        std::sort(have.begin(), have.end());
+        if (!started || have != final) return false;
+        for (const auto& m : have)
+            if (m != machine.user && !transport.Connected(m)) return false;
+        return true;
+    });
+    // The room as this game numbers it: by network index.
+    std::vector<std::string> byIndex = transport.Members();
+    std::sort(byIndex.begin(), byIndex.end(),
+              [&](const std::string& a, const std::string& b) { return transport.NetworkIndex(a) < transport.NetworkIndex(b); });
+    std::string slots;
+    for (const auto& m : byIndex) slots += (slots.empty() ? "" : " ") + std::to_string(transport.NetworkIndex(m)) + ":" + m;
+    Result("slots", "%s", slots.c_str());
+    // Whether this machine follows a host's member slots now (EDF6Coop_HostSlot of itself: -1 when not).
+    if (const HMODULE plugin = GetModuleHandleA("EDF6Coop.dll"))
+        if (const auto hostSlot = reinterpret_cast<int (*)(const char*)>(
+                reinterpret_cast<void*>(GetProcAddress(plugin, "EDF6Coop_HostSlot"))))
+            Result("followsHost", "%d", hostSlot(machine.user.c_str()));
+    if (!everyone) return 1;
+    // EDF6NET_STAY_MS: stay in the room that much longer (a room others try to join).
+    if (const int stay = std::atoi(Variable("EDF6NET_STAY_MS").c_str()); stay > 0)
+        TickUntil(machine, static_cast<unsigned>(stay), [&] {
+            frame();
+            return false;
+        });
+    // EDF6NET_SLOTS_ONLY=1: the numbering is what is checked; a room whose games cannot agree on it plays no start sync.
+    if (Variable("EDF6NET_SLOTS_ONLY") == "1") return 0;
+    room.members = byIndex;
+    return MissionIn(machine, host, room, &transport);
+}
+
+int FullRoom(Machine& machine, bool host) {
+    ListenToMembers(machine);
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    return FullRoomMission(machine, host, room, RoomMembers());
+}
+
+int FullJoin(Machine& machine) {
+    ListenToMembers(machine);
+    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+    const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+    const auto copyByKey = FakeExport<std::int32_t (*)(void*, const void*, void**)>("EOS_LobbyDetails_CopyAttributeByKey");
+    const auto release = FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release");
+    struct ByKey {
+        std::int32_t ApiVersion;
+        const char* AttrKey;
+    } key{1, "EDF6DN_HOSTADDR"};
+    void* details = nullptr;
+    // Epic's lobby full, and its host's direct-link address on it.
+    const bool ready = TickUntil(machine, 20000, [&] {
+        if (details) release(details);
+        details = roomCount() >= 2 ? roomDetails() : nullptr;
+        void* attribute = nullptr;
+        if (!details || copyByKey(details, &key, &attribute) != 0) return false;
+        FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
+        return true;
+    });
+    if (!ready) {
+        Result("fulljoin", "no full room with its host's address to join");
+        return 1;
+    }
+    Entered entered;
+    JoinOptions options;
+    options.LobbyDetailsHandle = details;
+    options.LocalUserId = Self(machine);
+    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+    TickUntil(machine, 30000, [&] {
+        PollP2P(machine);
+        return entered.done;
+    });
+    release(details);
+    Result("fulljoin", "%s %d", entered.done ? "completed" : "NOT completed", entered.result);
+    if (!entered.done || entered.result != 0) return 1;
+    Room room;
+    room.lobby = entered.lobby;
+    return FullRoomMission(machine, false, room, RoomMembers());
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -382,6 +1034,13 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "link") return Link(machine, host);
     if (step == "sidelink") return Link(machine, host, 5);
     if (step == "mission") return Mission(machine, host);
+    if (step == "playersync") return PlayerSync(machine, host);
+    if (step == "netstats") return NetStats(machine, host);
+    if (step == "versiongate") return VersionGate(machine, host);
+    if (step == "bulk") return Bulk(machine, host);
+    if (step == "fullroom") return FullRoom(machine, host);
+    if (step == "fulljoin") return FullJoin(machine);
+    if (step.rfind("slots-", 0) == 0) return SlotRoom(machine, step.substr(6));
     Result("role", "unknown role %s", role.c_str());
     return 2;
 }

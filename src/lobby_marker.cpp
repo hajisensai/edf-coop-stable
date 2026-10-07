@@ -277,6 +277,16 @@ std::vector<std::string> LobbyMarker::members(bool* known) {
     return out;
 }
 
+std::string LobbyMarker::ownAddress() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return address_;
+}
+
+std::string LobbyMarker::ownIdentity() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return identity_;
+}
+
 std::string LobbyMarker::ownerAddress(EOS_ProductUserId* owner) {
     std::lock_guard<std::mutex> lock(mu_);
     EOS_HLobbyDetails details = copyDetailsLocked();

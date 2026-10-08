@@ -342,6 +342,9 @@ target_compile_definitions(WorldAdmissionTests PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(WorldAdmissionTests PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(WorldAdmissionTests PRIVATE DirectNetCore)
 add_test(NAME WorldAdmission COMMAND WorldAdmissionTests)
+add_executable(WorldAdmissionNativeTests "${CMAKE_SOURCE_DIR}/../tests/world_admission_native_test.cpp"
+    "${CMAKE_SOURCE_DIR}/../src/room_view.cpp")
+target_compile_options(WorldAdmissionNativeTests PRIVATE /W4 /WX /utf-8 /EHsc)
 add_library(FakeExtensionProfile SHARED "${CMAKE_SOURCE_DIR}/../tests/fake_extension_profile.cpp")
 add_dependencies(GameNetTests FakeExtensionProfile)
 set_target_properties(FakeExtensionProfile PROPERTIES OUTPUT_NAME EDF6VehicleCrew

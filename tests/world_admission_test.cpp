@@ -108,11 +108,12 @@ int main() {
     fresh.setRoomOwner("host", ho.identity->commitment());
     fresh.setActive(false);
     CHECK(fresh.hostRoom(&version).empty());
-    host.setRoomMembers(message(sealed));
+    host.setRoomMembers(message(large));
     fresh.setActive(true); // fresh process/session with same PUID: must get a new host snapshot
     CHECK(!dn::freshWorldEntryAllowed(read()));
     CHECK(waitFor([&] { return read().phase == P::Sealed; }));
     CHECK(!dn::freshWorldEntryAllowed(read()));
+    CHECK(read().participants.size() == large.participants.size());
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

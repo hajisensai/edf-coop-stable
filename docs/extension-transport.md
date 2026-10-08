@@ -124,4 +124,11 @@ EOS imports, and verifies that the production parked callback stays pending with
 host slots present while the host is Sealed, then succeeds exactly once on Lobby.
 Its AF lifecycle source is an explicit fixture; that test does not validate AF's
 native mission-end observer itself.
+`WorldAdmissionNativeTests <EDF.dll> <production EDF6VehicleCrew.dll>` separately
+maps the private game image with `DONT_RESOLVE_DLL_REFERENCES`, runs the signature-
+verified native `Network_SetLocation` at `70F500`, and queries the production AF
+ABI before plugin initialization. The returned state runs through the production
+Coop Room encoder/parser/admission policy: initial Room, Loading, unsealed Playing,
+return to Room, next Loading, Lobby and Boot. It never calls `EML6_Load` or opens
+game UI; the network manager belongs to that short-lived test process.
 Real game and two-machine mission execution are not validated by these tests.

@@ -1,4 +1,5 @@
 #include "eos_hooks.h"
+#include "mod_room_compat.h"
 
 #include <atomic>
 #include <algorithm>
@@ -2075,6 +2076,12 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
 
 void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
                           EOS_Lobby_OnLobbyIdCallback callback, bool proveEos) {
+    if (!CompatibleLocalRoom(room.attributes)) {
+        defer([callback, clientData, roomId] {
+            completeLobbyCall(reinterpret_cast<void*>(callback), clientData, EOS_InvalidParameters, roomId);
+        });
+        return;
+    }
     const uint64_t now = GetTickCount64();
     std::lock_guard<std::mutex> lock(g.virtualMutex);
     VirtualRoom& v = g.virtualRoom;
@@ -2575,7 +2582,7 @@ EOS_HLobbyDetails rememberedRoomDetails(const LastRoom& r) {
 bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
     if (result == EOS_Success) return false;
     const LastRoom r = rememberedRoom();
-    if (r.roomId.empty() || g.marker.inLobby()) return false;
+    if (r.roomId.empty() || g.marker.inLobby() || !CompatibleLocalRoom(r.attributes)) return false;
     {
         std::lock_guard<std::mutex> lock(g.virtualMutex);
         if (g.virtualRoom.joining || g.virtualRoom.in) return false;
@@ -2725,7 +2732,13 @@ void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void
                      EOS_Lobby_OnLobbyIdCallback cb) {
     FakeDetails d;
     if (g_shutdown || !o || !cb) return g.outer.join(h, o, clientData, cb);
-    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) {
+        if (!CompatibleLocalRoom(d.attributes)) {
+            defer([cb, clientData] { completeLobbyCall(cb, clientData, EOS_InvalidParameters, ""); });
+            return;
+        }
+        return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    }
     LastRoom room = fullRoomFrom(o->LobbyDetailsHandle);
     if (!room.usable()) return g.outer.join(h, o, clientData, cb);
     bool full = false;
@@ -2794,6 +2807,9 @@ EOS_EResult hookDetailsCopyAttribute(EOS_HLobbyDetails h, const EOS_LobbyDetails
     if (!g.fakes.lookup(h, &d)) return g.outer.copyAttribute(h, o, out);
     if (!o || !out || o->AttrIndex >= d.attributes.size()) return EOS_InvalidParameters;
     *out = g.fakes.copyAttribute(d.attributes[o->AttrIndex]);
+    if (*out && (*out)->Data && (*out)->Data->ValueType == 1 &&
+        !std::strcmp((*out)->Data->Key, "SEARCH_TYPE"))
+        (*out)->Data->Value.AsInt64 = GameRoomType((*out)->Data->Value.AsInt64);
     return EOS_Success;
 }
 
@@ -3314,5 +3330,10 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
     std::lock_guard<std::mutex> lock(g.bulkMutex);
     g.bulks.push_back(std::move(pending));
     return true;
+}
+extern "C" __declspec(dllexport) int EDF6Coop_AllForcesVirtualRoom(void* details) {
+    FakeDetails d;
+    if (!g.fakes.lookup(static_cast<EOS_HLobbyDetails>(details), &d)) return -1;
+    return RoomIsolationAvailable() && CompatibleRoom(d.attributes, true) ? 1 : 0;
 }
 }  // namespace dn

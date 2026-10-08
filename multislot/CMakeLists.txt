@@ -365,3 +365,7 @@ target_include_directories(NetInterestTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(NetInterestTests PRIVATE ${WARNINGS})
 target_link_libraries(NetInterestTests PRIVATE DirectNetPart winhttp)
 add_test(NAME NetInterestOnTheWire COMMAND NetInterestTests)
+
+add_executable(ModRoomIsolationTests ../tests/mod_room_test.cpp)
+target_compile_options(ModRoomIsolationTests PRIVATE /W4 /WX /utf-8 /EHsc)
+add_test(NAME ModRoomIsolation COMMAND ModRoomIsolationTests)

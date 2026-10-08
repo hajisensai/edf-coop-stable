@@ -1,5 +1,6 @@
 #include "eos_hooks.h"
 #include "extension_bridge.h"
+#include "extension_room.h"
 #include "mod_room_compat.h"
 
 #include <atomic>
@@ -607,7 +608,8 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
-    invalidateExtensionTransport(); // any membership/promotion event cancels the old room authority
+    if (status == kPromoted || ends) invalidateExtensionTransport();
+    else if (status != kJoined) invalidateExtensionParticipant(target);
     const uint64_t now = GetTickCount64();
     // A new host: the old one's slots are not the room's any more (room_view.h promoted). Its list is followed from
     // scratch, the one that may have come before this PROMOTED included.
@@ -2202,27 +2204,15 @@ void virtualRoomTick(uint64_t now) {
     leftLobby(why);
 }
 
-// Fail closed unless EOS and the game's room agree, every member advertises this
-// exact extension profile, and DirectNet validates every authenticated route.
+// The AF game-thread registry names the actual players of this world. Lobby-only
+// joins/leaves do not change its quorum. Every participant must still be in our
+// current room, advertise this profile, and have an authenticated DirectNet route.
 // Virtual/overflow rooms intentionally stay unavailable in v1: their compatibility
 // profile cannot be independently read from a current EOS member attribute.
 void extensionRoomTick() {
-    auto net = g.net.load();
-    bool known = false;
-    auto members = g.marker.members(&known);
-    std::sort(members.begin(), members.end());
-    EOS_ProductUserId owner = nullptr;
-    g.marker.ownerAddress(&owner);
-    std::string room;
-    bool valid = net && known && owner && g.marker.extensionCompatible() && !entryParked();
+    const bool parked = entryParked();
     std::lock_guard<std::mutex> lock(g.viewMutex);
-    auto gameMembers = g.view.members();
-    std::sort(gameMembers.begin(), gameMembers.end());
-    valid = valid && g.view.active() && !g.view.awaitingHost() && members == gameMembers;
-    room = g.viewRoom;
-    if (!valid || room.empty()) { invalidateExtensionTransport(); return; }
-    net->setExtensionRoom(room, idString(owner), std::move(members));
-    bindExtensionTransport(std::move(net));
+    publishExtensionRoom(g.net.load(), g.marker, g.view, g.viewRoom, parked);
 }
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.

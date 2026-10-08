@@ -10,6 +10,8 @@
 
 #include "crashlog.h"
 #include "log.h"
+#include "patches.h"
+#include "../../src/extension_api.h"
 
 namespace multislot {
 namespace {
@@ -112,6 +114,34 @@ std::vector<std::string> GameSlotTable() {
     return out;
 }
 
+bool ResolveMissionPlayerPuid(int index, char* out, std::size_t size) {
+    if (!out || !size) return false;
+    out[0] = 0;
+    if (index < 0 || index >= kMaxPlayers) return false;
+    std::lock_guard<std::mutex> lock(tableMutex);
+    std::uint64_t begin = 0, end = 0;
+    if (!tableUsers || !Read(tableUsers, &begin) || !Read(tableUsers + 8, &end) ||
+        !begin || end < begin || (end - begin) % 16 || (end - begin) / 16 > kMaxPlayers) return false;
+    std::string found;
+    for (std::size_t slot = 0; slot < (end - begin) / 16; ++slot) {
+        std::uint64_t user = 0;
+        int missionIndex = -1;
+        if (!Read(begin + slot * 16, &user)) return false;
+        if (!user) continue;
+        if (!Read(user + 0x48, &missionIndex)) return false;
+        if (missionIndex != index) continue;
+        const void* id = nullptr;
+        if (!found.empty() || !Read(user + 0x18, &id)) return false;
+        found = MemberText(id);
+        // The native user must still be the member recorded by our Add hook in
+        // this slot; stale/reused memory or an already removed member is refused.
+        if (found.empty() || slot >= table.size() || found != table[slot]) return false;
+    }
+    if (found.empty() || found.size() >= size) return false;
+    std::memcpy(out, found.c_str(), found.size() + 1);
+    return true;
+}
+
 MidHandler UserSlotHookHandler(std::uint32_t rva) {
     switch (rva) {
         case 0x12B806E: return &AddHandler;
@@ -121,3 +151,11 @@ MidHandler UserSlotHookHandler(std::uint32_t rva) {
 }
 
 }  // namespace multislot
+
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6Coop_ResolveMissionPlayerPuid(
+    int32_t index, EDF6CoopPeer* out) noexcept {
+    if (!out) return 0;
+    *out = {};
+    try { return multislot::ResolveMissionPlayerPuid(index, out->id, sizeof(out->id)) ? 1u : 0u; }
+    catch (...) { *out = {}; return 0; }
+}

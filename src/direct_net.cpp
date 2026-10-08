@@ -377,7 +377,14 @@ void DirectNet::setLocalUser(const std::string& puid) {
 
 void DirectNet::setMemberIdentities(std::map<std::string, std::string> commitments) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (memberIds_ != commitments) resetExtensionLocked();
+    for (const auto& peer : extensionPeers_) {
+        const auto old = memberIds_.find(peer), next = commitments.find(peer);
+        if ((old == memberIds_.end()) != (next == commitments.end()) ||
+            (old != memberIds_.end() && next != commitments.end() && old->second != next->second)) {
+            resetExtensionLocked();
+            break;
+        }
+    }
     memberIds_ = std::move(commitments);
     for (auto it = seen_.begin(); it != seen_.end();)  // bounded by the room, not by what anyone claims
         it = memberIds_.count(it->first) ? std::next(it) : seen_.erase(it);

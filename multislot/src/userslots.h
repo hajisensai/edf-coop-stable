@@ -29,6 +29,9 @@ int ChooseUserSlot(int firstEmpty, int hostSlot, std::size_t slots, bool hostSlo
 // This machine's game's slots, as Users::Add and Users::Remove left them in its current room: index = slot, the
 // member's ProductUserId, "" for an empty slot (trailing empty slots left out). What a host sends (dn::setGameSlotsSource).
 std::vector<std::string> GameSlotTable();
+// Game-thread-only pre-spawn lookup. Reads current Users +0/+8 and matches
+// User+0x48 (mission index), never the lobby's slot number. No quorum authority.
+bool ResolveMissionPlayerPuid(int index, char* out, std::size_t size);
 
 // Handlers of UserSlotHooks (patches.h).
 MidHandler UserSlotHookHandler(std::uint32_t rva);

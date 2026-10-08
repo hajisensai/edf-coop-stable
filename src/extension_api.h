@@ -8,6 +8,7 @@
 #define EDF6COOP_EXTENSION_VERSION 1u
 #define EDF6COOP_EXTENSION_MAX_PAYLOAD 1024u
 #define EDF6COOP_EXTENSION_MAX_PEERS 1024u
+#define EDF6AF_SUPPORT_PROTOCOL_VERSION 2u
 #if defined(_WIN32)
 #define EDF6COOP_CALL __cdecl
 #else
@@ -40,4 +41,24 @@ typedef struct EDF6CoopExtensionApi {
 } EDF6CoopExtensionApi;
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionApiFn)(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionApi* out);
+
+// AF -> Coop, in-process only. The producer snapshots actual current-world player
+// PUIDs atomically. Lobby users alone are not participants. ready is 0 while the
+// world is loading, after an unknown player enters it without catch-up, or outside
+// a mission. worldEpoch identifies a world lifetime, including pointer reuse.
+#define EDF6AF_MISSION_PARTICIPANTS_VERSION 1u
+#define EDF6AF_MISSION_MAX_PARTICIPANTS 1024u
+typedef struct EDF6AFMissionParticipants {
+    uint32_t size;
+    uint32_t ready;
+    uint32_t participantCount;
+    uint32_t reserved;
+    uint64_t worldEpoch;
+    EDF6CoopPeer participants[EDF6AF_MISSION_MAX_PARTICIPANTS];
+} EDF6AFMissionParticipants;
+typedef uint32_t (EDF6COOP_CALL *EDF6AFGetMissionParticipantsFn)(
+    uint32_t version, uint32_t outSize, EDF6AFMissionParticipants* out);
+typedef uint32_t (EDF6COOP_CALL *EDF6AFAllowMissionPlayerFn)(int32_t missionIndex);
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopResolveMissionPlayerPuidFn)(int32_t missionIndex, EDF6CoopPeer* out);
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopMissionAdmissionReadyFn)(void);
 #pragma pack(pop)

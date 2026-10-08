@@ -215,8 +215,9 @@ public:
     // wildcard channel reads. Room facts are refreshed on the EOS tick only.
     static constexpr const char* kExtensionSocket = "EDF6CoopExt1";
     static constexpr uint8_t kExtensionChannel = 0xAF;
-    void setExtensionRoom(std::string room, std::string host, std::vector<std::string> members);
+    void setExtensionRoom(std::string room, std::string host, std::vector<std::string> members, uint64_t worldEpoch = 1);
     void clearExtensionRoom();
+    bool extensionParticipant(const std::string& peer);
     void extensionSnapshot(EDF6CoopSnapshot& out);
     bool extensionPeer(uint64_t generation, uint32_t index, EDF6CoopPeer& out);
     bool extensionSend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes);
@@ -415,6 +416,7 @@ private:
     std::vector<std::string> extensionMembers_, extensionPeers_;
     std::vector<uint64_t> extensionLinks_;
     uint64_t extensionGeneration_ = 0, extensionUpdatedMs_ = 0;
+    uint64_t extensionWorldEpoch_ = 0;
     bool extensionReady_ = false, extensionFault_ = false;
     void resetExtensionLocked();
     bool refreshExtensionLocked();

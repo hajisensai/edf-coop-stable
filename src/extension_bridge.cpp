@@ -1,10 +1,12 @@
 #include "direct_net.h"
 #include "extension_bridge.h"
 #include <cstring>
+#include <algorithm>
 
 namespace {
 std::atomic<std::shared_ptr<dn::DirectNet>> transport;
 std::atomic<bool> stopped{false};
+std::atomic<bool> missionGateReady{false};
 uint32_t EDF6COOP_CALL snapshot(EDF6CoopSnapshot* out) noexcept {
     if (!out || out->size != sizeof(*out)) return 0;
     if (stopped.load()) { *out = {}; out->size = sizeof(*out); return 0; }
@@ -55,6 +57,39 @@ void invalidateExtensionTransport() {
     if (auto net = transport.exchange(nullptr)) net->clearExtensionRoom();
 }
 void shutdownExtensionTransport() noexcept { stopped.store(true); }
+void invalidateExtensionParticipant(const std::string& peer) {
+    if (auto net = transport.load(); net && net->extensionParticipant(peer)) invalidateExtensionTransport();
+}
+bool readMissionParticipants(uint64_t& epoch, std::vector<std::string>& members) {
+    epoch = 0;
+    members.clear();
+    if (!missionGateReady.load()) return false;
+    const auto module = GetModuleHandleW(L"EDF6VehicleCrew.dll");
+    if (!module) return false;
+    const auto read = reinterpret_cast<EDF6AFGetMissionParticipantsFn>(GetProcAddress(module, "EDF6AF_GetMissionParticipants"));
+    if (!read) return false;
+    auto snapshot = std::make_unique<EDF6AFMissionParticipants>();
+    snapshot->size = sizeof(*snapshot);
+    if (read(EDF6AF_MISSION_PARTICIPANTS_VERSION, sizeof(*snapshot), snapshot.get()) != 1 ||
+        snapshot->size != sizeof(*snapshot) || snapshot->ready != 1 || snapshot->reserved ||
+        !snapshot->worldEpoch || !snapshot->participantCount ||
+        snapshot->participantCount > EDF6AF_MISSION_MAX_PARTICIPANTS) return false;
+    for (uint32_t i = 0; i < snapshot->participantCount; ++i) {
+        const auto& peer = snapshot->participants[i];
+        const auto end = static_cast<const char*>(memchr(peer.id, '\0', sizeof(peer.id)));
+        if (!end || end == peer.id) { members.clear(); return false; }
+        members.emplace_back(peer.id, static_cast<size_t>(end - peer.id));
+    }
+    std::sort(members.begin(), members.end());
+    if (std::adjacent_find(members.begin(), members.end()) != members.end()) { members.clear(); return false; }
+    epoch = snapshot->worldEpoch;
+    return true;
+}
+void setExtensionMissionGateReady(bool ready) noexcept { missionGateReady.store(ready); }
+}
+
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6Coop_MissionAdmissionReady() noexcept {
+    return !stopped.load() && missionGateReady.load() ? 1u : 0u;
 }
 
 extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(

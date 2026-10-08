@@ -65,6 +65,7 @@ public:
     bool hasMarker(EOS_ProductUserId remote);
     // The lobby owner and the address it advertises ("" when none). Owner may be null.
     std::string ownerAddress(EOS_ProductUserId* owner);
+    std::string ownerId();
     // Diagnostics: what our copy of the lobby shows about its owner.
     std::string describeOwner() const;
     // The direct-link identity commitments the members of our lobby published (EOS id -> commitment),
@@ -76,7 +77,7 @@ public:
     std::vector<std::string> members(bool* known);
     // No caching: every listed member must currently advertise the exact extension
     // profile. An older Coop build must never receive our reserved-channel data.
-    bool extensionCompatible();
+    bool extensionCompatible(const std::vector<std::string>& participants = {});
 
 private:
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.

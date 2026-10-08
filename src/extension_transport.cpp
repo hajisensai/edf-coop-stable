@@ -29,14 +29,15 @@ void DirectNet::resetExtensionLocked() {
     extensionGeneration_ = nextGeneration.fetch_add(1);
 }
 
-void DirectNet::setExtensionRoom(std::string room, std::string host, std::vector<std::string> members) {
+void DirectNet::setExtensionRoom(std::string room, std::string host, std::vector<std::string> members, uint64_t worldEpoch) {
     std::lock_guard<std::mutex> lock(mu_);
     std::sort(members.begin(), members.end());
-    if (room != extensionRoom_ || host != extensionHost_ || members != extensionMembers_) {
+    if (room != extensionRoom_ || host != extensionHost_ || members != extensionMembers_ || worldEpoch != extensionWorldEpoch_) {
         resetExtensionLocked();
         extensionFault_ = false;
         extensionRoom_ = std::move(room);
         extensionHost_ = std::move(host);
+        extensionWorldEpoch_ = worldEpoch;
         extensionMembers_ = std::move(members);
         extensionPeers_ = extensionMembers_;
         std::erase(extensionPeers_, localPuid_);
@@ -50,17 +51,23 @@ void DirectNet::clearExtensionRoom() {
     resetExtensionLocked();
     extensionRoom_.clear();
     extensionHost_.clear();
+    extensionWorldEpoch_ = 0;
     extensionMembers_.clear();
     extensionPeers_.clear();
     extensionFault_ = false;
     extensionUpdatedMs_ = 0;
 }
 
+bool DirectNet::extensionParticipant(const std::string& peer) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return !extensionRoom_.empty() && std::binary_search(extensionMembers_.begin(), extensionMembers_.end(), peer);
+}
+
 // Called with mu_ held, including in send/poll and authenticated receive. No stale
 // snapshot can authorize a send after a link disappeared/reconnected or its key changed.
 bool DirectNet::refreshExtensionLocked() {
     const uint64_t now = extensionNowMs();
-    bool ready = running_ && active_ && !extensionFault_ && !extensionRoom_.empty() &&
+    bool ready = running_ && active_ && !extensionFault_ && !extensionRoom_.empty() && extensionWorldEpoch_ &&
         validId(localPuid_) && validId(extensionHost_) && extensionUpdatedMs_ &&
         now - extensionUpdatedMs_ <= kRoomLeaseMs &&
         extensionPeers_.size() <= EDF6COOP_EXTENSION_MAX_PEERS &&
@@ -87,8 +94,10 @@ bool DirectNet::refreshExtensionLocked() {
         if (ready) {
             auto roster = roster_;
             std::sort(roster.begin(), roster.end());
-            ready = roster == extensionMembers_;
-            links = {hostLink_->id, rosterPages_.applied};
+            // A lobby-only member may join/leave without changing this mission.
+            // Every actual participant still needs a currently authenticated route.
+            ready = std::includes(roster.begin(), roster.end(), extensionMembers_.begin(), extensionMembers_.end());
+            links = {hostLink_->id};
         }
     } else ready = false;
     if (ready != extensionReady_ || (ready && links != extensionLinks_)) {

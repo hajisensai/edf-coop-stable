@@ -79,7 +79,7 @@ float __fastcall FakeScale(void*, int, int players) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const std::size_t imageSize = kGameStatusPointer + 0x1000;
     auto* image = static_cast<unsigned char*>(VirtualAlloc(nullptr, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     Check(image != nullptr, "fake image");
@@ -91,7 +91,22 @@ int main() {
     const unsigned char scale[] = {0xF3, 0x41, 0x0F, 0x2A, 0xC0, 0xC3};         // cvtsi2ss xmm0, r8d; ret
     std::memcpy(image + kMissionContextConstructor, constructor, sizeof(constructor));
     std::memcpy(image + kPlayerCountScale, scale, sizeof(scale));
+    const unsigned char createPlayer[] = {0x48, 0x89, 0xD0, 0xC3}; // mov rax,rdx; ret (records forwarding)
+    std::memcpy(image + kCreateOnlinePlayer, createPlayer, sizeof(createPlayer));
     InitMission(image);
+
+    const auto admittedCreate = reinterpret_cast<void*(__fastcall*)(int, const void*, int)>(MissionCallHandler(0x1DC525));
+    int transform = 123;
+    Check(admittedCreate && admittedCreate(7, &transform, 0) == &transform, "without AF the safe call forwards to the original");
+    if (argc > 1) {
+        const HMODULE af = LoadLibraryA(argv[1]);
+        Check(af != nullptr, "test AF admission provider loads");
+        if (af) {
+            Check(admittedCreate(1, &transform, 0) == &transform, "admitted mission index forwards its native arguments");
+            Check(admittedCreate(7, &transform, 0) == nullptr, "unadmitted mission index rejected before native allocation");
+            FreeLibrary(af);
+        }
+    }
 
     // Every table entry has a handler.
     for (const auto& hook : MissionHooks()) Check(MissionHookHandler(hook.rva) != nullptr, hook.name);

@@ -63,6 +63,28 @@ int main() {
     auto hs = snap(host), as = snap(a), bs = snap(b);
     CHECK(hs.isHost && hs.peerCount == 2 && !as.isHost && as.peerCount == 2);
     CHECK(hs.generation != as.generation && as.generation != bs.generation);
+    const std::vector<std::string> missionMembers{hostId, aId};
+    auto missionTick = [&] {
+        host.setExtensionRoom("room-1", hostId, missionMembers, 42);
+        a.setExtensionRoom("room-1", hostId, missionMembers, 42);
+    };
+    missionTick();
+    auto missionHost = snap(host), missionA = snap(a);
+    CHECK(missionHost.ready && missionA.ready && missionHost.peerCount == 1 && missionA.peerCount == 1);
+    host.setMemberIdentities({{aId, ai->commitment()}}); // lobby-only member's identity vanishes
+    missionTick();
+    CHECK(snap(host).generation == missionHost.generation);
+    b.setActive(false);
+    CHECK(waitFor([&] { missionTick(); return !host.canRoute(bId); }));
+    CHECK(snap(host).ready && snap(a).ready && snap(host).generation == missionHost.generation &&
+        snap(a).generation == missionA.generation);
+    host.setMemberIdentities(ho.memberIds);
+    b.setActive(true);
+    CHECK(waitFor([&] { missionTick(); return host.canRoute(bId); }));
+    CHECK(snap(host).generation == missionHost.generation && snap(a).generation == missionA.generation);
+    host.setExtensionRoom("room-1", hostId, missionMembers, 43); // same addresses, new world lifetime
+    CHECK(snap(host).generation != missionHost.generation);
+    tick(); hs = snap(host); as = snap(a); bs = snap(b);
     EDF6CoopPeer peer{};
     CHECK(host.extensionPeer(hs.generation, 0, peer) && std::string(peer.id) == aId);
     CHECK(!host.extensionPeer(hs.generation, 2, peer));

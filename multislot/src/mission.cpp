@@ -11,6 +11,7 @@
 #include "crashlog.h"
 #include "log.h"
 #include "patches.h"
+#include "../../src/extension_api.h"
 
 namespace multislot {
 namespace {
@@ -287,6 +288,27 @@ void __fastcall ItemStoreHook(void*, const std::int32_t* position, const std::ui
 }
 
 using ConstructorFn = void*(__fastcall*)(void*);
+// Only the 1DC525 call has the verified null-result branch (1DC544..1DC550).
+// Never detour 591130 globally: its script caller at 22AC2F dereferences the result.
+void* __fastcall CreateAdmittedOnlinePlayer(int index, const void* transform, int weaponMode) {
+    if (const HMODULE af = GetModuleHandleW(L"EDF6VehicleCrew.dll")) {
+        using Version = uint32_t (__cdecl*)();
+        const auto version = reinterpret_cast<Version>(GetProcAddress(af, "EDF6AF_SupportProtocolVersion"));
+        if (version && version() == EDF6AF_SUPPORT_PROTOCOL_VERSION) {
+            const auto admit = reinterpret_cast<EDF6AFAllowMissionPlayerFn>(GetProcAddress(af, "EDF6AF_AllowMissionPlayer"));
+            if (!admit || admit(index) != 1) {
+                Log("MISSION participant %d refused before player creation: not in this world's admitted roster; "
+                    "wait for the next mission", index);
+                return nullptr;
+            }
+        }
+    }
+    using Create = void*(__fastcall*)(int, const void*, int);
+    const int ghosts = activeGhosts.load();
+    const int source = ghosts > 0 && index > 0 && index <= ghosts ? 0 : index;
+    return reinterpret_cast<Create>(game + kCreateOnlinePlayer)(source, transform, weaponMode);
+}
+
 void* __fastcall MissionContextConstructorHook(void* self) {
     const auto original = reinterpret_cast<ConstructorFn>(game + kMissionContextConstructor);
     void* result = original(self);
@@ -327,15 +349,6 @@ void GhostCountHandler(CpuContext* context) {
     } else {
         activeGhosts.store(0);
     }
-}
-
-using CreateOnlinePlayerFn = void*(__fastcall*)(std::uint32_t, void*, std::uint32_t);
-// CreatePlayer's online path finds the user whose index matches; ghosts use player 1's user and
-// loadout, created at their own spawn point.
-void* __fastcall GhostCreateOnlinePlayerHook(std::uint32_t index, void* transform, std::uint32_t weaponMode) {
-    const int ghosts = activeGhosts.load();
-    const std::uint32_t source = ghosts && index >= 1 && index <= static_cast<std::uint32_t>(ghosts) ? 0 : index;
-    return reinterpret_cast<CreateOnlinePlayerFn>(game + kCreateOnlinePlayer)(source, transform, weaponMode);
 }
 
 }  // namespace
@@ -444,7 +457,7 @@ MidHandler GhostHookHandler(std::uint32_t rva) {
 }
 
 void* GhostCallHandler(std::uint32_t rva) {
-    return rva == 0x1DC525 ? reinterpret_cast<void*>(&GhostCreateOnlinePlayerHook) : nullptr;
+    return rva == 0x1DC525 ? reinterpret_cast<void*>(&CreateAdmittedOnlinePlayer) : nullptr;
 }
 
 std::uint64_t LoadoutRecordOffset(std::int64_t index) {
@@ -520,6 +533,7 @@ MidHandler MissionHookHandler(std::uint32_t rva) {
 
 void* MissionCallHandler(std::uint32_t rva) {
     switch (rva) {
+        case 0x1DC525: return reinterpret_cast<void*>(&CreateAdmittedOnlinePlayer);
         case 0x1D6CD5:
         case 0x1DD618: return reinterpret_cast<void*>(&MissionContextConstructorHook);
         case 0x0D7770: return reinterpret_cast<void*>(&DurabilityScaleHook);

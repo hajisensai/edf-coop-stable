@@ -1,9 +1,31 @@
 // Test-only AF presence/readiness exports, isolated from the real game/plugin.
 #include "../src/extension_api.h"
 #include <cstring>
+#include <mutex>
 static bool ready = true;
 static unsigned version = EDF6AF_SUPPORT_PROTOCOL_VERSION;
 static unsigned missionMode = 0;
+static std::mutex admissionMutex;
+static EDF6AFMissionAdmissionState admission = {sizeof(EDF6AFMissionAdmissionState), 1};
+// Test-controlled world authority; this fixture does not model AF's game lifecycle.
+extern "C" __declspec(dllexport) void EDF6COOP_CALL FakeAF_SetAdmission(uint32_t phase, const char* participant) {
+    const std::lock_guard<std::mutex> lock(admissionMutex);
+    admission = {};
+    admission.size = sizeof(admission);
+    admission.phase = phase;
+    if (phase != 1) admission.worldEpoch = 11;
+    if (participant && *participant) {
+        admission.participantCount = 1;
+        strncpy_s(admission.participants[0].id, participant, _TRUNCATE);
+    }
+}
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6AF_GetMissionAdmissionState(
+    uint32_t apiVersion, uint32_t outSize, EDF6AFMissionAdmissionState* out) {
+    if (!out || apiVersion != EDF6AF_MISSION_ADMISSION_VERSION || outSize != sizeof(*out)) return 0;
+    const std::lock_guard<std::mutex> lock(admissionMutex);
+    *out = admission;
+    return 1;
+}
 extern "C" __declspec(dllexport) void EDF6AF_DecodeRoomType() {}
 extern "C" __declspec(dllexport) bool EDF6AF_RoomIsolationReady() { return ready; }
 extern "C" __declspec(dllexport) void FakeAF_SetReady(bool value) { ready = value; }

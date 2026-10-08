@@ -92,6 +92,16 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("FAIL: EDF.dll cannot be loaded from %s (error %lu)\n", Narrow(gameFolder).c_str(), GetLastError());
         return 1;
     }
+    // Only this test executable accepts a fake AF profile. Production never reads this variable.
+    wchar_t profilePath[32768]{};
+    const DWORD profileLength = GetEnvironmentVariableW(L"EDF6NET_AF_PROFILE", profilePath, 32768);
+    if (profileLength) {
+        if (profileLength >= 32768 || !LoadLibraryW(profilePath)) {
+            std::printf("FAIL: AF test profile cannot be loaded (error %lu)\n", GetLastError());
+            return 1;
+        }
+        gamenet::Result("af-profile", "loaded");
+    }
     // A seat without EDF6Coop (no DLL in its Mods\Plugins) plays the game as it ships.
     const std::wstring pluginPath = machine.work + L"\\Mods\\Plugins\\EDF6Coop.dll";
     const bool plain = GetFileAttributesW(pluginPath.c_str()) == INVALID_FILE_ATTRIBUTES;

@@ -55,12 +55,29 @@ that identity against the same slot recorded by Users::Add/Remove. Duplicate
 indices, stale members and failed native reads fail closed. This resolver supplies
 identity only; it does not make a lobby member part of the mission quorum.
 
-These guards protect a sealed world's creation paths. They do not establish that
-a newly joined machine, whose local world is not yet sealed, waits in the lobby:
-the unsealed admission policy lives in AF, and host-authorized pre-world admission
-or a verified native wait path is still required to make that stronger claim.
-The existing GameNet start-sync harness supplies its own user-index mapping and
-does not model that newcomer state machine or a running mission world.
+Fresh clients additionally wait before the game's EOS JoinLobby completion. The
+host reads `EDF6AF_GetMissionAdmissionState` (ABI 1) independently of transport
+readiness: Unknown, Lobby, Loading, Sealed or Invalid, a world epoch, and the frozen
+participants. Only an explicit verified Lobby with an empty frozen roster permits
+a fresh completion. A reconnect using a participant's PUID still has no old world
+state and waits too. AF must derive Lobby from the native mission lifecycle;
+`ready == 0`, a missing actor, or an empty list is never a Lobby signal.
+
+The authenticated host's Room control message carries this metadata after the
+reserved removed-ID delimiter (`#world-v1:<phase>:<epoch>`, `#world-member:<PUID>`).
+It reaches lobby-only DirectNet clients without adding them to the support quorum
+or requiring a ready extension/spawn channel. Older Room readers never mistake
+these reserved strings for native slots or actual kicked PUIDs. Missing, malformed,
+partially received, superseded, disconnected-host and old-host manifests cannot
+release admission. Active-world waits remain parked until Lobby; a lost host or
+unavailable authority fails the join instead of the ordinary no-host fallback.
+Virtual joins use the same fresh-client policy. No unsafe player constructor is
+replaced with a global null return.
+
+Room/Roster pagination requires exact contiguous coverage, bounded totals and
+monotonic versions. Learning any page of a newer Room snapshot suspends an older
+admission grant until the full snapshot arrives. Host identity changes, new
+handshakes and dropped links clear cached grants and paging state.
 
 The extension inbox is separate from the game's inbox. Either reserved socket
 or reserved channel removes a packet from game delivery, including malformed or
@@ -93,4 +110,12 @@ address alone does not alter authority, while real host migration and participan
 capability loss close it. `MissionAdmission` tests the native call wrapper's
 allow/deny branches; `PatchTablesMatchEDF` verifies the installed game call target,
 both null-result guards and mission-index/PUID lookup fixtures.
+`WorldAdmission` covers frozen/malformed/missing manifests, next-lobby release,
+same-PUID reconnect, host changes, missing/overlapping/reordered pages, and real
+authenticated UDP Room delivery under loss to a nonparticipant. `GameNet_worldadmission`
+loads the real EDF.dll and Coop DLL in private test processes, drives the actual
+EOS imports, and verifies that the production parked callback stays pending with
+host slots present while the host is Sealed, then succeeds exactly once on Lobby.
+Its AF lifecycle source is an explicit fixture; that test does not validate AF's
+native mission-end observer itself.
 Real game and two-machine mission execution are not validated by these tests.

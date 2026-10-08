@@ -256,6 +256,7 @@ struct State {
         std::string lobbyId;
         uint64_t sinceMs = 0;
         uint64_t noHostSinceMs = 0;  // since when the room's owner advertises no direct link (0: it does)
+        bool worldWaitLogged = false;
     };
     std::mutex parkedMutex;
     ParkedEntry parked;
@@ -993,8 +994,8 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
     const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
     // A join into a room whose host hosts a direct link: the game enters once the host's member slots are here.
-    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner && g.autoJoinOn &&
-        lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)) {
+    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner &&
+        (missionAdmissionRequired() || (g.autoJoinOn && lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)))) {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
         g.parked.active = true;
         g.parked.callback = cb;
@@ -1668,6 +1669,8 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
         // Whom the room removed goes with it: whoever hosts the room next keeps them out.
         members = roomMessage(members, g.view.bannedMembers());
     }
+    const WorldAdmission world = readMissionAdmission();
+    if (world.present) appendWorldAdmission(members, world);
     base->setRoomMembers(std::move(members));
 }
 
@@ -1764,6 +1767,13 @@ void parkedEntryTick(uint64_t now) {
     const bool progressing = hostLinkProgressing(now);
     EOS_ProductUserId owner = nullptr;
     const bool hostLink = !g.marker.ownerAddress(&owner).empty() || !owner;  // an owner not known yet: not "none"
+    WorldAdmission currentWorld;
+    if (auto net = g.net.load()) {
+        uint64_t version = 0;
+        std::string from;
+        const auto message = net->hostRoom(&version, &from);
+        if (!from.empty() && from == g.marker.ownerId()) currentWorld = parseWorldAdmission(message);
+    }
     {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
         if (!g.parked.active) return;
@@ -1777,7 +1787,16 @@ void parkedEntryTick(uint64_t now) {
             std::lock_guard<std::mutex> view(g.viewMutex);
             const bool slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
             const bool gone = g.viewRoom != g.parked.lobbyId;
-            outcome = decideParkedEntry(waited, slotted, gone, progressing, noHost);
+            outcome = decideParkedWorldEntry(waited, slotted, gone, progressing, noHost,
+                                             missionAdmissionRequired() || g.view.hostWorld().present, currentWorld);
+            if (outcome == ParkedEntryOutcome::Wait && slotted && !freshWorldEntryAllowed(currentWorld) &&
+                (missionAdmissionRequired() || g.view.hostWorld().present) && !g.parked.worldWaitLogged) {
+                g.parked.worldWaitLogged = true;
+                logf("ROOM world admission waiting: host epoch %llu phase %u, %zu frozen participants; "
+                     "the fresh client remains outside the native world until the host returns to lobby",
+                     static_cast<unsigned long long>(currentWorld.epoch), static_cast<unsigned>(currentWorld.phase),
+                     currentWorld.participants.size());
+            }
             if (outcome == ParkedEntryOutcome::Wait) return;
             if (outcome == ParkedEntryOutcome::Slotted) g.view.adoptHost();
         }
@@ -2147,14 +2166,19 @@ void virtualRoomTick(uint64_t now) {
         std::vector<std::string> slots;
         parseRoomMessage(list, &slots, nullptr);
         if (v.joining) {
-            if (std::find(slots.begin(), slots.end(), self) != slots.end()) {
+            const WorldAdmission world = parseWorldAdmission(list);
+            const bool needsAdmission = missionAdmissionRequired() || world.present;
+            const bool worldAllowed = !needsAdmission || freshWorldEntryAllowed(world);
+            const bool waitingWorld = needsAdmission && !worldAllowed && world.present &&
+                world.phase != WorldPhase::Unknown && net && net->canRoute(v.room.host);
+            if (worldAllowed && std::find(slots.begin(), slots.end(), self) != slots.end()) {
                 v.joining = false;
                 v.in = true;
                 v.hostSeenMs = now;
                 callback = reinterpret_cast<void*>(v.callback);
                 clientData = v.clientData;
                 v.callback = nullptr;
-            } else if (now - v.startMs >= kVirtualJoinMs) {
+            } else if (!waitingWorld && now - v.startMs >= kVirtualJoinMs) {
                 logf("REJOIN room %s: its host did not let us in within %llu s", roomId.c_str(),
                      static_cast<unsigned long long>(kVirtualJoinMs / 1000));
                 callback = reinterpret_cast<void*>(v.callback);

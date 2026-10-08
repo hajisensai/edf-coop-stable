@@ -1,5 +1,6 @@
 #include "direct_net.h"
 #include "extension_bridge.h"
+#include "room_view.h"
 #include <cstring>
 #include <algorithm>
 
@@ -49,6 +50,35 @@ uint32_t EDF6COOP_CALL poll(uint64_t generation, EDF6CoopPeer* sender, void* dat
 }
 }
 namespace dn {
+bool missionAdmissionRequired() { return GetModuleHandleW(L"EDF6VehicleCrew.dll") != nullptr; }
+WorldAdmission readMissionAdmission() {
+    WorldAdmission out;
+    out.present = missionAdmissionRequired();
+    if (!out.present || !missionGateReady.load()) return out;
+    const auto module = GetModuleHandleW(L"EDF6VehicleCrew.dll");
+    const auto read = reinterpret_cast<EDF6AFGetMissionAdmissionStateFn>(
+        GetProcAddress(module, "EDF6AF_GetMissionAdmissionState"));
+    if (!read) return out;
+    auto snapshot = std::make_unique<EDF6AFMissionAdmissionState>();
+    snapshot->size = sizeof(*snapshot);
+    if (read(EDF6AF_MISSION_ADMISSION_VERSION, sizeof(*snapshot), snapshot.get()) != 1 ||
+        snapshot->size != sizeof(*snapshot) || snapshot->reserved || snapshot->phase > 4 ||
+        snapshot->participantCount > EDF6AF_MISSION_MAX_PARTICIPANTS) return out;
+    WorldAdmission candidate;
+    candidate.present = true;
+    candidate.phase = static_cast<WorldPhase>(snapshot->phase);
+    candidate.epoch = snapshot->worldEpoch;
+    for (uint32_t i = 0; i < snapshot->participantCount; ++i) {
+        const auto& peer = snapshot->participants[i];
+        const auto end = static_cast<const char*>(memchr(peer.id, '\0', sizeof(peer.id)));
+        if (!end || end == peer.id || peer.id[0] == '#') return out;
+        candidate.participants.emplace_back(peer.id, static_cast<size_t>(end - peer.id));
+    }
+    std::vector<std::string> encoded;
+    appendWorldAdmission(encoded, candidate);
+    candidate = parseWorldAdmission(encoded);
+    return candidate.present ? candidate : out;
+}
 void bindExtensionTransport(std::shared_ptr<DirectNet> net) {
     auto old = transport.exchange(net);
     if (old && old != net) old->clearExtensionRoom();

@@ -5,6 +5,9 @@
 #include <cstdint>
 namespace dn {
 class DirectNet;
+struct WorldAdmission;
+bool missionAdmissionRequired();
+WorldAdmission readMissionAdmission();
 void bindExtensionTransport(std::shared_ptr<DirectNet> net);
 void invalidateExtensionTransport();
 void shutdownExtensionTransport() noexcept; // loader-lock safe: atomics only

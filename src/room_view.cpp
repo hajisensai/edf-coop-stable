@@ -1,8 +1,58 @@
 #include "room_view.h"
 
 #include <algorithm>
+#include <charconv>
 
 namespace dn {
+
+namespace {
+constexpr const char* kWorldMarker = "#world-v1:";
+constexpr const char* kWorldMember = "#world-member:";
+}
+
+bool freshWorldEntryAllowed(const WorldAdmission& world) {
+    return world.present && world.phase == WorldPhase::Lobby && world.participants.empty();
+}
+
+void appendWorldAdmission(std::vector<std::string>& message, const WorldAdmission& world) {
+    // Old readers treat these reserved strings as removed IDs, never as player slots.
+    if (std::find(message.begin(), message.end(), kRemovedMarker) == message.end()) message.push_back(kRemovedMarker);
+    message.push_back(std::string(kWorldMarker) + std::to_string(static_cast<uint32_t>(world.phase)) + ":" +
+                      std::to_string(world.epoch));
+    for (const auto& id : world.participants) message.push_back(std::string(kWorldMember) + id);
+}
+
+WorldAdmission parseWorldAdmission(const std::vector<std::string>& message) {
+    WorldAdmission out;
+    bool removed = false;
+    for (const auto& entry : message) {
+        if (entry == kRemovedMarker) { removed = true; continue; }
+        if (!removed) continue;
+        if (entry.starts_with(kWorldMarker)) {
+            if (out.present) return {};
+            out.present = true;
+            const std::string text = entry.substr(std::char_traits<char>::length(kWorldMarker));
+            const auto colon = text.find(':');
+            if (colon == std::string::npos) return {};
+            uint32_t phase = 0;
+            const auto p = std::from_chars(text.data(), text.data() + colon, phase);
+            const auto e = std::from_chars(text.data() + colon + 1, text.data() + text.size(), out.epoch);
+            if (p.ec != std::errc{} || p.ptr != text.data() + colon || e.ec != std::errc{} ||
+                e.ptr != text.data() + text.size() || phase > 4) return {};
+            out.phase = static_cast<WorldPhase>(phase);
+        } else if (entry.starts_with(kWorldMember)) {
+            if (!out.present || out.participants.size() >= 1024) return {};
+            const std::string id = entry.substr(std::char_traits<char>::length(kWorldMember));
+            if (id.empty() || id.size() > 64 || id[0] == '#') return {};
+            out.participants.push_back(id);
+        }
+    }
+    std::sort(out.participants.begin(), out.participants.end());
+    if (std::adjacent_find(out.participants.begin(), out.participants.end()) != out.participants.end() ||
+        (out.phase == WorldPhase::Lobby && !out.participants.empty()) ||
+        ((out.phase == WorldPhase::Loading || out.phase == WorldPhase::Sealed) && !out.epoch)) return {};
+    return out;
+}
 
 namespace {
 void eraseFrom(std::vector<std::string>& order, const std::string& member) {
@@ -16,6 +66,20 @@ ParkedEntryOutcome decideParkedEntry(uint64_t waitedMs, bool slotted, bool gone,
     if (noHostMs >= kParkedNoHostMs) return ParkedEntryOutcome::NoHost;
     if (waitedMs >= kParkedEntryCapMs || (waitedMs >= kParkedEntryMs && !progressing)) return ParkedEntryOutcome::GiveUp;
     return ParkedEntryOutcome::Wait;
+}
+
+ParkedEntryOutcome decideParkedWorldEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing,
+                                         uint64_t noHostMs, bool required, const WorldAdmission& world) {
+    if (required && !freshWorldEntryAllowed(world)) {
+        if (gone) return ParkedEntryOutcome::Gone;
+        // An authenticated host explicitly running/loading a world: remain outside its native world until lobby.
+        // A lost host or missing/malformed manifest must never turn into the old NoHost permissive fallback.
+        if (progressing && world.present && world.phase != WorldPhase::Unknown) return ParkedEntryOutcome::Wait;
+        if (waitedMs >= kParkedEntryCapMs || (waitedMs >= kParkedEntryMs && !progressing))
+            return ParkedEntryOutcome::GiveUp;
+        return ParkedEntryOutcome::Wait;
+    }
+    return decideParkedEntry(waitedMs, slotted, gone, progressing, noHostMs);
 }
 
 InheritedPlacement decideInheritedPlacement(int oldSlot, const std::vector<std::string>& ours, bool late) {
@@ -46,7 +110,7 @@ void parseRoomMessage(const std::vector<std::string>& message, std::vector<std::
         }
         if (!past) {
             if (slots) slots->push_back(entry);
-        } else if (removed && !entry.empty()) {
+        } else if (removed && !entry.empty() && entry[0] != '#') {
             removed->insert(entry);
         }
     }
@@ -124,6 +188,7 @@ void RoomView::heardHost(const std::vector<std::string>& message, const std::str
     heard_ = true;
     awaiting_ = false;
     parseRoomMessage(message, &hostSlots_, &hostBanned_);
+    hostWorld_ = parseWorldAdmission(message);
     hostNow_.clear();
     for (const std::string& m : hostSlots_)
         if (!m.empty()) hostNow_.insert(m);
@@ -152,6 +217,7 @@ std::vector<std::pair<std::string, int>> RoomView::promoted(const std::string& n
     const std::vector<std::string> oldSlots = hostSlots_;
     heard_ = false;
     hostSlots_.clear();
+    hostWorld_ = {};
     hostNow_.clear();
     // Whom the old host listed says nothing about the new host's room: a member its list does not have (yet) is not
     // told to leave for that (followHost).

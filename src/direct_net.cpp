@@ -392,7 +392,13 @@ void DirectNet::setMemberIdentities(std::map<std::string, std::string> commitmen
 
 void DirectNet::setRoomOwner(const std::string& puid, const std::string& commitment) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (roomOwner_ != puid || roomOwnerId_ != commitment) resetExtensionLocked();
+    if (roomOwner_ != puid || roomOwnerId_ != commitment) {
+        resetExtensionLocked();
+        if (hostLink_) dropHostLink("room owner/identity changed; discard its old admission and authenticate again");
+        hostRoom_.clear();
+        hostRoomFrom_.clear();
+        ++hostRoomVersion_;
+    }
     roomOwner_ = puid;
     roomOwnerId_ = commitment;
 }
@@ -766,6 +772,12 @@ void DirectNet::setRoomMembers(std::vector<std::string> members) {
 std::vector<std::string> DirectNet::hostRoom(uint64_t* version, std::string* from) {
     std::lock_guard<std::mutex> lock(mu_);
     if (version) *version = hostRoomVersion_;
+    // A cached lobby grant belongs to its authenticated live host session, never a replacement host or reconnect.
+    if (!hostLink_ || !usable(*hostLink_) || hostLink_->puid != roomOwner_ || hostRoomFrom_ != roomOwner_ ||
+        roomPages_.version > roomPages_.applied) {
+        if (from) from->clear();
+        return {};
+    }
     if (from) *from = hostRoomFrom_;
     return hostRoom_;
 }
@@ -1365,11 +1377,13 @@ void DirectNet::onClientDatagram(const Received& r, const sockaddr_storage& from
         if (m.roster.hostNonce != hostLink_->peerNonce) return;
         std::vector<std::string> list;
         const bool single = m.roster.offset == 0 && m.roster.total == m.roster.roster.size();
-        if (single ? m.counter >= hostLink_->rosterCounter && m.roster.version >= rosterPages_.applied
+        if (single ? m.counter >= hostLink_->rosterCounter && currentSinglePage(rosterPages_, m.roster.version)
                    : applyPage(rosterPages_, m.roster.version, m.roster.total, m.roster.offset, m.roster.roster, list)) {
             if (single) {
                 hostLink_->rosterCounter = m.counter;
                 rosterPages_.applied = m.roster.version;
+                rosterPages_.version = m.roster.version;
+                rosterPages_.pages.clear();
                 list = m.roster.roster;
             }
             if (roster_ != list) logf("DIRECT roster now has %zu direct members", list.size());
@@ -1380,11 +1394,13 @@ void DirectNet::onClientDatagram(const Received& r, const sockaddr_storage& from
         if (m.room.hostNonce != hostLink_->peerNonce) return;
         std::vector<std::string> list;
         const bool single = m.room.offset == 0 && m.room.total == m.room.members.size();
-        if (single ? m.counter >= hostLink_->roomCounter && m.room.version >= roomPages_.applied
+        if (single ? m.counter >= hostLink_->roomCounter && currentSinglePage(roomPages_, m.room.version)
                    : applyPage(roomPages_, m.room.version, m.room.total, m.room.offset, m.room.members, list)) {
             if (single) {
                 hostLink_->roomCounter = m.counter;
                 roomPages_.applied = m.room.version;
+                roomPages_.version = m.room.version;
+                roomPages_.pages.clear();
                 list = m.room.members;
             }
             if (hostRoom_ != list || hostRoomFrom_ != hostLink_->puid) {
@@ -1451,6 +1467,11 @@ void DirectNet::onClientWelcome(const WelcomeMsg& w, const sockaddr_storage& fro
     link.up = true;
     link.id = ++linkIds_;
     link.lastRecvMs = now;
+    rosterPages_ = {};
+    roomPages_ = {};
+    hostRoom_.clear();
+    hostRoomFrom_.clear();
+    ++hostRoomVersion_;
     hostLink_ = std::move(link);
     hostReplyAddr_ = from;
     hostReplyAddrLen_ = fromLen;
@@ -1466,6 +1487,9 @@ void DirectNet::dropHostLink(const char* why) {
     roster_.clear();
     rosterPages_ = {};
     roomPages_ = {};
+    hostRoom_.clear();
+    hostRoomFrom_.clear();
+    ++hostRoomVersion_;
     newLocalSession();
     lastHelloMs_ = 0;
 }
@@ -1549,24 +1573,7 @@ void DirectNet::sendListPages(Link& link, MsgType type, const std::vector<std::s
 
 bool DirectNet::applyPage(Pages& pages, uint32_t version, uint16_t total, uint16_t offset,
                           const std::vector<std::string>& entries, std::vector<std::string>& out) {
-    if (version <= pages.applied) return false;  // an older list than the one we have
-    if (version != pages.version) {
-        if (version < pages.version) return false;
-        pages.version = version;
-        pages.total = total;
-        pages.pages.clear();
-    }
-    if (total != pages.total) return false;
-    pages.pages[offset] = entries;
-    size_t have = 0;
-    for (const auto& [at, page] : pages.pages) have += page.size();
-    if (have < total) return false;
-    out.clear();
-    for (const auto& [at, page] : pages.pages) out.insert(out.end(), page.begin(), page.end());
-    out.resize(total);
-    pages.applied = version;
-    pages.pages.clear();
-    return true;
+    return applyListPage(pages, version, total, offset, entries, out);
 }
 
 bool DirectNet::resolveHost() {

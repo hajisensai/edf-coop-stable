@@ -12,6 +12,7 @@
 #include "machine.h"
 #include "net_shared.h"
 #include "../../../src/eos_min.h"
+#include "../../../src/extension_api.h"
 #include "../../src/netplayer.h"
 
 namespace gamenet {
@@ -974,6 +975,105 @@ int SlotRoom(Machine& machine, const std::string& how) {
     return MissionIn(machine, host, room, &transport);
 }
 
+struct WorldEntered {
+    Entered entered;
+    unsigned callbacks = 0;
+};
+
+void OnWorldEntered(const LobbyCallbackInfo* info) {
+    auto* state = static_cast<WorldEntered*>(info->ClientData);
+    ++state->callbacks;
+    LobbyCallbackInfo copy = *info;
+    copy.ClientData = &state->entered;
+    OnEntered(&copy);
+    // Count all callbacks separately from successful completions. A failed join must never satisfy release.
+    if (info->ResultCode == 0) FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish")(1);
+    FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready")(1);
+}
+
+// Real EDF.dll imports -> production EOS wrappers -> authenticated DirectNet room authority.
+// The fake controls only AF's published phase; AF's actual world/lobby lifecycle is tested separately.
+int WorldAdmission(Machine& machine, bool host) {
+    ListenToMembers(machine);
+    const auto setAdmission = reinterpret_cast<void (EDF6COOP_CALL *)(uint32_t, const char*)>(
+        GetProcAddress(GetModuleHandleW(L"EDF6VehicleCrew.dll"), "FakeAF_SetAdmission"));
+    if (!setAdmission) {
+        Result("world-admission", "missing AF test profile");
+        return 1;
+    }
+    const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    const auto callbacks = FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready");
+    if (host) {
+        setAdmission(3, machine.user.c_str());  // sealed world contains only the host
+        Entered entered;
+        CreateOptions options;
+        options.LocalUserId = Self(machine);
+        options.MaxLobbyMembers = gamenet::kMaxMachines;
+        Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+        if (!TickUntil(machine, 10000, [&] { return entered.done; }) || entered.result != 0) return 1;
+        if (!TickUntil(machine, 20000, [&] { return roomCount() == 2; })) {
+            Result("world-admission", "guest never reached EOS lobby");
+            return 1;
+        }
+        // The host publishes its real EDF.dll user slots. Populate those lobby users as SlotRoom does;
+        // a loaded game without its lobby transport has no native slots for the guest to adopt.
+        Transport transport;
+        if (!transport.Start(machine, entered.lobby, GameRoomMembers(machine, entered.lobby))) return 1;
+        const ULONGLONG holdUntil = GetTickCount64() + 2000;
+        const bool held = TickUntil(machine, 5000, [&] {
+            transport.Tick();
+            return callbacks(0) != 0 || GetTickCount64() >= holdUntil;
+        }) && callbacks(0) == 0 && finish(0) == 0;
+        Result("world-held", "%s", held ? "callback pending for 2000ms after EOS join" : "callback escaped sealed world");
+        if (!held) return 1;
+        setAdmission(1, nullptr);  // verified lobby releases the same parked completion
+        const bool released = TickUntil(machine, 15000, [&] {
+            transport.Tick();
+            return callbacks(0) != 0;
+        }) && callbacks(0) == 1 && finish(0) == 1;
+        Result("world-released", "%s", released ? "one callback after lobby" : "missing or repeated callback");
+        if (!released) return 1;
+        finish(1);  // acknowledge the guest's successful release before either process stops ticking
+        return 0;
+    }
+    setAdmission(1, nullptr);
+    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+    const auto release = FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release");
+    void* details = nullptr;
+    struct ByKey { std::int32_t ApiVersion; const char* AttrKey; } key{1, "EDF6DN_HOSTADDR"};
+    const bool found = TickUntil(machine, 20000, [&] {
+        if (details) release(details);
+        details = roomCount() == 1 ? roomDetails() : nullptr;
+        void* attribute = nullptr;
+        if (!details || FakeExport<std::int32_t (*)(void*, const void*, void**)>(
+                "EOS_LobbyDetails_CopyAttributeByKey")(details, &key, &attribute) != 0) return false;
+        FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
+        return true;
+    });
+    if (!found) {
+        if (details) release(details);
+        Result("world-admission", "no advertised authenticated host");
+        return 1;
+    }
+    WorldEntered state;
+    JoinOptions options;
+    options.LocalUserId = Self(machine);
+    options.LobbyDetailsHandle = details;
+    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &state, &OnWorldEntered);
+    const bool completed = TickUntil(machine, 30000, [&] {
+        PollP2P(machine);
+        return state.entered.done;
+    });
+    release(details);
+    const bool acknowledged = completed && state.entered.result == 0 && TickUntil(machine, 5000, [&] {
+        PollP2P(machine);
+        return finish(0) >= 2;
+    });
+    Result("world-callback", "%u result=%d acknowledged=%d", state.callbacks, state.entered.result, acknowledged ? 1 : 0);
+    return acknowledged && state.callbacks == 1 && state.entered.result == 0 ? 0 : 1;
+}
+
 int FullRoom(Machine& machine, bool host) {
     ListenToMembers(machine);
     Room room;
@@ -1040,6 +1140,7 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "bulk") return Bulk(machine, host);
     if (step == "fullroom") return FullRoom(machine, host);
     if (step == "fulljoin") return FullJoin(machine);
+    if (step == "worldadmission") return WorldAdmission(machine, host);
     if (step.rfind("slots-", 0) == 0) return SlotRoom(machine, step.substr(6));
     Result("role", "unknown role %s", role.c_str());
     return 2;

@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "auth.h"
+#include "list_pages.h"
 #include "congestion.h"
 #include "reliable.h"
 #include "wire.h"
@@ -313,12 +314,7 @@ private:
         uint64_t retryAfterMs = 0;  // after kIntroFailures of them, not before this
     };
     // A member list (Roster or Room) arriving in pages.
-    struct Pages {
-        uint32_t version = 0;
-        uint16_t total = 0;
-        uint32_t applied = 0;  // the newest version applied
-        std::map<uint16_t, std::vector<std::string>> pages;  // by offset
-    };
+    using Pages = ListPages;
 
     // A link that carries game packets now: up, and not being closed for an unacknowledged backlog.
     static bool usable(const Link& link) { return link.up && !link.tx.overloaded(); }

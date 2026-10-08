@@ -61,4 +61,18 @@ typedef uint32_t (EDF6COOP_CALL *EDF6AFGetMissionParticipantsFn)(
 typedef uint32_t (EDF6COOP_CALL *EDF6AFAllowMissionPlayerFn)(int32_t missionIndex);
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopResolveMissionPlayerPuidFn)(int32_t missionIndex, EDF6CoopPeer* out);
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopMissionAdmissionReadyFn)(void);
+
+// World lifecycle authority, independent of whether extension transport/quorum is ready.
+// phase: 0 unknown, 1 verified lobby, 2 loading, 3 sealed, 4 invalid.
+#define EDF6AF_MISSION_ADMISSION_VERSION 1u
+typedef struct EDF6AFMissionAdmissionState {
+    uint32_t size;
+    uint32_t phase;
+    uint32_t participantCount;
+    uint32_t reserved;
+    uint64_t worldEpoch;
+    EDF6CoopPeer participants[EDF6AF_MISSION_MAX_PARTICIPANTS];
+} EDF6AFMissionAdmissionState;
+typedef uint32_t (EDF6COOP_CALL *EDF6AFGetMissionAdmissionStateFn)(
+    uint32_t version, uint32_t outSize, EDF6AFMissionAdmissionState* out);
 #pragma pack(pop)

@@ -79,7 +79,7 @@ float __fastcall FakeScale(void*, int, int players) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const std::size_t imageSize = kGameStatusPointer + 0x1000;
     auto* image = static_cast<unsigned char*>(VirtualAlloc(nullptr, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     Check(image != nullptr, "fake image");
@@ -91,7 +91,46 @@ int main() {
     const unsigned char scale[] = {0xF3, 0x41, 0x0F, 0x2A, 0xC0, 0xC3};         // cvtsi2ss xmm0, r8d; ret
     std::memcpy(image + kMissionContextConstructor, constructor, sizeof(constructor));
     std::memcpy(image + kPlayerCountScale, scale, sizeof(scale));
+    const unsigned char createPlayer[] = {0x48, 0x89, 0xD0, 0xC3}; // mov rax,rdx; ret (records forwarding)
+    std::memcpy(image + kCreateOnlinePlayer, createPlayer, sizeof(createPlayer));
     InitMission(image);
+
+    const auto admittedCreate = reinterpret_cast<void*(__fastcall*)(int, const void*, int)>(MissionCallHandler(0x1DC525));
+    Check(admittedCreate != nullptr, "safe player creation handler exists");
+    if (!admittedCreate) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    int transform = 123;
+    Check(admittedCreate(7, &transform, 0) == &transform, "without AF the safe call forwards to the original");
+    if (argc > 1) {
+        const HMODULE af = LoadLibraryA(argv[1]);
+        Check(af != nullptr, "test AF admission provider loads");
+        if (af) {
+            const auto count = reinterpret_cast<unsigned(*)()>(GetProcAddress(af, "FakeAF_CreationCount"));
+            const auto observedIndex = reinterpret_cast<int32_t(*)()>(GetProcAddress(af, "FakeAF_CreationIndex"));
+            const auto observedObject = reinterpret_cast<const void*(*)()>(GetProcAddress(af, "FakeAF_CreationObject"));
+            const auto observedControl = reinterpret_cast<const void*(*)()>(GetProcAddress(af, "FakeAF_CreationControl"));
+            Check(count && observedIndex && observedObject && observedControl, "test observer exports exist");
+            if (!count || !observedIndex || !observedObject || !observedControl) return 1;
+            std::uint8_t player[0x38]{};
+            FakeControl control{nullptr, 1, 1};
+            const void* controlPointer = &control;
+            std::memcpy(player + 0x30, &controlPointer, sizeof(controlPointer));
+            Check(admittedCreate(1, player, 0) == player, "admitted mission index forwards its native arguments");
+            Check(count() == 1 && observedIndex() == 1 && observedObject() == player && observedControl() == &control,
+                  "only successful live creation publishes the exact object and control identity");
+            Check(admittedCreate(7, &transform, 0) == nullptr, "unadmitted mission index rejected before native allocation");
+            Check(admittedCreate(1, nullptr, 0) == nullptr && count() == 1, "failed original creation does not notify");
+            player[0x18] = 4;
+            Check(admittedCreate(1, player, 0) == player && count() == 1, "deleted object does not notify");
+            player[0x18] = 0; control.uses = 0;
+            Check(admittedCreate(1, player, 0) == player && count() == 1, "expired control does not notify");
+            Check(admittedCreate(1, reinterpret_cast<void*>(1), 0) == reinterpret_cast<void*>(1) && count() == 1,
+                  "bad native object reads fail closed without changing the original return");
+            FreeLibrary(af);
+        }
+    }
 
     // Every table entry has a handler.
     for (const auto& hook : MissionHooks()) Check(MissionHookHandler(hook.rva) != nullptr, hook.name);

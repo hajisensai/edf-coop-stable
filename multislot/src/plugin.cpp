@@ -58,6 +58,7 @@
 #include "networld.h"
 #include "src/config.h"
 #include "src/dn_part.h"
+#include "src/extension_bridge.h"
 #include "src/log.h"
 #include "src/product.h"
 #include "src/updater.h"
@@ -279,8 +280,9 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     if (mission) {
         for (const auto& call : MissionCalls()) redirects.push_back({call, MissionCallHandler(call.rva)});
         for (const auto& call : PacketFitCalls()) redirects.push_back({call, PacketFitCallHandler(call.rva)});
-        if (ghosts > 0)
-            for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
+        // The native null-safe call also hosts AF admission. Install once in every
+        // mission; the same wrapper performs the optional solo ghost remap.
+        for (const auto& call : GhostCalls()) redirects.push_back({call, GhostCallHandler(call.rva)});
     }
     // Netcode rewrite W1: the controller's plaintext datagrams, for their class and the per-type traffic log.
     for (const auto& call : NetTrafficCalls()) redirects.push_back({call, NetTrafficCallHandler(call.rva)});
@@ -413,6 +415,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     Log("Patched EDF.dll: %zu sites (%zu redirected calls, %zu hooks, %zu widened compares, %zu code patches, %zu vtable "
         "slots); stubs and hook thunks at %p (%zu bytes)", writes.size(), redirects.size(), hooks.size(), compares.size(),
         patches.size(), slots.size(), static_cast<const void*>(thunks.Base()), thunks.Used());
+    dn::setExtensionMissionGateReady(mission);
     return true;
 }
 

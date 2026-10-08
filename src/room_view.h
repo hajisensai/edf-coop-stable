@@ -26,6 +26,18 @@
 
 namespace dn {
 
+enum class WorldPhase : uint32_t { Unknown = 0, Lobby = 1, Loading = 2, Sealed = 3, Invalid = 4 };
+struct WorldAdmission {
+    WorldPhase phase = WorldPhase::Unknown;
+    uint64_t epoch = 0;
+    std::vector<std::string> participants;
+    bool present = false;
+};
+// A fresh process has no state from the sealed world, even when it reuses a participant's PUID.
+bool freshWorldEntryAllowed(const WorldAdmission& world);
+void appendWorldAdmission(std::vector<std::string>& message, const WorldAdmission& world);
+WorldAdmission parseWorldAdmission(const std::vector<std::string>& message);
+
 // EOS_ELobbyMemberStatus.
 enum : int32_t { kJoined = 0, kLeft = 1, kDisconnected = 2, kKicked = 3, kPromoted = 4, kClosed = 5 };
 
@@ -108,6 +120,7 @@ public:
     // empty one), and whom the room removed.
     // `from`: the host that sent it; after a change of host, only the new host's list is heard ("" any).
     void heardHost(const std::vector<std::string>& message, const std::string& from = std::string());
+    const WorldAdmission& hostWorld() const { return hostWorld_; }
     // A member: what our game must be told to have what the host's game has. Departures first: whom the host listed
     // before and lists no longer leaves (our own removal is a kick); a member only Epic told us of, which the host never
     // listed (its game may simply not have seen the join yet), stays. Then whom the host lists joins, in slot order -
@@ -172,6 +185,7 @@ private:
     std::set<std::string> hostBanned_;  // whom the host's newest Room message says the room removed
     std::set<std::string> hostNow_;   // the host's newest list
     std::vector<std::string> hostSlots_;  // the same by slot, "" for an empty one
+    WorldAdmission hostWorld_;
     std::set<std::string> hostEver_;  // everyone the host listed since we entered
 };
 
@@ -187,6 +201,8 @@ constexpr uint64_t kParkedEntryCapMs = 45000;
 constexpr uint64_t kParkedNoHostMs = 5000;
 // noHostMs: how long the room's owner has advertised no direct link (0: it does).
 ParkedEntryOutcome decideParkedEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing, uint64_t noHostMs = 0);
+ParkedEntryOutcome decideParkedWorldEntry(uint64_t waitedMs, bool slotted, bool gone, bool progressing,
+                                         uint64_t noHostMs, bool required, const WorldAdmission& world);
 
 // Becoming the room's host, one join we held back (RoomView::promoted) and the slot the old host's game had it in
 // (`oldSlot`, -1 none): whether our game is told it now, and whether it then takes that slot. Our game gives the first

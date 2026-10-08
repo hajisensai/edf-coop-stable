@@ -965,8 +965,38 @@ inline void CheckGiveUp(const std::vector<Spawned>& machines, const gamenet::Net
           g.user + " forgot the room it could not enter (no REJOIN entry for it)");
 }
 
+inline std::vector<Seat> WorldAdmissionSeats() {
+    // Use the established loopback socket setup; the real EOS callback still passes through the production gate.
+    auto seats = DirectSeats(2, "worldadmission", "[Test]\r\nLoopbackHosts=1\r\n");
+    for (auto& seat : seats) seat.ini += "Key=world-admission-test\r\n";
+    return seats;
+}
+
+inline void CheckWorldAdmission(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    Check(Result(machines[0], "world-held") == "callback pending for 2000ms after EOS join",
+          "EOS lobby membership did not complete the guest's join into a sealed world");
+    Check(Result(machines[0], "world-released") == "one callback after lobby",
+          "the verified lobby phase released exactly one completion");
+    Check(Result(machines[1], "world-callback") == "1 result=0 acknowledged=1",
+          "the guest's original EOS callback succeeded once and the host acknowledged it");
+    const auto& log = machines[1].text;
+    Check(log.find("once its host's member slots are here") != std::string::npos,
+          "the production lobbyEnteredWrapper parked the guest's callback");
+    Check(log.find("ROOM world admission waiting: host epoch 11 phase 3, 1 frozen participants") != std::string::npos,
+          "the guest already had host slots and was blocked specifically by the sealed world authority");
+    Check(log.find("with its host's member slots") != std::string::npos,
+          "the production parkedEntryTick released the callback through the authenticated host room");
+    Check(network.lobby.count == 2, "both members stayed in the EOS lobby");
+    for (const auto& machine : machines) {
+        Check(Result(machine, "af-profile") == "loaded", machine.user + " loaded the explicit AF test fixture");
+        Check(machine.results.count("unimplemented-eos") == 0, machine.user + " used implemented EOS calls only");
+    }
+    CheckEosAcceptedAll(network);
+}
+
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
+        {"worldadmission", WorldAdmissionSeats(), 90000, &CheckWorldAdmission},
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
          {{"EDF6NET_SECONDS", "8"}}},
         {"versiongate",

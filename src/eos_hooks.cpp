@@ -1,4 +1,7 @@
 #include "eos_hooks.h"
+#include "extension_bridge.h"
+#include "extension_room.h"
+#include "mod_room_compat.h"
 
 #include <atomic>
 #include <algorithm>
@@ -253,6 +256,7 @@ struct State {
         std::string lobbyId;
         uint64_t sinceMs = 0;
         uint64_t noHostSinceMs = 0;  // since when the room's owner advertises no direct link (0: it does)
+        bool worldWaitLogged = false;
     };
     std::mutex parkedMutex;
     ParkedEntry parked;
@@ -605,6 +609,8 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
+    if (status == kPromoted || ends) invalidateExtensionTransport();
+    else if (status != kJoined) invalidateExtensionParticipant(target);
     const uint64_t now = GetTickCount64();
     // A new host: the old one's slots are not the room's any more (room_view.h promoted). Its list is followed from
     // scratch, the one that may have come before this PROMOTED included.
@@ -697,6 +703,7 @@ void completeLobbyCall(void* callback, void* clientData, EOS_EResult result, con
 
 // The game is in room `lobbyId` with `members` (EOS ids; it is listed among them).
 void enterView(const std::string& lobbyId, const std::string& self, const std::vector<std::string>& members) {
+    invalidateExtensionTransport();
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.reset(self, members);
     g.inherited.clear();
@@ -710,6 +717,7 @@ void enterView(const std::string& lobbyId, const std::string& self, const std::v
 
 void leaveView() {
     std::lock_guard<std::mutex> lock(g.viewMutex);
+    invalidateExtensionTransport();
     g.view.clear();
     g.inherited.clear();
     g.viewRoom.clear();
@@ -986,8 +994,8 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
     const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
     // A join into a room whose host hosts a direct link: the game enters once the host's member slots are here.
-    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner && g.autoJoinOn &&
-        lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)) {
+    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner &&
+        (missionAdmissionRequired() || (g.autoJoinOn && lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)))) {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
         g.parked.active = true;
         g.parked.callback = cb;
@@ -1041,6 +1049,7 @@ void stopAutoJoinLocked(const char* why) {
 }
 
 void leftLobby(const char* why) {
+    invalidateExtensionTransport();
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.stateTypes.forget();  // the next room's players and missions teach their own
     // Datagrams put together, copies remembered and fragments waiting belong to the room just left.
@@ -1660,6 +1669,8 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
         // Whom the room removed goes with it: whoever hosts the room next keeps them out.
         members = roomMessage(members, g.view.bannedMembers());
     }
+    const WorldAdmission world = readMissionAdmission();
+    if (world.present) appendWorldAdmission(members, world);
     base->setRoomMembers(std::move(members));
 }
 
@@ -1756,6 +1767,13 @@ void parkedEntryTick(uint64_t now) {
     const bool progressing = hostLinkProgressing(now);
     EOS_ProductUserId owner = nullptr;
     const bool hostLink = !g.marker.ownerAddress(&owner).empty() || !owner;  // an owner not known yet: not "none"
+    WorldAdmission currentWorld;
+    if (auto net = g.net.load()) {
+        uint64_t version = 0;
+        std::string from;
+        const auto message = net->hostRoom(&version, &from);
+        if (!from.empty() && from == g.marker.ownerId()) currentWorld = parseWorldAdmission(message);
+    }
     {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
         if (!g.parked.active) return;
@@ -1769,7 +1787,16 @@ void parkedEntryTick(uint64_t now) {
             std::lock_guard<std::mutex> view(g.viewMutex);
             const bool slotted = g.viewRoom == g.parked.lobbyId && g.view.slotted();
             const bool gone = g.viewRoom != g.parked.lobbyId;
-            outcome = decideParkedEntry(waited, slotted, gone, progressing, noHost);
+            outcome = decideParkedWorldEntry(waited, slotted, gone, progressing, noHost,
+                                             missionAdmissionRequired() || g.view.hostWorld().present, currentWorld);
+            if (outcome == ParkedEntryOutcome::Wait && slotted && !freshWorldEntryAllowed(currentWorld) &&
+                (missionAdmissionRequired() || g.view.hostWorld().present) && !g.parked.worldWaitLogged) {
+                g.parked.worldWaitLogged = true;
+                logf("ROOM world admission waiting: host epoch %llu phase %u, %zu frozen participants; "
+                     "the fresh client remains outside the native world until the host returns to lobby",
+                     static_cast<unsigned long long>(currentWorld.epoch), static_cast<unsigned>(currentWorld.phase),
+                     currentWorld.participants.size());
+            }
             if (outcome == ParkedEntryOutcome::Wait) return;
             if (outcome == ParkedEntryOutcome::Slotted) g.view.adoptHost();
         }
@@ -2075,6 +2102,12 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
 
 void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
                           EOS_Lobby_OnLobbyIdCallback callback, bool proveEos) {
+    if (!CompatibleLocalRoom(room.attributes)) {
+        defer([callback, clientData, roomId] {
+            completeLobbyCall(reinterpret_cast<void*>(callback), clientData, EOS_InvalidParameters, roomId);
+        });
+        return;
+    }
     const uint64_t now = GetTickCount64();
     std::lock_guard<std::mutex> lock(g.virtualMutex);
     VirtualRoom& v = g.virtualRoom;
@@ -2133,14 +2166,19 @@ void virtualRoomTick(uint64_t now) {
         std::vector<std::string> slots;
         parseRoomMessage(list, &slots, nullptr);
         if (v.joining) {
-            if (std::find(slots.begin(), slots.end(), self) != slots.end()) {
+            const WorldAdmission world = parseWorldAdmission(list);
+            const bool needsAdmission = missionAdmissionRequired() || world.present;
+            const bool worldAllowed = !needsAdmission || freshWorldEntryAllowed(world);
+            const bool waitingWorld = needsAdmission && !worldAllowed && world.present &&
+                world.phase != WorldPhase::Unknown && net && net->canRoute(v.room.host);
+            if (worldAllowed && std::find(slots.begin(), slots.end(), self) != slots.end()) {
                 v.joining = false;
                 v.in = true;
                 v.hostSeenMs = now;
                 callback = reinterpret_cast<void*>(v.callback);
                 clientData = v.clientData;
                 v.callback = nullptr;
-            } else if (now - v.startMs >= kVirtualJoinMs) {
+            } else if (!waitingWorld && now - v.startMs >= kVirtualJoinMs) {
                 logf("REJOIN room %s: its host did not let us in within %llu s", roomId.c_str(),
                      static_cast<unsigned long long>(kVirtualJoinMs / 1000));
                 callback = reinterpret_cast<void*>(v.callback);
@@ -2190,6 +2228,17 @@ void virtualRoomTick(uint64_t now) {
     leftLobby(why);
 }
 
+// The AF game-thread registry names the actual players of this world. Lobby-only
+// joins/leaves do not change its quorum. Every participant must still be in our
+// current room, advertise this profile, and have an authenticated DirectNet route.
+// Virtual/overflow rooms intentionally stay unavailable in v1: their compatibility
+// profile cannot be independently read from a current EOS member attribute.
+void extensionRoomTick() {
+    const bool parked = entryParked();
+    std::lock_guard<std::mutex> lock(g.viewMutex);
+    publishExtensionRoom(g.net.load(), g.marker, g.view, g.viewRoom, parked);
+}
+
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
 void hookPlatformTick(EOS_HPlatform platform) {
     g.api.tick(platform);
@@ -2212,6 +2261,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     roomTick(GetTickCount64());
     rememberRoomTick(GetTickCount64());
     virtualRoomTick(GetTickCount64());
+    extensionRoomTick();
     if (g.hold && g.hold->heldCount()) {
         for (const auto& remote : g.hold->poll(GetTickCount64(), directAlive))
             logf("RESILIENCE %s did not come back within %u s; disconnect handed to the game",
@@ -2430,6 +2480,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
 // delivered is dropped. True when the game gets it as it is.
 bool takeArrival(const std::string& src, const std::string& socket, uint8_t channel, const uint8_t* data, uint32_t size,
                  bool mayBeCopy) {
+    if (socket == DirectNet::kExtensionSocket || channel == DirectNet::kExtensionChannel) return false;
     uint64_t acked = 0;
     if (channel == kFragmentChannel && parseFragmentAck(data, size, acked)) {
         std::lock_guard<std::mutex> lock(g.bulkMutex);
@@ -2575,7 +2626,7 @@ EOS_HLobbyDetails rememberedRoomDetails(const LastRoom& r) {
 bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
     if (result == EOS_Success) return false;
     const LastRoom r = rememberedRoom();
-    if (r.roomId.empty() || g.marker.inLobby()) return false;
+    if (r.roomId.empty() || g.marker.inLobby() || !CompatibleLocalRoom(r.attributes)) return false;
     {
         std::lock_guard<std::mutex> lock(g.virtualMutex);
         if (g.virtualRoom.joining || g.virtualRoom.in) return false;
@@ -2725,7 +2776,13 @@ void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void
                      EOS_Lobby_OnLobbyIdCallback cb) {
     FakeDetails d;
     if (g_shutdown || !o || !cb) return g.outer.join(h, o, clientData, cb);
-    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) {
+        if (!CompatibleLocalRoom(d.attributes)) {
+            defer([cb, clientData] { completeLobbyCall(cb, clientData, EOS_InvalidParameters, ""); });
+            return;
+        }
+        return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    }
     LastRoom room = fullRoomFrom(o->LobbyDetailsHandle);
     if (!room.usable()) return g.outer.join(h, o, clientData, cb);
     bool full = false;
@@ -2794,6 +2851,9 @@ EOS_EResult hookDetailsCopyAttribute(EOS_HLobbyDetails h, const EOS_LobbyDetails
     if (!g.fakes.lookup(h, &d)) return g.outer.copyAttribute(h, o, out);
     if (!o || !out || o->AttrIndex >= d.attributes.size()) return EOS_InvalidParameters;
     *out = g.fakes.copyAttribute(d.attributes[o->AttrIndex]);
+    if (*out && (*out)->Data && (*out)->Data->ValueType == 1 &&
+        !std::strcmp((*out)->Data->Key, "SEARCH_TYPE"))
+        (*out)->Data->Value.AsInt64 = GameRoomType((*out)->Data->Value.AsInt64);
     return EOS_Success;
 }
 
@@ -2932,7 +2992,7 @@ bool hook(HMODULE game, const char* name, T replacement, T& original) {
 
 }  // namespace
 
-void eosHooksShutdown() { g_shutdown = true; }
+void eosHooksShutdown() { g_shutdown = true; shutdownExtensionTransport(); }
 
 bool installVirtualRoomHooks(HMODULE game) {
     const Api& a = g.api;
@@ -3314,5 +3374,10 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
     std::lock_guard<std::mutex> lock(g.bulkMutex);
     g.bulks.push_back(std::move(pending));
     return true;
+}
+extern "C" __declspec(dllexport) int EDF6Coop_AllForcesVirtualRoom(void* details) {
+    FakeDetails d;
+    if (!g.fakes.lookup(static_cast<EOS_HLobbyDetails>(details), &d)) return -1;
+    return RoomIsolationAvailable() && CompatibleRoom(d.attributes, true) ? 1 : 0;
 }
 }  // namespace dn

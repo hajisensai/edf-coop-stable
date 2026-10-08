@@ -650,7 +650,10 @@ int wmain(int argc, wchar_t** argv) {
                   "old per-player-count scale keys are reported as unused");
         } else {
             for (const auto& hook : GhostHooks()) Check(SiteUntouched(base, hook), "ghost sites untouched without GhostPlayers");
-            for (const auto& call : GhostCalls()) Check(CallTargets(base + call.rva, call.rva, call.target), "ghost call untouched without GhostPlayers");
+            for (const auto& call : GhostCalls())
+                Check(mode == L"nomission" ? CallTargets(base + call.rva, call.rva, call.target)
+                                            : RedirectedInto(base + call.rva, plugin),
+                      "mission admission shares the ghost call site even without GhostPlayers");
         }
         if (netLog) {
             Check(Contains(log, "Net log: 15 EOS imports redirected"), "NetLog=1 installs all EOS import wrappers");

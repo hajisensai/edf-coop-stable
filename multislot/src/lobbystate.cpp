@@ -1,4 +1,5 @@
 #include "lobbystate.h"
+#include "../../src/mod_room_compat.h"
 
 #include <atomic>
 #include <cstring>
@@ -201,7 +202,7 @@ void ReadDetails(void* details, LobbyFacts& facts, std::string* owner) {
     if (api.copyAttribute(details, &key, &attribute) == kEosSuccess && attribute && attribute->Data &&
         attribute->Data->ValueType == kInt64) {
         facts.hasSearchType = true;
-        facts.searchType = attribute->Data->Value.AsInt64;
+        facts.searchType = dn::GameRoomType(attribute->Data->Value.AsInt64);
     }
     if (attribute) api.releaseAttribute(attribute);
     const CopyAttributeOptions sizeKey{1, kRoomSizeKey};

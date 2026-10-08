@@ -599,6 +599,13 @@ int main(int argc, char** argv) {
         const std::uint8_t* at = image.At(rva, expected.size());
         return at && std::memcmp(at, expected.data(), expected.size()) == 0;
     };
+    Check(CallTargets(image.At(0x1DC525, 5), 0x1DC525, 0x591130) &&
+              bytesAt(0x1DC544, {0x48, 0x85, 0xC0, 0x75, 0x0C}) &&
+              bytesAt(0x1DC549, {0x4D, 0x89, 0x37, 0x4D, 0x89, 0x77, 0x08}) &&
+              bytesAt(0x1D9B17, {0x4D, 0x85, 0xF6, 0x74, 0x4D}),
+          "mission admission call has native null output and outer skip guards", 0x1DC525);
+    Check(bytesAt(0x1DC55B, {0x49, 0x8B, 0x50, 0x30}) && bytesAt(0x1DC564, {0x8B, 0x42, 0x08}),
+          "successful native player identity uses self control at +30 and strong uses at control+8", 0x1DC55B);
     Check(bytesAt(0x78D11B, {0x4C, 0x89, 0x44, 0x24, 0x60}) && bytesAt(0x78D5AB, {0x48, 0x8B, 0x7C, 0x24, 0x60}),
           "MissionSync_Res keeps its output stream at rsp+0x60 and writes the count from it", 0x78D11B);
     Check(CallTargets(image.At(0x78D6E3, 5), 0x78D6E3, 0x773740) && CallTargets(image.At(0x78D5B6, 5), 0x78D5B6, 0x12B5580),
@@ -985,6 +992,37 @@ int main(int argc, char** argv) {
         add.r13 = 0x6000;  // another room's Users
         UserSlotHookHandler(0x12B806E)(&add);
         Check((GameSlotTable() == std::vector<std::string>{"", "E"}), "another room starts its own table");
+        // Native pre-spawn identity lookup distinguishes mission index from lobby slot.
+        std::uint8_t users[2][0xA0]{};
+        const char* ids[2]{"A", "B"};
+        int missionIndices[2]{7, 3};
+        std::uint64_t nativeSlots[4]{reinterpret_cast<std::uintptr_t>(users[0]), 0,
+                                     reinterpret_cast<std::uintptr_t>(users[1]), 0};
+        std::uint64_t nativeUsers[2]{reinterpret_cast<std::uintptr_t>(nativeSlots),
+                                     reinterpret_cast<std::uintptr_t>(nativeSlots + 4)};
+        for (int n = 0; n < 2; ++n) {
+            std::memcpy(users[n] + 0x18, &ids[n], sizeof(ids[n]));
+            std::memcpy(users[n] + 0x48, &missionIndices[n], sizeof(int));
+            add.r13 = reinterpret_cast<std::uintptr_t>(nativeUsers);
+            add.rcx = static_cast<std::uint64_t>(n); add.r8 = 2;
+            add.r9 = reinterpret_cast<std::uintptr_t>(nativeSlots);
+            add.rbx = reinterpret_cast<std::uintptr_t>(&ids[n]);
+            UserSlotHookHandler(0x12B806E)(&add);
+        }
+        char resolved[65]{};
+        Check(ResolveMissionPlayerPuid(7, resolved, sizeof(resolved)) && std::string(resolved) == "A",
+              "mission index 7 maps to slot 0's authenticated identity");
+        Check(ResolveMissionPlayerPuid(3, resolved, sizeof(resolved)) && std::string(resolved) == "B",
+              "mission index 3 maps to slot 1");
+        Check(!ResolveMissionPlayerPuid(0, resolved, sizeof(resolved)) && !resolved[0], "lobby slot 0 is not mission index 0");
+        std::memcpy(users[1] + 0x48, &missionIndices[0], sizeof(int));
+        Check(!ResolveMissionPlayerPuid(7, resolved, sizeof(resolved)), "duplicate mission indices fail closed");
+        std::memcpy(users[1] + 0x48, &missionIndices[1], sizeof(int));
+        remove.r15 = reinterpret_cast<std::uintptr_t>(nativeUsers); remove.rbp = 0;
+        UserSlotHookHandler(0x12B8A24)(&remove);
+        Check(!ResolveMissionPlayerPuid(7, resolved, sizeof(resolved)), "removed member cannot resolve from stale native pointer");
+        ++nativeUsers[1];
+        Check(!ResolveMissionPlayerPuid(3, resolved, sizeof(resolved)), "misaligned native vector is rejected");
         SetUserSlotSources(nullptr, nullptr);
     }
 

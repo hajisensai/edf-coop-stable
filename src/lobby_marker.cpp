@@ -1,4 +1,5 @@
 #include "lobby_marker.h"
+#include "mod_room_compat.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -16,6 +17,14 @@ bool resolve(HMODULE eos, const char* name, T& out) {
 }
 
 constexpr uint32_t kMaxMembersRead = 64;  // EOS lobbies hold at most 64 members
+
+bool supportProfileReady() {
+    if (!AllForcesActive() || !RoomIsolationAvailable()) return false;
+    const auto module = GetModuleHandleW(L"EDF6VehicleCrew.dll");
+    using Version = uint32_t (__cdecl*)();
+    const auto version = reinterpret_cast<Version>(GetProcAddress(module, "EDF6AF_SupportProtocolVersion"));
+    return version && version() == 1;
+}
 
 // What Identity::commitment() looks like: 32 lowercase hex digits.
 bool isCommitment(const std::string& s) {
@@ -140,6 +149,15 @@ void LobbyMarker::tick() {
     seq.ValueType = 1;  // int64
     EOS_LobbyModification_AddMemberAttributeOptions as{1, &seq, 0};
     if (r == EOS_Success) r = addMemberAttribute_(mod, &as);
+    if (r == EOS_Success) {
+        EOS_Lobby_AttributeData extension{};
+        extension.ApiVersion = 1;
+        extension.Key = "EDF6DN_EXT";
+        extension.Value.AsUtf8 = supportProfileReady() ? "af-support/1" : "disabled";
+        extension.ValueType = 3;
+        EOS_LobbyModification_AddMemberAttributeOptions option{1, &extension, 0};
+        r = addMemberAttribute_(mod, &option);
+    }
     if (r == EOS_Success && !identity_.empty()) {
         EOS_Lobby_AttributeData id{};
         id.ApiVersion = 1;
@@ -172,6 +190,24 @@ void LobbyMarker::tick() {
 bool LobbyMarker::inLobby() const {
     std::lock_guard<std::mutex> lock(mu_);
     return !lobbyId_.empty();
+}
+
+bool LobbyMarker::extensionCompatible() {
+    if (!supportProfileReady()) return false;
+    std::lock_guard<std::mutex> lock(mu_);
+    EOS_HLobbyDetails details = getMemberCount_ && getMemberByIndex_ ? copyDetailsLocked() : nullptr;
+    if (!details) return false;
+    EOS_LobbyDetails_GetMemberCountOptions countOption{1};
+    const uint32_t count = getMemberCount_(details, &countOption);
+    bool compatible = count > 0 && count <= kMaxMembersRead;
+    for (uint32_t i = 0; compatible && i < count; ++i) {
+        EOS_LobbyDetails_GetMemberByIndexOptions memberOption{1, i};
+        const auto member = getMemberByIndex_(details, &memberOption);
+        std::string value;
+        compatible = member && readAttribute(details, member, "EDF6DN_EXT", &value) && value == "af-support/1";
+    }
+    releaseDetails_(details);
+    return compatible;
 }
 
 bool LobbyMarker::isOwner() const {

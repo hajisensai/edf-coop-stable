@@ -1,4 +1,5 @@
 #include "eos_hooks.h"
+#include "extension_bridge.h"
 #include "mod_room_compat.h"
 
 #include <atomic>
@@ -606,6 +607,7 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     const bool ends = endsRoomForUs(self, status);
     if (ends && !lobbyId.empty() && lobbyId == g.endedRoom) return false;
     if (lobbyId != g.viewRoom) return true;
+    invalidateExtensionTransport(); // any membership/promotion event cancels the old room authority
     const uint64_t now = GetTickCount64();
     // A new host: the old one's slots are not the room's any more (room_view.h promoted). Its list is followed from
     // scratch, the one that may have come before this PROMOTED included.
@@ -698,6 +700,7 @@ void completeLobbyCall(void* callback, void* clientData, EOS_EResult result, con
 
 // The game is in room `lobbyId` with `members` (EOS ids; it is listed among them).
 void enterView(const std::string& lobbyId, const std::string& self, const std::vector<std::string>& members) {
+    invalidateExtensionTransport();
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.reset(self, members);
     g.inherited.clear();
@@ -711,6 +714,7 @@ void enterView(const std::string& lobbyId, const std::string& self, const std::v
 
 void leaveView() {
     std::lock_guard<std::mutex> lock(g.viewMutex);
+    invalidateExtensionTransport();
     g.view.clear();
     g.inherited.clear();
     g.viewRoom.clear();
@@ -1042,6 +1046,7 @@ void stopAutoJoinLocked(const char* why) {
 }
 
 void leftLobby(const char* why) {
+    invalidateExtensionTransport();
     if (g.marker.inLobby()) logf("LOBBY %s", why);
     g.stateTypes.forget();  // the next room's players and missions teach their own
     // Datagrams put together, copies remembered and fragments waiting belong to the room just left.
@@ -2197,6 +2202,29 @@ void virtualRoomTick(uint64_t now) {
     leftLobby(why);
 }
 
+// Fail closed unless EOS and the game's room agree, every member advertises this
+// exact extension profile, and DirectNet validates every authenticated route.
+// Virtual/overflow rooms intentionally stay unavailable in v1: their compatibility
+// profile cannot be independently read from a current EOS member attribute.
+void extensionRoomTick() {
+    auto net = g.net.load();
+    bool known = false;
+    auto members = g.marker.members(&known);
+    std::sort(members.begin(), members.end());
+    EOS_ProductUserId owner = nullptr;
+    g.marker.ownerAddress(&owner);
+    std::string room;
+    bool valid = net && known && owner && g.marker.extensionCompatible() && !entryParked();
+    std::lock_guard<std::mutex> lock(g.viewMutex);
+    auto gameMembers = g.view.members();
+    std::sort(gameMembers.begin(), gameMembers.end());
+    valid = valid && g.view.active() && !g.view.awaitingHost() && members == gameMembers;
+    room = g.viewRoom;
+    if (!valid || room.empty()) { invalidateExtensionTransport(); return; }
+    net->setExtensionRoom(room, idString(owner), std::move(members));
+    bindExtensionTransport(std::move(net));
+}
+
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
 void hookPlatformTick(EOS_HPlatform platform) {
     g.api.tick(platform);
@@ -2219,6 +2247,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     roomTick(GetTickCount64());
     rememberRoomTick(GetTickCount64());
     virtualRoomTick(GetTickCount64());
+    extensionRoomTick();
     if (g.hold && g.hold->heldCount()) {
         for (const auto& remote : g.hold->poll(GetTickCount64(), directAlive))
             logf("RESILIENCE %s did not come back within %u s; disconnect handed to the game",
@@ -2437,6 +2466,7 @@ EOS_EResult hookSendPacket(EOS_HP2P h, const EOS_P2P_SendPacketOptions* o) {
 // delivered is dropped. True when the game gets it as it is.
 bool takeArrival(const std::string& src, const std::string& socket, uint8_t channel, const uint8_t* data, uint32_t size,
                  bool mayBeCopy) {
+    if (socket == DirectNet::kExtensionSocket || channel == DirectNet::kExtensionChannel) return false;
     uint64_t acked = 0;
     if (channel == kFragmentChannel && parseFragmentAck(data, size, acked)) {
         std::lock_guard<std::mutex> lock(g.bulkMutex);
@@ -2948,7 +2978,7 @@ bool hook(HMODULE game, const char* name, T replacement, T& original) {
 
 }  // namespace
 
-void eosHooksShutdown() { g_shutdown = true; }
+void eosHooksShutdown() { g_shutdown = true; shutdownExtensionTransport(); }
 
 bool installVirtualRoomHooks(HMODULE game) {
     const Api& a = g.api;

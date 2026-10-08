@@ -74,6 +74,9 @@ public:
     // The members our copy of the lobby lists now (EOS ids), or nothing when we have no copy (`known` false).
     // EOS calls: run on the EOS tick only.
     std::vector<std::string> members(bool* known);
+    // No caching: every listed member must currently advertise the exact extension
+    // profile. An older Coop build must never receive our reserved-channel data.
+    bool extensionCompatible();
 
 private:
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.

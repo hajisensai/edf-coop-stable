@@ -96,8 +96,13 @@ int main(int argc, char** argv) {
     InitMission(image);
 
     const auto admittedCreate = reinterpret_cast<void*(__fastcall*)(int, const void*, int)>(MissionCallHandler(0x1DC525));
+    Check(admittedCreate != nullptr, "safe player creation handler exists");
+    if (!admittedCreate) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
     int transform = 123;
-    Check(admittedCreate && admittedCreate(7, &transform, 0) == &transform, "without AF the safe call forwards to the original");
+    Check(admittedCreate(7, &transform, 0) == &transform, "without AF the safe call forwards to the original");
     if (argc > 1) {
         const HMODULE af = LoadLibraryA(argv[1]);
         Check(af != nullptr, "test AF admission provider loads");

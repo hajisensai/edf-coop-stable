@@ -24,7 +24,7 @@ bool supportProfileReady() {
     const auto module = GetModuleHandleW(L"EDF6VehicleCrew.dll");
     using Version = uint32_t (__cdecl*)();
     const auto version = reinterpret_cast<Version>(GetProcAddress(module, "EDF6AF_SupportProtocolVersion"));
-    return version && version() == 2;
+    return version && version() == 2 && GetProcAddress(module, "EDF6AF_MissionPlayerCreated");
 }
 
 // What Identity::commitment() looks like: 32 lowercase hex digits.

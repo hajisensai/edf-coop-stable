@@ -15,7 +15,7 @@ template<typename T> T function(HMODULE module, const char* name) {
 }
 }
 int main(int argc, char** argv) {
-    if (argc != 3) return 2;
+    if (argc != 3 && argc != 4) return 2;
     HMODULE eos = LoadLibraryA(argv[1]);
     if (!eos) return 2;
     const auto reset = function<void(*)(const char*)>(eos, "FakeEos_Reset");
@@ -132,7 +132,19 @@ int main(int argc, char** argv) {
     CHECK(!publish().ready); // genuine host migration is not an ignored lobby change
     dn::invalidateExtensionTransport(); remote.stop(); net->stop();
     marker.left(); CHECK(!marker.extensionCompatible());
-    FreeLibrary(af); FreeLibrary(eos);
+    FreeLibrary(af);
+    if (argc == 4) {
+        const HMODULE legacy = LoadLibraryA(argv[3]);
+        CHECK(legacy != nullptr);
+        if (legacy) {
+            marker.entered(reinterpret_cast<EOS_HLobby>(1), "room", user("self"), true);
+            marker.tick(); tick(nullptr);
+            // Protocol 2 without the successful-creation observer is incompatible.
+            CHECK(published("EDF6DN_EXT") == "disabled" && !marker.extensionCompatible());
+            FreeLibrary(legacy);
+        }
+    }
+    FreeLibrary(eos);
     printf("extension profile: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

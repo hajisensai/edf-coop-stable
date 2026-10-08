@@ -29,6 +29,12 @@ the rest of the same update. Virtual rooms, offline rejoin, and overflow members
 outside EOS's 64-member lobby are unavailable in v1. The ABI reserves room for
 1024 remote peers without promising those paths are currently supported.
 
+The profile also requires `EDF6AF_MissionPlayerCreated`. After the safe native
+creation call succeeds, Coop notifies AF with the exact object and its weak-self
+control block (`+0x30`), only while the object is not deleted (`+0x18 & 4 == 0`)
+and the control has positive strong uses (`+8`). Failed creation, bad reads and
+expired identities never notify; admission attempts alone cannot seal a roster.
+
 Messages have 1–1024 bytes and use socket `EDF6CoopExt1`, channel `0xAF`.
 The sender always uses the host link (or, as host, the recipient's link), reliable
 ordered delivery, and exactly one path. Joiner-to-joiner messages are relayed by

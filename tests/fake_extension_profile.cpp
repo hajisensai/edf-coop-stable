@@ -26,6 +26,20 @@ extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6AF_GetMissionAdmissi
     *out = admission;
     return 1;
 }
+static unsigned creationCount = 0;
+static int32_t creationIndex = -1;
+static const void* creationObject = nullptr;
+static const void* creationControl = nullptr;
+extern "C" __declspec(dllexport) unsigned FakeAF_CreationCount() { return creationCount; }
+extern "C" __declspec(dllexport) int32_t FakeAF_CreationIndex() { return creationIndex; }
+extern "C" __declspec(dllexport) const void* FakeAF_CreationObject() { return creationObject; }
+extern "C" __declspec(dllexport) const void* FakeAF_CreationControl() { return creationControl; }
+#ifndef FAKE_AF_NO_OBSERVER
+extern "C" __declspec(dllexport) void EDF6COOP_CALL EDF6AF_MissionPlayerCreated(
+    int32_t index, const void* object, const void* control) {
+    ++creationCount; creationIndex = index; creationObject = object; creationControl = control;
+}
+#endif
 extern "C" __declspec(dllexport) void EDF6AF_DecodeRoomType() {}
 extern "C" __declspec(dllexport) bool EDF6AF_RoomIsolationReady() { return ready; }
 extern "C" __declspec(dllexport) void FakeAF_SetReady(bool value) { ready = value; }

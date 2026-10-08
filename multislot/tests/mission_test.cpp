@@ -102,8 +102,27 @@ int main(int argc, char** argv) {
         const HMODULE af = LoadLibraryA(argv[1]);
         Check(af != nullptr, "test AF admission provider loads");
         if (af) {
-            Check(admittedCreate(1, &transform, 0) == &transform, "admitted mission index forwards its native arguments");
+            const auto count = reinterpret_cast<unsigned(*)()>(GetProcAddress(af, "FakeAF_CreationCount"));
+            const auto observedIndex = reinterpret_cast<int32_t(*)()>(GetProcAddress(af, "FakeAF_CreationIndex"));
+            const auto observedObject = reinterpret_cast<const void*(*)()>(GetProcAddress(af, "FakeAF_CreationObject"));
+            const auto observedControl = reinterpret_cast<const void*(*)()>(GetProcAddress(af, "FakeAF_CreationControl"));
+            Check(count && observedIndex && observedObject && observedControl, "test observer exports exist");
+            if (!count || !observedIndex || !observedObject || !observedControl) return 1;
+            std::uint8_t player[0x38]{};
+            FakeControl control{nullptr, 1, 1};
+            const void* controlPointer = &control;
+            std::memcpy(player + 0x30, &controlPointer, sizeof(controlPointer));
+            Check(admittedCreate(1, player, 0) == player, "admitted mission index forwards its native arguments");
+            Check(count() == 1 && observedIndex() == 1 && observedObject() == player && observedControl() == &control,
+                  "only successful live creation publishes the exact object and control identity");
             Check(admittedCreate(7, &transform, 0) == nullptr, "unadmitted mission index rejected before native allocation");
+            Check(admittedCreate(1, nullptr, 0) == nullptr && count() == 1, "failed original creation does not notify");
+            player[0x18] = 4;
+            Check(admittedCreate(1, player, 0) == player && count() == 1, "deleted object does not notify");
+            player[0x18] = 0; control.uses = 0;
+            Check(admittedCreate(1, player, 0) == player && count() == 1, "expired control does not notify");
+            Check(admittedCreate(1, reinterpret_cast<void*>(1), 0) == reinterpret_cast<void*>(1) && count() == 1,
+                  "bad native object reads fail closed without changing the original return");
             FreeLibrary(af);
         }
     }

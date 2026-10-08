@@ -348,12 +348,18 @@ set_target_properties(FakeExtensionProfile PROPERTIES OUTPUT_NAME EDF6VehicleCre
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-profile")
 add_dependencies(MissionTests FakeExtensionProfile)
 add_test(NAME MissionAdmission COMMAND MissionTests "$<TARGET_FILE:FakeExtensionProfile>")
+add_library(FakeExtensionNoObserver SHARED "${CMAKE_SOURCE_DIR}/../tests/fake_extension_profile.cpp")
+target_compile_definitions(FakeExtensionNoObserver PRIVATE FAKE_AF_NO_OBSERVER)
+set_target_properties(FakeExtensionNoObserver PROPERTIES OUTPUT_NAME EDF6VehicleCrew
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-observer"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-observer")
 add_executable(ExtensionProfileTests "${CMAKE_SOURCE_DIR}/../tests/extension_profile_test.cpp")
 target_compile_definitions(ExtensionProfileTests PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(ExtensionProfileTests PRIVATE /W4 /WX /utf-8 /EHsc)
 target_link_libraries(ExtensionProfileTests PRIVATE DirectNetPart)
-add_dependencies(ExtensionProfileTests FakeEosSdk FakeExtensionProfile)
-add_test(NAME ExtensionProfile COMMAND ExtensionProfileTests "$<TARGET_FILE:FakeEosSdk>" "$<TARGET_FILE:FakeExtensionProfile>")
+add_dependencies(ExtensionProfileTests FakeEosSdk FakeExtensionProfile FakeExtensionNoObserver)
+add_test(NAME ExtensionProfile COMMAND ExtensionProfileTests "$<TARGET_FILE:FakeEosSdk>" "$<TARGET_FILE:FakeExtensionProfile>"
+    "$<TARGET_FILE:FakeExtensionNoObserver>")
 add_executable(DirectNetProbeJoin "${CMAKE_SOURCE_DIR}/../tests/probe_join.cpp")
 target_compile_definitions(DirectNetProbeJoin PRIVATE ${DIRECTNET_DEFINES})
 target_compile_options(DirectNetProbeJoin PRIVATE /W4 /WX /utf-8 /EHsc)

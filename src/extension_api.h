@@ -75,4 +75,5 @@ typedef struct EDF6AFMissionAdmissionState {
 } EDF6AFMissionAdmissionState;
 typedef uint32_t (EDF6COOP_CALL *EDF6AFGetMissionAdmissionStateFn)(
     uint32_t version, uint32_t outSize, EDF6AFMissionAdmissionState* out);
+typedef void (EDF6COOP_CALL *EDF6AFMissionPlayerCreatedFn)(int32_t missionIndex, const void* object, const void* control);
 #pragma pack(pop)

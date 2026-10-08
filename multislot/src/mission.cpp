@@ -288,13 +288,36 @@ void __fastcall ItemStoreHook(void*, const std::int32_t* position, const std::ui
 }
 
 using ConstructorFn = void*(__fastcall*)(void*);
+// The same native weak-self identity AF uses (ObjRef): GameObject+0x30 holds
+// its shared control block, +0x18 bit 4 means deleted, control+8 is live uses.
+bool CreatedPlayerControl(const void* object, const void** control) {
+    *control = nullptr;
+    if (!object) return false;
+    return Probing([&]() -> bool {
+        __try {
+            const auto* bytes = static_cast<const unsigned char*>(object);
+            if (bytes[0x18] & 4) return false;
+            const void* found = nullptr;
+            std::memcpy(&found, bytes + 0x30, sizeof(found));
+            if (!found || *reinterpret_cast<const LONG*>(static_cast<const unsigned char*>(found) + 8) <= 0) return false;
+            const void* current = nullptr;
+            std::memcpy(&current, bytes + 0x30, sizeof(current));
+            if (current != found || (bytes[0x18] & 4)) return false;
+            *control = found;
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    });
+}
+
 // Only the 1DC525 call has the verified null-result branch (1DC544..1DC550).
 // Never detour 591130 globally: its script caller at 22AC2F dereferences the result.
 void* __fastcall CreateAdmittedOnlinePlayer(int index, const void* transform, int weaponMode) {
+    EDF6AFMissionPlayerCreatedFn created = nullptr;
     if (const HMODULE af = GetModuleHandleW(L"EDF6VehicleCrew.dll")) {
         using Version = uint32_t (__cdecl*)();
         const auto version = reinterpret_cast<Version>(GetProcAddress(af, "EDF6AF_SupportProtocolVersion"));
         if (version && version() == EDF6AF_SUPPORT_PROTOCOL_VERSION) {
+            created = reinterpret_cast<EDF6AFMissionPlayerCreatedFn>(GetProcAddress(af, "EDF6AF_MissionPlayerCreated"));
             const auto admit = reinterpret_cast<EDF6AFAllowMissionPlayerFn>(GetProcAddress(af, "EDF6AF_AllowMissionPlayer"));
             if (!admit || admit(index) != 1) {
                 Log("MISSION participant %d refused before player creation: not in this world's admitted roster; "
@@ -306,7 +329,10 @@ void* __fastcall CreateAdmittedOnlinePlayer(int index, const void* transform, in
     using Create = void*(__fastcall*)(int, const void*, int);
     const int ghosts = activeGhosts.load();
     const int source = ghosts > 0 && index > 0 && index <= ghosts ? 0 : index;
-    return reinterpret_cast<Create>(game + kCreateOnlinePlayer)(source, transform, weaponMode);
+    void* result = reinterpret_cast<Create>(game + kCreateOnlinePlayer)(source, transform, weaponMode);
+    const void* control = nullptr;
+    if (created && index >= 0 && CreatedPlayerControl(result, &control)) created(index, result, control);
+    return result;
 }
 
 void* __fastcall MissionContextConstructorHook(void* self) {

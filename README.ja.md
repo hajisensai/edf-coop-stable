@@ -187,10 +187,10 @@ powershell -ExecutionPolicy Bypass -File package.ps1        # -> release\EDF6Coo
 1. バージョンを上げる：`multislot/CMakeLists.txt` の `project(EDF6Coop VERSION x.y.z)` と、同梱の説明書 3 つ `dist/README_EDF6Coop*.txt` の 1 行目。
 2. リリースノート `release-notes/<バージョン>.md` を書く（Release ページの本文で、パッケージ内の `RELEASE_NOTES_EDF6Coop.md` にもなります）。
 3. `main` にコミットし、タグを付けて push します：`git tag v2.0.0 && git push origin v2.0.0`。
-4. ゲームのある PC で、そのコミットの状態で `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload` を実行します。`build.ps1 -Test` と `package.ps1` を実行し、`EDF6Coop.dll`・`EDF6Coop-<バージョン>.zip` とその `.sha256`、および 2.2.x の全人数版が更新できるよう同じ DLL を旧名 `EDF6Coop-<N>p.dll`（8・10・12・16・24・32）でも入れた**下書き**の Release を作ります（`-Upload` なしなら `release\upload-<バージョン>\` に置くだけ）。署名はしません。
-5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：タグが `main` 上にありバージョンと一致すること、下書きに DLL と zip がそろっていること、各 zip が `.sha256` と一致しその DLL を含むこと、CI ビルドでないことを確認し、`sign-update.ps1` で DLL に署名し（鍵はリポジトリの secret `EDF6DN_UPDATE_SIGNING_KEY`。読み取り専用トークンの job にだけ渡します）、`.dll.sig` と `.dll.sha256` を（旧名の分も）アップロードして、Release を最新として公開します。
+4. ゲームのある PC で、そのコミットの状態で `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload` を実行します。`build.ps1 -Test` と `package.ps1` を実行し、`EDF6Coop.dll`・`EDF6Coop-<バージョン>.zip` とその `.sha256` を入れた**下書き**の Release を作ります（`-Upload` なしなら `release\upload-<バージョン>\` に置くだけ）。署名はしません。
+5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：タグが `main` 上にありバージョンと一致すること、下書きに DLL と zip がそろっていること、各 zip が `.sha256` と一致しその DLL を含むこと、CI ビルドでないことを確認し、`sign-update.ps1` で DLL に署名し（鍵はリポジトリの secret `EDF6DN_UPDATE_SIGNING_KEY`。読み取り専用トークンの job にだけ渡します）、`.dll.sig` と `.dll.sha256` をアップロードして、Release を最新として公開します。
 
-インストール済みのすべてのプラグインは、最新の Release から `EDF6Coop.dll` / `.dll.sig` をダウンロードします。2.2.x は自分の人数の `EDF6Coop-<N>p.dll` を探すため、Release には同じ DLL を 6 つの旧名でも入れます。
+インストール済みのすべてのプラグインは、最新の Release から `EDF6Coop.dll` / `.dll.sig` をダウンロードします。2.2.x の人数別ビルドが探す `EDF6Coop-<N>p.dll` はもう公開しないため、2.2.x は新しい `INSTALL.bat` を実行して更新します。
 
 ## ディレクトリ構成
 

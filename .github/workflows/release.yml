@@ -4,9 +4,8 @@ name: Release
 # need the game's menu asset, which cannot be on a build server).
 #   1. release.ps1 -Upload       builds, tests and packages, creates the DRAFT Release vX.Y.Z
 #   2. gh workflow run release.yml -f tag=vX.Y.Z
-# This workflow checks the draft (EDF6Coop.dll and the six EDF6Coop-<N>p.dll copies the 2.2 room-size builds'
-# updaters download are one and the same file, the zip matches its .sha256 and carries exactly that DLL, no CI
-# placeholder build), signs each DLL asset's update manifest and publishes the Release as latest. The tagged commit must be on main; the release text is
+# This workflow checks the draft (EDF6Coop.dll is the file the zip carries, the zip matches its .sha256, no CI
+# placeholder build), signs the DLL's update manifest and publishes the Release as latest. The tagged commit must be on main; the release text is
 # release-notes/X.Y.Z.md. The signing key is only in the sign job, which has a read-only token.
 on:
   workflow_dispatch:
@@ -20,7 +19,7 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag }}
-  DLLS: 'EDF6Coop.dll EDF6Coop-8p.dll EDF6Coop-10p.dll EDF6Coop-12p.dll EDF6Coop-16p.dll EDF6Coop-24p.dll EDF6Coop-32p.dll'
+  DLLS: 'EDF6Coop.dll'
 
 jobs:
   fetch:

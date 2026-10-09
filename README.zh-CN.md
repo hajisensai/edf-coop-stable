@@ -187,10 +187,10 @@ powershell -ExecutionPolicy Bypass -File package.ps1        # -> release\EDF6Coo
 1. 改版本号：`multislot/CMakeLists.txt` 里的 `project(EDF6Coop VERSION x.y.z)`，以及三份随包说明 `dist/README_EDF6Coop*.txt` 的第一行。
 2. 写发布说明 `release-notes/<版本>.md`（即 Release 页面正文，也是包里的 `RELEASE_NOTES_EDF6Coop.md`）。
 3. 提交到 `main`，打 tag 并推送：`git tag v2.0.0 && git push origin v2.0.0`。
-4. 在装了游戏的机器上、在该提交处运行 `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`。它执行 `build.ps1 -Test` 和 `package.ps1`，然后创建一个**草稿** Release，带上 `EDF6Coop.dll`、`EDF6Coop-<版本>.zip` 及其 `.sha256`，另外同一个 DLL 再以六个旧名 `EDF6Coop-<N>p.dll`（8、10、12、16、24、32）各放一份，让 2.2.x 各人数版都能更新（不加 `-Upload` 时只放到 `release\upload-<版本>\`）。它从不签名。
-5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：检查 tag 在 `main` 上且与版本一致、草稿里 DLL 和 zip 都齐、每个 zip 与其 `.sha256` 相符且装的正是那个 DLL、没有 CI 构建；用 `sign-update.ps1` 给 DLL 签名（密钥是仓库 secret `EDF6DN_UPDATE_SIGNING_KEY`，只在只读 token 的 job 里）；上传 `.dll.sig` 和 `.dll.sha256`（旧名的也一并上传）；把 Release 发布为最新。
+4. 在装了游戏的机器上、在该提交处运行 `powershell -ExecutionPolicy Bypass -File release.ps1 -Upload`。它执行 `build.ps1 -Test` 和 `package.ps1`，然后创建一个**草稿** Release，带上 `EDF6Coop.dll`、`EDF6Coop-<版本>.zip` 及其 `.sha256`（不加 `-Upload` 时只放到 `release\upload-<版本>\`）。它从不签名。
+5. `gh workflow run release.yml -f tag=v2.0.0`（`.github/workflows/release.yml`）：检查 tag 在 `main` 上且与版本一致、草稿里 DLL 和 zip 都齐、每个 zip 与其 `.sha256` 相符且装的正是那个 DLL、没有 CI 构建；用 `sign-update.ps1` 给 DLL 签名（密钥是仓库 secret `EDF6DN_UPDATE_SIGNING_KEY`，只在只读 token 的 job 里）；上传 `.dll.sig` 和 `.dll.sha256`；把 Release 发布为最新。
 
-所有已安装插件的自动更新都从最新 Release 下载 `EDF6Coop.dll` / `.dll.sig`；2.2.x 还在找自己人数的 `EDF6Coop-<N>p.dll`，所以 Release 同时带同一个 DLL 的六个旧名。
+所有已安装插件的自动更新都从最新 Release 下载 `EDF6Coop.dll` / `.dll.sig`。2.2.x 各人数版找的 `EDF6Coop-<N>p.dll` 已不再发布，2.2.x 需运行新版 `INSTALL.bat` 更新。
 
 ## 目录
 

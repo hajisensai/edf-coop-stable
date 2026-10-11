@@ -22,6 +22,11 @@
 #include <vector>
 
 namespace dn {
+// Only the supported room-maintenance timeout path may be retained. UI moderation, room teardown and
+// unknown callers remain the game's decision, even while a peer has a live authenticated direct link.
+constexpr bool KeepLiveRouteOnTimeoutKick(bool verifiedTimeoutCaller,bool currentMember,bool heldEosTimeout,bool liveRoute) {
+    return verifiedTimeoutCaller && currentMember && heldEosTimeout && liveRoute;
+}
 
 class DisconnectHold {
 public:

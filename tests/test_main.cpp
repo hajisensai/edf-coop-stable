@@ -2277,6 +2277,9 @@ void testReceiveStateFollowsSession() {
 }
 
 void testDisconnectHold() {
+    for(unsigned flags=0;flags<16;++flags) {
+        CHECK(dn::KeepLiveRouteOnTimeoutKick((flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0)==(flags==15));
+    }
     printf("hold: transient disconnects are hidden from the game and recovered\n");
     int forwarded = 0, reaccepts = 0;
     auto fwd = [&] { ++forwarded; };

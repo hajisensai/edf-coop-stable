@@ -2,6 +2,7 @@
 #include "extension_bridge.h"
 #include "extension_room.h"
 #include "mod_room_compat.h"
+#include "../multislot/src/peertimeout.h"
 
 #include <atomic>
 #include <algorithm>
@@ -1179,6 +1180,19 @@ Kick hostKick(const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) 
         completeLobbyCall(cb, clientData, EOS_Success, lobbyId);
     });
     return Kick::Answered;
+}
+
+bool keepNativeLivePeer(const char* room, const void* productId) noexcept {
+    if(g_shutdown || !room || !productId)return false;
+    try {
+    const auto target=idString(static_cast<EOS_ProductUserId>(const_cast<void*>(productId)));
+    bool member=false;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        member=room==g.viewRoom && g.view.active() && g.view.has(target);
+    }
+    return KeepLiveRouteOnTimeoutKick(true,member,g.hold && g.hold->isHeld(target),directAlive(target));
+    } catch(...) { return false; }
 }
 
 void hookKickMember(EOS_HLobby h, const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) {
@@ -3092,6 +3106,7 @@ bool installEosHooks(HMODULE game, HMODULE eos, const Config& config, DirectNet*
             DisconnectHold::Options{config.graceMs, 2000, config.hold == Config::Hold::All});
         g.lobbyHold = std::make_unique<LobbyStatusHold>(config.graceMs);
     }
+    multislot::SetLiveFailedPeerQuery(&keepNativeLivePeer);
 
     // Diagnostics and resilience are optional: failing here must not disable the rest.
     hook(game, "EOS_P2P_CloseConnection", hookCloseConnection, g.api.gameClose);

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 
 #include "midhook.h"
 
@@ -30,6 +31,15 @@ namespace multislot {
 // Join times come from Users::Add (12B7F50), right after it made the user object (12B80E0).
 
 void InitPeerTimeout(unsigned char* gameBase);
+using LiveFailedPeerQuery = bool(*)(const char* room,const void* productId) noexcept;
+using SharedUserRelease = void(__fastcall*)(void*);
+inline std::atomic<LiveFailedPeerQuery>& LiveFailedPeerQueryStore() noexcept {
+    static std::atomic<LiveFailedPeerQuery> query{nullptr};
+    return query;
+}
+inline void SetLiveFailedPeerQuery(LiveFailedPeerQuery query) noexcept { LiveFailedPeerQueryStore().store(query); }
+std::size_t FilterNativeFailedPeers(const void* room,void* vector,LiveFailedPeerQuery query,SharedUserRelease release);
+void NativeFailedPeersHandler(CpuContext* context);
 
 // Mid-function hook at EDF+12B80E0: rax = the new shared_ptr<eos::User>, rbx = {ProductUserId, bool remote}.
 void PeerJoinedHandler(CpuContext* context);

@@ -475,6 +475,7 @@ std::vector<MidSite> UserSlotHooks() {
 
 std::vector<MidSite> PeerTimeoutHooks() {
     return {
+        {"native disconnected-peer list",0x12C04C0,{0xE8,0x1B,0xE1,0x00,0x00,0x90,0x48,0x8B,0x45,0xF8,0x48,0x39,0x45,0xF0},5,9},
         // Users::Add (12B7F50) right after make_shared<eos::User> (12B7610): `mov r12, [rax]; mov rsi, [rax+8]`
         // takes the new user out of the returned shared_ptr; rbx is still the {ProductUserId, bool remote} argument.
         {"room user joined (join time)", 0x12B80E0, {0x4C, 0x8B, 0x20, 0x48, 0x8B, 0x70, 0x08}, 0, 7},

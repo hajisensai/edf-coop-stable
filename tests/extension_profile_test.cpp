@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
     CHECK(marker.extensionCompatible());
     version(3); CHECK(!marker.extensionCompatible()); version(2);
     add("peer");
+    setText("peer", "EDF6DN_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     CHECK(!marker.extensionCompatible()); // older Coop/absent extension
     CHECK(marker.extensionCompatible({"self"})); // lobby-only peer is not part of this mission
     CHECK(!marker.extensionCompatible({"self", "absent"}));
@@ -75,13 +76,14 @@ int main(int argc, char** argv) {
     setText("peer", "EDF6DN_EXT", "af-support/2");
     CHECK(marker.extensionCompatible());
     clear("peer");
-    CHECK(!marker.extensionCompatible()); // no cached capability after it disappears
+    CHECK(marker.extensionCompatible()); // the same observed identity survives an incomplete EOS snapshot
+    setText("peer", "EDF6DN_EXT", "disabled"); CHECK(!marker.extensionCompatible());
     setText("peer", "EDF6DN_EXT", "af-support/2");
     copyFails(1); CHECK(!marker.extensionCompatible()); copyFails(0);
     ready(false); CHECK(!marker.extensionCompatible());
     marker.memberJoined(); marker.tick(); tick(nullptr);
     CHECK(published("EDF6DN_EXT") == "disabled");
-    ready(true); CHECK(!marker.extensionCompatible()); // own current marker still disabled
+    ready(true); CHECK(marker.extensionCompatible()); // actual local module, not its stale EOS marker, decides local capability
     marker.memberJoined(); marker.tick(); tick(nullptr);
     CHECK(marker.extensionCompatible());
 
@@ -94,6 +96,7 @@ int main(int argc, char** argv) {
     hostOptions.mode = dn::Mode::Host; hostOptions.listenPort = 0;
     hostOptions.identity = dn::Identity::generate();
     auto peerIdentity = dn::Identity::generate();
+    setText("peer", "EDF6DN_ID", peerIdentity->commitment().c_str());
     hostOptions.memberIds = {{"peer", peerIdentity->commitment()}};
     CHECK(net->start(hostOptions)); net->setLocalUser("self");
     dn::DirectOptions joinOptions;
@@ -126,7 +129,9 @@ int main(int argc, char** argv) {
     remove("lobby-only"); view.admit("lobby-only", dn::kLeft);
     after = publish(); CHECK(after.ready && after.generation == stable.generation);
     clear("peer");
-    CHECK(!publish().ready); // actual participant loses its capability: closed
+    after = publish(); CHECK(after.ready && after.generation == stable.generation); // same authenticated link and world
+    setText("peer", "EDF6DN_EXT", "disabled"); CHECK(!publish().ready); // explicit revocation still closes it
+    clear("peer"); CHECK(!publish().ready); // a later missing snapshot cannot resurrect a revoked grant
     setText("peer", "EDF6DN_EXT", "af-support/2"); CHECK(publish().ready);
     owner("peer"); view.promoted("peer", GetTickCount64());
     CHECK(!publish().ready); // genuine host migration is not an ignored lobby change

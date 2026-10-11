@@ -11,9 +11,11 @@
 唯独 `extensionCompatible` 要求所有参与者每次现读 `EDF6DN_EXT=af-support/2`，没有与身份同生命周期的记录。
 这把临时不完整的 SDK 快照当成了已认证对端进程能力的变化。
 
-`LobbyProfileTests` 执行生产 `lobby_marker.cpp`，仅替换 EOS 详情/属性接口和本机模块探测：
+初始 `LobbyProfileTests` 执行生产 `lobby_marker.cpp`，仅替换 EOS 详情/属性接口和本机模块探测：
 先在大厅发现成员身份与扩展能力，再丢失扩展属性后进入本关就绪判断。
 未修代码出现 3 项失败；修复后包括原始路径、身份替换、撤销和房间清理等用例通过。
+最终将这些回归并入既有 `ExtensionProfileTests`：通过真实导出接口加载 Fake EOS 和 AF DLL，
+再执行生产身份发现、房间就绪判断和独立签名身份的 UDP 链路。删除重复包含生产 cpp 的临时测试及私有字段访问。
 
 ## 修复及边界
 

@@ -81,7 +81,6 @@ public:
     bool extensionCompatible(const std::vector<std::string>& participants = {});
 
 private:
-    friend struct LobbyMarkerFixture;
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.
     bool readAttribute(EOS_HLobbyDetails details, EOS_ProductUserId member, const char* key, std::string* value) const;
     void observeExtensionLocked(EOS_HLobbyDetails details, EOS_ProductUserId member);
@@ -116,7 +115,7 @@ private:
     int64_t seq_ = 0;     // EDF6DN_SEQ: makes every publish a real change that EOS sends to everyone
     std::unordered_set<std::string> marked_;  // members seen with the marker since they joined
     std::map<std::string, std::string> identities_;  // member -> identity commitment seen since it joined
-    std::map<std::string, std::string> extensionIdentities_; // compatible profile -> the identity it was observed with
+    std::map<std::string, std::string, std::less<>> extensionIdentities_; // compatible profile -> the identity it was observed with
     std::string extensionProblem_;
     std::string knownOwner_, knownOwnerAddress_;  // the last address seen advertised, and by whom
 };

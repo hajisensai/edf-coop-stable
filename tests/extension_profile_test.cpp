@@ -87,6 +87,38 @@ int main(int argc, char** argv) {
     marker.memberJoined(); marker.tick(); tick(nullptr);
     CHECK(marker.extensionCompatible());
 
+    // Discover capabilities with identities before world sealing, then model EOS losing those attributes.
+    marker.memberIdentities(); clear("self"); clear("peer");
+    CHECK(marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_EXT", "disabled"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    clear("peer"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_EXT", "af-support/2"); CHECK(marker.extensionCompatible({"self", "peer"}));
+    // Same PUID, replacement process identity: an absent profile cannot inherit the old grant.
+    clear("peer"); setText("peer", "EDF6DN_ID", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    marker.memberIdentities(); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_EXT", "af-support/2"); CHECK(marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_ID", "invalid"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_ID", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    CHECK(marker.extensionCompatible({"self", "peer"}));
+    marker.memberGone("peer"); clear("peer"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_EXT", "af-support/2"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    marker.memberIdentities(); CHECK(marker.extensionCompatible({"self", "peer"}));
+    lobby("replacement-room", "self"); add("peer");
+    marker.entered(reinterpret_cast<EOS_HLobby>(1), "replacement-room", user("self"), true);
+    clear("peer"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    setText("peer", "EDF6DN_EXT", "af-support/2"); marker.memberIdentities();
+    CHECK(marker.extensionCompatible({"self", "peer"}));
+    remove("peer"); CHECK(!marker.extensionCompatible({"self", "peer"})); add("peer");
+    marker.left(); lobby("room", "self"); add("peer");
+    marker.entered(reinterpret_cast<EOS_HLobby>(1), "room", user("self"), true);
+    clear("peer"); CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_EXT", "af-support/2");
+    CHECK(!marker.extensionCompatible({"self", "peer"}));
+    setText("peer", "EDF6DN_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    marker.memberIdentities(); CHECK(marker.extensionCompatible({"self", "peer"}));
+
     // Drive the actual EOS-tick publisher, not a hand-fed DirectNet room snapshot.
     // AF supplies a real atomic ABI snapshot; marker reads the fake SDK; live
     // routes use independent signed identities and production UDP handshakes.

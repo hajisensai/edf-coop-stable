@@ -218,13 +218,15 @@ bool LobbyMarker::extensionCompatible(const std::vector<std::string>& participan
         observeExtensionLocked(details, member);
         // Our own loaded module is authoritative, even when EOS loses our member attributes too.
         if (!id.empty() && id == ours) continue;
-        const auto identity = identities_.find(id), profile = extensionIdentities_.find(id);
+        const auto identity = identities_.find(id);
+        const auto profile = extensionIdentities_.find(id);
         compatible = member && identity != identities_.end() && profile != extensionIdentities_.end() &&
             identity->second == profile->second;
     }
     releaseDetails_(details);
-    return extensionResultLocked(compatible && remaining.empty(),!compatible ? "participant profile unconfirmed for current identity"
-        : !remaining.empty() ? "actual world participant missing from current lobby" : "verified current-room identity profiles");
+    if (!compatible) return extensionResultLocked(false,"participant profile unconfirmed for current identity");
+    if (!remaining.empty()) return extensionResultLocked(false,"actual world participant missing from current lobby");
+    return extensionResultLocked(true,"verified current-room identity profiles");
 }
 
 bool LobbyMarker::extensionResultLocked(bool ready, const char* reason) {
@@ -238,8 +240,7 @@ bool LobbyMarker::extensionResultLocked(bool ready, const char* reason) {
 void LobbyMarker::observeExtensionLocked(EOS_HLobbyDetails details, EOS_ProductUserId member) {
     const std::string id = idString(member);
     if (id.empty()) return;
-    std::string identity;
-    if (readAttribute(details, member, kIdentityKey, &identity)) {
+    if (std::string identity; readAttribute(details, member, kIdentityKey, &identity)) {
         const auto prior = identities_.find(id);
         if (!isCommitment(identity)) {
             identities_.erase(id);extensionIdentities_.erase(id);return;

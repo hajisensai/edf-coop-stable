@@ -114,58 +114,73 @@ unsigned long long quietChecks = 0;
 
 void InitPeerTimeout(unsigned char* gameBase) { game = gameBase; }
 
-std::size_t FilterNativeFailedPeers(const void* room,void* vector,LiveFailedPeerQuery query,SharedUserRelease release) {
-    if(!room || !vector || !query || !release)return 0;
-    struct WeakUser { void* object;void* control; };
-    struct WeakVector { WeakUser* begin;WeakUser* end;WeakUser* capacity; };
-    auto* list=static_cast<WeakVector*>(vector);
-    std::size_t removed=0;
-    Probing([&]() -> bool {
-        __try {
-            const auto* lobby=static_cast<const unsigned char*>(room)+0x68;
-            const auto length=*reinterpret_cast<const std::size_t*>(lobby+16);
-            const auto capacity=*reinterpret_cast<const std::size_t*>(lobby+24);
-            if(!length || length>=64 || capacity<length)return false;
-            const auto* text=capacity<16 ? reinterpret_cast<const char*>(lobby) : *reinterpret_cast<const char* const*>(lobby);
-            char name[64]{};std::memcpy(name,text,length);
-            const auto begin=reinterpret_cast<std::uintptr_t>(list->begin),end=reinterpret_cast<std::uintptr_t>(list->end);
-            if(end<begin || (end-begin)%sizeof(WeakUser) || (end-begin)/sizeof(WeakUser)>kMaxLinks ||
-               reinterpret_cast<std::uintptr_t>(list->capacity)<end)return false;
-            for(auto* item=list->begin;item!=list->end;) {
-                auto* counts=item->control ? reinterpret_cast<volatile LONG*>(static_cast<unsigned char*>(item->control)+8) : nullptr;
-                LONG used=counts ? *counts : 0;
-                bool pinned=false;
-                while(item->object && used>0 && used<(std::numeric_limits<LONG>::max)()) {
-                    const LONG observed=InterlockedCompareExchange(counts,used+1,used);
-                    if(observed==used){pinned=true;break;}used=observed;
-                }
-                if(!pinned){++item;continue;}
-                void* strong[2]={item->object,item->control};
-                const void* productId=nullptr;
-                const bool readable=Probing([&]() -> bool {
-                    __try {productId=*reinterpret_cast<const void* const*>(static_cast<unsigned char*>(item->object)+kUserProductIdOffset);return true;}
-                    __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
-                });
-                const bool keep=readable && counts[1]>=2 && query(name,productId);
-                if(keep) {
-                    // The strong pin keeps the control's implicit weak reference alive while this one is dropped.
-                    InterlockedDecrement(counts+1);
-                    std::memmove(item,item+1,static_cast<std::size_t>(list->end-item-1)*sizeof(WeakUser));
-                    --list->end;++removed;
-                }
-                release(strong);
-                if(!keep)++item;
-            }
-            return true;
-        } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+namespace {
+bool ReadFailedRoom(const unsigned char* room,std::array<char,64>& name) {
+    __try {
+        const auto* lobby=room+0x68;
+        std::size_t length=0;
+        std::size_t capacity=0;
+        std::memcpy(&length,lobby+16,sizeof(length));
+        std::memcpy(&capacity,lobby+24,sizeof(capacity));
+        if(!length || length>=name.size() || capacity<length)return false;
+        const char* text=nullptr;
+        if(capacity<16)std::memcpy(name.data(),lobby,length);
+        else {std::memcpy(&text,lobby,sizeof(text));std::memcpy(name.data(),text,length);}
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool PinFailedUser(const NativeWeakUser& item) {
+    if(!item.object || !item.control)return false;
+    auto* count=&item.control->strong;
+    LONG used=*count;
+    while(used>0 && used<(std::numeric_limits<LONG>::max)()) {
+        const LONG observed=InterlockedCompareExchange(count,used+1,used);
+        if(observed==used)return true;
+        used=observed;
+    }
+    return false;
+}
+bool RetainFailedUser(const NativeWeakUser& item,const char* room,LiveFailedPeerQuery query) { // NOSONAR: non-owning native callback
+    return Probing([&item,room,query] {
+        __try {return item.control->weak>=2 && query(room,item.object->productId);}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     });
-    return removed;
+}
+std::size_t FilterFailedUsers(const unsigned char* room,NativeFailedUsers& list,LiveFailedPeerQuery query,SharedUserRelease release) { // NOSONAR: native destructor and atomic bridge callbacks
+    __try {
+        std::array<char,64> name{};
+        if(!ReadFailedRoom(room,name))return 0;
+        const auto begin=reinterpret_cast<std::uintptr_t>(list.begin); // NOSONAR: validate native vector address span
+        const auto end=reinterpret_cast<std::uintptr_t>(list.end); // NOSONAR: validate native vector address span
+        if(end<begin || (end-begin)%sizeof(NativeWeakUser) || (end-begin)/sizeof(NativeWeakUser)>kMaxLinks ||
+           reinterpret_cast<std::uintptr_t>(list.capacity)<end)return 0; // NOSONAR: validate native vector address span
+        std::size_t removed=0;
+        for(auto* item=list.begin;item!=list.end;) {
+            if(!PinFailedUser(*item)){++item;continue;}
+            NativeWeakUser strong=*item;
+            const bool keep=RetainFailedUser(*item,name.data(),query);
+            if(keep) {
+                // A strong pin retains the implicit weak reference while the vector's one is dropped.
+                InterlockedDecrement(&item->control->weak);
+                std::memmove(item,item+1,static_cast<std::size_t>(list.end-item-1)*sizeof(NativeWeakUser));
+                --list.end;++removed;
+            }
+            release(&strong);
+            if(!keep)++item;
+        }
+        return removed;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
+}
+} // namespace
+std::size_t FilterNativeFailedPeers(const unsigned char* room,NativeFailedUsers* vector,LiveFailedPeerQuery query,SharedUserRelease release) { // NOSONAR: native bridge callbacks
+    if(!room || !vector || !query || !release)return 0;
+    return Probing([room,vector,query,release] {return FilterFailedUsers(room,*vector,query,release);});
 }
 
-void NativeFailedPeersHandler(CpuContext* context) {
+void NativeFailedPeersHandler(CpuContext* context) { // NOSONAR: midhook callback ABI requires mutable CpuContext
     if(!game || !context)return;
-    const auto removed=FilterNativeFailedPeers(reinterpret_cast<const void*>(context->r14),
-        reinterpret_cast<void*>(context->rbp-16),LiveFailedPeerQueryStore().load(),reinterpret_cast<SharedUserRelease>(game+0x1D6B20));
+    const auto removed=FilterNativeFailedPeers(reinterpret_cast<const unsigned char*>(context->r14), // NOSONAR: supported native register ABI
+        reinterpret_cast<NativeFailedUsers*>(context->rbp-16),LiveFailedPeerQueryStore().load(),reinterpret_cast<SharedUserRelease>(game+0x1D6B20)); // NOSONAR: supported stack vector and destructor ABI
     if(removed)Log("RESILIENCE native closed-peer list: retained %zu authenticated live route(s), no automatic kick/leave",removed);
 }
 

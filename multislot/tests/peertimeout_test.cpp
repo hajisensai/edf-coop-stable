@@ -269,33 +269,36 @@ int wmain(int argc, wchar_t** argv) {
     }
     // The failed-user vector is filtered before either the host kick or joiner's leave branch.
     {
-        struct Weak { void* object;void* control; };
-        struct Vector { Weak* begin;Weak* end;Weak* capacity; };
-        alignas(8) unsigned char nativeRoom[0x100]{};
-        std::memcpy(nativeRoom+0x68,"room",5);
-        const std::size_t length=4,capacity=15;
-        std::memcpy(nativeRoom+0x78,&length,8);std::memcpy(nativeRoom+0x80,&capacity,8);
-        alignas(8) unsigned char users[3][32]{};
-        alignas(8) LONG controls[3][4]{};
-        for(int i=0;i<3;++i){controls[i][2]=i==2 ? 0 : 1;controls[i][3]=2;const void* id=users[i];std::memcpy(users[i]+0x18,&id,8);}
-        Weak entries[3]={{users[0],controls[0]},{users[1],controls[1]},{users[2],controls[2]}};
-        Vector vector{entries,entries+3,entries+3};
-        const auto query=+[](const char* roomId,const void* id) noexcept {return std::strcmp(roomId,"room")==0 && id!=nullptr;};
-        const auto release=+[](void* shared) {auto** slots=static_cast<void**>(shared);InterlockedDecrement(static_cast<LONG*>(slots[1])+2);};
-        Check(FilterNativeFailedPeers(nativeRoom,&vector,query,release)==2,"live failed users filtered before native room maintenance");
-        Check(vector.end-vector.begin==1 && vector.begin->object==users[2],"expired unknown user is not dereferenced or invented");
-        Check(controls[0][2]==1 && controls[1][2]==1 && controls[0][3]==1 && controls[1][3]==1,
+        alignas(8) std::array<unsigned char,0x100> nativeRoom{};
+        std::memcpy(nativeRoom.data()+0x68,"room",5);
+        const std::size_t length=4;
+        const std::size_t capacity=15;
+        std::memcpy(nativeRoom.data()+0x78,&length,8);std::memcpy(nativeRoom.data()+0x80,&capacity,8);
+        std::array<NativeUser,3> users{};
+        std::array<NativeUserControl,3> controls{};
+        for(int i=0;i<3;++i){controls[i].strong=i==2 ? 0 : 1;controls[i].weak=2;users[i].productId=reinterpret_cast<EOS_ProductUserIdDetails*>(&users[i]);} // NOSONAR: synthetic opaque EOS handles, never dereferenced
+        std::array<NativeWeakUser,3> entries{{{&users[0],&controls[0]},{&users[1],&controls[1]},{&users[2],&controls[2]}}};
+        NativeFailedUsers vector{entries.data(),entries.data()+3,entries.data()+3};
+        const auto query=+[](const char* roomId,EOS_ProductUserIdDetails* id) noexcept {return std::strcmp(roomId,"room")==0 && id!=nullptr;};
+        const auto release=+[](NativeWeakUser* shared) {InterlockedDecrement(&shared->control->strong);};
+        Check(FilterNativeFailedPeers(nativeRoom.data(),&vector,query,release)==2,"live failed users filtered before native room maintenance");
+        Check(vector.end-vector.begin==1 && vector.begin->object==&users[2],"expired unknown user is not dereferenced or invented");
+        Check(controls[0].strong==1 && controls[1].strong==1 && controls[0].weak==1 && controls[1].weak==1,
               "temporary strong pins and removed weak entries released exactly once");
-        Check(controls[2][2]==0 && controls[2][3]==2,"expired control references preserved for native handling");
-        controls[0][3]=2;
-        entries[0]={users[0],controls[0]};vector={entries,entries+1,entries+1};
-        const auto reject=+[](const char*,const void*) noexcept {return false;};
-        Check(FilterNativeFailedPeers(nativeRoom,&vector,reject,release)==0 && vector.end==entries+1,
+        Check(controls[2].strong==0 && controls[2].weak==2,"expired control references preserved for native handling");
+        controls[0].weak=2;
+        entries[0]={&users[0],&controls[0]};vector={entries.data(),entries.data()+1,entries.data()+1};
+        const auto reject=+[](const char*,EOS_ProductUserIdDetails*) noexcept {return false;};
+        Check(FilterNativeFailedPeers(nativeRoom.data(),&vector,reject,release)==0 && vector.end==entries.data()+1,
               "unknown or unhealthy route remains for native failure handling");
-        Check(controls[0][2]==1 && controls[0][3]==2,"rejected route preserves both native reference counts");
+        Check(controls[0].strong==1 && controls[0].weak==2,"rejected route preserves both native reference counts");
         nativeRoom[0x68]='x';
-        Check(FilterNativeFailedPeers(nativeRoom,&vector,query,release)==0 && controls[0][2]==1 && controls[0][3]==2,
+        Check(FilterNativeFailedPeers(nativeRoom.data(),&vector,query,release)==0 && controls[0].strong==1 && controls[0].weak==2,
               "room mismatch never suppresses native disconnect");
+        nativeRoom[0x68]='r';
+        entries[0].object=reinterpret_cast<NativeUser*>(1); // NOSONAR: deliberately unreadable native object tests the guarded probe
+        Check(FilterNativeFailedPeers(nativeRoom.data(),&vector,query,release)==0 && controls[0].strong==1 && controls[0].weak==2,
+              "unreadable pinned user releases its temporary strong reference");
     }
     ForgetPeerTimeoutLog();
     ForgetPeerJoins();

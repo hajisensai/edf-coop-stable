@@ -75,13 +75,17 @@ public:
     // The members our copy of the lobby lists now (EOS ids), or nothing when we have no copy (`known` false).
     // EOS calls: run on the EOS tick only.
     std::vector<std::string> members(bool* known);
-    // No caching: every listed member must currently advertise the exact extension
-    // profile. An older Coop build must never receive our reserved-channel data.
+    // A profile observed in this room belongs to that member's identity commitment.
+    // EOS losing a snapshot attribute does not change the authenticated process.
+    // Unknown/replaced identities, explicit incompatible profiles and absent members fail closed.
     bool extensionCompatible(const std::vector<std::string>& participants = {});
 
 private:
+    friend struct LobbyMarkerFixture;
     // Copies member attribute `key` of `member` as a string ("" when absent). Caller holds mu_.
     bool readAttribute(EOS_HLobbyDetails details, EOS_ProductUserId member, const char* key, std::string* value) const;
+    void observeExtensionLocked(EOS_HLobbyDetails details, EOS_ProductUserId member);
+    bool extensionResultLocked(bool ready, const char* reason);
     EOS_HLobbyDetails copyDetailsLocked() const;
     std::string idString(EOS_ProductUserId id) const;
 
@@ -112,6 +116,8 @@ private:
     int64_t seq_ = 0;     // EDF6DN_SEQ: makes every publish a real change that EOS sends to everyone
     std::unordered_set<std::string> marked_;  // members seen with the marker since they joined
     std::map<std::string, std::string> identities_;  // member -> identity commitment seen since it joined
+    std::map<std::string, std::string> extensionIdentities_; // compatible profile -> the identity it was observed with
+    std::string extensionProblem_;
     std::string knownOwner_, knownOwnerAddress_;  // the last address seen advertised, and by whom
 };
 

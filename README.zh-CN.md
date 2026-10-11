@@ -29,6 +29,8 @@
 
 ## 安装
 
+全军出击支援能力按当前房间和成员身份保存：EOS 大厅暂时读不到先前已确认的扩展属性时，同一身份仍保留其能力；成员离开、换身份或明确宣告不兼容立即撤销。详情见 [支援扩展生命周期](docs/reviews/2026-10-11-support-profile-lifecycle.md)。
+
 1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载 `EDF6Coop-<版本>.zip`，**完整解压**到任意文件夹。
 2. 双击 **`INSTALL.bat`**：从 Steam 库自动找到 EDF6 并安装。
    - 没有 EDFModLoader 时会装上附带的加载器：[BlueAmulet/EDFModLoader](https://github.com/BlueAmulet/EDFModLoader) v1.0.10（MIT），且**修复了官方版的一个多线程问题**（它的函数转发口共用同一个跳转目标变量，多个线程同时调用时可能跳到错误的函数；详见 [multislot/packaging/LOADER_FIX_JA.md](multislot/packaging/LOADER_FIX_JA.md)）。已有的 `winmm.dll` 不会覆盖，只有一个例外：如果它与官方 v1.0.10 的文件逐字节相同，就换成修复版，原文件备份为 `winmm.dll.bak-official`。其他加载器（更新的或打过补丁的）一律不动。

@@ -70,6 +70,10 @@ bool LobbyMarker::init(HMODULE eos) {
 void LobbyMarker::entered(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId localUser, bool owner) {
     if (!lobby || !lobbyId || !localUser) return;
     std::lock_guard<std::mutex> lock(mu_);
+    if (lobby_ != lobby || lobbyId_ != lobbyId || localUser_ != localUser) {
+        marked_.clear();identities_.clear();extensionIdentities_.clear();extensionProblem_.clear();
+        knownOwner_.clear();knownOwnerAddress_.clear();
+    }
     lobby_ = lobby;
     lobbyId_ = lobbyId;
     localUser_ = localUser;
@@ -82,6 +86,8 @@ void LobbyMarker::left() {
     lobbyId_.clear();
     marked_.clear();
     identities_.clear();
+    extensionIdentities_.clear();
+    extensionProblem_.clear();
     knownOwner_.clear();
     knownOwnerAddress_.clear();
     owner_ = false;
@@ -104,6 +110,7 @@ void LobbyMarker::memberGone(const std::string& member) {
     std::lock_guard<std::mutex> lock(mu_);
     marked_.erase(member);
     identities_.erase(member);
+    extensionIdentities_.erase(member);
     if (member == knownOwner_) {
         knownOwner_.clear();
         knownOwnerAddress_.clear();
@@ -194,23 +201,57 @@ bool LobbyMarker::inLobby() const {
 }
 
 bool LobbyMarker::extensionCompatible(const std::vector<std::string>& participants) {
-    if (!supportProfileReady()) return false;
     std::lock_guard<std::mutex> lock(mu_);
+    if (!supportProfileReady()) return extensionResultLocked(false,"local AF dependency not ready");
     EOS_HLobbyDetails details = getMemberCount_ && getMemberByIndex_ ? copyDetailsLocked() : nullptr;
-    if (!details) return false;
+    if (!details) return extensionResultLocked(false,"no current EOS member roster");
     EOS_LobbyDetails_GetMemberCountOptions countOption{1};
     const uint32_t count = getMemberCount_(details, &countOption);
     bool compatible = count > 0 && count <= kMaxMembersRead;
+    const std::string ours = idString(localUser_);
     std::set<std::string> remaining(participants.begin(), participants.end());
     for (uint32_t i = 0; compatible && i < count; ++i) {
         EOS_LobbyDetails_GetMemberByIndexOptions memberOption{1, i};
         const auto member = getMemberByIndex_(details, &memberOption);
-        if (!participants.empty() && !remaining.erase(idString(member))) continue;
-        std::string value;
-        compatible = member && readAttribute(details, member, "EDF6DN_EXT", &value) && value == "af-support/2";
+        const std::string id = idString(member);
+        if (!participants.empty() && !remaining.erase(id)) continue;
+        observeExtensionLocked(details, member);
+        // Our own loaded module is authoritative, even when EOS loses our member attributes too.
+        if (!id.empty() && id == ours) continue;
+        const auto identity = identities_.find(id), profile = extensionIdentities_.find(id);
+        compatible = member && identity != identities_.end() && profile != extensionIdentities_.end() &&
+            identity->second == profile->second;
     }
     releaseDetails_(details);
-    return compatible && remaining.empty();
+    return extensionResultLocked(compatible && remaining.empty(),!compatible ? "participant profile unconfirmed for current identity"
+        : !remaining.empty() ? "actual world participant missing from current lobby" : "verified current-room identity profiles");
+}
+
+bool LobbyMarker::extensionResultLocked(bool ready, const char* reason) {
+    if (extensionProblem_ != reason) {
+        extensionProblem_ = reason;
+        logf("EXTENSION profile: %s",reason);
+    }
+    return ready;
+}
+
+void LobbyMarker::observeExtensionLocked(EOS_HLobbyDetails details, EOS_ProductUserId member) {
+    const std::string id = idString(member);
+    if (id.empty()) return;
+    std::string identity;
+    if (readAttribute(details, member, kIdentityKey, &identity)) {
+        const auto prior = identities_.find(id);
+        if (!isCommitment(identity)) {
+            identities_.erase(id);extensionIdentities_.erase(id);return;
+        }
+        if (prior == identities_.end() || prior->second != identity) extensionIdentities_.erase(id);
+        identities_[id] = identity;
+    }
+    std::string profile;
+    if (!readAttribute(details, member, "EDF6DN_EXT", &profile)) return; // absence is not a revocation
+    const auto known = identities_.find(id);
+    if (profile == "af-support/2" && known != identities_.end()) extensionIdentities_[id] = known->second;
+    else extensionIdentities_.erase(id); // explicit disabled/foreign profile revokes immediately
 }
 
 bool LobbyMarker::isOwner() const {
@@ -290,10 +331,9 @@ std::map<std::string, std::string> LobbyMarker::memberIdentities() {
     for (uint32_t i = 0; i < members && i < kMaxMembersRead; ++i) {
         EOS_LobbyDetails_GetMemberByIndexOptions mo{1, i};
         EOS_ProductUserId member = getMemberByIndex_(details, &mo);
-        std::string value;
-        if (!member || !readAttribute(details, member, kIdentityKey, &value) || !isCommitment(value)) continue;
-        std::string id = idString(member);
-        if (!id.empty()) identities_[id] = value;
+        // Observe capability with the identity during discovery, before world sealing; the initial complete
+        // snapshot may be the only time EOS exposes these attributes to a joiner.
+        observeExtensionLocked(details, member);
     }
     releaseDetails_(details);
     return identities_;

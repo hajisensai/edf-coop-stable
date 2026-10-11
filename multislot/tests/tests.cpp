@@ -682,11 +682,16 @@ int main(int argc, char** argv) {
     // EOS_Lobby_LeaveLobby that the redirected call cuts, as the game has them.
     const auto peerTimeoutHooks = PeerTimeoutHooks();
     const auto peerTimeoutCalls = PeerTimeoutCalls();
-    Check(peerTimeoutHooks.size() == 1 && peerTimeoutCalls.size() == 1, "peer timeout table sizes");
+    Check(peerTimeoutHooks.size() == 2 && peerTimeoutCalls.size() == 1, "peer timeout table sizes");
     for (const auto& hook : peerTimeoutHooks) {
         const Patch verify{hook.name, hook.rva, hook.original, hook.original};
         Check(Matches(image.At(hook.rva, hook.original.size()), verify), hook.name, hook.rva);
-        Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the join-time hook keeps both moves", hook.rva);
+        if(hook.rva==0x12C04C0)
+            Check(hook.displacedOffset==5 && hook.displacedSize==9 &&
+                  CallTargets(image.At(hook.rva,5),hook.rva,0x12CE5E0),
+                  "failed peers filtered after producer, before vector comparison",hook.rva);
+        else
+            Check(hook.displacedOffset == 0 && hook.displacedSize == hook.original.size(), "the join-time hook keeps both moves", hook.rva);
     }
     for (const auto& call : peerTimeoutCalls) Check(CallTargets(image.At(call.rva, 5), call.rva, call.target), call.name, call.rva);
     const auto Bytes = [&](std::uint32_t rva, std::initializer_list<std::uint8_t> bytes) {

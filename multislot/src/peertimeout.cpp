@@ -8,6 +8,9 @@
 #include "identity.h"
 #include "log.h"
 #include "patches.h"  // kMaxPlayers
+#include <atomic>
+#include <cstring>
+#include <limits>
 
 namespace multislot {
 namespace {
@@ -110,6 +113,61 @@ unsigned long long quietChecks = 0;
 }  // namespace
 
 void InitPeerTimeout(unsigned char* gameBase) { game = gameBase; }
+
+std::size_t FilterNativeFailedPeers(const void* room,void* vector,LiveFailedPeerQuery query,SharedUserRelease release) {
+    if(!room || !vector || !query || !release)return 0;
+    struct WeakUser { void* object;void* control; };
+    struct WeakVector { WeakUser* begin;WeakUser* end;WeakUser* capacity; };
+    auto* list=static_cast<WeakVector*>(vector);
+    std::size_t removed=0;
+    Probing([&]() -> bool {
+        __try {
+            const auto* lobby=static_cast<const unsigned char*>(room)+0x68;
+            const auto length=*reinterpret_cast<const std::size_t*>(lobby+16);
+            const auto capacity=*reinterpret_cast<const std::size_t*>(lobby+24);
+            if(!length || length>=64 || capacity<length)return false;
+            const auto* text=capacity<16 ? reinterpret_cast<const char*>(lobby) : *reinterpret_cast<const char* const*>(lobby);
+            char name[64]{};std::memcpy(name,text,length);
+            const auto begin=reinterpret_cast<std::uintptr_t>(list->begin),end=reinterpret_cast<std::uintptr_t>(list->end);
+            if(end<begin || (end-begin)%sizeof(WeakUser) || (end-begin)/sizeof(WeakUser)>kMaxLinks ||
+               reinterpret_cast<std::uintptr_t>(list->capacity)<end)return false;
+            for(auto* item=list->begin;item!=list->end;) {
+                auto* counts=item->control ? reinterpret_cast<volatile LONG*>(static_cast<unsigned char*>(item->control)+8) : nullptr;
+                LONG used=counts ? *counts : 0;
+                bool pinned=false;
+                while(item->object && used>0 && used<(std::numeric_limits<LONG>::max)()) {
+                    const LONG observed=InterlockedCompareExchange(counts,used+1,used);
+                    if(observed==used){pinned=true;break;}used=observed;
+                }
+                if(!pinned){++item;continue;}
+                void* strong[2]={item->object,item->control};
+                const void* productId=nullptr;
+                const bool readable=Probing([&]() -> bool {
+                    __try {productId=*reinterpret_cast<const void* const*>(static_cast<unsigned char*>(item->object)+kUserProductIdOffset);return true;}
+                    __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+                });
+                const bool keep=readable && counts[1]>=2 && query(name,productId);
+                if(keep) {
+                    // The strong pin keeps the control's implicit weak reference alive while this one is dropped.
+                    InterlockedDecrement(counts+1);
+                    std::memmove(item,item+1,static_cast<std::size_t>(list->end-item-1)*sizeof(WeakUser));
+                    --list->end;++removed;
+                }
+                release(strong);
+                if(!keep)++item;
+            }
+            return true;
+        } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    });
+    return removed;
+}
+
+void NativeFailedPeersHandler(CpuContext* context) {
+    if(!game || !context)return;
+    const auto removed=FilterNativeFailedPeers(reinterpret_cast<const void*>(context->r14),
+        reinterpret_cast<void*>(context->rbp-16),LiveFailedPeerQueryStore().load(),reinterpret_cast<SharedUserRelease>(game+0x1D6B20));
+    if(removed)Log("RESILIENCE native closed-peer list: retained %zu authenticated live route(s), no automatic kick/leave",removed);
+}
 
 void NotePeerJoined(const void* user, bool local, std::uint64_t tick) {
     if (!user) return;

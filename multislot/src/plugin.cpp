@@ -220,7 +220,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     if (diagnostics)
         for (const auto& site : DiagnosticHooks()) hooks.push_back({site, JoinLogHookHandler(site.rva)});
     if (keepRoom)
-        for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, &PeerJoinedHandler});
+        for (const auto& site : PeerTimeoutHooks()) hooks.push_back({site, site.rva==0x12C04C0 ? &NativeFailedPeersHandler : &PeerJoinedHandler});
     if (hostData)
         for (const auto& site : HostDataHooks()) hooks.push_back({site, &HostDataOpenHandler});
     for (const auto& site : UserSlotHooks()) hooks.push_back({site, UserSlotHookHandler(site.rva)});

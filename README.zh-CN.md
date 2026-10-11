@@ -29,6 +29,8 @@
 
 ## 安装
 
+已认证直连仍健康时，Coop 会保留已识别的原版维护超时踢人请求；手动踢人、真实离开和失效连接照常处理。详见 [超时维护说明](docs/reviews/2026-10-11-live-route-timeout.md)。
+
 全军出击支援能力按当前房间和成员身份保存：EOS 大厅暂时读不到先前已确认的扩展属性时，同一身份仍保留其能力；成员离开、换身份或明确宣告不兼容立即撤销。详情见 [支援扩展生命周期](docs/reviews/2026-10-11-support-profile-lifecycle.md)。
 
 1. 到 [Releases](https://github.com/hajisensai/edf-coop-stable/releases/latest) 下载 `EDF6Coop-<版本>.zip`，**完整解压**到任意文件夹。

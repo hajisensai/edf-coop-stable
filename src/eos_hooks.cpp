@@ -1182,10 +1182,10 @@ Kick hostKick(const EOS_Lobby_KickMemberOptions* o, void* clientData, void* cb) 
     return Kick::Answered;
 }
 
-bool keepNativeLivePeer(const char* room, const void* productId) noexcept {
+bool keepNativeLivePeer(const char* room, EOS_ProductUserId productId) noexcept {
     if(g_shutdown || !room || !productId)return false;
     try {
-    const auto target=idString(static_cast<EOS_ProductUserId>(const_cast<void*>(productId)));
+    const auto target=idString(productId);
     bool member=false;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
@@ -3220,7 +3220,7 @@ void setRoomCapacitySource(RoomCapacitySource source) { g.roomCapacity = source;
 void setGameSlotsSource(GameSlotsSource source) { g.gameSlots = source; }
 
 int hostSlotOf(const std::string& member) {
-    std::lock_guard<std::mutex> lock(g.viewMutex);
+    std::scoped_lock lock(g.viewMutex);
     return g.view.active() && g.view.slotted() ? g.view.hostSlot(member) : -1;
 }
 

@@ -2,8 +2,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <array>
 
 #include "midhook.h"
+struct EOS_ProductUserIdDetails;
 
 namespace multislot {
 
@@ -31,14 +33,19 @@ namespace multislot {
 // Join times come from Users::Add (12B7F50), right after it made the user object (12B80E0).
 
 void InitPeerTimeout(unsigned char* gameBase);
-using LiveFailedPeerQuery = bool(*)(const char* room,const void* productId) noexcept;
-using SharedUserRelease = void(__fastcall*)(void*);
+struct NativeUser { std::array<unsigned char,0x18> prefix{}; EOS_ProductUserIdDetails* productId=nullptr; };
+struct NativeUserControl { std::array<unsigned char,8> prefix{}; volatile LONG strong=0; volatile LONG weak=0; };
+struct NativeWeakUser { NativeUser* object; NativeUserControl* control; };
+struct NativeFailedUsers { NativeWeakUser* begin; NativeWeakUser* end; NativeWeakUser* capacity; };
+static_assert(offsetof(NativeUser,productId)==0x18 && offsetof(NativeUserControl,strong)==8 && sizeof(NativeWeakUser)==16);
+using LiveFailedPeerQuery = bool(*)(const char* room,EOS_ProductUserIdDetails* productId) noexcept; // NOSONAR: atomic, non-owning native bridge callback
+using SharedUserRelease = void(__fastcall*)(NativeWeakUser*); // NOSONAR: exact native shared_ptr destructor ABI
 inline std::atomic<LiveFailedPeerQuery>& LiveFailedPeerQueryStore() noexcept {
     static std::atomic<LiveFailedPeerQuery> query{nullptr};
     return query;
 }
 inline void SetLiveFailedPeerQuery(LiveFailedPeerQuery query) noexcept { LiveFailedPeerQueryStore().store(query); }
-std::size_t FilterNativeFailedPeers(const void* room,void* vector,LiveFailedPeerQuery query,SharedUserRelease release);
+std::size_t FilterNativeFailedPeers(const unsigned char* room,NativeFailedUsers* vector,LiveFailedPeerQuery query,SharedUserRelease release); // NOSONAR: native bridge callbacks do not allocate or own captures
 void NativeFailedPeersHandler(CpuContext* context);
 
 // Mid-function hook at EDF+12B80E0: rax = the new shared_ptr<eos::User>, rbx = {ProductUserId, bool remote}.

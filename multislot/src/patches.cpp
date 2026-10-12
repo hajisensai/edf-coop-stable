@@ -537,18 +537,43 @@ bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t 
     return value == imageBase + targetRva;
 }
 
+namespace {
+
+// Code another plugin installed: inside a module loaded in this process, in committed executable memory. A pointer
+// into the heap, a data section or a freed module is not a hook anyone can have meant to chain to.
+bool LoadedModuleCode(std::uint64_t value) {
+    const auto* address = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value));
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(address), &module) ||
+        !module)
+        return false;
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(address, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT) return false;
+    const DWORD protect = memory.Protect & 0xFF;
+    return protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+}  // namespace
+
 std::uint64_t SlotNext(const std::uint8_t* slotAt, const std::uint8_t* image, std::uint64_t imageBase,
                        std::uint64_t imageSize, const PointerSlot& slot) {
     if (!slotAt) return 0;
     std::uint64_t value = 0;
     std::memcpy(&value, slotAt, sizeof(value));
     const std::uint64_t original = imageBase + slot.target;
-    if (slot.code.empty()) return value == original ? value : 0;
+    // The slot holds the game's function: accepted as it always was, whatever the function's first bytes are now
+    // (another plugin may have detoured its entry inline, which the slot check never looked at).
+    if (value == original) return value;
+    // Anything else is only ever accepted in a shared slot, as another plugin's hook - and only when the game's
+    // function is this build's code, since the slot no longer tells the build.
+    if (slot.code.empty() || !value) return 0;
     if (!image || slot.target + slot.code.size() > imageSize ||
         std::memcmp(image + slot.target, slot.code.data(), slot.code.size()) != 0)
         return 0;
     const bool insideImage = value >= imageBase && value < imageBase + imageSize;
-    return value && (value == original || !insideImage) ? value : 0;
+    return !insideImage && LoadedModuleCode(value) ? value : 0;
 }
 
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva) {

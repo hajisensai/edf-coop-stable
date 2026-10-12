@@ -94,6 +94,17 @@ void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer);
 // More keys read into every watcher's view from the next beat on, without another watcher (memberattr.h: keys other
 // plugins ask for at run time). Any thread.
 void WatchMemberKeys(std::vector<std::string> keys);
+// Other plugins' member texts (memberattr.h, keys EDF6X_*): published on our lobby member like PublishMemberText, but
+// in an UpdateLobby of their own, with kExtensionSeqKey, at most once per kExtensionIntervalMs and half a beat off
+// Coop's own: an extension update EOS refuses, rejects or throttles never takes Coop's markers (EDF6MS_*,
+// EDF6NET_*, ...) with it, and a change of Coop's markers never resends the extensions' texts. 1 to 1000 characters
+// (memberattr enforces its own limits, a 4 KB total among them). Any thread.
+constexpr const char* kExtensionSeqKey = "EDF6MS_XSEQ";
+constexpr ULONGLONG kExtensionIntervalMs = 2000;
+void PublishExtensionText(const std::string& key, const std::string& value);
+// Called on the EOS tick, outside every lock of this file, when a beat finds no copy of the lobby we are in (EOS
+// has none: we are no longer in it). Coop's own features keep what they know then; memberattr shows no room.
+void WatchLobbyUnreadable(std::function<void()> listener);
 // Lobby keys (PublishLobbyText) read into every view's lobbyTexts on the same beat.
 void WatchLobbyTexts(std::vector<std::string> keys);
 // Our value of `key` (at most 1000 characters), published on our lobby member on the next beat and in every lobby

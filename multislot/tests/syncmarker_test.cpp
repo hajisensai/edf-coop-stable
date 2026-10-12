@@ -87,10 +87,13 @@ void AddMember(const char* id, bool marked) {
 // What the text observer (WatchMemberTexts) was last handed, and how often.
 LobbyView lastView;
 int views = 0;
+int emptyViews = 0;  // views of no lobby: we left one
 void ObserveView(const LobbyView& view) {
     lastView = view;
     ++views;
+    if (view.lobbyId.empty()) ++emptyViews;
 }
+int unreadableBeats = 0;  // WatchLobbyUnreadable
 std::string Text(const char* member, const char* key) {
     const char* text = Fake<const char* (*)(const char*, const char*)>("FakeEos_Text")(member, key);
     return text ? text : "<none>";
@@ -316,6 +319,140 @@ void TestTextsOnly() {
     reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
 }
 
+int UpdatesWith(const char* key) { return Fake<int (*)(const char*)>("FakeEos_UpdatesWith")(key); }
+void SendMemberStatus(const char* lobby, const char* member, std::int32_t status) {
+    Fake<void (*)(const char*, const char*, std::int32_t)>("FakeEos_SendMemberStatus")(lobby, member, status);
+}
+void Join(const char* lobby) {
+    static const int lobbyHandle = 0;
+    const LobbyOptions join{1, Fake<void* (*)(const char*)>("FakeEos_Details")(lobby), User("self")};
+    reinterpret_cast<LobbyCallFn>(replacements["EOS_Lobby_JoinLobby"])(const_cast<int*>(&lobbyHandle), &join,
+                                                                        &gameMarker, &GameLobbyCallback);
+}
+
+// Other plugins' texts (PublishExtensionText) go in an update of their own, on their own turn: a refused one never
+// takes Coop's markers with it, Coop's markers never resend them, and changes are paced.
+void TestExtensions(const std::wstring& logPath) {
+    if (!fake) return;
+    Fake<void (*)(const char*)>("FakeEos_Reset")("self");
+    Check(InstallSyncMarker(nullptr, &FakeRedirect, true), "the lobby glue installs again");
+    WatchLobbyUnreadable([] { ++unreadableBeats; });
+    PublishExtensionText("EDF6X_A", "=one");
+    const int lobbyHandle = 0;
+    const LobbyOptions create{1, User("self"), nullptr};
+    reinterpret_cast<LobbyCallFn>(replacements["EOS_Lobby_CreateLobby"])(
+        const_cast<int*>(&lobbyHandle), &create, &gameMarker, &GameLobbyCallback);
+    Tick();
+    NextObservation();
+    Tick();
+    Check(UpdatesWith(kSplitSyncSeqKey) == 1 && UpdatesWith("EDF6X_A") == 0 && UpdatesWith(kExtensionSeqKey) == 0,
+          "Coop's markers go out on the first beat, without the extensions' texts");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith("EDF6X_A") == 1 && UpdatesWith(kExtensionSeqKey) == 1 && UpdatesWith(kSplitSyncSeqKey) == 1 &&
+              Text("self", "EDF6X_A") == "=one",
+          "the extensions' texts go out on their own turn, in an update without Coop's markers");
+
+    PublishMemberText("TEXT_A", "ext-test-1");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith(kSplitSyncSeqKey) == 2 && UpdatesWith("EDF6X_A") == 1 && Text("self", "TEXT_A") == "ext-test-1",
+          "a change of Coop's texts does not resend the extensions'");
+
+    // An extension text EOS refuses: the extensions' update fails, Coop's goes out all the same.
+    Fake<void (*)(const char*)>("FakeEos_SetRefusedKey")("EDF6X_B");
+    PublishExtensionText("EDF6X_B", "=bad");
+    PublishMemberText("TEXT_A", "ext-test-2");
+    NextObservation();
+    Tick();
+    Check(Text("self", "TEXT_A") == "ext-test-2" && UpdatesWith(kSplitSyncSeqKey) == 3,
+          "a refused extension text does not stop Coop's markers");
+    Check(Text("self", "EDF6X_B") == "<none>" && UpdatesWith("EDF6X_A") == 1, "and its own update did not go out");
+    Fake<void (*)(const char*)>("FakeEos_SetRefusedKey")("");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith("EDF6X_A") == 1, "a failed extension update is not repeated before its next turn");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith("EDF6X_A") == 2 && Text("self", "EDF6X_B") == "=bad" && UpdatesWith(kSplitSyncSeqKey) == 3,
+          "it goes out on its next turn, alone");
+
+    // Paced: two changes within a turn go out once, with the last value.
+    const int before = UpdatesWith("EDF6X_A");
+    PublishExtensionText("EDF6X_A", "=two");
+    PublishExtensionText("EDF6X_A", "=three");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith("EDF6X_A") == before, "no extension update before its turn");
+    NextObservation();
+    Tick();
+    Check(UpdatesWith("EDF6X_A") == before + 1 && Text("self", "EDF6X_A") == "=three", "one update, the last value");
+    PublishExtensionText("EDF6X_C", std::string(1001, 'x'));
+    PublishExtensionText("EDF6X_D", "");
+    NextObservation();
+    NextObservation();
+    Tick();
+    Check(Text("self", "EDF6X_C") == "<none>" && Text("self", "EDF6X_D") == "<none>",
+          "a text EOS would refuse for its size is never sent");
+
+    const std::string log = ReadLog(logPath);
+    Check(Count(log, "publishing the extensions' member attributes failed") == 1, "the extensions' failure is logged once");
+    Check(Count(log, "publishing our split marker failed") == 1, "and is not a failure of Coop's markers");
+}
+
+// The room ends without the game leaving it: kicked, the room closed, a beat without a copy of it, or another room
+// entered. Whatever watches the lobby is told.
+void TestRoomLost() {
+    if (!fake) return;
+    Check(Fake<int (*)()>("FakeEos_StatusNotifications")() == 1, "the member status notification is registered once");
+    unreadableBeats = 0;
+    Fake<void (*)(int)>("FakeEos_SetCopyFails")(1);
+    NextObservation();
+    Check(unreadableBeats == 1 && SplitSync().InLobby(), "a beat without a copy of the lobby is reported; Coop keeps it");
+    Fake<void (*)(int)>("FakeEos_SetCopyFails")(0);
+    NextObservation();
+    Check(unreadableBeats == 1 && lastView.lobbyId == "lobby-created", "and the next beat reads it again");
+
+    AddMember("other", false);
+    int empty = emptyViews;
+    SendMemberStatus("lobby-created", "other", 3);
+    Tick();
+    Check(SplitSync().InLobby() && emptyViews == empty, "another member kicked: we stay");
+    SendMemberStatus("lobby-created", "self", 4);
+    Tick();
+    Check(SplitSync().InLobby() && emptyViews == empty, "promoted: we stay");
+    SendMemberStatus("lobby-created", "self", 3);
+    Tick();
+    Check(!SplitSync().InLobby() && emptyViews == empty + 1 && lastView.lobbyId.empty(),
+          "kicked: the room is left, and the observers are told");
+    const int updates = Updates();
+    NextObservation();
+    Check(Updates() == updates, "nothing is published after the kick");
+
+    Join("lobby-two");
+    Tick();
+    SendMemberStatus("lobby-created", "self", 5);
+    Tick();
+    Check(SplitSync().LobbyId() == "lobby-two", "a status for a room we are no longer in changes nothing");
+    empty = emptyViews;
+    SendMemberStatus("lobby-two", "self", 5);
+    Tick();
+    Check(!SplitSync().InLobby() && emptyViews == empty + 1, "the room closed: left");
+
+    Join("lobby-three");
+    Tick();
+    NextObservation();
+    Check(lastView.lobbyId == "lobby-three", "in the third room");
+    empty = emptyViews;
+    Join("lobby-four");
+    Tick();
+    Check(emptyViews == empty + 1 && SplitSync().LobbyId() == "lobby-four",
+          "another room entered without leaving: the last one is left first");
+    NextObservation();
+    Check(lastView.lobbyId == "lobby-four", "and the new one is read");
+    reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
+}
+
 void TestLog(const std::wstring& path) {
     const std::string log = ReadLog(path);
     Check(Count(log, "no marker seen yet from EOS older") == 1, "a member without the marker is logged once per room");
@@ -344,6 +481,8 @@ int main(int argc, char** argv) {
     TestLobby(fakePath.c_str());
     TestLog(logPath);
     TestTextsOnly();
+    TestExtensions(logPath);
+    TestRoomLost();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

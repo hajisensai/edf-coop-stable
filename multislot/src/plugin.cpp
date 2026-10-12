@@ -336,8 +336,8 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
             if (slot.code.empty())
                 Log("REFUSED: EDF+%X (%s) does not point at EDF+%X; nothing was changed", slot.rva, slot.name, slot.target);
             else
-                Log("REFUSED: EDF+%X (%s) is not the expected code, or its slot EDF+%X points elsewhere in EDF.dll; "
-                    "nothing was changed", slot.target, slot.name, slot.rva);
+                Log("REFUSED: EDF+%X (%s) is not the expected code, or its slot EDF+%X holds neither the game's "
+                    "function nor another loaded module's code; nothing was changed", slot.target, slot.name, slot.rva);
             return false;
         }
         if (next != reinterpret_cast<std::uint64_t>(base) + slot.target)

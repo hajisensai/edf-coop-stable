@@ -25,6 +25,19 @@ void Check(bool condition, const char* what, const char* slot) {
 }
 
 std::uint64_t ForeignOnUpdate(void*, void*) { return 0; }
+int foreignData = 0;  // in this exe's data section: a loaded module, but not code
+
+std::uint64_t Address(const void* at) { return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at)); }
+
+// Memory no module owns: the heap's (read/write) and a JIT-like executable block.
+struct Loose {
+    void* data = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    void* code = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READ);
+    ~Loose() {
+        if (data) VirtualFree(data, 0, MEM_RELEASE);
+        if (code) VirtualFree(code, 0, MEM_RELEASE);
+    }
+};
 
 struct Image {
     unsigned char* base = nullptr;
@@ -52,19 +65,42 @@ void CheckShared(Image& image, const PointerSlot& slot) {
     image.Set(slot, image.Address() + slot.target + 0x40);
     Check(image.Next(slot) == 0, "a slot pointing elsewhere into EDF.dll is refused (not this vtable)", slot.name);
 
-    // A game update: the function's code is not this build's, whoever holds the slot.
-    image.base[slot.target + slot.code.size() - 1] ^= 0x01;
+    // A foreign pointer is only taken when it is code in a loaded module (another plugin's hook).
+    Loose loose;
+    Check(loose.data && loose.code, "memory for the loose blocks", slot.name);
+    image.Set(slot, Address(loose.data));
+    Check(image.Next(slot) == 0, "a pointer into heap memory is refused", slot.name);
+    image.Set(slot, Address(loose.code));
+    Check(image.Next(slot) == 0, "executable memory outside every module is refused", slot.name);
+    image.Set(slot, Address(&foreignData));
+    Check(image.Next(slot) == 0, "a loaded module's data (not code) is refused", slot.name);
+    VirtualFree(loose.code, 0, MEM_RELEASE);
+    image.Set(slot, Address(loose.code));
+    const void* freed = loose.code;
+    loose.code = nullptr;
+    Check(image.Next(slot) == 0 && freed, "a freed block is refused", slot.name);
+
+    // The function's entry changed: a game update, or another plugin's inline detour. The slot still holding the
+    // game's function is accepted exactly as before shared slots (the code is not read then); a foreign pointer,
+    // which leaves only the code to tell the build, is refused.
+    image.base[slot.target] ^= 0x01;
     image.Set(slot, original);
-    Check(image.Next(slot) == 0, "changed code with an untouched slot is refused", slot.name);
+    Check(image.Next(slot) == original, "changed code with an untouched slot is accepted, as it always was", slot.name);
     image.Set(slot, foreign);
     Check(image.Next(slot) == 0, "changed code with another plugin's hook is refused", slot.name);
+    image.base[slot.target] ^= 0x01;
     image.base[slot.target + slot.code.size() - 1] ^= 0x01;
-    image.Set(slot, original);
-    Check(image.Next(slot) == original, "the code restored is accepted again", slot.name);
+    image.Set(slot, foreign);
+    Check(image.Next(slot) == 0, "a change at the head's last byte is seen too", slot.name);
+    image.base[slot.target + slot.code.size() - 1] ^= 0x01;
+    Check(image.Next(slot) == foreign, "the code restored is accepted again", slot.name);
 
-    // The function's head is read inside the image only.
+    // The function's head is read inside the image only (for a foreign pointer; the game's function needs no read).
     Check(SlotNext(image.base + slot.rva, image.base, image.Address(), slot.target + slot.code.size() - 1, slot) == 0,
           "a head past the image's end is refused", slot.name);
+    image.Set(slot, original);
+    Check(SlotNext(image.base + slot.rva, nullptr, image.Address(), kImageSize, slot) == original,
+          "the game's function is accepted without reading the code", slot.name);
 }
 
 void CheckExclusive(Image& image, const PointerSlot& slot) {
@@ -72,8 +108,10 @@ void CheckExclusive(Image& image, const PointerSlot& slot) {
     const std::uint64_t original = image.Address() + slot.target;
     image.Set(slot, original);
     Check(image.Next(slot) == original, "holding the game's function is accepted", slot.name);
-    image.Set(slot, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&ForeignOnUpdate)));
+    image.Set(slot, Address(reinterpret_cast<const void*>(&ForeignOnUpdate)));
     Check(image.Next(slot) == 0, "anything else is refused, as before", slot.name);
+    image.Set(slot, 0);
+    Check(image.Next(slot) == 0, "an empty slot is refused", slot.name);
 }
 
 }  // namespace

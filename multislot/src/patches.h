@@ -224,10 +224,12 @@ bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t 
 // What a hook written into `slot` continues with, or 0 when the slot may not be written. slotAt: the slot's 8 bytes;
 // image: EDF.dll's first byte as this process reads it (the function's code is read at image + slot.target);
 // imageBase and imageSize: where EDF.dll lies in the address space the slot's pointers are in.
-// - without slot.code: the game's function, when the slot holds it (SlotTargets);
-// - with slot.code: the function's head must be slot.code (a game update is refused), and the slot must hold the
-//   game's function or a pointer outside EDF.dll, which is another plugin's hook. A pointer to anything else inside
-//   EDF.dll is not this vtable as this build knows it, and is refused.
+// - the slot holds the game's function: accepted, exactly as SlotTargets always did (the function's bytes are not
+//   read: another plugin may have detoured its entry inline);
+// - otherwise only a slot with slot.code may be written, when the function's head is slot.code (a game update is
+//   refused) and the slot holds another plugin's hook: a pointer outside EDF.dll into a module loaded in this
+//   process, in committed executable memory. Null, anything else inside EDF.dll, heap, data or unmapped memory is
+//   refused.
 std::uint64_t SlotNext(const std::uint8_t* slotAt, const std::uint8_t* image, std::uint64_t imageBase,
                        std::uint64_t imageSize, const PointerSlot& slot);
 

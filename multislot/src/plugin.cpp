@@ -28,6 +28,7 @@
 #include "joinlog.h"
 #include "log.h"
 #include "loaderproxy.h"
+#include "memberattr.h"
 #include "lobbystate.h"
 #include "hud.h"
 #include "identity.h"
@@ -785,6 +786,8 @@ bool LoadRooms(const wchar_t* iniPath) {
     const bool marker = imports == 2 && lobbyGlue;
     // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
     StartNetFeature(lobbyGlue);
+    // Room member attributes for other plugins (member_attribute_api.h, EDF6CoopGetMemberAttributeApi).
+    memberattr::StartMemberAttributes(lobbyGlue);
     // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
     // datagrams follow interest management within each path's budget (netaoi.h).
     dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });

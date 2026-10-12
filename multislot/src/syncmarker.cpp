@@ -526,12 +526,23 @@ bool PeerReadsSplitSync(const void* remote) {
     return marked;
 }
 
-void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer) {
-    AcquireSRWLockExclusive(&local.lock);
+// Caller holds local.lock.
+static void WatchKeysLocked(std::vector<std::string>& keys) {
     for (std::string& key : keys)
         if (std::find(local.watched.begin(), local.watched.end(), key) == local.watched.end())
             local.watched.push_back(std::move(key));
+}
+
+void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer) {
+    AcquireSRWLockExclusive(&local.lock);
+    WatchKeysLocked(keys);
     local.observers.push_back(std::move(observer));
+    ReleaseSRWLockExclusive(&local.lock);
+}
+
+void WatchMemberKeys(std::vector<std::string> keys) {
+    AcquireSRWLockExclusive(&local.lock);
+    WatchKeysLocked(keys);
     ReleaseSRWLockExclusive(&local.lock);
 }
 

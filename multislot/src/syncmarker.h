@@ -91,6 +91,9 @@ using LobbyObserver = std::function<void(const LobbyView& view)>;
 // the EOS tick, outside every lock of this file. Leaving a lobby hands it an empty view. Each call adds a watcher
 // (host data and the netcode version gate both watch); every watcher's view holds every watcher's keys.
 void WatchMemberTexts(std::vector<std::string> keys, LobbyObserver observer);
+// More keys read into every watcher's view from the next beat on, without another watcher (memberattr.h: keys other
+// plugins ask for at run time). Any thread.
+void WatchMemberKeys(std::vector<std::string> keys);
 // Lobby keys (PublishLobbyText) read into every view's lobbyTexts on the same beat.
 void WatchLobbyTexts(std::vector<std::string> keys);
 // Our value of `key` (at most 1000 characters), published on our lobby member on the next beat and in every lobby

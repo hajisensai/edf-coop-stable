@@ -31,6 +31,8 @@ constexpr std::uint32_t kSetText = 0x863690;            // HUiTextField: (this, 
 constexpr int kRefreshUpdates = 120;                    // re-apply the label every ~2 s (frames can be recreated)
 
 unsigned char* game = nullptr;
+using OnUpdateFn = std::uint64_t(__fastcall*)(void*, void*);
+OnUpdateFn nextOnUpdate = nullptr;  // the game's HUiMainFrame::OnUpdate, or a hook chained onto its slot first
 wchar_t iniFile[MAX_PATH]{};
 std::atomic<int> roomSize{0};     // the setting: rooms created now are for this many, 0 = normal rooms
 std::atomic<int> createdSize{0};  // what this machine created its last room as, 0 = a normal room
@@ -236,6 +238,7 @@ void InitHostMode(unsigned char* gameBase, const wchar_t* iniPath, int size, int
         if (length < 24) wmemcpy(hostModeHint, hint, length + 1);
     }
     game = gameBase;
+    nextOnUpdate = gameBase ? reinterpret_cast<OnUpdateFn>(gameBase + kMainFrameOnUpdate) : nullptr;
     iniFile[0] = 0;
     if (iniPath && wcslen(iniPath) < MAX_PATH) wmemcpy(iniFile, iniPath, wcslen(iniPath) + 1);
     roomSize.store(ValidRoomSize(size) ? size : 0);
@@ -389,9 +392,12 @@ void SetWeaponFeature(int accept, int page, WeaponFeatureFrame frame) {
     weaponFeatureFrame = frame;
 }
 
+void ChainMainFrameOnUpdate(std::uint64_t next) {
+    nextOnUpdate = reinterpret_cast<OnUpdateFn>(static_cast<std::uintptr_t>(next));
+}
+
 std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
-    using OnUpdateFn = std::uint64_t(__fastcall*)(void*, void*);
-    const std::uint64_t result = reinterpret_cast<OnUpdateFn>(game + kMainFrameOnUpdate)(frame, context);
+    const std::uint64_t result = nextOnUpdate(frame, context);
     PollIdentity();  // the plugin loads before the game signs in, so this is asked from here until it answers
     if (CopyArmorKey() || CopyArmorPad()) {
         const bool down = (KeyDown(CopyArmorKey()) || PadButtonDown(CopyArmorPad())) && InRoomSession();

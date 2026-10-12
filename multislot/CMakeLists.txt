@@ -193,6 +193,10 @@ add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.
 target_compile_options(RoomViewTests PRIVATE ${WARNINGS})
 add_test(NAME RoomViewPaging COMMAND RoomViewTests)
 
+add_executable(SlotChainTests tests/slotchain_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
+target_compile_options(SlotChainTests PRIVATE ${WARNINGS})
+add_test(NAME SharedVtableSlots COMMAND SlotChainTests)
+
 add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
 add_test(NAME MidFunctionHooks COMMAND MidHookTests)
@@ -299,7 +303,7 @@ add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6Coop)
-foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff quiet smooth)
+foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff quiet smooth chained codechanged)
     add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6Coop>"
              "${CMAKE_BINARY_DIR}/loadtest" ${mode})
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

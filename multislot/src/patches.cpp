@@ -164,7 +164,10 @@ std::vector<CallSite> RoomViewCalls() {
 }
 
 PointerSlot RoomViewSlot() {
-    return {"HUiRoom OnUpdate", 0x180AC48, 0x8FDFE0};
+    // 8FDFE0's prologue up to its frame (`sub rsp, 0x430`). EDF6VehicleCrew chains onto this slot too.
+    return {"HUiRoom OnUpdate", 0x180AC48, 0x8FDFE0,
+            {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56,
+             0x41, 0x57, 0x48, 0x8D, 0xA8, 0x98, 0xFC, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x30, 0x04, 0x00, 0x00}};
 }
 
 std::vector<CallSite> MemberListCalls() {
@@ -204,7 +207,10 @@ std::vector<MidSite> HostModeHooks() {
 }
 
 PointerSlot MainFrameSlot() {
-    return {"HUiMainFrame OnUpdate", 0x1806D38, 0x8C12B0};
+    // 8C12B0's prologue up to its frame (`sub rsp, 0xD0`).
+    return {"HUiMainFrame OnUpdate", 0x1806D38, 0x8C12B0,
+            {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41,
+             0x56, 0x41, 0x57, 0x48, 0x8D, 0x68, 0xA1, 0x48, 0x81, 0xEC, 0xD0, 0x00, 0x00, 0x00}};
 }
 
 std::vector<Patch> MissionPatches() {
@@ -529,6 +535,20 @@ bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t 
     std::uint64_t value = 0;
     std::memcpy(&value, at, sizeof(value));
     return value == imageBase + targetRva;
+}
+
+std::uint64_t SlotNext(const std::uint8_t* slotAt, const std::uint8_t* image, std::uint64_t imageBase,
+                       std::uint64_t imageSize, const PointerSlot& slot) {
+    if (!slotAt) return 0;
+    std::uint64_t value = 0;
+    std::memcpy(&value, slotAt, sizeof(value));
+    const std::uint64_t original = imageBase + slot.target;
+    if (slot.code.empty()) return value == original ? value : 0;
+    if (!image || slot.target + slot.code.size() > imageSize ||
+        std::memcmp(image + slot.target, slot.code.data(), slot.code.size()) != 0)
+        return 0;
+    const bool insideImage = value >= imageBase && value < imageBase + imageSize;
+    return value && (value == original || !insideImage) ? value : 0;
 }
 
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva) {

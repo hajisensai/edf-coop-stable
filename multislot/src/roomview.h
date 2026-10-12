@@ -74,6 +74,9 @@ void InitRoomView(const unsigned char* gameBase, const RoomViewSettings& setting
 std::uint64_t BuildPanelsHook(void* room);
 std::uint64_t UpdateVoiceIconsHook(void* room);
 std::uint64_t RoomOnUpdateHook(void* room, void* context);
+// What RoomOnUpdateHook calls on: the slot's value when it was written (SlotNext in patches.h), the game's
+// HUiRoom::OnUpdate or another plugin's hook chained onto that slot first. InitRoomView sets the game's.
+void ChainRoomOnUpdate(std::uint64_t next);
 
 // Test seams: the same logic with the original functions supplied by the caller.
 using RoomFunction = std::uint64_t (*)(void* room);

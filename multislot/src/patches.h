@@ -86,10 +86,15 @@ struct CallSite {
 };
 
 // An absolute function pointer (a vtable slot) whose value is verified, then replaced.
+// `code`, when given, is the head of the game's function `target`, and the slot may be shared: another plugin may
+// have chained a hook onto it first (EDF6VehicleCrew does with HUiRoom::OnUpdate, and EDFModLoader loads plugins in
+// file-name order). The game build is then told by these bytes, not by the slot, and the hook installed here
+// continues with whatever the slot held (SlotNext). Without `code` the slot must hold `target` itself.
 struct PointerSlot {
     const char* name;
     std::uint32_t rva;
     std::uint32_t target;
+    std::vector<std::uint8_t> code{};
 };
 
 // Always applied: find and join both vanilla and MultiSlot rooms.
@@ -216,5 +221,14 @@ std::vector<MidSite> WeaponGuardHooks();
 bool Matches(const std::uint8_t* at, const Patch& patch);
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva);
 bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t targetRva);
+// What a hook written into `slot` continues with, or 0 when the slot may not be written. slotAt: the slot's 8 bytes;
+// image: EDF.dll's first byte as this process reads it (the function's code is read at image + slot.target);
+// imageBase and imageSize: where EDF.dll lies in the address space the slot's pointers are in.
+// - without slot.code: the game's function, when the slot holds it (SlotTargets);
+// - with slot.code: the function's head must be slot.code (a game update is refused), and the slot must hold the
+//   game's function or a pointer outside EDF.dll, which is another plugin's hook. A pointer to anything else inside
+//   EDF.dll is not this vtable as this build knows it, and is refused.
+std::uint64_t SlotNext(const std::uint8_t* slotAt, const std::uint8_t* image, std::uint64_t imageBase,
+                       std::uint64_t imageSize, const PointerSlot& slot);
 
 }  // namespace multislot

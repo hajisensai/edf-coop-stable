@@ -65,6 +65,9 @@ int HostRoomSize();
 MidHandler HostModeHookHandler(std::uint32_t rva);
 // HUiMainFrame::OnUpdate vtable slot (MainFrameSlot() in patches.h).
 std::uint64_t MainFrameOnUpdateHook(void* frame, void* context);
+// What MainFrameOnUpdateHook calls first: the slot's value when it was written (SlotNext in patches.h), the game's
+// HUiMainFrame::OnUpdate or another plugin's hook chained onto that slot first. InitHostMode sets the game's.
+void ChainMainFrameOnUpdate(std::uint64_t next);
 
 // Test seams.
 struct MenuContext {

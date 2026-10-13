@@ -273,6 +273,10 @@ int main(int argc, char** argv) {
     Check(SlotTargets(image.At(slot.rva, 8), image.nt->OptionalHeader.ImageBase, slot.target), slot.name, slot.rva);
     const PointerSlot frameSlot = MainFrameSlot();
     Check(SlotTargets(image.At(frameSlot.rva, 8), image.nt->OptionalHeader.ImageBase, frameSlot.target), frameSlot.name, frameSlot.rva);
+    // Shared slots are verified by their function's code (SlotNext): it has to be this build's.
+    for (const PointerSlot& shared : {slot, frameSlot})
+        Check(!shared.code.empty() && std::memcmp(image.At(shared.target, shared.code.size()), shared.code.data(), shared.code.size()) == 0,
+              shared.name, shared.target);
 
     // Constants roomview.cpp relies on, checked where the game itself uses them.
     const auto RipTarget = [&](std::uint32_t rva, std::size_t length) {

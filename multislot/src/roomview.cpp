@@ -72,7 +72,7 @@ RoomViewSettings config{};
 RoomFunction originalBuilder = nullptr;
 RoomFunction originalVoiceIcons = nullptr;
 using OnUpdateFunction = std::uint64_t (*)(void*, void*);
-OnUpdateFunction originalOnUpdate = nullptr;
+OnUpdateFunction nextOnUpdate = nullptr;  // the game's HUiRoom::OnUpdate, or a hook chained onto its slot first
 
 // Everything below runs on the game's UI thread only (HUiRoom::OnUpdate and what it calls).
 void* currentRoom = nullptr;
@@ -453,7 +453,11 @@ void InitRoomView(const unsigned char* gameBase, const RoomViewSettings& setting
     config = settings;
     originalBuilder = reinterpret_cast<RoomFunction>(gameBase + kPanelBuilder);
     originalVoiceIcons = reinterpret_cast<RoomFunction>(gameBase + kVoiceIcons);
-    originalOnUpdate = reinterpret_cast<OnUpdateFunction>(gameBase + kRoomOnUpdate);
+    nextOnUpdate = reinterpret_cast<OnUpdateFunction>(gameBase + kRoomOnUpdate);
+}
+
+void ChainRoomOnUpdate(std::uint64_t next) {
+    nextOnUpdate = reinterpret_cast<OnUpdateFunction>(static_cast<std::uintptr_t>(next));
 }
 
 std::uint64_t BuildPanelsHook(void* room) { return PagedCall(room, originalBuilder); }
@@ -463,7 +467,7 @@ std::uint64_t UpdateVoiceIconsHook(void* room) { return PagedCall(room, original
 std::uint64_t RoomOnUpdateHook(void* room, void* context) {
     Poll(room);
     NoteRoomUpdate(room, GetTickCount64());
-    return originalOnUpdate(room, context);
+    return nextOnUpdate(room, context);
 }
 
 std::uint64_t CallWithPageView(void* room, RoomFunction original) { return PagedCall(room, original); }

@@ -453,6 +453,31 @@ void TestRoomLost() {
     reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
 }
 
+// Ownership belongs to one membership, not the process. A newly joined room may not be readable yet.
+void TestOwnershipReset() {
+    if (!fake) return;
+    Join("ownership-host");
+    Tick();
+    Fake<void (*)(const char*)>("FakeEos_SetOwner")("self");
+    NextObservation();
+    Check(lastView.owner == "self", "ownership reset setup: we hosted the preceding room");
+    PublishLobbyText("HOST_ONLY", "host-value");
+    // The fake refuses this lobby text. If stale ownership survives, it will refuse the new room's whole update.
+    Join("ownership-client");
+    Tick();
+    Fake<void (*)(const char*)>("FakeEos_SetOwner")("remote-host");
+    Fake<void (*)(int)>("FakeEos_SetCopyFails")(1);
+    const int before = UpdatesWith(kSplitSyncSeqKey);
+    NextObservation();
+    Tick();
+    Check(UpdatesWith(kSplitSyncSeqKey) == before + 1,
+          "an unreadable new room publishes member markers without the previous room's host-only attributes");
+    Fake<void (*)(int)>("FakeEos_SetCopyFails")(0);
+    NextObservation();
+    Check(lastView.owner == "remote-host", "the recovered lobby read learns the new host");
+    reinterpret_cast<LeaveFn>(replacements["EOS_Lobby_LeaveLobby"])(nullptr, nullptr, nullptr, nullptr);
+}
+
 void TestLog(const std::wstring& path) {
     const std::string log = ReadLog(path);
     Check(Count(log, "no marker seen yet from EOS older") == 1, "a member without the marker is logged once per room");
@@ -483,6 +508,7 @@ int main(int argc, char** argv) {
     TestTextsOnly();
     TestExtensions(logPath);
     TestRoomLost();
+    TestOwnershipReset();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

@@ -478,6 +478,9 @@ void Entered(const LobbyCall& call, const char* lobbyId) {
     local.user = call.user;
     local.lobbyId = lobbyId;
     local.seen.clear();
+    // Ownership is learned from this membership's first readable beat. Never carry the previous room's authority
+    // into an unreadable new one: EOS refuses a guest's lobby attributes and its entire member-marker update.
+    local.owner = false;
     local.dirty = true;
     local.nextBeat = GetTickCount64() + kObserveIntervalMs;
     local.failureLogged = false;
@@ -513,6 +516,7 @@ void LeftLobby() {
     AcquireSRWLockExclusive(&local.lock);
     local.lobbyId.clear();
     local.seen.clear();
+    local.owner = false;
     local.dirty = false;
     local.extensionDirty = false;
     const std::vector<LobbyObserver> observers = local.observers;

@@ -28,6 +28,7 @@
 #include "joinlog.h"
 #include "log.h"
 #include "loaderproxy.h"
+#include "memberattr.h"
 #include "lobbystate.h"
 #include "hud.h"
 #include "identity.h"
@@ -189,6 +190,8 @@ struct Hook {
 struct SlotWrite {
     PointerSlot slot;
     void* handler;
+    // Told what the handler continues with (SlotNext) before the slot is written; null: the game's own function.
+    void (*chain)(std::uint64_t next) = nullptr;
 };
 
 // All or nothing: a half-applied set could publish a 5-slot room that unmodded players can join,
@@ -287,8 +290,8 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     // Netcode rewrite W1: the controller's plaintext datagrams, for their class and the per-type traffic log.
     for (const auto& call : NetTrafficCalls()) redirects.push_back({call, NetTrafficCallHandler(call.rva)});
     for (const auto& call : NetCompressCalls()) redirects.push_back({call, NetCompressCallHandler(call.rva)});
-    std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook)},
-                                 {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook)}};
+    std::vector<SlotWrite> slots{{RoomViewSlot(), reinterpret_cast<void*>(&RoomOnUpdateHook), &ChainRoomOnUpdate},
+                                 {MainFrameSlot(), reinterpret_cast<void*>(&MainFrameOnUpdateHook), &ChainMainFrameOnUpdate}};
     if (mission)
         for (const auto& missionSlot : MissionSlots()) slots.push_back({missionSlot, MissionSlotHandler(missionSlot.rva)});
 
@@ -322,12 +325,25 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
             return false;
         }
     }
+    // What each slot's handler continues with: the game's function, or another plugin's hook already chained onto a
+    // shared slot (PointerSlot::code). Whether the game is the build these tables are for is told by the code.
+    std::vector<std::uint64_t> slotNext;
     for (const auto& write : slots) {
         const auto& slot = write.slot;
-        if (!write.handler || !SlotTargets(base + slot.rva, reinterpret_cast<std::uint64_t>(base), slot.target)) {
-            Log("REFUSED: EDF+%X (%s) does not point at EDF+%X; nothing was changed", slot.rva, slot.name, slot.target);
+        const std::uint64_t next =
+            write.handler ? SlotNext(base + slot.rva, base, reinterpret_cast<std::uint64_t>(base), kImageSize, slot) : 0;
+        if (!next) {
+            if (slot.code.empty())
+                Log("REFUSED: EDF+%X (%s) does not point at EDF+%X; nothing was changed", slot.rva, slot.name, slot.target);
+            else
+                Log("REFUSED: EDF+%X (%s) is not the expected code, or its slot EDF+%X holds neither the game's "
+                    "function nor another loaded module's code; nothing was changed", slot.target, slot.name, slot.rva);
             return false;
         }
+        if (next != reinterpret_cast<std::uint64_t>(base) + slot.target)
+            Log("%s: EDF+%X already holds %p (another plugin's hook); ours chains onto it", slot.name, slot.rva,
+                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(next)));
+        slotNext.push_back(next);
     }
     if (!thunks.Allocate(base)) {
         Log("REFUSED: no memory for call stubs near EDF.dll; nothing was changed");
@@ -391,6 +407,10 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         Log("Call stubs: their unwind data could not be registered, so a crash inside a hook handler shows a call "
             "stack that ends at the stub");
     writes.insert(writes.end(), patches.begin(), patches.end());
+    // Before any slot is written: a handler is never reachable before it knows what to call. A failed write below
+    // puts back the bytes each slot held, whatever they pointed at.
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        if (slots[i].chain) slots[i].chain(slotNext[i]);
     for (const auto& write : slots) {
         const auto& slot = write.slot;
         std::vector<std::uint8_t> handler(sizeof(std::uint64_t));
@@ -785,6 +805,8 @@ bool LoadRooms(const wchar_t* iniPath) {
     const bool marker = imports == 2 && lobbyGlue;
     // Netcode rewrite: our netcode protocol and features go into our lobby entry with the marker (netfeature.h).
     StartNetFeature(lobbyGlue);
+    // Room member attributes for other plugins (member_attribute_api.h, EDF6CoopGetMemberAttributeApi).
+    memberattr::StartMemberAttributes(lobbyGlue);
     // I1: a host lets the room's real size (up to 1024, lobbystate.h) in over the direct link, not Epic's 64; state
     // datagrams follow interest management within each path's budget (netaoi.h).
     dn::setRoomCapacitySource([]() -> std::uint32_t { return static_cast<std::uint32_t>(std::max(0, CurrentLobbyCapacity())); });

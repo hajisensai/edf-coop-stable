@@ -104,7 +104,7 @@ add_library(EDF6Coop SHARED
     src/netlog.cpp src/identity.cpp src/smoothing.cpp src/updatecheck.cpp src/peertimeout.cpp src/packetfit.cpp
     src/syncmarker.cpp src/lobbystate.cpp src/hostdata.cpp src/hostdataopen.cpp src/hostdatanet.cpp src/hostdataprompt.cpp src/weaponguard.cpp
     src/userslots.cpp src/networld.cpp src/worldrng.cpp src/hitauth.cpp src/hitauthgame.cpp src/netplayer.cpp src/netplayer_game.cpp src/netplayer_members.cpp
-    src/widecmp.cpp src/interest.cpp src/vectoralloc.cpp)
+    src/widecmp.cpp src/interest.cpp src/vectoralloc.cpp src/memberattr.cpp)
 target_link_libraries(EDF6Coop PRIVATE DirectNetPart winhttp)
 # "src/config.h" and the like name the direct-link part's headers (both parts have a log.h).
 target_include_directories(EDF6Coop PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated" "${CMAKE_SOURCE_DIR}/..")
@@ -147,6 +147,10 @@ set_target_properties(FakeEosSdk PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping)
 add_executable(SyncMarkerTests tests/syncmarker_test.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/log.cpp)
 target_compile_options(SyncMarkerTests PRIVATE ${WARNINGS})
 add_dependencies(SyncMarkerTests FakeEosSdk)
+add_executable(MemberAttributeTests tests/memberattr_test.cpp src/memberattr.cpp src/syncmarker.cpp src/packetfit.cpp
+    src/identity.cpp src/log.cpp)
+target_compile_options(MemberAttributeTests PRIVATE ${WARNINGS})
+add_test(NAME RoomMemberAttributeApi COMMAND MemberAttributeTests)
 add_test(NAME SplitSyncLobbyMarker COMMAND SyncMarkerTests "${CMAKE_BINARY_DIR}/syncmarker-test.log"
     "$<TARGET_FILE:FakeEosSdk>")
 add_executable(LobbyStateTests tests/lobbystate_test.cpp src/lobbystate.cpp src/hostmode.cpp src/roomview.cpp
@@ -188,6 +192,10 @@ add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
 target_compile_options(RoomViewTests PRIVATE ${WARNINGS})
 add_test(NAME RoomViewPaging COMMAND RoomViewTests)
+
+add_executable(SlotChainTests tests/slotchain_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
+target_compile_options(SlotChainTests PRIVATE ${WARNINGS})
+add_test(NAME SharedVtableSlots COMMAND SlotChainTests)
 
 add_executable(MidHookTests tests/midhook_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(MidHookTests PRIVATE ${WARNINGS})
@@ -295,7 +303,7 @@ add_executable(MultiSlotLoadTest tests/load_test.cpp src/patches.cpp src/midhook
 target_include_directories(MultiSlotLoadTest PRIVATE ${MODLOADER_INCLUDE} "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(MultiSlotLoadTest PRIVATE ${WARNINGS})
 add_dependencies(MultiSlotLoadTest EDF6Coop)
-foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff quiet smooth)
+foreach(mode off host4 host8 fresh upgrade nomission recoveryoff keeproomoff quiet smooth chained codechanged)
     add_test(NAME PluginLoad_${mode} COMMAND MultiSlotLoadTest "${EDF_DLL}" "$<TARGET_FILE:EDF6Coop>"
              "${CMAKE_BINARY_DIR}/loadtest" ${mode})
     set_tests_properties(PluginLoad_${mode} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

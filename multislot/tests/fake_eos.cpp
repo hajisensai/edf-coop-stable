@@ -127,6 +127,16 @@ std::map<std::string, std::int64_t> lobbyAttributes;
 std::int32_t leaveResult = 0;
 std::int32_t destroyResult = 0;
 std::deque<std::function<void()>> completions;
+std::string refusedKey;                     // AddMemberAttribute refuses this key (FakeEos_SetRefusedKey)
+std::map<std::string, int> updatesWith;     // UpdateLobby calls whose modification carried the key
+struct MemberStatusInfo {  // EOS_Lobby_LobbyMemberStatusReceivedCallbackInfo
+    void* ClientData;
+    const char* LobbyId;
+    const void* TargetUserId;
+    std::int32_t CurrentStatus;
+};
+using MemberStatusCallback = void (*)(const MemberStatusInfo*);
+std::vector<std::pair<MemberStatusCallback, void*>> statusNotifications;
 // What a room search finds: each room's SEARCH_TYPE (-1 for none), and how many searches ran.
 struct SearchFake {
     std::vector<std::int64_t> types;
@@ -189,7 +199,25 @@ EXPORT void FakeEos_Reset(const char* selfId) {
     lobbyAttributes.clear();
     leaveResult = 0;
     destroyResult = 0;
+    refusedKey.clear();
+    updatesWith.clear();
     Searches() = SearchFake{};
+}
+EXPORT void FakeEos_SetRefusedKey(const char* key) { refusedKey = key ? key : ""; }
+EXPORT int FakeEos_UpdatesWith(const char* key) {
+    const auto it = updatesWith.find(key);
+    return it == updatesWith.end() ? 0 : it->second;
+}
+EXPORT int FakeEos_StatusNotifications() { return static_cast<int>(statusNotifications.size()); }
+// EOS tells every registered notification that `member` of `lobby` changed to `status`, on the next tick.
+EXPORT void FakeEos_SendMemberStatus(const char* lobby, const char* member, std::int32_t status) {
+    const std::string id = lobby, who = member;
+    completions.push_back([=]() {
+        for (const auto& [callback, clientData] : statusNotifications) {
+            const MemberStatusInfo info{clientData, id.c_str(), Handle(who), status};
+            callback(&info);
+        }
+    });
 }
 EXPORT void FakeEos_SetSearchResults(const std::int64_t* values, int count) {
     Searches().types.assign(values, values + count);
@@ -341,6 +369,7 @@ EXPORT std::int32_t EOS_Lobby_UpdateLobbyModification(void*, const void*, void**
 EXPORT std::int32_t EOS_LobbyModification_AddMemberAttribute(void* modification, const AddMemberAttributeOptions* options) {
     if (!options->Attribute) return 10;
     auto* changes = static_cast<Modification*>(modification);
+    if (!refusedKey.empty() && options->Attribute->Key && refusedKey == options->Attribute->Key) return 10;
     // Like EOS: an empty text is invalid (EOS_InvalidParameters), and the caller's whole update with it.
     if (options->Attribute->ValueType == 3 && (!options->Attribute->Value.AsUtf8 || !*options->Attribute->Value.AsUtf8))
         return 10;
@@ -361,6 +390,8 @@ EXPORT void EOS_LobbyModification_Release(void* modification) { delete static_ca
 EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void* clientData, LobbyIdCallback callback) {
     ++updates;
     const Modification copy = *static_cast<Modification*>(options->LobbyModificationHandle);  // EOS copies it
+    for (const auto& [key, value] : copy.attributes) ++updatesWith[key];
+    for (const auto& [key, value] : copy.texts) ++updatesWith[key];
     const std::int32_t result = updateResult;
     const std::string lobby = lobbyId;
     completions.push_back([=]() {
@@ -375,6 +406,13 @@ EXPORT void EOS_Lobby_UpdateLobby(void*, const UpdateLobbyOptions* options, void
         LobbyIdCallbackInfo info{result, clientData, lobby.c_str()};
         callback(&info);
     });
+}
+
+EXPORT std::uint64_t EOS_Lobby_AddNotifyLobbyMemberStatusReceived(void*, const void*, void* clientData,
+                                                                  MemberStatusCallback callback) {
+    if (!callback) return 0;
+    statusNotifications.emplace_back(callback, clientData);
+    return statusNotifications.size();
 }
 
 // A copy exists only of the lobby this user is in.

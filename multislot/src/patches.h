@@ -86,10 +86,15 @@ struct CallSite {
 };
 
 // An absolute function pointer (a vtable slot) whose value is verified, then replaced.
+// `code`, when given, is the head of the game's function `target`, and the slot may be shared: another plugin may
+// have chained a hook onto it first (EDF6VehicleCrew does with HUiRoom::OnUpdate, and EDFModLoader loads plugins in
+// file-name order). The game build is then told by these bytes, not by the slot, and the hook installed here
+// continues with whatever the slot held (SlotNext). Without `code` the slot must hold `target` itself.
 struct PointerSlot {
     const char* name;
     std::uint32_t rva;
     std::uint32_t target;
+    std::vector<std::uint8_t> code{};
 };
 
 // Always applied: find and join both vanilla and MultiSlot rooms.
@@ -216,5 +221,16 @@ std::vector<MidSite> WeaponGuardHooks();
 bool Matches(const std::uint8_t* at, const Patch& patch);
 bool CallTargets(const std::uint8_t* at, std::uint32_t siteRva, std::uint32_t targetRva);
 bool SlotTargets(const std::uint8_t* at, std::uint64_t imageBase, std::uint32_t targetRva);
+// What a hook written into `slot` continues with, or 0 when the slot may not be written. slotAt: the slot's 8 bytes;
+// image: EDF.dll's first byte as this process reads it (the function's code is read at image + slot.target);
+// imageBase and imageSize: where EDF.dll lies in the address space the slot's pointers are in.
+// - the slot holds the game's function: accepted, exactly as SlotTargets always did (the function's bytes are not
+//   read: another plugin may have detoured its entry inline);
+// - otherwise only a slot with slot.code may be written, when the function's head is slot.code (a game update is
+//   refused) and the slot holds another plugin's hook: a pointer outside EDF.dll into a module loaded in this
+//   process, in committed executable memory. Null, anything else inside EDF.dll, heap, data or unmapped memory is
+//   refused.
+std::uint64_t SlotNext(const std::uint8_t* slotAt, const std::uint8_t* image, std::uint64_t imageBase,
+                       std::uint64_t imageSize, const PointerSlot& slot);
 
 }  // namespace multislot

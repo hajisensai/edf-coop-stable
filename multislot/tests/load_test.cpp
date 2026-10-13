@@ -2,7 +2,7 @@
 // its initialisation, then calls the patched SEARCH_TYPE functions (all leaf code) to check what
 // they now return, compared with what the same functions returned before the plugin loaded.
 // The plugin sits in <work-folder>\<mode>\Mods\Plugins, as in a game folder.
-//   MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission
+//   MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission|chained|codechanged
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -242,6 +242,24 @@ bool SlotInto(const unsigned char* base, const PointerSlot& slot, HMODULE plugin
     return InModule(value, plugin);
 }
 
+// Another plugin's OnUpdate hook, as one loaded before EDF6Coop leaves in a shared slot (PointerSlot::code). Never called.
+std::uint64_t ForeignOnUpdate(void*, void*) { return 0x5A; }
+
+std::uint64_t SlotValue(const unsigned char* base, const PointerSlot& slot) {
+    std::uint64_t value = 0;
+    std::memcpy(&value, base + slot.rva, sizeof(value));
+    return value;
+}
+
+// Writes into the mapped EDF.dll (a private copy: the file on disk is never written).
+void Poke(const unsigned char* at, const void* bytes, std::size_t size) {
+    DWORD old = 0;
+    auto* to = const_cast<unsigned char*>(at);
+    VirtualProtect(to, size, PAGE_EXECUTE_READWRITE, &old);
+    std::memcpy(to, bytes, size);
+    VirtualProtect(to, size, old, &old);
+}
+
 int Applied(const unsigned char* base, const std::vector<Patch>& patches) {
     int count = 0;
     for (const auto& patch : patches)
@@ -286,7 +304,7 @@ std::vector<unsigned char> ReadBytes(const std::wstring& path) {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 5) {
-        std::printf("usage: MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission\n");
+        std::printf("usage: MultiSlotLoadTest EDF.dll EDF6Coop.dll work-folder off|host4|host8|fresh|upgrade|nomission|chained|codechanged\n");
         return 2;
     }
     const std::wstring mode = argv[4];
@@ -338,7 +356,8 @@ int wmain(int argc, wchar_t** argv) {
                           : mode == L"quiet"     ? "[MultiSlot]\r\nEnabled=1\r\nHandshakeRecovery=0\r\nNetLog=0\r\n"
                           : mode == L"host4"     ? "[MultiSlot]\r\nEnabled=1\r\nNetLog=0\r\n[Mission]\r\nExtraEnemies=0\r\n"
                           : mode == L"nomission" ? "[MultiSlot]\r\nEnabled=1\r\nMaxPlayers=4\r\n[Mission]\r\nExtend=0\r\n"
-                          : mode == L"smooth"    ? "[MultiSlot]\r\nEnabled=1\r\nNetLog=1\r\n[Smoothing]\r\nRemotePlayerPercent=30\r\n"
+                          : mode == L"chained" || mode == L"codechanged" ? "[MultiSlot]\r\nEnabled=1\r\n"
+                          : mode == L"smooth"    ?"[MultiSlot]\r\nEnabled=1\r\nNetLog=1\r\n[Smoothing]\r\nRemotePlayerPercent=30\r\n"
                                                  : "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nCrashLog=1\r\nNetLog=1\r\n"
                                                    "[RoomScreen]\r\nDummyMembers=1\r\nPageKey=F2\r\nDummyAddKey=F3\r\nDummyRemoveKey=F4\r\n"
                                                    "[Test]\r\nGhostPlayers=4\r\n[Mission]\r\nScale6=1.25\r\n";
@@ -364,6 +383,18 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"off" || mode == L"host8" || mode == L"nomission" || mode == L"quiet") {
         CreateDirectoryW(hudFolder.c_str(), nullptr);
         WriteBytes(hudPath, mode == L"quiet" ? foreignHud : ourHud);
+    }
+
+    // chained: another plugin loaded first and chained its hook onto both shared OnUpdate slots.
+    // codechanged: the same, and HUiRoom::OnUpdate's code is not this build's (a game update): refused.
+    const auto foreignHook = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&ForeignOnUpdate));
+    if (mode == L"chained" || mode == L"codechanged") {
+        Poke(base + RoomViewSlot().rva, &foreignHook, sizeof(foreignHook));
+        Poke(base + MainFrameSlot().rva, &foreignHook, sizeof(foreignHook));
+    }
+    if (mode == L"codechanged") {
+        const std::uint8_t changed = static_cast<std::uint8_t>(RoomViewSlot().code.back() ^ 0x01);
+        Poke(base + RoomViewSlot().target + RoomViewSlot().code.size() - 1, &changed, 1);
     }
 
     const HMODULE plugin = LoadLibraryW(dll.c_str());
@@ -402,7 +433,17 @@ int wmain(int argc, wchar_t** argv) {
         return untouched;
     };
 
-    if (mode == L"off") {
+    if (mode == L"codechanged") {
+        Check(!loaded, "a changed HUiRoom::OnUpdate is refused, though its slot is another plugin's");
+        Check(Untouched(base, guest) == static_cast<int>(guest.size()) &&
+                  Untouched(base, sessions) == static_cast<int>(sessions.size()),
+              "the refusal changes nothing (all or nothing)");
+        for (const auto& call : calls) Check(CallTargets(base + call.rva, call.rva, call.target), "calls stay untouched");
+        Check(SlotValue(base, RoomViewSlot()) == foreignHook && SlotValue(base, MainFrameSlot()) == foreignHook,
+              "the other plugin's hooks stay in both slots");
+        Check(missionUntouched(false), "mission code stays untouched");
+        Check(Contains(log, "REFUSED: EDF+8FDFE0 (HUiRoom OnUpdate) is not the expected code"), "the refusal names the function");
+    } else if (mode == L"off") {
         Check(!loaded, "Enabled=0 asks the loader to unload");
         Check(Untouched(base, guest) == static_cast<int>(guest.size()), "Enabled=0 leaves every guest patch site untouched");
         Check(Untouched(base, sessions) == static_cast<int>(sessions.size()), "Enabled=0 leaves the room tables at four");
@@ -473,6 +514,13 @@ int wmain(int argc, wchar_t** argv) {
         for (const auto& call : calls) Check(RedirectedInto(base + call.rva, plugin), "member count call reaches the plugin through a stub");
         for (const auto& call : RoomViewCalls()) Check(RedirectedInto(base + call.rva, plugin), "room screen call reaches the plugin through a stub");
         Check(SlotInto(base, RoomViewSlot(), plugin), "HUiRoom OnUpdate vtable slot points into the plugin");
+        if (mode == L"chained") {
+            Check(Contains(log, "HUiRoom OnUpdate: EDF+180AC48 already holds") &&
+                      Contains(log, "HUiMainFrame OnUpdate: EDF+1806D38 already holds"),
+                  "both hooks chain onto the other plugin's, and say so");
+        } else {
+            Check(!Contains(log, "already holds"), "an untouched slot chains onto the game's own function");
+        }
         // Every call to the room member list builder is redirected, with or without DummyMembers: the list is cut
         // to this build's room size before the voice chat HUD writes a record per member, and fake members reach
         // the room screen, the HUD and anything else that asks for the members.

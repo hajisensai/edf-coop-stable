@@ -7,9 +7,9 @@
 # Without -Upload it stops after staging release\upload-<version>\. With -Upload it creates a DRAFT Release
 # for the tag with those files (gh, tag already pushed); players' updaters never see a draft. Then run
 #   gh workflow run release.yml --repo <owner>/<repo> -f tag=v<version>
-# which checks the draft, signs EDF6Coop.dll and its copies, uploads the .sig files and publishes it as latest.
-# One DLL for every room size. It is staged as EDF6Coop.dll (2.3.0's updater) and as each EDF6Coop-<N>p.dll a 2.2
-# room-size build's updater downloads, so every installed copy updates to it.
+# which checks the draft, signs EDF6Coop.dll, uploads its .sig and publishes it as latest.
+# One DLL for every room size, staged as EDF6Coop.dll (what every updater since 2.3.0 downloads). 2.2's room-size
+# builds looked for EDF6Coop-<N>p.dll; those copies are no longer published (they only confused players).
 # Keep this script ASCII: PowerShell 5.1 reads it as ANSI.
 param([switch]$Upload)
 $ErrorActionPreference = 'Stop'
@@ -46,9 +46,7 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 & (Join-Path $root 'package.ps1') | Out-Null
 $dll = Join-Path $multislot 'dist\EDF6Coop.dll'
 # The zip carries the same file.
-foreach ($asset in @('EDF6Coop.dll') + (8, 10, 12, 16, 24, 32 | ForEach-Object { "EDF6Coop-${_}p.dll" })) {
-    Copy-Item -LiteralPath $dll -Destination (Join-Path $stage $asset)
-}
+Copy-Item -LiteralPath $dll -Destination (Join-Path $stage 'EDF6Coop.dll')
 $zip = Join-Path $root "release\EDF6Coop-$version.zip"
 Copy-Item -LiteralPath $zip, "$zip.sha256" -Destination $stage
 

@@ -47,6 +47,23 @@ constexpr std::size_t kGdiFlags = 0x60;           // u16
 constexpr std::size_t kGdiExtra64 = 0x64;
 constexpr std::size_t kGdiExtra68 = 0x68;         // 1.0 unless set
 constexpr std::size_t kGdiParts = 0x70;           // a container the constructor reserves 4 entries of 0x30 in
+// The container's entries are the hit's sub-hits (the bullet's shape cast, 2321B0): +0x78 data, +0x80 capacity,
+// +0x88 count (124190's layout); an entry is 0x30 bytes, +0x00 the world point (float[4]), +0x20 the Havok body id
+// (u32) it touched. The classes that take damage on one body only (a weak point: UfoCarrier508 slot 16 4F7190,
+// MovingFortress 4C6650, and plugin classes doing the same) take the entry nearest the hit point and map its body id
+// to a ragdoll body (6EA430): no entries, no damage.
+constexpr std::size_t kGdiHits = 0x78, kGdiHitCapacity = 0x80, kGdiHitCount = 0x88;
+constexpr std::size_t kHitRecordBytes = 0x30, kHitRecordBody = 0x20;
+// A ragdoll component (constructor 6E3B10; EventAnimationObject +0xAA0, UfoCarrier508 +0xB60, MovingFortress +0xB00):
+// bodies at [+0x78], their count at [+0x88], 0xC0 bytes each; a body's Havok id is [[body+0x50]+0xF0], or, when
+// body+0xB8 is set, [[[body+0xB0]+0x10]+0xF0] too (6EA430 compares both).
+constexpr std::size_t kRagdollBodies = 0x78, kRagdollCount = 0x88, kRagdollBodyBytes = 0xC0;
+constexpr std::size_t kRagdollMostBodies = 512;
+// The body index the Havok body `id` has in `ragdoll` (6EA430, run on this memory), -1 none. Reads raw pointers:
+// the game side calls it under an exception guard.
+int RagdollIndexOf(const std::uint8_t* ragdoll, std::uint32_t id);
+// The Havok id of body `index` (its first id, the one 6EA430 tries first); false when there is no such body.
+bool RagdollIdOf(const std::uint8_t* ragdoll, int index, std::uint32_t* id);
 constexpr std::uint16_t kGdiFromNetwork = 0x40;   // flag: dealt from a network message (the game's kill message)
 
 // Who owns a network object, by its NetworkObject+8 word (782880): bit 0 another machine, bit 1 this one. An object
@@ -106,6 +123,16 @@ constexpr bool OwnerTakesEvent(bool dropping, bool ownerDecides) { return droppi
 // keep authority while the host seats its Dummy. With a live registered rider, use 630F90: runner 1 local, else remote.
 NetOwner VehicleShooter(bool noRegisteredDriver, bool host, int runner);
 
+// A sub-hit as it travels: the Havok body id is this machine's alone (the physics world allocates it), so it goes as
+// the body's place in the target - its ragdoll component's offset in the object (the same class on every machine)
+// and the body's index there - which the owner turns back into its own copy's id.
+struct HitBody {
+    std::uint16_t component = 0;  // offset of the ragdoll component in the target object
+    std::uint16_t index = 0;      // the body's index in it
+    float point[3]{};             // the sub-hit's world point
+};
+constexpr int kMostHitBodies = 4;  // the GDI's container is reserved for 4 (22FE27)
+
 // The damage event, as it travels (little-endian, fixed layout behind a magic and a version).
 struct DamageEvent {
     std::uint32_t seq = 0;          // the sender's, increasing
@@ -124,12 +151,19 @@ struct DamageEvent {
     float extra64 = 0.0f;
     float extra68 = 1.0f;
     float attackerPos[3]{};  // where the attacker was on the sender's machine
+    std::uint8_t bodyCount = 0;  // version 3: the sub-hits the owner rebuilds (a weak point's filter needs them)
+    HitBody bodies[kMostHitBodies]{};
 };
-constexpr std::uint8_t kDamageEventMagic0 = 'H', kDamageEventMagic1 = 'A', kDamageEventVersion = 2;
-constexpr std::size_t kDamageEventBytes = 4 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 12 + 4 * 4 + 2 + 4 + 4 + 12;
-// Returns the bytes written, 0 when `capacity` is too small.
+// Version 2: the 94-byte event without sub-hits. Version 3 (netprotocol 3): the same 94 bytes, then a count and that
+// many 16-byte sub-hits. The reader takes both (a version 2 event is one without sub-hits); the writer writes 3.
+constexpr std::uint8_t kDamageEventMagic0 = 'H', kDamageEventMagic1 = 'A', kDamageEventVersion = 3;
+constexpr std::uint8_t kDamageEventVersionNoBodies = 2;
+constexpr std::size_t kDamageEventBaseBytes = 4 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 12 + 4 * 4 + 2 + 4 + 4 + 12;
+constexpr std::size_t kHitBodyBytes = 2 + 2 + 12;
+constexpr std::size_t kDamageEventBytes = kDamageEventBaseBytes + 1 + kMostHitBodies * kHitBodyBytes;  // the most
+// Returns the bytes written, 0 when `capacity` is too small (or the event has more sub-hits than it can carry).
 std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::size_t capacity);
-// False for anything that is not a whole event of this version.
+// False for anything that is not a whole event of version 2 or 3.
 bool ReadDamageEvent(const std::uint8_t* data, std::size_t size, DamageEvent& out);
 
 // Between an event and a GDI's bytes. GdiToEvent leaves seq, the refs and attackerPos alone. EventToGdi writes only

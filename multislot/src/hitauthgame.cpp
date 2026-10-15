@@ -232,10 +232,96 @@ bool TakesRemoteHits(const std::uint8_t* target) {
                                                                                                         false);
 }
 
+// ---- the sub-hits (hitauth.h HitBody) ----
+// The target's ragdoll component that holds Havok body `id`: the object is searched once per class (its vtable) for a
+// component whose bodies include it (the component has no vtable of its own: 6E3B10 writes none), then that offset is
+// used for the class. Each guess runs under an exception guard: a field that is no component may hold any pointer.
+constexpr std::size_t kRagdollSearchFrom = 0x300, kRagdollSearchTo = 0x2000;
+int GuardedIndex(const std::uint8_t* ragdoll, std::uint32_t id) {
+    __try {
+        return RagdollIndexOf(ragdoll, id);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+bool GuardedId(const std::uint8_t* ragdoll, int index, std::uint32_t* id) {
+    __try {
+        return RagdollIdOf(ragdoll, index, id);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+struct RagdollPlace {
+    const void* vtable;
+    std::uint16_t offset;  // 0: none found for this class
+};
+RagdollPlace ragdollPlaces[64];
+int ragdollPlaceCount = 0;
+
+// The GDI's sub-hits (at most kMostHitBodies) as places in `target`; the ones whose body is in none of its ragdoll
+// components are left out (a hit on a body of another object, or a class without one).
+void CollectHitBodies(const std::uint8_t* target, const std::uint8_t* gdi, DamageEvent& event) {
+    event.bodyCount = 0;
+    const auto* hits = Field<const std::uint8_t*>(gdi, kGdiHits);
+    const std::size_t count = Field<std::size_t>(gdi, kGdiHitCount);
+    if (!hits || !count || count > 64) return;
+    const void* vtable = Field<const void*>(target, 0);
+    std::uint16_t known = 0;
+    bool searched = false;
+    AcquireSRWLockShared(&lock);
+    for (int i = 0; i < ragdollPlaceCount; ++i)
+        if (ragdollPlaces[i].vtable == vtable) {
+            known = ragdollPlaces[i].offset;
+            searched = true;
+        }
+    ReleaseSRWLockShared(&lock);
+    for (std::size_t k = 0; k < count && event.bodyCount < kMostHitBodies; ++k) {
+        const std::uint8_t* hit = hits + k * kHitRecordBytes;
+        const std::uint32_t id = Field<std::uint32_t>(hit, kHitRecordBody);
+        int index = known ? GuardedIndex(target + known, id) : -1;
+        if (index < 0 && !searched) {
+            for (std::size_t at = kRagdollSearchFrom; at < kRagdollSearchTo && index < 0; at += 8)
+                if ((index = GuardedIndex(target + at, id)) >= 0) known = static_cast<std::uint16_t>(at);
+            searched = true;
+            AcquireSRWLockExclusive(&lock);
+            if (ragdollPlaceCount < 64) ragdollPlaces[ragdollPlaceCount++] = {vtable, known};
+            ReleaseSRWLockExclusive(&lock);
+        }
+        if (index < 0 || index > 0xFFFF) continue;
+        HitBody& body = event.bodies[event.bodyCount++];
+        body.component = known;
+        body.index = static_cast<std::uint16_t>(index);
+        for (int i = 0; i < 3; ++i) body.point[i] = Field<float>(hit, 4 * i);
+    }
+}
+
+// The owner's side: each sub-hit back as an entry of the GDI's container (reserved for 4), with the id of the body at
+// that place in this machine's copy. A place that holds no such body here is left out.
+void ApplyHitBodies(const std::uint8_t* target, std::uint8_t* gdi, const DamageEvent& event) {
+    auto* hits = Field<std::uint8_t*>(gdi, kGdiHits);
+    const std::size_t capacity = Field<std::size_t>(gdi, kGdiHitCapacity);
+    std::size_t count = 0;
+    for (int k = 0; k < event.bodyCount && count < capacity && hits; ++k) {
+        const HitBody& body = event.bodies[k];
+        std::uint32_t id = 0;
+        if (body.component < kRagdollSearchFrom || body.component >= kRagdollSearchTo || (body.component & 7) ||
+            !GuardedId(target + body.component, body.index, &id))
+            continue;
+        std::uint8_t* entry = hits + count * kHitRecordBytes;
+        std::memset(entry, 0, kHitRecordBytes);
+        for (int i = 0; i < 3; ++i) SetField<float>(entry, 4 * i, body.point[i]);
+        SetField<float>(entry, 12, 1.0f);
+        SetField<std::uint32_t>(entry, kHitRecordBody, id);
+        ++count;
+    }
+    SetField<std::size_t>(gdi, kGdiHitCount, count);
+}
+
 // Our shot at another machine's object: an event to the object's copies, which only its owner deals.
 bool Forward(std::uint8_t* target, const std::uint8_t* gdi) {
     DamageEvent event;
     GdiToEvent(gdi, event);
+    CollectHitBodies(target, gdi, event);  // the weak points' filters need the body the shot touched
     // The attacker's reference id, as the game's kill message names it (76B583); the target needs none, the event
     // travels through its own NetworkObject (and asking would give every object hit an entry in the id table).
     // Only for a live attacker: an empty reference would be given an id of its own.
@@ -264,6 +350,7 @@ void Deal(std::uint8_t* target, const DamageEvent& event, GameRef& attacker) {
     SetField<float>(gdi, kGdiExtra68, 1.0f);
     Fn<bool(__fastcall*)(void*, std::size_t)>(kPartsReserve)(gdi + kGdiParts, 4);
     EventToGdi(event, gdi);
+    ApplyHitBodies(target, gdi, event);
     const bool known = Alive(attacker);
     if (known) {
         SetField<void*>(gdi, kGdiAttacker, attacker.object);
@@ -336,6 +423,13 @@ void Received(std::uint8_t* target, const DamageEvent& event) {
 }
 
 }  // namespace
+
+void HitBodiesFromGdi(const std::uint8_t* target, const std::uint8_t* gdi, DamageEvent& event) {
+    CollectHitBodies(target, gdi, event);
+}
+void HitBodiesToGdi(const std::uint8_t* target, std::uint8_t* gdi, const DamageEvent& event) {
+    ApplyHitBodies(target, gdi, event);
+}
 
 std::vector<MidSite> HitAuthorityHooks() {
     // mov [rsp+0x10], rbx: the first instruction of both, run after the handler.

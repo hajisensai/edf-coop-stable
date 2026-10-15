@@ -49,6 +49,12 @@ struct HitCounters {
 };
 HitCounters HitAuthorityCounters();
 
+// The sub-hits of a forwarded hit (hitauth.h HitBody): the sender turns the GDI's entries into places in `target`
+// (ragdoll component offset, body index), the owner turns them back into entries of its GDI with its own copy's body
+// ids, so that a class that takes damage on one body only (a weak point) can tell which body was hit.
+void HitBodiesFromGdi(const std::uint8_t* target, const std::uint8_t* gdi, DamageEvent& event);
+void HitBodiesToGdi(const std::uint8_t* target, std::uint8_t* gdi, const DamageEvent& event);
+
 // The handlers, for the tests.
 void HitPreFilterHandler(CpuContext* context);
 void HitObjectReceiveHandler(CpuContext* context);

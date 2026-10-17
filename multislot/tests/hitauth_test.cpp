@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -358,6 +359,54 @@ void TestRagdollBodies() {
     Check(!RagdollIdOf(r.component, 4, &id) && !RagdollIdOf(r.component, -1, &id), "no such body");
     std::uint8_t empty[0x100]{};
     Check(RagdollIndexOf(empty, 500) == -1 && !RagdollIdOf(empty, 0, &id), "no component: nothing");
+}
+
+// The sender's search for a class's ragdoll (hitauthgame.cpp CollectHitBodies), without the game: a stand-in object
+// with its ragdoll at +0x7A0 and GDIs of sub-hits.
+void TestHitBodySearch() {
+    struct Object {
+        alignas(16) std::uint8_t bytes[0x2100]{};
+        FakeRagdoll ragdoll;
+        Object(std::uint32_t firstId, const void* vtable) : ragdoll(firstId) {
+            std::memcpy(bytes, &vtable, 8);
+            std::memcpy(bytes + 0x7A0 + kRagdollBodies, ragdoll.component + kRagdollBodies, 0x18);
+        }
+    };
+    struct Gdi {
+        alignas(16) std::uint8_t bytes[kGdiBytes]{};
+        alignas(16) std::uint8_t hits[4 * kHitRecordBytes]{};
+        explicit Gdi(std::initializer_list<std::uint32_t> ids) {
+            std::size_t n = 0;
+            for (const std::uint32_t id : ids) {
+                const float point[4] = {static_cast<float>(n), 1.0f, 2.0f, 1.0f};
+                std::memcpy(hits + n * kHitRecordBytes, point, 16);
+                std::memcpy(hits + n * kHitRecordBytes + kHitRecordBody, &id, 4);
+                ++n;
+            }
+            const void* at = hits;
+            std::memcpy(bytes + kGdiHits, &at, 8);
+            std::memcpy(bytes + kGdiHitCount, &n, 8);
+        }
+    };
+    // The first sub-hit is another object's body, the second this one's: the search tries both.
+    static const std::uint64_t firstTable[4]{};
+    static Object first(700, firstTable);
+    DamageEvent e;
+    HitBodiesFromGdi(first.bytes, Gdi{55555, 702}.bytes, e, 10000);
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 1.0f,
+          "a first sub-hit on another object's body does not hide the target's own");
+    // A class's first shot touches none of its bodies: the class is not given up, the next shot finds the ragdoll.
+    static const std::uint64_t laterTable[4]{};
+    static Object later(800, laterTable);
+    HitBodiesFromGdi(later.bytes, Gdi{55555}.bytes, e, 20000);
+    Check(e.bodyCount == 0, "no body of the target: nothing sent");
+    HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 10);
+    Check(e.bodyCount == 0, "the class is searched again only after a while");
+    HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 1000);
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 3,
+          "a class whose first search found nothing is searched again and its ragdoll found");
+    HitBodiesFromGdi(later.bytes, Gdi{55555, 801, 800}.bytes, e, 20000 + 1001);
+    Check(e.bodyCount == 2 && e.bodies[0].index == 1 && e.bodies[1].index == 0, "then the class's offset is used");
 }
 
 void TestGdi() {
@@ -952,7 +1001,7 @@ void TestWeakPointFilter() {
     const std::size_t two = 2;
     std::memcpy(sent + kGdiHitCount, &two, 8);
     DamageEvent e = SampleEvent();
-    HitBodiesFromGdi(sender.object, sent, e);
+    HitBodiesFromGdi(sender.object, sent, e, 5000);
     Check(e.bodyCount == 1 && e.bodies[0].component == 0xB60 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 10.5f,
           "the sender finds the ship's ragdoll (+0xB60) by the body the shot touched, and leaves the other body out");
 
@@ -1018,6 +1067,7 @@ int main(int argc, char** argv) {
     TestSwitchWindow();
     TestSerialization();
     TestRagdollBodies();
+    TestHitBodySearch();
     TestGdi();
     TestCheck();
     TestGate();

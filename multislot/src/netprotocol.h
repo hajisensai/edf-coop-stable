@@ -10,6 +10,8 @@ namespace multislot {
 //   1: the first gate, transport classes, mesh, fragments, compression.
 //   2: hit events carry their sender (version 2), enemy dice carry their sender (version 2), fragment ids carry
 //      the sender's epoch.
-constexpr std::int64_t kNetProtocol = 2;
+//   3: hit events carry the shot's sub-hits as ragdoll body places (version 3), so a weak point's filter takes a
+//      forwarded hit.
+constexpr std::int64_t kNetProtocol = 3;
 
 }  // namespace multislot

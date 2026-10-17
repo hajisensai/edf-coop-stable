@@ -104,7 +104,9 @@ bool HitRuleClock::Dropping(std::uint64_t nowMs) const {
 }
 
 std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::size_t capacity) {
-    if (!out || capacity < kDamageEventBytes) return 0;
+    if (event.bodyCount > kMostHitBodies) return 0;
+    const std::size_t bytes = kDamageEventBaseBytes + 1 + event.bodyCount * kHitBodyBytes;
+    if (!out || capacity < bytes) return 0;
     Writer w{out};
     w.Put(kDamageEventMagic0);
     w.Put(kDamageEventMagic1);
@@ -126,15 +128,29 @@ std::size_t WriteDamageEvent(const DamageEvent& event, std::uint8_t* out, std::s
     w.Put(event.extra64);
     w.Put(event.extra68);
     w.Put3(event.attackerPos);
+    w.Put(event.bodyCount);
+    for (int i = 0; i < event.bodyCount; ++i) {
+        w.Put(event.bodies[i].component);
+        w.Put(event.bodies[i].index);
+        w.Put3(event.bodies[i].point);
+    }
     return static_cast<std::size_t>(w.at - out);
 }
 
 bool ReadDamageEvent(const std::uint8_t* data, std::size_t size, DamageEvent& out) {
-    if (!data || size != kDamageEventBytes) return false;
+    if (!data || size < kDamageEventBaseBytes) return false;
     Reader r{data};
-    if (r.Get<std::uint8_t>() != kDamageEventMagic0 || r.Get<std::uint8_t>() != kDamageEventMagic1 ||
-        r.Get<std::uint8_t>() != kDamageEventVersion)
+    if (r.Get<std::uint8_t>() != kDamageEventMagic0 || r.Get<std::uint8_t>() != kDamageEventMagic1) return false;
+    const std::uint8_t version = r.Get<std::uint8_t>();
+    if (version == kDamageEventVersionNoBodies) {
+        if (size != kDamageEventBaseBytes) return false;
+    } else if (version == kDamageEventVersion) {
+        if (size < kDamageEventBaseBytes + 1) return false;
+        const std::uint8_t count = data[kDamageEventBaseBytes];
+        if (count > kMostHitBodies || size != kDamageEventBaseBytes + 1 + count * kHitBodyBytes) return false;
+    } else {
         return false;
+    }
     r.Get<std::uint8_t>();
     DamageEvent e;
     e.seq = r.Get<std::uint32_t>();
@@ -153,7 +169,45 @@ bool ReadDamageEvent(const std::uint8_t* data, std::size_t size, DamageEvent& ou
     e.extra64 = r.Get<float>();
     e.extra68 = r.Get<float>();
     r.Get3(e.attackerPos);
+    if (version == kDamageEventVersion) {
+        e.bodyCount = r.Get<std::uint8_t>();
+        for (int i = 0; i < e.bodyCount; ++i) {
+            e.bodies[i].component = r.Get<std::uint16_t>();
+            e.bodies[i].index = r.Get<std::uint16_t>();
+            r.Get3(e.bodies[i].point);
+            if (!Finite3(e.bodies[i].point)) return false;
+        }
+    }
     out = e;
+    return true;
+}
+
+int RagdollIndexOf(const std::uint8_t* ragdoll, std::uint32_t id) {
+    if (!ragdoll) return -1;
+    const auto* bodies = Load<const std::uint8_t*>(ragdoll, kRagdollBodies);
+    const auto count = Load<std::size_t>(ragdoll, kRagdollCount);
+    if (!bodies || count > kRagdollMostBodies) return -1;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::uint8_t* body = bodies + i * kRagdollBodyBytes;
+        const auto* rigid = Load<const std::uint8_t*>(body, 0x50);
+        if (rigid && Load<std::uint32_t>(rigid, 0xF0) == id) return static_cast<int>(i);
+        if (Load<std::uint64_t>(body, 0xB8)) {  // 6EA46C: the second id, through +0xB0
+            const auto* other = Load<const std::uint8_t*>(body, 0xB0);
+            const auto* second = other ? Load<const std::uint8_t*>(other, 0x10) : nullptr;
+            if (second && Load<std::uint32_t>(second, 0xF0) == id) return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool RagdollIdOf(const std::uint8_t* ragdoll, int index, std::uint32_t* id) {
+    if (!ragdoll || !id || index < 0) return false;
+    const auto* bodies = Load<const std::uint8_t*>(ragdoll, kRagdollBodies);
+    const auto count = Load<std::size_t>(ragdoll, kRagdollCount);
+    if (!bodies || count > kRagdollMostBodies || static_cast<std::size_t>(index) >= count) return false;
+    const auto* rigid = Load<const std::uint8_t*>(bodies + static_cast<std::size_t>(index) * kRagdollBodyBytes, 0x50);
+    if (!rigid) return false;
+    *id = Load<std::uint32_t>(rigid, 0xF0);
     return true;
 }
 

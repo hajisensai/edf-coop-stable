@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -269,12 +270,13 @@ void TestSwitchWindow() {
 void TestSerialization() {
     const DamageEvent e = SampleEvent();
     std::uint8_t bytes[kDamageEventBytes + 8]{};
-    Check(kDamageEventBytes == 94, "the event is 94 bytes");
+    Check(kDamageEventBaseBytes == 94, "the event without sub-hits is 94 bytes (version 2's size)");
+    Check(kDamageEventBytes == 94 + 1 + 4 * 16, "with four sub-hits 159");
     const std::size_t n = WriteDamageEvent(e, bytes, sizeof(bytes));
-    Check(n == kDamageEventBytes, "the whole event is written");
-    Check(WriteDamageEvent(e, bytes, kDamageEventBytes - 1) == 0, "no room: nothing written");
+    Check(n == kDamageEventBaseBytes + 1 && bytes[2] == 3, "an event without sub-hits: version 3, a zero count");
+    Check(WriteDamageEvent(e, bytes, n - 1) == 0, "no room: nothing written");
     DamageEvent out;
-    Check(ReadDamageEvent(bytes, n, out) && Same(e, out), "the event reads back as written");
+    Check(ReadDamageEvent(bytes, n, out) && Same(e, out) && out.bodyCount == 0, "the event reads back as written");
     Check(!ReadDamageEvent(bytes, n - 1, out), "a short event is refused");
     Check(!ReadDamageEvent(bytes, n + 1, out), "a long event is refused");
     std::uint8_t bad[kDamageEventBytes];
@@ -284,11 +286,127 @@ void TestSerialization() {
     std::memcpy(bad, bytes, n);
     bad[2] = kDamageEventVersion + 1;
     Check(!ReadDamageEvent(bad, n, out), "another version is refused");
+    // Version 2 (the build before): the same 94 bytes and no count; read as an event without sub-hits.
+    std::memcpy(bad, bytes, kDamageEventBaseBytes);
+    bad[2] = kDamageEventVersionNoBodies;
+    Check(ReadDamageEvent(bad, kDamageEventBaseBytes, out) && Same(e, out) && out.bodyCount == 0,
+          "a version 2 event reads as one without sub-hits");
+    Check(!ReadDamageEvent(bad, kDamageEventBaseBytes + 1, out), "a version 2 event has exactly 94 bytes");
     DamageEvent net = e;
     net.flags |= kGdiFromNetwork;
     WriteDamageEvent(net, bytes, sizeof(bytes));
     Check(ReadDamageEvent(bytes, n, out) && !(out.flags & kGdiFromNetwork) && out.flags == e.flags,
           "the from-network flag never travels");
+    // Sub-hits.
+    DamageEvent hit = e;
+    hit.bodyCount = 2;
+    hit.bodies[0] = HitBody{0xAA0, 7, {1.0f, 2.0f, 3.0f}};
+    hit.bodies[1] = HitBody{0xB60, 0, {-4.0f, 5.5f, 6.0f}};
+    const std::size_t m = WriteDamageEvent(hit, bytes, sizeof(bytes));
+    Check(m == kDamageEventBaseBytes + 1 + 2 * kHitBodyBytes, "two sub-hits: 16 bytes each after the count");
+    Check(ReadDamageEvent(bytes, m, out) && Same(hit, out) && out.bodyCount == 2 && out.bodies[0].component == 0xAA0 &&
+              out.bodies[0].index == 7 && out.bodies[1].component == 0xB60 && out.bodies[1].point[1] == 5.5f,
+          "the sub-hits read back as written");
+    Check(!ReadDamageEvent(bytes, m - 1, out) && !ReadDamageEvent(bytes, m + 16, out), "the count fixes the size");
+    std::memcpy(bad, bytes, m);
+    bad[kDamageEventBaseBytes] = 5;
+    Check(!ReadDamageEvent(bad, kDamageEventBaseBytes + 1 + 5 * kHitBodyBytes, out), "more than four sub-hits are refused");
+    const float nan = std::nanf("");
+    std::memcpy(bad, bytes, m);
+    std::memcpy(bad + kDamageEventBaseBytes + 1 + 4, &nan, 4);
+    Check(!ReadDamageEvent(bad, m, out), "a sub-hit point that is not a number is refused");
+    hit.bodyCount = kMostHitBodies + 1;
+    Check(WriteDamageEvent(hit, bytes, sizeof(bytes)) == 0, "an event with more sub-hits than it carries is not written");
+}
+
+// A ragdoll component as 6E3B10 / 6EA430 lay it out: bodies [+0x78], count [+0x88], 0xC0 each, the rigid body
+// +0x50 with its Havok id at +0xF0; body+0xB8 set means a second id through [[+0xB0]+0x10]+0xF0.
+struct FakeRagdoll {
+    alignas(16) std::uint8_t component[0x100]{};
+    alignas(16) std::uint8_t bodies[4 * kRagdollBodyBytes]{};
+    alignas(16) std::uint8_t rigid[4][0x100]{};
+    alignas(16) std::uint8_t second[0x100]{}, secondHolder[0x20]{};
+    explicit FakeRagdoll(std::uint32_t firstId) {
+        const void* b = bodies;
+        std::memcpy(component + kRagdollBodies, &b, 8);
+        const std::size_t count = 4;
+        std::memcpy(component + kRagdollCount, &count, 8);
+        for (int i = 0; i < 4; ++i) {
+            const void* r = rigid[i];
+            std::memcpy(bodies + i * kRagdollBodyBytes + 0x50, &r, 8);
+            const std::uint32_t id = firstId + static_cast<std::uint32_t>(i);
+            std::memcpy(rigid[i] + 0xF0, &id, 4);
+        }
+        // body 2 also answers to firstId + 100 (its second id)
+        const void* holder = secondHolder;
+        std::memcpy(bodies + 2 * kRagdollBodyBytes + 0xB0, &holder, 8);
+        const std::uint64_t set = 1;
+        std::memcpy(bodies + 2 * kRagdollBodyBytes + 0xB8, &set, 8);
+        const void* sec = second;
+        std::memcpy(secondHolder + 0x10, &sec, 8);
+        const std::uint32_t id2 = firstId + 100;
+        std::memcpy(second + 0xF0, &id2, 4);
+    }
+};
+
+void TestRagdollBodies() {
+    FakeRagdoll r(500);
+    Check(RagdollIndexOf(r.component, 501) == 1 && RagdollIndexOf(r.component, 503) == 3, "a body id's index");
+    Check(RagdollIndexOf(r.component, 600) == 2, "the second id (6EA46C) finds its body too");
+    Check(RagdollIndexOf(r.component, 77) == -1, "an id of no body: -1");
+    std::uint32_t id = 0;
+    Check(RagdollIdOf(r.component, 3, &id) && id == 503, "an index's id");
+    Check(!RagdollIdOf(r.component, 4, &id) && !RagdollIdOf(r.component, -1, &id), "no such body");
+    std::uint8_t empty[0x100]{};
+    Check(RagdollIndexOf(empty, 500) == -1 && !RagdollIdOf(empty, 0, &id), "no component: nothing");
+}
+
+// The sender's search for a class's ragdoll (hitauthgame.cpp CollectHitBodies), without the game: a stand-in object
+// with its ragdoll at +0x7A0 and GDIs of sub-hits.
+void TestHitBodySearch() {
+    struct Object {
+        alignas(16) std::uint8_t bytes[0x2100]{};
+        FakeRagdoll ragdoll;
+        Object(std::uint32_t firstId, const void* vtable) : ragdoll(firstId) {
+            std::memcpy(bytes, &vtable, 8);
+            std::memcpy(bytes + 0x7A0 + kRagdollBodies, ragdoll.component + kRagdollBodies, 0x18);
+        }
+    };
+    struct Gdi {
+        alignas(16) std::uint8_t bytes[kGdiBytes]{};
+        alignas(16) std::uint8_t hits[4 * kHitRecordBytes]{};
+        explicit Gdi(std::initializer_list<std::uint32_t> ids) {
+            std::size_t n = 0;
+            for (const std::uint32_t id : ids) {
+                const float point[4] = {static_cast<float>(n), 1.0f, 2.0f, 1.0f};
+                std::memcpy(hits + n * kHitRecordBytes, point, 16);
+                std::memcpy(hits + n * kHitRecordBytes + kHitRecordBody, &id, 4);
+                ++n;
+            }
+            const void* at = hits;
+            std::memcpy(bytes + kGdiHits, &at, 8);
+            std::memcpy(bytes + kGdiHitCount, &n, 8);
+        }
+    };
+    // The first sub-hit is another object's body, the second this one's: the search tries both.
+    static const std::uint64_t firstTable[4]{};
+    static Object first(700, firstTable);
+    DamageEvent e;
+    HitBodiesFromGdi(first.bytes, Gdi{55555, 702}.bytes, e, 10000);
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 1.0f,
+          "a first sub-hit on another object's body does not hide the target's own");
+    // A class's first shot touches none of its bodies: the class is not given up, the next shot finds the ragdoll.
+    static const std::uint64_t laterTable[4]{};
+    static Object later(800, laterTable);
+    HitBodiesFromGdi(later.bytes, Gdi{55555}.bytes, e, 20000);
+    Check(e.bodyCount == 0, "no body of the target: nothing sent");
+    HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 10);
+    Check(e.bodyCount == 0, "the class is searched again only after a while");
+    HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 1000);
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 3,
+          "a class whose first search found nothing is searched again and its ragdoll found");
+    HitBodiesFromGdi(later.bytes, Gdi{55555, 801, 800}.bytes, e, 20000 + 1001);
+    Check(e.bodyCount == 2 && e.bodies[0].index == 1 && e.bodies[1].index == 0, "then the class's offset is used");
 }
 
 void TestGdi() {
@@ -845,6 +963,99 @@ void TestVehicleSeatAuthority() {
     VirtualProtect(singleton, sizeof(previous), old, &old);
 }
 
+// A forwarded hit on a weak point (docs/net-re/damage.md section 6.7): the sender's sub-hits as body places, through the
+// game's stream code, rebuilt in the owner's GDI with the owner's own Havok ids, then the game's own UfoCarrier508
+// filter (slot 16, 4F7190: the sub-hit nearest the hit point, its body mapped by 6EA430, == the core index +0xD8C while
+// the hatch flag +0xD85 is up) asked on the owner's copy. Version 2's event carried no sub-hit: the filter said no.
+void TestWeakPointFilter() {
+    constexpr std::uint32_t kCarrierAccept = 0x4F7190, kBodyIndex = 0x6EA430, kReserve = 0x124190, kRelease = 0x11E9D0;
+    Check(Bytes(kCarrierAccept, "40554883ec5080b9850d0000"), "4F7190 is UfoCarrier508's slot 16 (hatch flag +0xD85)");
+    Check(Bytes(0x4F72B1, "488d8d600b0000"), "4F7190 maps the body through the ragdoll at +0xB60");
+    Check(Bytes(kBodyIndex, "4c8b4178"), "6EA430 reads the bodies at +0x78");
+    Check(Slot(0x17C9DC0, 16) == kCarrierAccept, "UfoCarrier508's vtable slot 16 is 4F7190");
+    struct Carrier {
+        alignas(16) std::uint8_t object[0x1700]{};
+        FakeRagdoll ragdoll;
+        Carrier(std::uint32_t firstId, const void* vtable) : ragdoll(firstId) {
+            std::memcpy(object, &vtable, 8);
+            std::memcpy(object + 0xB60 + kRagdollBodies, ragdoll.component + kRagdollBodies, 0x18);
+        }
+    };
+    static const std::uint64_t senderTable[4]{}, ownerTable[4]{};
+    static Carrier sender(900, senderTable), owner(4000, ownerTable);  // one ship, two physics worlds: other Havok ids
+    Check(Fn<int(__fastcall*)(const void*, std::uint32_t)>(kBodyIndex)(sender.object + 0xB60, 902) == 2 &&
+              Fn<int(__fastcall*)(const void*, std::uint32_t)>(kBodyIndex)(owner.object + 0xB60, 4002) == 2,
+          "the game's own 6EA430 reads the stand-in ragdolls");
+
+    // The sender's GDI: the bullet's two sub-hits, the core body nearest the hit point, another one not of this ship.
+    alignas(16) std::uint8_t sent[kGdiBytes]{};
+    alignas(16) std::uint8_t hits[2 * kHitRecordBytes]{};
+    const float closeHit[4] = {10.5f, 2.5f, -7.0f, 1.0f}, awayHit[4] = {40.0f, 2.5f, -7.0f, 1.0f};
+    std::memcpy(hits, closeHit, 16);
+    const std::uint32_t coreId = 902, otherId = 77777;
+    std::memcpy(hits + kHitRecordBody, &coreId, 4);
+    std::memcpy(hits + kHitRecordBytes, awayHit, 16);
+    std::memcpy(hits + kHitRecordBytes + kHitRecordBody, &otherId, 4);
+    const void* hitsPtr = hits;
+    std::memcpy(sent + kGdiHits, &hitsPtr, 8);
+    const std::size_t two = 2;
+    std::memcpy(sent + kGdiHitCount, &two, 8);
+    DamageEvent e = SampleEvent();
+    HitBodiesFromGdi(sender.object, sent, e, 5000);
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0xB60 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 10.5f,
+          "the sender finds the ship's ragdoll (+0xB60) by the body the shot touched, and leaves the other body out");
+
+    // Through the game's stream code.
+    Stream written;
+    Fn<void*(__fastcall*)(void*, int)>(kStreamConstruct)(written.bytes, 0x40);
+    Check(WriteHitEventMessage(written.bytes, e), "the event with its sub-hit is written into a game stream");
+    Stream reader;
+    ToReader(written, reader);
+    DamageEvent got;
+    Check(PeekHitEventMessage(reader.bytes, got) == HitMessage::Event && got.bodyCount == 1, "and read back");
+
+    // The owner's GDI as Deal builds it, the sub-hit rebuilt, the game's filter asked.
+    const auto accept = Fn<bool(__fastcall*)(void*, const void*)>(kCarrierAccept);
+    auto dealt = [&](const DamageEvent& event, bool* filter) {
+        alignas(16) std::uint8_t gdi[kGdiBytes]{};
+        const float one = 1.0f;
+        std::memcpy(gdi + kGdiExtra68, &one, 4);
+        Fn<bool(__fastcall*)(void*, std::size_t)>(kReserve)(gdi + kGdiParts, 4);
+        EventToGdi(event, gdi);
+        HitBodiesToGdi(owner.object, gdi, event);
+        std::size_t count = 0;
+        std::memcpy(&count, gdi + kGdiHitCount, 8);
+        std::uint32_t id = 0;
+        const std::uint8_t* entries = nullptr;
+        std::memcpy(&entries, gdi + kGdiHits, 8);
+        if (count) std::memcpy(&id, entries + kHitRecordBody, 4);
+        *filter = accept(owner.object, gdi);
+        Fn<void(__fastcall*)(void*)>(kRelease)(gdi + kGdiParts);
+        return count ? id : 0u;
+    };
+    owner.object[0xD85] = 1;
+    std::int32_t core = 2;
+    std::memcpy(owner.object + 0xD8C, &core, 4);
+    bool taken = false;
+    Check(dealt(got, &taken) == 4002, "the owner rebuilds the sub-hit with its own copy's id of that body");
+    Check(taken, "the game's UfoCarrier508 filter takes the forwarded hit on its core");
+    core = 1;
+    std::memcpy(owner.object + 0xD8C, &core, 4);
+    dealt(got, &taken);
+    Check(!taken, "a hit on another body is still refused by the filter");
+    core = 2;
+    std::memcpy(owner.object + 0xD8C, &core, 4);
+    DamageEvent old = got;
+    old.bodyCount = 0;  // what version 2 carried
+    dealt(old, &taken);
+    Check(!taken, "without the sub-hit (version 2) the filter refuses the hit: the gap this closes");
+    DamageEvent forged = got;
+    forged.bodies[0].component = 0x1F00;  // a place holding no ragdoll: left out
+    forged.bodies[1] = HitBody{0xB61, 0, {0, 0, 0}};  // misaligned: left out
+    forged.bodyCount = 2;
+    Check(dealt(forged, &taken) == 0 && !taken, "a sub-hit at a place with no such body is left out");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -855,6 +1066,8 @@ int main(int argc, char** argv) {
     TestOwnerTakesEvent();
     TestSwitchWindow();
     TestSerialization();
+    TestRagdollBodies();
+    TestHitBodySearch();
     TestGdi();
     TestCheck();
     TestGate();
@@ -881,6 +1094,7 @@ int main(int argc, char** argv) {
         TestPreFilter();
         TestForwardReferenceOwnership();
         TestVehicleSeatAuthority();
+        TestWeakPointFilter();
     }
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

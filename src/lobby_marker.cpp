@@ -6,6 +6,7 @@
 #include <set>
 
 #include "log.h"
+#include "room_view.h"
 
 namespace dn {
 namespace {
@@ -71,7 +72,7 @@ void LobbyMarker::entered(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUser
     if (!lobby || !lobbyId || !localUser) return;
     std::lock_guard<std::mutex> lock(mu_);
     if (lobby_ != lobby || lobbyId_ != lobbyId || localUser_ != localUser) {
-        marked_.clear();identities_.clear();extensionIdentities_.clear();extensionProblem_.clear();
+        marked_.clear();roomFeed_.clear();identities_.clear();extensionIdentities_.clear();extensionProblem_.clear();
         knownOwner_.clear();knownOwnerAddress_.clear();
     }
     lobby_ = lobby;
@@ -85,6 +86,7 @@ void LobbyMarker::left() {
     std::lock_guard<std::mutex> lock(mu_);
     lobbyId_.clear();
     marked_.clear();
+    roomFeed_.clear();
     identities_.clear();
     extensionIdentities_.clear();
     extensionProblem_.clear();
@@ -109,6 +111,7 @@ void LobbyMarker::memberJoined() {
 void LobbyMarker::memberGone(const std::string& member) {
     std::lock_guard<std::mutex> lock(mu_);
     marked_.erase(member);
+    roomFeed_.erase(member);
     identities_.erase(member);
     extensionIdentities_.erase(member);
     if (member == knownOwner_) {
@@ -128,6 +131,13 @@ void LobbyMarker::setIdentity(const std::string& commitment) {
     std::lock_guard<std::mutex> lock(mu_);
     if (identity_ == commitment) return;
     identity_ = commitment;
+    dirty_ = !lobbyId_.empty();
+}
+
+void LobbyMarker::setRoomFeed(bool on) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (roomFeedOn_ == on) return;
+    roomFeedOn_ = on;
     dirty_ = !lobbyId_.empty();
 }
 
@@ -165,6 +175,15 @@ void LobbyMarker::tick() {
         extension.ValueType = 3;
         EOS_LobbyModification_AddMemberAttributeOptions option{1, &extension, 0};
         r = addMemberAttribute_(mod, &option);
+    }
+    if (r == EOS_Success && roomFeedOn_) {
+        EOS_Lobby_AttributeData feed{};
+        feed.ApiVersion = 1;
+        feed.Key = kRoomFeedKey;
+        feed.Value.AsInt64 = kRoomFeedFormat;
+        feed.ValueType = 1;  // int64
+        EOS_LobbyModification_AddMemberAttributeOptions af{1, &feed, 0};
+        r = addMemberAttribute_(mod, &af);
     }
     if (r == EOS_Success && !identity_.empty()) {
         EOS_Lobby_AttributeData id{};
@@ -338,6 +357,31 @@ std::map<std::string, std::string> LobbyMarker::memberIdentities() {
     }
     releaseDetails_(details);
     return identities_;
+}
+
+std::vector<std::string> LobbyMarker::roomFeedMembers() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> out;
+    EOS_HLobbyDetails details = getMemberCount_ && getMemberByIndex_ ? copyDetailsLocked() : nullptr;
+    if (!details) return out;
+    const std::string ours = idString(localUser_);
+    EOS_LobbyDetails_GetMemberCountOptions mc{1};
+    const uint32_t count = getMemberCount_(details, &mc);
+    for (uint32_t i = 0; i < count && i < kMaxMembersRead; ++i) {
+        EOS_LobbyDetails_GetMemberByIndexOptions mo{1, i};
+        EOS_ProductUserId member = getMemberByIndex_(details, &mo);
+        const std::string id = idString(member);
+        if (id.empty() || id == ours) continue;
+        if (readAttribute(details, member, kRoomFeedKey, nullptr)) roomFeed_.insert(id);
+        if (roomFeed_.count(id)) out.push_back(id);
+    }
+    releaseDetails_(details);
+    return out;
+}
+
+bool LobbyMarker::readsRoomFeed(const std::string& member) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return roomFeed_.count(member) != 0;
 }
 
 std::vector<std::string> LobbyMarker::members(bool* known) {

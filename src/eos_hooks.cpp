@@ -256,7 +256,7 @@ struct State {
         EOS_Lobby_LobbyIdCallbackInfo info{};
         std::string lobbyId;
         uint64_t sinceMs = 0;
-        uint64_t noHostSinceMs = 0;  // since when the room's owner advertises no direct link (0: it does)
+        uint64_t noHostSinceMs = 0;  // since when the room's owner says neither the room feed nor a direct link (0: it does)
         bool worldWaitLogged = false;
     };
     std::mutex parkedMutex;
@@ -327,13 +327,27 @@ struct State {
     std::string viewRoom;  // the lobby the view is of
     std::string endedRoom;  // the last room the game was told it is out of (removed, or the room closed)
     uint32_t viewCapacity = 0;  // the room's size, as last read from Epic's copy of it (0: not read yet)
-    std::weak_ptr<DirectNet> followedNet;  // a member: the link whose host list was followed last...
-    uint64_t followedVersion = 0;          // ...and that list's version
+    uint64_t followedVersion = 0;  // a member: the version of the host's Room message followed last (hostRoomNow)
     std::map<std::string, std::string> roomIds;  // a host: every member identity seen in this room
     // Becoming the room's host: the joins we held back, with the slot the old host's game had each in (-1 none), for
     // our game to take before we publish our slots (RoomView::promoted, hostRoomTick); since when.
     std::vector<std::pair<std::string, int>> inherited;
     uint64_t inheritedSinceMs = 0;
+    // The room feed (room_view.h): the host's Room message over EOS P2P. A member: what came over EOS and the direct
+    // link, put together (feedMutex: the game's receive thread and the EOS tick both hand packets in). The room's owner:
+    // what it sent (EOS tick only).
+    std::atomic<bool> roomFeedOn{true};
+    std::mutex feedMutex;
+    HostRoomFeed feed;
+    RoomFeedAssembler feedPages;
+    std::set<std::string> feedAccepted;  // members whose EOS connection on kRoomFeedSocket we accepted
+    struct FeedHost {
+        std::string room;                         // the room this hosting session is for ("" not hosting)
+        RoomStamp stamp;                          // our newest Room message's stamp...
+        std::vector<std::string> unstamped;       // ...that message without it
+        std::vector<std::string> message;         // ...and with it
+        std::map<std::string, RoomStamp> sent;    // per member: the newest message that went to it
+    } feedHost;
     // Calls of the game answered by us, completed on the next tick: never inside the call itself.
     std::mutex deferredMutex;
     std::vector<std::function<void()>> deferred;
@@ -617,7 +631,6 @@ bool admitStatus(const std::string& lobbyId, const std::string& target, bool sel
     // scratch, the one that may have come before this PROMOTED included.
     if (status == kPromoted) {
         auto placements = g.view.promoted(target, now);
-        g.followedNet.reset();
         g.followedVersion = 0;
         if (self) {
             g.inherited = std::move(placements);
@@ -702,27 +715,36 @@ void completeLobbyCall(void* callback, void* clientData, EOS_EResult result, con
     reinterpret_cast<EOS_Lobby_OnLobbyIdCallback>(callback)(&info);
 }
 
+// What the room feed knew belongs to the room just left (or the one before the room just entered).
+void resetRoomFeed() {
+    std::lock_guard<std::mutex> lock(g.feedMutex);
+    g.feed.clear();
+    g.feedPages.clear();
+    g.feedAccepted.clear();
+    g.feedHost = {};
+}
+
 // The game is in room `lobbyId` with `members` (EOS ids; it is listed among them).
 void enterView(const std::string& lobbyId, const std::string& self, const std::vector<std::string>& members) {
     invalidateExtensionTransport();
+    resetRoomFeed();
     std::lock_guard<std::mutex> lock(g.viewMutex);
     g.view.reset(self, members);
     g.inherited.clear();
     g.viewRoom = lobbyId;
     g.endedRoom.clear();
     g.viewCapacity = 0;
-    g.followedNet.reset();
     g.followedVersion = 0;
     g.roomIds.clear();
 }
 
 void leaveView() {
+    resetRoomFeed();
     std::lock_guard<std::mutex> lock(g.viewMutex);
     invalidateExtensionTransport();
     g.view.clear();
     g.inherited.clear();
     g.viewRoom.clear();
-    g.followedNet.reset();
     g.followedVersion = 0;
     g.roomIds.clear();
 }
@@ -932,10 +954,11 @@ void releaseVirtualRoom();
 
 bool entryParked() { return g.parkedActive.load(); }
 
-// Whether lobby `lobbyId` says its host hosts a direct link (kHostAddressKey, a lobby attribute every searcher reads):
-// then its member slots come over that link (room_view.h).
-bool lobbyAdvertisesHost(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user) {
+// Whether lobby `lobbyId` has the lobby attribute `key` (a lobby attribute every searcher reads), and its text (""
+// when it is no text). EOS calls: on the EOS tick.
+bool lobbyAttribute(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user, const char* key, std::string* text) {
     const Api& a = g.api;
+    if (text) text->clear();
     if (!lobby || !lobbyId || !user || !a.copyDetails || !a.attributeCount || !a.copyAttribute || !a.releaseAttribute ||
         !a.releaseDetails)
         return false;
@@ -945,18 +968,71 @@ bool lobbyAdvertisesHost(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserI
     co.LocalUserId = user;
     EOS_HLobbyDetails details = nullptr;
     if (a.copyDetails(lobby, &co, &details) != EOS_Success || !details) return false;
-    bool advertised = false;
+    bool found = false;
     EOS_LobbyDetails_GetAttributeCountOptions count{1};
     const uint32_t n = a.attributeCount(details, &count);
-    for (uint32_t i = 0; i < n && !advertised; ++i) {
+    for (uint32_t i = 0; i < n && !found; ++i) {
         EOS_LobbyDetails_CopyAttributeByIndexOptions ai{1, i};
         EOS_Lobby_Attribute* attribute = nullptr;
-        if (a.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data && attribute->Data->Key)
-            advertised = std::strcmp(attribute->Data->Key, kHostAddressKey) == 0;
+        if (a.copyAttribute(details, &ai, &attribute) == EOS_Success && attribute && attribute->Data && attribute->Data->Key &&
+            std::strcmp(attribute->Data->Key, key) == 0) {
+            found = true;
+            if (text && attribute->Data->ValueType == 3 && attribute->Data->Value.AsUtf8) *text = attribute->Data->Value.AsUtf8;
+        }
         if (attribute) a.releaseAttribute(attribute);
     }
     a.releaseDetails(details);
-    return advertised;
+    return found;
+}
+
+// Whether lobby `lobbyId` says its host hosts a direct link (kHostAddressKey): then its member slots come over that
+// link (room_view.h).
+bool lobbyAdvertisesHost(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user) {
+    return lobbyAttribute(lobby, lobbyId, user, kHostAddressKey, nullptr);
+}
+
+bool roomFeedOn() { return g.roomFeedOn.load(); }
+
+// Whether `owner`, the owner of lobby `lobbyId`, sends its member slots over EOS (the room feed, room_view.h): it says
+// so on the lobby (kRoomFeedLobbyKey names it; an owner of an older version that took the room over leaves another
+// one's id there) or on its own lobby member (LobbyMarker::kRoomFeedKey). EOS calls: on the EOS tick.
+bool ownerSendsRoomFeed(EOS_HLobby lobby, const char* lobbyId, EOS_ProductUserId user, const std::string& owner) {
+    if (!roomFeedOn() || owner.empty()) return false;
+    if (g.marker.readsRoomFeed(owner)) return true;
+    std::string named;
+    return lobbyAttribute(lobby, lobbyId, user, kRoomFeedLobbyKey, &named) && named == owner;
+}
+
+// The same for the room we are in.
+bool roomOwnerSendsRoomFeed(const std::string& owner) {
+    EOS_HLobby lobby = nullptr;
+    std::string room;
+    {
+        std::lock_guard<std::mutex> lock(g.roomMutex);
+        lobby = g.roomLobby;
+        room = g.roomId;
+    }
+    return !room.empty() && ownerSendsRoomFeed(lobby, room.c_str(), g.lobbyUser.load(), owner);
+}
+
+// A member: lets `member`'s packets on kRoomFeedSocket in (EOS holds a peer's packets until the connection is
+// accepted). Once per member and room. EOS calls: on the EOS tick.
+void acceptRoomFeed(const std::string& member) {
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId local = g.lobbyUser.load();
+    EOS_ProductUserId remote = member.empty() ? nullptr : idHandle(member);
+    if (!roomFeedOn() || !p2p || !local || !remote || !g.api.accept) return;
+    {
+        std::lock_guard<std::mutex> lock(g.feedMutex);
+        if (!g.feedAccepted.insert(member).second) return;
+    }
+    EOS_P2P_SocketId socket{1, {}};
+    strncpy_s(socket.SocketName, kRoomFeedSocket, _TRUNCATE);
+    EOS_P2P_PeerConnectionOptions o{1, local, remote, &socket};
+    const EOS_EResult r = g.api.accept(p2p, &o);
+    if (r != EOS_Success)
+        logf("ROOM cannot take member slots from %s over EOS: accepting its connection failed (%s)", shortId(member).c_str(),
+             resultName(r));
 }
 
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
@@ -994,20 +1070,37 @@ void lobbyEnteredWrapper(const EOS_Lobby_LobbyIdCallbackInfo* i) {
     copy.ClientData = call->clientData;
     EOS_Lobby_OnLobbyIdCallback cb = call->callback;
     const bool final = !g.api.isComplete || g.api.isComplete(i->ResultCode);
-    // A join into a room whose host hosts a direct link: the game enters once the host's member slots are here.
-    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner &&
-        (missionAdmissionRequired() || (g.autoJoinOn && lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser)))) {
-        std::lock_guard<std::mutex> lock(g.parkedMutex);
-        g.parked.active = true;
-        g.parked.callback = cb;
-        g.parked.info = copy;
-        g.parked.lobbyId = i->LobbyId ? i->LobbyId : "";
-        g.parked.sinceMs = GetTickCount64();
-        g.parkedActive = true;
-        logf("ROOM entering room %s once its host's member slots are here (its game numbers the members by them)",
-             g.parked.lobbyId.c_str());
-        delete call;
-        return;
+    // A join into a room whose host says its member slots - over EOS (the room feed, which reaches every member) or over
+    // a direct link it hosts: the game enters once they are here. All Forces waits for its host's world state either way.
+    if (!g_shutdown && final && i->ResultCode == EOS_Success && !call->owner) {
+        const std::string owner = g.marker.ownerId();
+        const bool feed = ownerSendsRoomFeed(call->lobby, i->LobbyId, call->localUser, owner);
+        const bool direct = g.autoJoinOn && lobbyAdvertisesHost(call->lobby, i->LobbyId, call->localUser);
+        const bool admission = missionAdmissionRequired();
+        const std::string room = i->LobbyId ? i->LobbyId : "";
+        if (feed || direct || admission) {
+            if (feed) acceptRoomFeed(owner);  // before its first packet: EOS holds a peer's packets until accepted
+            std::lock_guard<std::mutex> lock(g.parkedMutex);
+            g.parked = {};
+            g.parked.active = true;
+            g.parked.callback = cb;
+            g.parked.info = copy;
+            g.parked.lobbyId = room;
+            g.parked.sinceMs = GetTickCount64();
+            g.parkedActive = true;
+            logf("ROOM entering room %s once its host's member slots are here (its game numbers the members by them; "
+                 "they come %s)%s",
+                 room.c_str(),
+                 feed ? (direct ? "over EOS and the direct link" : "over EOS")
+                      : direct ? "over the direct link its host hosts" : "from its host, if it sends them",
+                 admission ? "; All Forces also needs its host's world state" : "");
+            delete call;
+            return;
+        }
+        logf("ROOM entering room %s without waiting for member slots: its host %s says on the lobby neither that it sends "
+             "them over EOS nor a direct-link address (it runs no EDF6Coop, or a version from before the room feed), so "
+             "the game numbers the members in Epic's order, as without the plugin",
+             room.c_str(), owner.empty() ? "(not known yet)" : shortId(owner).c_str());
     }
     // EOS runs the callback again after a non-final result (EOS_OperationWillRetry): keep the call
     // until the final one, or the next run reads freed memory.
@@ -1671,13 +1764,64 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (g.viewRoom == room) g.view.markDirect(c.target);
     }
-    placeInherited(room, now);
+}
+
+// A new hosting session's epoch (RoomStamp): the wall clock in milliseconds, so that a later session of ours is higher
+// than an earlier one also across game starts, and never lower than the last one of this process.
+uint64_t newFeedEpoch(uint64_t last) {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    const uint64_t ms = ((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
+    return std::max(ms, last + 1);
+}
+
+// The room's owner sends its Room message over EOS (the room feed) to `member`: every page, reliably and in order on
+// kRoomFeedChannel (EOS keeps them until the member accepted the connection). Not yet: there is no P2P interface to
+// send with (the game has not asked EOS for one yet), so nothing went - it goes on a later tick. Refused: EOS refused
+// a page (logged); the member gets the next message.
+enum class FeedSend { Sent, NotYet, Refused };
+FeedSend sendRoomFeed(const std::string& member, const std::vector<std::vector<uint8_t>>& pages) {
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId local = g.lobbyUser.load();
+    EOS_ProductUserId remote = idHandle(member);
+    if (!p2p || !local || !g.api.send) return FeedSend::NotYet;
+    if (!remote) return FeedSend::Refused;
+    EOS_P2P_SocketId socket{1, {}};
+    strncpy_s(socket.SocketName, kRoomFeedSocket, _TRUNCATE);
+    for (const std::vector<uint8_t>& page : pages) {
+        EOS_P2P_SendPacketOptions o{};
+        o.ApiVersion = 3;
+        o.LocalUserId = local;
+        o.RemoteUserId = remote;
+        o.SocketId = &socket;
+        o.Channel = kRoomFeedChannel;
+        o.DataLengthBytes = static_cast<uint32_t>(page.size());
+        o.Data = page.data();
+        o.Reliability = EOS_PR_ReliableOrdered;
+        o.bAllowDelayedDelivery = 1;
+        const EOS_EResult r = g.api.send(p2p, &o);
+        if (r != EOS_Success) {
+            logf("ROOM our member slots could not go to %s over EOS: %s (it gets them with the next change of the room)",
+                 shortId(member).c_str(), resultName(r));
+            return FeedSend::Refused;
+        }
+    }
+    return FeedSend::Sent;
+}
+
+// The room's owner, whatever links it hosts: its game's slots (room_view.h) - every member's game takes each member in
+// the same one - with whom the room removed and All Forces' world admission, stamped (RoomStamp), to its joiners over
+// the direct link it hosts (DirectNet::setRoomMembers) and to every member that reads the room feed over EOS.
+void publishRoomTick(const std::shared_ptr<DirectNet>& base) {
+    bool known = false;
+    const std::vector<std::string> epic = g.marker.members(&known);
     std::vector<std::string> members;
+    std::string room;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
-        // Our game's slots (room_view.h): every member's game takes each member in the same one. Until the game has
-        // its slots, the order they would take them in.
+        room = g.viewRoom;
+        // Until the game has its slots, the order they would take them in.
         if (GameSlotsSource slots = g.gameSlots.load()) members = slots();
         if (members.empty()) members = known ? roomOrder(epic, g.view.members()) : g.view.members();
         // Whom the room removed goes with it: whoever hosts the room next keeps them out.
@@ -1685,30 +1829,162 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
     }
     const WorldAdmission world = readMissionAdmission();
     if (world.present) appendWorldAdmission(members, world);
-    base->setRoomMembers(std::move(members));
+    const bool feed = roomFeedOn();
+    const std::vector<std::string> readers = feed ? g.marker.roomFeedMembers() : std::vector<std::string>{};
+    std::vector<std::string> message;
+    RoomStamp stamp;
+    std::vector<std::string> due;  // members our newest message has not gone to yet
+    {
+        std::lock_guard<std::mutex> lock(g.feedMutex);
+        auto& h = g.feedHost;
+        if (h.room != room) {  // a new hosting session: a room we created, or one Epic made us the owner of
+            const uint64_t last = h.stamp.epoch;
+            h = {};
+            h.room = room;
+            h.stamp = {newFeedEpoch(last), 0, true};
+        }
+        if (h.message.empty() || members != h.unstamped) {
+            ++h.stamp.seq;
+            h.unstamped = members;
+            h.message = members;
+            appendRoomStamp(h.message, h.stamp);
+        }
+        message = h.message;
+        stamp = h.stamp;
+        const std::set<std::string> present(readers.begin(), readers.end());
+        for (auto it = h.sent.begin(); it != h.sent.end();) it = present.count(it->first) ? std::next(it) : h.sent.erase(it);
+        for (const std::string& m : readers)
+            if (!(h.sent[m] == stamp)) due.push_back(m);
+    }
+    // Stamped also for the direct link: a member that gets both takes the newer (older readers skip the stamp).
+    if (base && g.config.direct.mode == Mode::Host) base->setRoomMembers(message);
+    if (due.empty()) return;
+    const std::vector<std::vector<uint8_t>> pages = encodeRoomFeed(room, message, stamp);
+    if (pages.empty()) {
+        logRateLimited("room-feed-encode", 60000, "ROOM our member slots cannot go over EOS: %zu entries do not fit the "
+                       "room feed", message.size());
+        return;
+    }
+    size_t sent = 0;
+    for (const std::string& m : due) {
+        // A refusal is logged and not repeated: the member gets the next message. Nothing to send with yet: next tick.
+        const FeedSend result = sendRoomFeed(m, pages);
+        if (result == FeedSend::NotYet) return;
+        sent += result == FeedSend::Sent ? 1 : 0;
+        std::lock_guard<std::mutex> lock(g.feedMutex);
+        if (g.feedHost.room == room) g.feedHost.sent[m] = stamp;
+    }
+    if (sent)
+        logf("ROOM our member slots (message %llu of session %llu, %zu entries) went over EOS to %zu member(s)",
+             static_cast<unsigned long long>(stamp.seq), static_cast<unsigned long long>(stamp.epoch), message.size(), sent);
 }
+
+// A member: a packet on kRoomFeedChannel, from the game's receive or our own (roomFeedReceiveTick). Never the game's:
+// its game would read it as game data. A page of the room we are in (or are joining) goes into its message; a whole
+// one that is newer than what we have from its sender is followed when the sender owns the room (HostRoomFeed).
+bool takeRoomFeed(const std::string& src, uint8_t channel, const uint8_t* data, uint32_t size) {
+    if (channel != kRoomFeedChannel) return false;
+    if (!roomFeedOn() || src.empty()) return true;
+    RoomFeedPage page;
+    if (!decodeRoomFeedPage(data, size, &page)) {
+        logRateLimited("room-feed-bad", 10000, "ROOM dropped a malformed member-slots packet from %s (%u bytes)",
+                       shortId(src).c_str(), size);
+        return true;
+    }
+    std::string room;
+    {
+        std::lock_guard<std::mutex> lock(g.viewMutex);
+        room = g.viewRoom;
+    }
+    if (room.empty() || page.room != room) return true;  // a room we left: its slots say nothing of this one
+    std::vector<std::string> message;
+    bool taken = false;
+    {
+        std::lock_guard<std::mutex> lock(g.feedMutex);
+        if (g.feedPages.add(src, page, &message))
+            taken = g.feed.eos(src, message);
+        else
+            g.feed.pending(src, g.feedPages.pending(src));
+    }
+    if (taken)
+        logf("ROOM member slots of %s came over EOS (message %llu of session %llu, %zu entries)", shortId(src).c_str(),
+             static_cast<unsigned long long>(page.stamp.seq), static_cast<unsigned long long>(page.stamp.epoch),
+             message.size());
+    return true;
+}
+
+// A member: our own reads of kRoomFeedChannel, so the room's slots arrive whether or not the game reads packets now (it
+// does not while its join waits for them). On the EOS tick.
+void roomFeedReceiveTick() {
+    EOS_HP2P p2p = g.p2p;
+    EOS_ProductUserId local = g.lobbyUser.load();
+    if (!roomFeedOn() || !p2p || !local || !g.api.receive || !g.marker.inLobby()) return;
+    EOS_P2P_ReceivePacketOptions o{};
+    o.ApiVersion = 2;
+    o.LocalUserId = local;
+    o.MaxDataSizeBytes = kMaxPayload;
+    o.RequestedChannel = &kRoomFeedChannel;
+    std::vector<uint8_t> buf(kMaxPayload);
+    for (int i = 0; i < 256; ++i) {
+        EOS_ProductUserId peer = nullptr;
+        EOS_P2P_SocketId socket{};
+        uint8_t channel = 0;
+        uint32_t n = 0;
+        if (g.api.receive(p2p, &o, &peer, &socket, &channel, buf.data(), &n) != EOS_Success) break;
+        takeRoomFeed(idString(peer), channel, buf.data(), n);
+    }
+}
+
+// A member: lets the room's owner, and every member that may own the room next, send us the room feed. On the EOS tick.
+void roomFeedAcceptTick() {
+    if (!roomFeedOn() || !g.marker.inLobby() || g.marker.isOwner()) return;
+    const std::string owner = g.marker.ownerId();
+    if (!owner.empty()) acceptRoomFeed(owner);
+    for (const std::string& m : g.marker.roomFeedMembers()) acceptRoomFeed(m);
+}
+
+// A member: the newest Room message of the room's owner, over the direct link or EOS, whichever is newer
+// (HostRoomFeed), and a version that changes whenever it does. In a room Epic does not know we are in (a virtual room)
+// the direct link's host is the room's owner.
+std::vector<std::string> hostRoomNow(uint64_t* version, std::string* from, RoomVia* via = nullptr);
 
 bool inVirtualRoom();
 bool entryParked();
 
+std::vector<std::string> hostRoomNow(uint64_t* version, std::string* from, RoomVia* via) {
+    const std::string owner = inVirtualRoom() ? std::string() : g.marker.ownerId();
+    uint64_t directVersion = 0;
+    std::string directFrom;
+    std::vector<std::string> direct;
+    if (std::shared_ptr<DirectNet> net = g.net.load()) direct = net->hostRoom(&directVersion, &directFrom);
+    std::lock_guard<std::mutex> lock(g.feedMutex);
+    g.feed.setOwner(owner);
+    g.feed.direct(directFrom, direct);
+    return g.feed.current(version, from, via);
+}
+
 // A member: its game follows who the host's game has in the room (RoomView::followHost), once Epic had its
 // chance to say the same. In a room Epic does not know we are in, the host is all there is to hear.
-void followHostTick(const std::shared_ptr<DirectNet>& net, uint64_t now) {
+void followHostTick(uint64_t now) {
     uint64_t version = 0;
     std::string from;
-    const std::vector<std::string> host = net->hostRoom(&version, &from);
+    RoomVia via = RoomVia::None;
+    const std::vector<std::string> host = hostRoomNow(&version, &from, &via);
     const uint64_t delay = inVirtualRoom() ? 0 : kEpicFirstMs;
     std::string room;
     std::vector<StatusChange> due;
     {
         std::lock_guard<std::mutex> lock(g.viewMutex);
         if (!g.view.active()) return;
-        // An empty list: a host of protocol 5 (it never says), or one whose game is out of the room (its
-        // room ends for us the way it would without the plugin).
-        if (!host.empty() && (g.followedNet.lock() != net || g.followedVersion != version)) {
-            g.followedNet = net;
+        // An empty list: a host that never says (a version from before protocol 6 over the direct link, before the room
+        // feed over EOS), or one whose game is out of the room (its room ends for us the way it would without the
+        // plugin).
+        if (!host.empty() && g.followedVersion != version) {
+            const bool first = !g.followedVersion;
             g.followedVersion = version;
             g.view.heardHost(host, from);
+            if (first)
+                logf("ROOM following the member slots of %s, which came over %s", shortId(from).c_str(), roomViaName(via));
         }
         room = g.viewRoom;
         if (entryParked()) return;  // the game is not in the room yet: it enters with the host's members
@@ -1773,20 +2049,26 @@ bool hostLinkProgressing(uint64_t now) {
 // going nowhere after kParkedEntryMs, or kParkedEntryCapMs passed) the join fails as a join that could not connect -
 // with a log line saying why - and we leave Epic's lobby again.
 void parkedEntryTick(uint64_t now) {
+    if (!entryParked()) return;
     EOS_Lobby_OnLobbyIdCallback callback = nullptr;
     EOS_Lobby_LobbyIdCallbackInfo info{};
     std::string lobbyId;
     ParkedEntryOutcome outcome = ParkedEntryOutcome::Wait;
     uint64_t waited = 0;
-    const bool progressing = hostLinkProgressing(now);
     EOS_ProductUserId owner = nullptr;
-    const bool hostLink = !g.marker.ownerAddress(&owner).empty() || !owner;  // an owner not known yet: not "none"
+    const bool address = !g.marker.ownerAddress(&owner).empty();
+    const std::string ownerId = idString(owner);
+    // The owner sends its slots over EOS: they come whether or not a direct link does (the room feed, room_view.h).
+    const bool feed = roomOwnerSendsRoomFeed(ownerId);
+    const bool direct = hostLinkProgressing(now);
+    const bool progressing = direct || feed;
+    const bool hostLink = address || feed || !owner;  // an owner not known yet: not "none"
     WorldAdmission currentWorld;
-    if (auto net = g.net.load()) {
+    {
         uint64_t version = 0;
         std::string from;
-        const auto message = net->hostRoom(&version, &from);
-        if (!from.empty() && from == g.marker.ownerId()) currentWorld = parseWorldAdmission(message);
+        const auto message = hostRoomNow(&version, &from);
+        if (!from.empty() && from == ownerId) currentWorld = parseWorldAdmission(message);
     }
     {
         std::lock_guard<std::mutex> lock(g.parkedMutex);
@@ -1822,11 +2104,26 @@ void parkedEntryTick(uint64_t now) {
     }
     info.LobbyId = lobbyId.c_str();
     if (outcome == ParkedEntryOutcome::GiveUp) {
-        logf("ROOM NOT entering room %s: its host's member slots did not come (%llu s, the direct link to its host %s); "
-             "entering without them would put members in other slots than the host's game has them. The join fails "
-             "and we leave the lobby",
+        // Why nothing came: the reason the log gives decides what the player can do about it.
+        std::string why;
+        if (feed)
+            why = "its host sends them over EOS, and they did not come";
+        else if (address)
+            why = std::string("its host sends them only over the direct link it hosts (an EDF6Coop from before the room "
+                              "feed), and that link ") + (direct ? "was still connecting" : "got nowhere");
+        else
+            why = "its host sends them neither over EOS nor over a direct link (no EDF6Coop, or one from before the room "
+                  "feed)";
+        const bool world = missionAdmissionRequired() && !freshWorldEntryAllowed(currentWorld);
+        logf("ROOM NOT entering room %s after %llu s: %s; %s. The join fails and we leave the lobby",
              lobbyId.c_str(), static_cast<unsigned long long>(waited / 1000),
-             progressing ? "was still connecting" : "got nowhere");
+             world && !currentWorld.present
+                 ? "All Forces (EDF6VehicleCrew) admits us only on its host's world state, which did not come"
+                 : world ? "its host's world state never allowed a new player in"
+                         : "its host's member slots did not come",
+             world && !currentWorld.present && !feed && !address
+                 ? "its host's EDF6Coop sends no world state at all: the host must update EDF6Coop"
+                 : (why + ". Entering without them would put members in other slots than the host's game has them").c_str());
         leaveParkedLobby(lobbyId);
         info.ResultCode = EOS_NoConnection;
         callback(&info);
@@ -1835,8 +2132,9 @@ void parkedEntryTick(uint64_t now) {
     logf("ROOM entering room %s %s", lobbyId.c_str(),
          outcome == ParkedEntryOutcome::Slotted ? "with its host's member slots"
          : outcome == ParkedEntryOutcome::NoHost
-             ? "without member slots: its host (the room's owner changed) hosts no direct link, so nobody says slots in "
-               "this room and the game goes as it would without the plugin"
+             ? "without member slots: its host sends them neither over EOS nor over a direct link (the room's owner "
+               "changed to one with no EDF6Coop, or one from before the room feed), so nobody says slots in this room "
+               "and the game goes as it would without the plugin"
              : "(the room is gone)");
     callback(&info);
 }
@@ -1845,15 +2143,23 @@ void roomTick(uint64_t now) {
     static uint64_t lastMs = 0;
     if (now - lastMs < kRoomTickMs) return;
     lastMs = now;
+    roomFeedAcceptTick();
     parkedEntryTick(now);
     releaseHeldJoins(now);
     std::shared_ptr<DirectNet> base = g.baseNet.load();
     const bool hosting = g.marker.inLobby() && g.marker.isOwner();
     if (hosting) {
         if (base && g.config.direct.mode == Mode::Host) hostRoomTick(base, now);
+        std::string room;
+        {
+            std::lock_guard<std::mutex> lock(g.viewMutex);
+            room = g.viewRoom;
+        }
+        if (!room.empty()) placeInherited(room, now);
+        publishRoomTick(base);
         return;
     }
-    if (std::shared_ptr<DirectNet> net = g.net.load()) followHostTick(net, now);
+    followHostTick(now);
 }
 
 // --- Coming back into the room we were last in, without Epic (P2) ---
@@ -2116,7 +2422,10 @@ void startVirtualJoin(EOS_ProductUserId user, const std::string& roomId, void* c
 
 void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const std::string& roomId, void* clientData,
                           EOS_Lobby_OnLobbyIdCallback callback, bool proveEos) {
-    if (!CompatibleLocalRoom(room.attributes)) {
+    PackCheck pack = PackCheck::NoExport;
+    if (!CompatibleLocalRoom(room.attributes, &pack)) {
+        logf("REJOIN not joining room %s over the direct link: %s", roomId.c_str(),
+             PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
         defer([callback, clientData, roomId] {
             completeLobbyCall(reinterpret_cast<void*>(callback), clientData, EOS_InvalidParameters, roomId);
         });
@@ -2223,8 +2532,7 @@ void virtualRoomTick(uint64_t now) {
         {
             std::lock_guard<std::mutex> lock(g.viewMutex);
             g.view.heardHost(list);  // the list we entered with
-            g.followedNet = net;
-            g.followedVersion = version;
+            g.followedVersion = 0;   // followHostTick takes the newest from here on (the same list, until it changes)
         }
         std::lock_guard<std::mutex> lock(g.lastMutex);
         g.lastRoomLeftMs = 0;
@@ -2268,6 +2576,7 @@ void hookPlatformTick(EOS_HPlatform platform) {
     meshTick(GetTickCount64());
     bulkTick(GetTickCount64());
     identityProofTick();
+    roomFeedReceiveTick();
     g.marker.tick();
     refreshMemberIdentities(GetTickCount64());
     if (g.autoJoinOn) autoJoinTick(GetTickCount64());
@@ -2615,6 +2924,7 @@ EOS_EResult hookReceivePacket(EOS_HP2P h, const EOS_P2P_ReceivePacketOptions* o,
             outSocket ? std::string(outSocket->SocketName, strnlen(outSocket->SocketName, sizeof(outSocket->SocketName)))
                       : std::string();
         if (takeIdentityProof(src, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes)) continue;
+        if (takeRoomFeed(src, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes)) continue;
         if (takeArrival(src, socket, outChannel ? *outChannel : 0, static_cast<const uint8_t*>(outData), *outBytes, false))
             return EOS_Success;
     }
@@ -2640,7 +2950,12 @@ EOS_HLobbyDetails rememberedRoomDetails(const LastRoom& r) {
 bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
     if (result == EOS_Success) return false;
     const LastRoom r = rememberedRoom();
-    if (r.roomId.empty() || g.marker.inLobby() || !CompatibleLocalRoom(r.attributes)) return false;
+    if (r.roomId.empty() || g.marker.inLobby()) return false;
+    if (PackCheck pack = PackCheck::NoExport; !CompatibleLocalRoom(r.attributes, &pack)) {
+        logRateLimited("rejoin-incompatible", 60000, "REJOIN room %s is not offered: %s", r.roomId.c_str(),
+                       PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(g.virtualMutex);
         if (g.virtualRoom.joining || g.virtualRoom.in) return false;
@@ -2791,7 +3106,9 @@ void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void
     FakeDetails d;
     if (g_shutdown || !o || !cb) return g.outer.join(h, o, clientData, cb);
     if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) {
-        if (!CompatibleLocalRoom(d.attributes)) {
+        if (PackCheck pack = PackCheck::NoExport; !CompatibleLocalRoom(d.attributes, &pack)) {
+            logf("REJOIN not joining room %s: %s", d.roomId.c_str(),
+                 PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
             defer([cb, clientData] { completeLobbyCall(cb, clientData, EOS_InvalidParameters, ""); });
             return;
         }
@@ -3231,6 +3548,17 @@ uint64_t bulkIncoming(const std::string& src, uint16_t tag, size_t* total) {
     return g.reassembler.pending(src, kFragmentBulk, tag, GetTickCount64(), total);
 }
 
+bool roomFeedAdvertisement(std::string& owner) {
+    if (!roomFeedOn() || !g.marker.inLobby() || !g.marker.isOwner()) return false;
+    owner = idString(g.lobbyUser.load());
+    return !owner.empty();
+}
+
+void setTestRoomFeed(bool on) {
+    g.roomFeedOn = on;
+    g.marker.setRoomFeed(on);
+}
+
 bool hostAdvertisement(std::string& address, std::string& identity) {
     if (g.config.direct.mode != Mode::Host) return false;
     address = g.marker.ownAddress();
@@ -3393,6 +3721,10 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
 extern "C" __declspec(dllexport) int EDF6Coop_AllForcesVirtualRoom(void* details) {
     FakeDetails d;
     if (!g.fakes.lookup(static_cast<EOS_HLobbyDetails>(details), &d)) return -1;
-    return RoomIsolationAvailable() && CompatibleRoom(d.attributes, true) ? 1 : 0;
+    if (!RoomIsolationAvailable() || !CompatibleRoom(d.attributes, true)) return 0;
+    const PackCheck pack = PackCompatibleRoom(d.attributes);
+    if (PackAllowed(pack)) return 1;
+    logf("REJOIN All Forces asked about room %s: not joinable, %s", d.roomId.c_str(), PackCheckName(pack));
+    return 0;
 }
 }  // namespace dn

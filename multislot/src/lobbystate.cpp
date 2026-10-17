@@ -85,6 +85,7 @@ struct AttributeData {
     std::int32_t ValueType;  // 0 bool, 1 int64, 2 double, 3 string
 };
 constexpr std::int32_t kInt64 = 1;
+constexpr std::int32_t kString = 3;
 struct Attribute {
     std::int32_t ApiVersion;
     AttributeData* Data;
@@ -554,6 +555,7 @@ void DestroyLobbyHook(void* lobby, const void* options, void* clientData, LobbyI
 }
 
 std::atomic<RoomMemberCountFn> roomMemberCount{nullptr};
+std::atomic<OwnerLobbyTextFn> ownerLobbyText{nullptr};
 
 bool AddCount(void* modification, const char* key, std::int64_t value) {
     AttributeData data{};
@@ -590,11 +592,32 @@ void AddRoomSize(void* lobby, const void* options) {
     if (members) AddCount(update->LobbyModificationHandle, kRoomMembersKey, members);
 }
 
+// The owner's text (SetOwnerLobbyTextSource) in an update the game makes of its lobby.
+void AddOwnerText(const void* options) {
+    const auto* update = static_cast<const UpdateLobbyOptions*>(options);
+    const OwnerLobbyTextFn source = ownerLobbyText.load();
+    std::string key, value;
+    if (!api.addAttribute || !update || !update->LobbyModificationHandle || !source || !source(key, value) || key.empty() ||
+        value.empty())
+        return;
+    AttributeData data{};
+    data.ApiVersion = 1;
+    data.Key = key.c_str();
+    data.Value.AsUtf8 = value.c_str();
+    data.ValueType = kString;
+    const AddAttributeOptions add{2, &data, 0};
+    const EosResult result = api.addAttribute(update->LobbyModificationHandle, &add);
+    static std::atomic<int> logged{0};
+    if (result != kEosSuccess && logged.fetch_add(1) < 4)
+        Log("LOBBY UpdateLobby: %s could not be added to the update (result %d)", key.c_str(), result);
+}
+
 void UpdateLobbyHook(void* lobby, const void* options, void* clientData, LobbyIdCallback callback) {
     AcquireSRWLockShared(&current.lock);
     const std::string id = current.id.empty() ? std::string("?") : current.id;
     ReleaseSRWLockShared(&current.lock);
     AddRoomSize(lobby, options);
+    AddOwnerText(options);
     api.updateLobby(lobby, options, new GameCall{callback, clientData, lobby, nullptr, id, 0}, &GameUpdated);
 }
 
@@ -825,6 +848,7 @@ void NoteLobbyLeft() {
 }
 
 void SetRoomMemberCountSource(RoomMemberCountFn source) { roomMemberCount = source; }
+void SetOwnerLobbyTextSource(OwnerLobbyTextFn source) { ownerLobbyText = source; }
 
 bool InstallLobbyState(HMODULE game, ImportRedirect redirect) {
     const HMODULE eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");

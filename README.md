@@ -77,7 +77,7 @@ How to confirm it worked (check the log `Mods\Plugins\EDF6Coop.log`):
 | `DIRECT client ... connected from ...` (host) / `DIRECT connected to host ...` (joiner) | Direct connection established |
 | `DIRECT auto-connect stopped (the room host did not answer on any advertised address ...)` | The joiner cannot reach the host (firewall / port forwarding / Key mismatch / a different EDF6Coop version); the game keeps using Epic as usual and retries after 60 seconds |
 
-Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works they stay on EOS, and normal play is not affected.
+Joiners try each address for 10 seconds in IPv4 → IPv6 order; if none works they stay on EOS, and normal play is not affected. Joining the room does not depend on the direct link either: the host's member slots also come over EOS (see "Member slots" below). Only a host running an EDF6Coop from before that still sends them over the direct link alone; a join into its room fails after 10 seconds when that link gets nowhere, and the log says the host must update.
 
 **About `Key=`**: an optional passphrase; you do not need it to be safe. Every plugin player publishes, in its own lobby member info, the fingerprint of a key made for this game session. The host lets someone connect as player X only after they prove they hold X's key, and a joiner accepts only a host that proves it holds the room owner's key. Every direct-link packet is then authenticated with keys only those two have, so nobody else — not another player in the room, not someone on the network path — can connect as someone else, take over a link, or alter, inject or replay packets. The Key, when set, is mixed into those keys as an extra shared secret. It is **not** written into the room info — if the host sets a Key, every joiner must put the same Key in their own ini, otherwise auto direct connect fails and falls back to EOS. If you only play with friends you can leave it unset.
 
@@ -136,6 +136,24 @@ The game learns its room's members from the lobby: the list when it enters, then
 
 - Host: a player Epic does not list, with a direct link, whom the game does not have is let into the room while it has space (their plugin dials the host only while their game is in the room); one in the room by its direct link only has left once that link stayed down for `GraceSeconds`; one that just left is not brought back by its old link before that times out, only by a new one. A player the host kicked is not let back in by their direct link in that room, unless they come in through Epic again. Kicking a player Epic does not know of is done by the plugin.
 - Member: while in someone else's room, the plugin notes it every 2 s (host, the host's published identity and addresses, the room's attributes). For 30 minutes after leaving, a room search Epic cannot run (its lobby service down) gets that room as its result; a search Epic answers reaches the game as it is. choosing it dials the host at the noted addresses (5 s each, 30 s in all), and the room is entered once the host's member list includes you. It is forgotten when the room closes, when you are kicked, when you enter another room, or when the room's host changes. That room is the host's real room, but Epic does not know you are in it: leaving or closing it in the game completes locally.
+
+### Member slots
+
+The game numbers the members of its room by the slot each was added in (the first empty one; one that leaves frees its slot and the next newcomer takes it), and that number is in its packets and in the mission start sync. A game that entered later reads the members in Epic's order and can number them differently from the host's game - then players get each other's loadouts or none. So the host's game decides: the host sends its slots (with whom the room removed and, with All Forces, its world state) to every member, and a joining game enters the room with them.
+
+They go over EOS P2P, which every member of the room has, and over the direct link when there is one (socket `EDF6ROOM`, channel `0x50`, only to members that publish `EDF6DN_ROOM`: a game without the plugin would read the packet as game data). The host says so on the lobby itself (`EDF6DN_ROOMFEED` = its EOS ID), where a joining player reads it before it is in the room, so the join waits for the slots whether or not a direct link comes up. Every message carries a stamp (hosting session, message number), and a member takes a copy only when it is newer than the one it has: an older copy coming late over the slower path never replaces a newer one, and a newer one half-received suspends the older one.
+
+How a join goes, by host:
+
+| Host | The join |
+|---|---|
+| this version or newer | waits for the host's slots over EOS (and the direct link), enters with them (`ROOM entering room ... with its host's member slots`); if none come within 45 s the join fails and the log says so |
+| older EDF6Coop with a direct link (`Mode=host`) | waits for the slots over the direct link as before; if that link gets nowhere for 10 s the join fails (`ROOM NOT entering room ...: ... its host sends them only over the direct link it hosts`) |
+| older EDF6Coop without a direct link, or no plugin | enters at once in Epic's order, as without the plugin (`ROOM entering room ... without waiting for member slots`); nobody in that room is numbered by the host |
+
+With All Forces (`EDF6VehicleCrew.dll`) the join also waits for the host's world state (a new player enters only while the host is in the lobby, not during a mission). A host whose EDF6Coop sends neither slots over EOS nor a direct link can never give it, so such a join fails after 10 s with `... its host's EDF6Coop sends no world state at all: the host must update EDF6Coop`.
+
+A room with only its host in it is not entered without the slots either: the host's own slot is 0 only while it is the player who created the room (after the room changed hands it can be any), so the guest's slot cannot be known without the host.
 
 ### Weapon pages and the room's weapon files
 

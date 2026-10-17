@@ -28,6 +28,10 @@ public:
     static constexpr const char* kAddressKey = "EDF6DN_ADDR";  // value: space-separated host addresses
     static constexpr const char* kSeqKey = "EDF6DN_SEQ";       // value: bumped on every publish
     static constexpr const char* kIdentityKey = "EDF6DN_ID";   // value: Identity::commitment() (see auth.h)
+    // value: room feed format (room_view.h): this member reads the room's host's Room message over EOS P2P, and as the
+    // room's owner sends its own. A member without it (an older EDF6Coop) is never sent one: its game would read the
+    // packet as game data.
+    static constexpr const char* kRoomFeedKey = "EDF6DN_ROOM";
     static constexpr int64_t kVersion = 1;
 
     // Resolves the EOS functions it needs. Returns false (unavailable) when any is missing.
@@ -49,6 +53,9 @@ public:
     void setAddress(const std::string& address);
     // The commitment of this player's direct-link identity, published by every player. Thread-safe.
     void setIdentity(const std::string& commitment);
+    // Whether we publish kRoomFeedKey (on by default; tests turn it off to play a host or member of an older version).
+    // Thread-safe.
+    void setRoomFeed(bool on);
     // What we publish: the address we host on ("" when not hosting) and our identity commitment. Thread-safe.
     std::string ownAddress() const;
     std::string ownIdentity() const;
@@ -72,6 +79,11 @@ public:
     // kept like hasMarker() for as long as the member is in the room. Members without the plugin (or
     // with 0.3.6 and older) are absent. EOS calls: run on the EOS tick only.
     std::map<std::string, std::string> memberIdentities();
+    // The members of our lobby (not us) that publish kRoomFeedKey, kept like hasMarker() while they are in the room.
+    // EOS calls: run on the EOS tick only.
+    std::vector<std::string> roomFeedMembers();
+    // Whether `member` published kRoomFeedKey in our lobby since it joined (what roomFeedMembers() last saw).
+    bool readsRoomFeed(const std::string& member) const;
     // The members our copy of the lobby lists now (EOS ids), or nothing when we have no copy (`known` false).
     // EOS calls: run on the EOS tick only.
     std::vector<std::string> members(bool* known);
@@ -114,6 +126,8 @@ private:
     bool dirty_ = false;  // our attributes differ from what the lobby has
     int64_t seq_ = 0;     // EDF6DN_SEQ: makes every publish a real change that EOS sends to everyone
     std::unordered_set<std::string> marked_;  // members seen with the marker since they joined
+    std::unordered_set<std::string> roomFeed_;  // members seen with kRoomFeedKey since they joined
+    bool roomFeedOn_ = true;
     std::map<std::string, std::string> identities_;  // member -> identity commitment seen since it joined
     std::map<std::string, std::string, std::less<>> extensionIdentities_; // compatible profile -> the identity it was observed with
     std::string extensionProblem_;

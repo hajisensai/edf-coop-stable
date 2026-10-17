@@ -437,3 +437,13 @@ set_tests_properties(GameNet_worldadmission GameNet_worldfeed GameNet_worldfeedo
 add_executable(ModRoomIsolationTests ../tests/mod_room_test.cpp)
 target_compile_options(ModRoomIsolationTests PRIVATE /W4 /WX /utf-8 /EHsc)
 add_test(NAME ModRoomIsolation COMMAND ModRoomIsolationTests)
+# All Forces' mission-pack check on rooms Coop persisted (REJOIN, virtual, full-lobby): with the export, and an All
+# Forces from before it (FakeExtensionNoPacks).
+add_library(FakeExtensionNoPacks SHARED "${CMAKE_SOURCE_DIR}/../tests/fake_extension_profile.cpp")
+target_compile_definitions(FakeExtensionNoPacks PRIVATE FAKE_AF_NO_PACKS)
+set_target_properties(FakeExtensionNoPacks PROPERTIES OUTPUT_NAME EDF6VehicleCrew
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-packs"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-packs")
+add_dependencies(ModRoomIsolationTests FakeExtensionProfile FakeExtensionNoPacks)
+add_test(NAME ModRoomPackCheck COMMAND ModRoomIsolationTests - "$<TARGET_FILE:FakeExtensionProfile>"
+    "$<TARGET_FILE:FakeExtensionNoPacks>")

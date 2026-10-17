@@ -788,6 +788,16 @@ inline std::vector<Seat> MigrateSeats() {
     return seats;
 }
 
+// Every game of `stay` (in slot order) numbers them that way (no start sync played: EDF6NET_SLOTS_ONLY).
+inline void CheckSameSlotsOnly(const std::vector<const Spawned*>& stay) {
+    std::string expected;
+    for (std::size_t slot = 0; slot < stay.size(); ++slot)
+        expected += (slot ? " " : "") + std::to_string(slot) + ":" + stay[slot]->user;
+    for (const Spawned* machine : stay)
+        Check(Result(*machine, "slots") == expected,
+              machine->user + "'s game numbers the members " + expected + " (" + Result(*machine, "slots") + ")");
+}
+
 // Every game of `stay` (in slot order) numbers them that way, and the start sync among them gives every machine every
 // player's own record.
 inline void CheckSameSlots(const std::vector<const Spawned*>& stay) {
@@ -812,14 +822,15 @@ inline void CheckSameSlots(const std::vector<const Spawned*>& stay) {
     }
 }
 
-// The new host has no direct link (review 4, item 1): it never says its slots. The members that followed H's hold D's
-// JOINED for the new host's, and when it does not come in time they give it to their games in the order it came -
-// never lose it - so every game has D in H's old slot 0, as A's game does.
+// The new host has no direct link and runs an EDF6Coop from before the room feed (review 4, item 1; [Test] RoomFeed=0):
+// it never says its slots. The members that followed H's hold D's JOINED for the new host's, and when it does not come
+// in time they give it to their games in the order it came - never lose it - so every game has D in H's old slot 0, as
+// A's game does.
 inline std::vector<Seat> MigrateNoDirectSeats() {
     auto seats = MigrateSeats();
     const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
                                "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
-    seats[1].ini = common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    seats[1].ini = common + "RoomFeed=0\r\n[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
     // D's game cannot be told the room's numbering here (see the check), so there is no start sync to agree on.
     for (auto& seat : seats) seat.env.push_back({"EDF6NET_SLOTS_ONLY", "1"});
     return seats;
@@ -847,8 +858,8 @@ inline void CheckSlotMigrateNoDirect(const std::vector<Spawned>& machines, const
     for (const Spawned* machine : {&a, &machines[2], &machines[3]})
         Check(Result(*machine, "slots") == expected,
               machine->user + "'s game numbers the members " + expected + " (" + Result(*machine, "slots") + ")");
-    Check(d.text.find("without member slots: its host (the room's owner changed) hosts no direct link") != std::string::npos,
-          d.user + " entered once the new host turned out to host no direct link, instead of failing its join");
+    Check(d.text.find("without member slots: its host sends them neither over EOS nor over a direct link") != std::string::npos,
+          d.user + " entered once the new host turned out to say no slots at all, instead of failing its join");
     for (const Spawned* guest : {&machines[2], &machines[3]}) {
         Check(guest->text.find("held join(s) go to the game in the order they came: the room's new host did not say its "
                                "member slots in time") != std::string::npos,
@@ -944,8 +955,9 @@ inline std::vector<Seat> GiveUpSeats() {
     const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
                                "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
     auto seats = Seats(2, "slots", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
-    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\n"
-                            "BindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:9\r\n";
+    // A host of an EDF6Coop from before the room feed ([Test] RoomFeed=0): the direct link is its only way to say slots.
+    seats[0].ini = common + "RoomCapacity=8\r\nRoomFeed=0\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\n"
+                            "UPnP=0\r\nBindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:9\r\n";
     seats[0].role = "host-slots-host";
     seats[1].role = "guest-slots-giveup";
     for (auto& seat : seats) {
@@ -960,9 +972,182 @@ inline void CheckGiveUp(const std::vector<Spawned>& machines, const gamenet::Net
     const auto& g = machines[1];
     Check(Result(g, "giveup").rfind("failed", 0) == 0, g.user + "'s join failed (" + Result(g, "giveup") + ")");
     Check(g.text.find("ROOM NOT entering room") != std::string::npos, g.user + " gave its join up, and said why");
+    Check(g.text.find("its host sends them only over the direct link it hosts (an EDF6Coop from before the room feed), "
+                      "and that link got nowhere") != std::string::npos,
+          g.user + " said its host's version sends slots only over the direct link, which got nowhere");
     Check(g.text.find("REJOIN remembering room") != std::string::npos, g.user + " had noted the room while it waited");
     Check(g.text.find("REJOIN forgetting room") != std::string::npos && g.text.find(": the join was given up") != std::string::npos,
           g.user + " forgot the room it could not enter (no REJOIN entry for it)");
+}
+
+// --- The room feed (src/room_view.h): the host's Room message over EOS P2P, which every member has ---
+
+// A host without a direct link (Mode=off) - the room of the player report of 2026-10-17 - in the churn of slotchurn: X
+// joins in slot 1 and leaves, Y takes slot 1 in H's game, B and C hear Epic's statuses only 20 s late. The host's say
+// comes over EOS alone: B and C follow X leaving and Y joining from it, and Y enters with H's slots.
+inline std::vector<Seat> FeedChurnSeats() {
+    auto seats = ChurnSeats(false);
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    return seats;
+}
+
+inline void CheckSlotFeed(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckSlotChurn(machines, network, false);
+    const auto& h = machines[0];
+    const auto& y = machines[4];
+    Check(h.text.find("went over EOS to") != std::string::npos, h.user + " sent its member slots over EOS");
+    Check(h.text.find("DIRECT started") == std::string::npos, h.user + " hosts no direct link");
+    for (const Spawned* guest : {&machines[2], &machines[3], &y})
+        Check(guest->text.find("member slots of " + h.user.substr(0, 8) + " came over EOS") != std::string::npos,
+              guest->user + " got the host's member slots over EOS");
+    Check(y.text.find("they come over EOS)") != std::string::npos && y.text.find("with its host's member slots") != std::string::npos,
+          y.user + "'s join waited for the host's slots over EOS and entered with them");
+}
+
+// The host advertises a direct link nobody can reach (slotgiveup), but sends its slots over EOS too: the guest's join
+// no longer depends on the direct link and enters with them.
+inline std::vector<Seat> FeedRescueSeats() {
+    auto seats = GiveUpSeats();
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\n"
+                            "BindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:9\r\n";
+    seats[1].role = "guest-slots-rescued";
+    const std::string final = seats[0].user + "," + seats[1].user;
+    for (auto& seat : seats) {
+        for (auto& variable : seat.env)
+            if (variable.first == "EDF6NET_FINAL") variable.second = final;
+        for (auto& variable : seat.env)
+            if (variable.first == "EDF6NET_STAY_MS") variable.second = "3000";
+    }
+    return seats;
+}
+
+inline void CheckFeedRescue(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    CheckSameSlotsOnly({&h, &g});
+    Check(g.text.find("they come over EOS and the direct link)") != std::string::npos,
+          g.user + "'s join waited for slots over both paths");
+    Check(g.text.find("member slots of " + h.user.substr(0, 8) + " came over EOS") != std::string::npos,
+          g.user + " got the host's member slots over EOS");
+    Check(g.text.find("DIRECT connected to host") == std::string::npos, g.user + " never reached the host's direct link");
+    Check(g.text.find("with its host's member slots") != std::string::npos && g.text.find("ROOM NOT entering") == std::string::npos,
+          g.user + " entered with its host's member slots although the direct link got nowhere");
+}
+
+// A host of an EDF6Coop from before the room feed and without a direct link ([Test] RoomFeed=0, Mode=off): nobody says
+// slots in its room. A guest enters at once, numbering the members as without the plugin, and says why.
+inline std::vector<Seat> FeedOldHostSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(2, "slots", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
+    seats[0].ini = common + "RoomCapacity=8\r\nRoomFeed=0\r\n[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\n"
+                            "BindPhysicalInterface=0\r\n";
+    seats[0].role = "host-slots-host";
+    seats[1].role = "guest-slots-epic";
+    for (auto& seat : seats) {
+        seat.env.push_back({"EDF6NET_FINAL", seats[0].user + "," + seats[1].user});
+        seat.env.push_back({"EDF6NET_SLOTS_ONLY", "1"});
+        seat.env.push_back({"EDF6NET_STAY_MS", "3000"});
+    }
+    return seats;
+}
+
+inline void CheckFeedOldHost(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    Check(Result(g, "entered") == "epic", g.user + " is in the room (" + Result(g, "entered") + ")");
+    Check(g.text.find("without waiting for member slots: its host " + h.user.substr(0, 8) +
+                      " says on the lobby neither that it sends them over EOS nor a direct-link address") != std::string::npos,
+          g.user + " entered at once and said that its host says no slots");
+    Check(g.text.find("once its host's member slots are here") == std::string::npos, g.user + "'s join did not wait");
+    Check(h.text.find("went over EOS") == std::string::npos, h.user + " (an older version) sent nothing over EOS");
+    CheckSameSlotsOnly({&h, &g});
+}
+
+// A host with a direct link the guest reaches and the room feed: the same stamped slots come both ways.
+inline std::vector<Seat> FeedBothSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(3, "slots", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
+    seats[0].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=host\r\nListenPort=@PORT@\r\nUPnP=0\r\n"
+                            "BindPhysicalInterface=0\r\nPublicAddress=127.0.0.1:@PORT@\r\n";
+    seats[0].role = "host-slots-host";
+    seats[1].role = "guest-slots-rescued";  // waits for the host's address on the lobby, then joins
+    seats[2].role = "guest-slots-epic";
+    for (auto& seat : seats) seat.env.push_back({"EDF6NET_FINAL", seats[0].user + "," + seats[1].user + "," + seats[2].user});
+    return seats;
+}
+
+inline void CheckFeedBoth(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    CheckSameSlots({&h, &machines[1], &machines[2]});
+    for (const Spawned* guest : {&machines[1], &machines[2]}) {
+        Check(guest->text.find("member slots of " + h.user.substr(0, 8) + " came over EOS") != std::string::npos,
+              guest->user + " got the host's member slots over EOS");
+        Check(guest->text.find("DIRECT connected to host") != std::string::npos, guest->user + " is on the host's direct link too");
+        Check(guest->text.find("with its host's member slots") != std::string::npos, guest->user + " entered with them");
+    }
+}
+
+// The room's new host has no direct link but sends its slots over EOS (slotmigratenodirect with the room feed): every
+// member follows A's slots from it, D enters with them, and they play the start sync.
+inline std::vector<Seat> MigrateFeedSeats() {
+    auto seats = MigrateSeats();
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    seats[1].ini = common + "RoomCapacity=8\r\n[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    return seats;
+}
+
+inline void CheckSlotMigrateFeed(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckSlotMigrate(machines, network);
+    const auto& a = machines[1];
+    Check(a.text.find("went over EOS to") != std::string::npos, a.user + ", the new host, sent its member slots over EOS");
+    for (const Spawned* member : {&machines[2], &machines[3], &machines[4]})
+        Check(member->text.find("member slots of " + a.user.substr(0, 8) + " came over EOS") != std::string::npos,
+              member->user + " got the new host's member slots over EOS");
+}
+
+// All Forces: the player report of 2026-10-17. A guest with EDF6VehicleCrew joins a host without a direct link. With the
+// room feed its world state and slots come over EOS and it enters; from a host of an older version nothing can admit it,
+// and the join fails at once with a line that says the host must update.
+inline std::vector<Seat> WorldFeedSeats(bool feed) {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(2, "worldfeed", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
+    if (!feed)
+        seats[0].ini = common + "RoomFeed=0\r\n[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    return seats;
+}
+
+inline void CheckWorldFeed(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    for (const auto& machine : machines) Check(Result(machine, "af-profile") == "loaded", machine.user + " loaded the AF test fixture");
+    Check(Result(g, "world-callback") == "1 result=0 acknowledged=1",
+          g.user + "'s join completed once, successfully (" + Result(g, "world-callback") + ")");
+    Check(Result(h, "world-host") == "guest joined", h.user + " saw the guest in (" + Result(h, "world-host") + ")");
+    Check(g.text.find("they come over EOS); All Forces also needs its host's world state") != std::string::npos,
+          g.user + "'s join waited for the host's slots and world state over EOS");
+    Check(g.text.find("member slots of " + h.user.substr(0, 8) + " came over EOS") != std::string::npos,
+          g.user + " got them over EOS");
+    Check(g.text.find("with its host's member slots") != std::string::npos, g.user + " entered with them");
+    Check(network.lobby.count == 2, "both members are in the EOS lobby");
+}
+
+inline void CheckWorldFeedOld(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& g = machines[1];
+    Check(Result(g, "world-callback").rfind("1 result=", 0) == 0 && Result(g, "world-callback").find("result=0") == std::string::npos,
+          g.user + "'s join failed once (" + Result(g, "world-callback") + ")");
+    Check(g.text.find("All Forces (EDF6VehicleCrew) admits us only on its host's world state, which did not come; its host's "
+                      "EDF6Coop sends no world state at all: the host must update EDF6Coop") != std::string::npos,
+          g.user + " said why: its host's EDF6Coop sends no world state");
+    const unsigned long long took = std::strtoull(Result(g, "world-took").c_str(), nullptr, 10);
+    Check(took < 15000, g.user + "'s join ended within the wait for a host that says nothing (" + Result(g, "world-took") + " ms)");
 }
 
 inline std::vector<Seat> WorldAdmissionSeats() {
@@ -1024,6 +1209,13 @@ inline const std::vector<Scenario>& NetScenarios() {
         {"slotmigratenodirect", MigrateNoDirectSeats(), 200000, &CheckSlotMigrateNoDirect, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"slotmigrateearlyroom", MigrateEarlyRoomSeats(), 180000, &CheckSlotMigrateEarlyRoom, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"slotgiveup", GiveUpSeats(), 120000, &CheckGiveUp},
+        {"slotfeed", FeedChurnSeats(), 150000, &CheckSlotFeed, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
+        {"slotfeedrescue", FeedRescueSeats(), 120000, &CheckFeedRescue},
+        {"slotfeedold", FeedOldHostSeats(), 120000, &CheckFeedOldHost},
+        {"slotfeedboth", FeedBothSeats(), 150000, &CheckFeedBoth},
+        {"slotmigratefeed", MigrateFeedSeats(), 180000, &CheckSlotMigrateFeed, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
+        {"worldfeed", WorldFeedSeats(true), 90000, &CheckWorldFeed},
+        {"worldfeedold", WorldFeedSeats(false), 90000, &CheckWorldFeedOld},
         {"slotchurn", ChurnSeats(false), 150000,
          [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckSlotChurn(m, n, false); },
          {{"EDF6NET_EPIC_MEMBERS", "4"}}},

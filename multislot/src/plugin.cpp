@@ -770,6 +770,10 @@ bool LoadRooms(const wchar_t* iniPath) {
     // First, so its wrappers sit next to EOS: what a room update publishes is read from the lobby, and a
     // machine never stays behind in a lobby it closed or left (lobbystate.h).
     SetRoomMemberCountSource(&GameRoomMemberCount);
+    SetOwnerLobbyTextSource([](std::string& key, std::string& value) {
+        key = dn::kRoomFeedLobbyKey;
+        return dn::roomFeedAdvertisement(value);
+    });
     if (InstallLobbyState(game, &RedirectGameImport))
         Log("Lobby state: room updates keep the lobby's own kind and size; a close of a lobby someone else owns, "
             "or one that fails, leaves it");

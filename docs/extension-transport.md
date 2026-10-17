@@ -80,6 +80,18 @@ unavailable authority fails the join instead of the ordinary no-host fallback.
 Virtual joins use the same fresh-client policy. No unsafe player constructor is
 replaced with a global null return.
 
+The same stamped Room message also travels over EOS P2P (the room feed, `src/room_view.h`):
+socket `EDF6ROOM`, channel `0x50`, sent by the lobby owner to every member publishing
+`EDF6DN_ROOM`, and announced on the lobby as `EDF6DN_ROOMFEED = <owner PUID>`. EOS
+authenticates the sending ProductUserId, and a member follows only the current lobby
+owner's messages, so a host without a direct link (`Mode=off`, the default) is an
+authority too. Each message carries `#room-v1:<epoch>:<seq>` after the removed-ID
+delimiter (older readers skip it); a member takes a copy only when its stamp is newer
+than the one it holds from that owner, whichever path brought it, and a newer EOS
+message seen in part suspends the older one. A host whose EDF6Coop predates the room
+feed and hosts no direct link can never provide a manifest: an All Forces client's
+join into its room fails after `kParkedEntryMs` with a log line naming that cause.
+
 Room/Roster pagination requires exact contiguous coverage, bounded totals and
 monotonic versions. Learning any page of a newer Room snapshot suspends an older
 admission grant until the full snapshot arrives. Host identity changes, new

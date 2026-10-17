@@ -93,6 +93,17 @@ bool hostAdvertisement(std::string& address, std::string& identity);
 // `refuseOthers`. The host's view of what each member beyond Epic's lobby runs (for the version gate).
 void setNetcodeIdentity(uint32_t protocol, uint32_t caps, bool refuseOthers);
 std::map<std::string, std::pair<uint32_t, uint32_t>> directMemberNetcode();  // EOS id -> (protocol, caps)
+// --- The room feed (room_view.h): the host's Room message over EOS P2P, which every member of the room has ---
+// What a room owner puts on the lobby itself, where a player joining reads it before it is in the room: its own EOS id
+// (an owner of an older version taking the room over leaves the value as it was, naming someone else).
+constexpr const char* kRoomFeedLobbyKey = "EDF6DN_ROOMFEED";
+// Our EOS id while we own the lobby we are in and send the room feed: what the room part publishes as
+// kRoomFeedLobbyKey. False otherwise. Thread-safe.
+bool roomFeedAdvertisement(std::string& owner);
+// Tests only ([Test] RoomFeed=0): play an EDF6Coop from before the room feed - publish neither kRoomFeedLobbyKey nor
+// LobbyMarker::kRoomFeedKey, send no Room message over EOS and follow none.
+void setTestRoomFeed(bool on);
+
 // Tests only ([Test] LoopbackHosts): a room host may advertise a loopback address (gamenet runs on one machine).
 void setTestLoopbackHosts(bool on);
 

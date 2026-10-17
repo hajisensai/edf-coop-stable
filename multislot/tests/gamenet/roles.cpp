@@ -156,7 +156,11 @@ struct Room {
 
 // Creates (host) or joins (guest) the room the way the game does, then waits until every member is in and
 // publishes the split start message marker (EDF6Coop does that on its own, from the game's EOS ticks).
+void ListenToMembers(const Machine& machine);
+
 bool EnterRoom(Machine& machine, bool host, Room& room) {
+    // The game's lobby manager hears every member status (its view of the room, and the room's host's slots, follow them).
+    ListenToMembers(machine);
     Entered entered;
     if (host) {
         CreateOptions options;
@@ -679,6 +683,11 @@ void OnMemberStatus(const MemberStatusInfo* info) {
     if (info) toldStatuses.emplace_back(text, info->CurrentStatus);
 }
 void ListenToMembers(const Machine& machine) {
+    // Once per machine, as the game's lobby manager registers its one handler (012B3380) at start: each registration
+    // would hear every status again.
+    static bool listening = false;
+    if (listening) return;
+    listening = true;
     struct Options {
         std::int32_t ApiVersion;
     } options{1};
@@ -822,8 +831,8 @@ int SlotRoom(Machine& machine, const std::string& how) {
             if (how == "direct" ? count < epic : how == "late" ? !(wasFull && count < epic) : count < seat) return false;
             if (details) FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release")(details);
             details = roomDetails();
-            // "giveup" too: its join is parked only once the host's address is on the lobby.
-            if (!details || (how != "direct" && how != "giveup")) return details != nullptr;
+            // "giveup" and "rescued" too: they join once the host's (unreachable) address is on the lobby.
+            if (!details || (how != "direct" && how != "giveup" && how != "rescued")) return details != nullptr;
             // Coming in over the direct link needs the host's address on the lobby (FullJoin).
             struct ByKey {
                 std::int32_t ApiVersion;
@@ -993,6 +1002,97 @@ void OnWorldEntered(const LobbyCallbackInfo* info) {
 
 // Real EDF.dll imports -> production EOS wrappers -> authenticated DirectNet room authority.
 // The fake controls only AF's published phase; AF's actual world/lobby lifecycle is tested separately.
+// The room feed (src/room_view.h) with All Forces' world admission: the host hosts no direct link (Mode=off) and is in
+// its lobby (Lobby phase) from the start. `feed`: the host sends its Room message over EOS, so the guest's parked join
+// completes with its slots and world state; without (a host of an older EDF6Coop, [Test] RoomFeed=0) nothing can
+// admit the guest, and its join fails with a line saying why. The guest reports how its join ended ("world-callback").
+int WorldFeed(Machine& machine, bool host) {
+    ListenToMembers(machine);
+    const auto setAdmission = reinterpret_cast<void (EDF6COOP_CALL *)(uint32_t, const char*)>(
+        GetProcAddress(GetModuleHandleW(L"EDF6VehicleCrew.dll"), "FakeAF_SetAdmission"));
+    if (!setAdmission) {
+        Result("world-admission", "missing AF test profile");
+        return 1;
+    }
+    const auto roomCount = FakeExport<std::uint32_t (*)()>("FakeNet_RoomCount");
+    const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+    const auto callbacks = FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready");
+    setAdmission(1, nullptr);
+    if (host) {
+        Entered entered;
+        CreateOptions options;
+        options.LocalUserId = Self(machine);
+        options.MaxLobbyMembers = gamenet::kMaxMachines;
+        Import<LobbyCall>(machine, "EOS_Lobby_CreateLobby")(kLobbyInterface, &options, &entered, &OnEntered);
+        if (!TickUntil(machine, 10000, [&] { return entered.done; }) || entered.result != 0) return 1;
+        if (!TickUntil(machine, 20000, [&] { return roomCount() == 2; })) {
+            Result("world-admission", "guest never reached EOS lobby");
+            return 1;
+        }
+        Transport transport;
+        if (!transport.Start(machine, entered.lobby, GameRoomMembers(machine, entered.lobby))) return 1;
+        // Until the guest's join ended one way or the other (its callback ran), and it saw that we saw it.
+        const bool ended = TickUntil(machine, 40000, [&] {
+            transport.Tick();
+            return callbacks(0) != 0;
+        });
+        Result("world-host", "%s", ended ? (finish(0) ? "guest joined" : "guest's join failed") : "guest's join never ended");
+        finish(1);
+        TickUntil(machine, 2000, [&] {
+            transport.Tick();
+            return false;
+        });
+        return ended ? 0 : 1;
+    }
+    const auto roomDetails = FakeExport<void* (*)()>("FakeNet_RoomDetails");
+    const auto release = FakeExport<void (*)(void*)>("EOS_LobbyDetails_Release");
+    void* details = nullptr;
+    const bool found = TickUntil(machine, 20000, [&] {
+        details = roomCount() == 1 ? roomDetails() : nullptr;
+        return details != nullptr;
+    });
+    if (!found) {
+        Result("world-admission", "no room to join");
+        return 1;
+    }
+    // A room is found by the attributes its owner's game puts on it, and the room feed's goes with them: wait for it a
+    // while (a host of an older version never puts it there), as a search would find the room only then.
+    struct ByKey { std::int32_t ApiVersion; const char* AttrKey; } key{1, "EDF6DN_ROOMFEED"};
+    TickUntil(machine, 5000, [&] {
+        release(details);
+        details = roomDetails();
+        void* attribute = nullptr;
+        if (!details || FakeExport<std::int32_t (*)(void*, const void*, void**)>("EOS_LobbyDetails_CopyAttributeByKey")(
+                            details, &key, &attribute) != 0)
+            return false;
+        FakeExport<void (*)(void*)>("EOS_Lobby_Attribute_Release")(attribute);
+        return true;
+    });
+    if (!details) {
+        Result("world-admission", "the room went");
+        return 1;
+    }
+    WorldEntered state;
+    JoinOptions options;
+    options.LocalUserId = Self(machine);
+    options.LobbyDetailsHandle = details;
+    const ULONGLONG start = GetTickCount64();
+    Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &state, &OnWorldEntered);
+    const bool completed = TickUntil(machine, 40000, [&] {
+        PollP2P(machine);
+        return state.entered.done;
+    });
+    const ULONGLONG took = GetTickCount64() - start;
+    release(details);
+    const bool acknowledged = completed && TickUntil(machine, 5000, [&] {
+        PollP2P(machine);
+        return finish(0) >= (state.entered.result == 0 ? 2u : 1u);
+    });
+    Result("world-callback", "%u result=%d acknowledged=%d", state.callbacks, state.entered.result, acknowledged ? 1 : 0);
+    Result("world-took", "%llu", static_cast<unsigned long long>(took));
+    return completed && state.callbacks == 1 ? 0 : 1;
+}
+
 int WorldAdmission(Machine& machine, bool host) {
     ListenToMembers(machine);
     const auto setAdmission = reinterpret_cast<void (EDF6COOP_CALL *)(uint32_t, const char*)>(
@@ -1141,6 +1241,7 @@ int RunRole(Machine& machine, const std::string& role) {
     if (step == "fullroom") return FullRoom(machine, host);
     if (step == "fulljoin") return FullJoin(machine);
     if (step == "worldadmission") return WorldAdmission(machine, host);
+    if (step == "worldfeed") return WorldFeed(machine, host);
     if (step.rfind("slots-", 0) == 0) return SlotRoom(machine, step.substr(6));
     Result("role", "unknown role %s", role.c_str());
     return 2;

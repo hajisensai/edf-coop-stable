@@ -32,7 +32,8 @@ namespace testguard {
 class LoopbackGuard {
 public:
     LoopbackGuard() : thread_([this] { run(); }) { watch(GetCurrentProcessId()); }
-    ~LoopbackGuard() { stop(); }
+    // Only stops the watcher: the last look and the result are stop()'s, which can allocate and throw.
+    ~LoopbackGuard() { halt(); }
     LoopbackGuard(const LoopbackGuard&) = delete;
     LoopbackGuard& operator=(const LoopbackGuard&) = delete;
 
@@ -42,11 +43,7 @@ public:
     }
     // Stops watching (after one last look) and returns what was bound to an address that is not loopback.
     std::vector<std::string> stop() {
-        if (thread_.joinable()) {
-            done_ = true;
-            thread_.join();
-            look();
-        }
+        if (halt()) look();
         std::lock_guard<std::mutex> lock(mu_);
         return {found_.begin(), found_.end()};
     }
@@ -59,6 +56,18 @@ public:
     }
 
 private:
+    // Ends the watcher thread; true when it was running (a last look is then due). Never throws: a join that fails
+    // (std::system_error) leaves the thread detached rather than ending the process from a destructor.
+    bool halt() noexcept {
+        done_ = true;
+        if (!thread_.joinable()) return false;
+        try {
+            thread_.join();
+        } catch (...) {
+            thread_.detach();
+        }
+        return true;
+    }
     void run() {
         while (!done_) {
             look();

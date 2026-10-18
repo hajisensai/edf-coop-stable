@@ -40,6 +40,9 @@ bool CompatibleRoom(const Attributes& attributes,bool allForces) {
 // never reaches that hook with an EOS handle, so Coop asks All Forces itself with the attributes it kept:
 // `int EDF6AF_RoomPackCompatible(int64_t dlc, const char* afPack)` (afPack nullptr when the room has none), 1 joinable,
 // 0 not (All Forces logs why). An All Forces without that export (from before its mission packs) has nothing to check.
+// It is called on the game's thread - inside the game's JoinLobby, and in the room search's and the join's EOS
+// callbacks on the EOS tick (no lock of Coop's held) - so it must answer at once: whatever All Forces tells the player
+// about a refusal it shows on a later frame of its own, never in a dialog or a wait inside this call.
 enum class PackCheck { Ok, NoExport, Refused, NoContent };
 inline const char* PackCheckName(PackCheck c) {
     switch(c) {

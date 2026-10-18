@@ -5,6 +5,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
+#include <cwchar>
+#include <vector>
 
 #include "log.h"
 #include "netcompress.h"
@@ -345,6 +348,24 @@ void InitNetFeature(const wchar_t* iniPath) {
         dn::setTestRoomFeed(false);
         Log("TEST RoomFeed=0: this machine plays an EDF6Coop from before the room feed (no member slots over EOS, either "
             "way)");
+    }
+    {
+        wchar_t text[256]{};
+        GetPrivateProfileStringW(L"Test", L"RoomFeedEpochs", L"", text, 256, iniPath);
+        std::vector<std::uint64_t> epochs;
+        for (const wchar_t* at = text; *at;) {
+            wchar_t* end = nullptr;
+            const unsigned long long e = std::wcstoull(at, &end, 10);
+            if (end == at) break;
+            epochs.push_back(e);
+            at = *end == L',' ? end + 1 : end;
+        }
+        const UINT restartMs = GetPrivateProfileIntW(L"Test", L"RoomFeedRestartMs", 0, iniPath);
+        if (!epochs.empty() || restartMs) {
+            dn::setTestRoomFeedSessions(epochs, restartMs);
+            Log("TEST RoomFeedEpochs=%ls RoomFeedRestartMs=%u: our hosting sessions take these epochs, and the first one "
+                "of a room ends after that long", text, restartMs);
+        }
     }
     if (GetPrivateProfileIntW(L"Test", L"LoopbackHosts", 0, iniPath)) {
         dn::setTestLoopbackHosts(true);

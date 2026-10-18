@@ -205,6 +205,24 @@ void MissionStartHandler(CpuContext* context) {
     missionStartHandler(context);
 }
 
+// The BVM player table hooks as written (patches.h BvmPlayerTableHooks, in its order): the jump each site got, so
+// EDF6Coop_BvmPlayerTableHooks can tell whether it is still there. Written once by Apply, before the export is asked.
+struct WrittenHook {
+    const unsigned char* at = nullptr;
+    std::uint8_t jump[5]{};
+};
+WrittenHook bvmHooks[4];
+std::atomic<bool> bvmHooksWritten{false};
+
+void NoteBvmHooks(const unsigned char* base) {
+    const auto sites = BvmPlayerTableHooks();
+    for (std::size_t i = 0; i < sites.size() && i < std::size(bvmHooks); ++i) {
+        bvmHooks[i].at = base + sites[i].rva;
+        std::memcpy(bvmHooks[i].jump, bvmHooks[i].at, sizeof(bvmHooks[i].jump));
+    }
+    bvmHooksWritten.store(true, std::memory_order_release);
+}
+
 bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int ghosts, bool diagnostics, bool armor,
            bool recovery, bool keepRoom, bool hostData, float smoothing, ThunkPage& thunks) {
     auto patches = GuestPatches();
@@ -436,6 +454,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
         "slots); stubs and hook thunks at %p (%zu bytes)", writes.size(), redirects.size(), hooks.size(), compares.size(),
         patches.size(), slots.size(), static_cast<const void*>(thunks.Base()), thunks.Used());
     dn::setExtensionMissionGateReady(mission);
+    if (mission) NoteBvmHooks(base);  // the hooks are in only with Extend=1 (all of them, or Apply refused above)
     return true;
 }
 
@@ -1008,6 +1027,20 @@ extern "C" __declspec(dllexport) const std::uint8_t* EDF6Coop_LoadoutRecord(int 
 // follows it (-1: not following the host's slots, or the host's list does not have it).
 extern "C" __declspec(dllexport) int EDF6Coop_HostSlot(const char* member) {
     return member ? dn::hostSlotOf(member) : -1;
+}
+
+// For All Forces (its EDF5 / EDF4.1 script missions use the BVM player table too): bit i set when the i-th of
+// patches.h BvmPlayerTableHooks (21F3CF, 222761, 228AED, 22A685) is in and still holds the jump this plugin wrote.
+// 0 with [Mission] Extend=0, or when the patches were refused. Any thread; reads 5 bytes per site.
+extern "C" __declspec(dllexport) std::uint32_t __cdecl EDF6Coop_BvmPlayerTableHooks(void) {
+    using multislot::bvmHooks;
+    if (!multislot::bvmHooksWritten.load(std::memory_order_acquire)) return 0;
+    std::uint32_t bits = 0;
+    for (std::size_t i = 0; i < std::size(bvmHooks); ++i)
+        if (bvmHooks[i].at && bvmHooks[i].jump[0] == 0xE9 &&
+            std::memcmp(bvmHooks[i].at, bvmHooks[i].jump, sizeof(bvmHooks[i].jump)) == 0)
+            bits |= 1u << i;
+    return bits;
 }
 
 // For the game-code tests (tests/gamenet): sends `size` bytes to `remote` in bulk (netfeature.h SendBulk).

@@ -86,8 +86,11 @@ socket `EDF6ROOM`, channel `0x50`, sent by the lobby owner to every member publi
 authenticates the sending ProductUserId, and a member follows only the current lobby
 owner's messages, so a host without a direct link (`Mode=off`, the default) is an
 authority too. Each message carries `#room-v1:<epoch>:<seq>` after the removed-ID
-delimiter (older readers skip it); a member takes a copy only when its stamp is newer
-than the one it holds from that owner, whichever path brought it, and a newer EOS
+delimiter (older readers skip it). The epoch is 64 random bits drawn when the owner begins
+hosting, not a clock: a member orders an owner's sessions by when it first heard of each
+(the one heard of last is current, every earlier one is over), and within the current one
+by `seq`. A member takes a copy only when its stamp is newer than the one it holds from
+that owner, whichever path brought it, and a newer EOS
 message seen in part suspends the older one. A host whose EDF6Coop predates the room
 feed and hosts no direct link can never provide a manifest: an All Forces client's
 join into its room fails after `kParkedEntryMs` with a log line naming that cause.

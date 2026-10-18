@@ -252,11 +252,13 @@ bool DirectNet::openSocket(int family, uint16_t port) {
         auto* a = reinterpret_cast<sockaddr_in6*>(&local);
         a->sin6_family = AF_INET6;
         a->sin6_port = htons(port);
+        if (opt_.testBindLoopback != DirectOptions::Loopback::Off) a->sin6_addr = in6addr_loopback;
         localLen = sizeof(sockaddr_in6);
     } else {
         auto* a = reinterpret_cast<sockaddr_in*>(&local);
         a->sin_family = AF_INET;
         a->sin_port = htons(port);
+        if (opt_.testBindLoopback != DirectOptions::Loopback::Off) a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         localLen = sizeof(sockaddr_in);
     }
     if (bind(s, reinterpret_cast<sockaddr*>(&local), localLen) != 0) {
@@ -282,11 +284,21 @@ bool DirectNet::start(const DirectOptions& options) {
     opt_ = options;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
-    bool opened = openSocket(AF_INET6, opt_.listenPort) || openSocket(AF_INET, opt_.listenPort);
+    // Dual-stack first (one IPv6 socket that takes IPv4 too), IPv4 alone where there is no IPv6. Bound to loopback
+    // (tests), one socket has one address: the family the test asked for, only.
+    const auto open = [&](uint16_t port) {
+        switch (opt_.testBindLoopback) {
+            case DirectOptions::Loopback::V4: return openSocket(AF_INET, port);
+            case DirectOptions::Loopback::V6: return openSocket(AF_INET6, port);
+            case DirectOptions::Loopback::Off: break;
+        }
+        return openSocket(AF_INET6, port) || openSocket(AF_INET, port);
+    };
+    bool opened = open(opt_.listenPort);
     if (!opened && opt_.mode == Mode::Join && opt_.listenPort != 0) {
         // A joining player's local port is a preference, not something anyone connects to.
         logf("DIRECT UDP port %u is busy; joining from a random port instead", opt_.listenPort);
-        opened = openSocket(AF_INET6, 0) || openSocket(AF_INET, 0);
+        opened = open(0);
     }
     std::string secret(32, '\0');
     if (opened && !randomBytes(reinterpret_cast<uint8_t*>(secret.data()), secret.size())) {

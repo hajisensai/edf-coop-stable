@@ -14,6 +14,8 @@
 #include "../../../src/eos_min.h"
 #include "../../../src/extension_api.h"
 #include "../../src/netplayer.h"
+#include "../../src/hitauth.h"
+#include "../../src/hitauthgame.h"
 
 namespace gamenet {
 namespace {
@@ -1222,6 +1224,172 @@ int FullJoin(Machine& machine) {
     return FullRoomMission(machine, false, room, RoomMembers());
 }
 
+// --- Hit authority (multislot/src/hitauth.h, docs/net-re/damage.md 6.7): a forwarded hit with its sub-hits ---
+
+// A ragdoll component as 6E3B10 / 6EA430 lay it out (bodies [+0x78], count [+0x88], 0xC0 each, the rigid body [+0x50]
+// with its Havok id at +0xF0), with 4 bodies numbered from `firstId`: each machine's physics world numbers its own.
+struct StandInRagdoll {
+    alignas(16) std::uint8_t component[0x100]{};
+    alignas(16) std::uint8_t bodies[4 * multislot::kRagdollBodyBytes]{};
+    alignas(16) std::uint8_t rigid[4][0x100]{};
+    explicit StandInRagdoll(std::uint32_t firstId) {
+        const void* b = bodies;
+        std::memcpy(component + multislot::kRagdollBodies, &b, 8);
+        const std::size_t count = 4;
+        std::memcpy(component + multislot::kRagdollCount, &count, 8);
+        for (int i = 0; i < 4; ++i) {
+            const void* r = rigid[i];
+            std::memcpy(bodies + i * multislot::kRagdollBodyBytes + 0x50, &r, 8);
+            const std::uint32_t id = firstId + static_cast<std::uint32_t>(i);
+            std::memcpy(rigid[i] + 0xF0, &id, 4);
+        }
+    }
+};
+// One UfoCarrier508 as far as its weak-point filter (4F7190) reads it: the ragdoll at +0xB60, the hatch flag +0xD85,
+// the core body index +0xD8C (2).
+struct StandInCarrier {
+    alignas(16) std::uint8_t object[0x1700]{};
+    StandInRagdoll ragdoll;
+    StandInCarrier(std::uint32_t firstId, const void* vtable) : ragdoll(firstId) {
+        std::memcpy(object, &vtable, 8);
+        std::memcpy(object + 0xB60 + multislot::kRagdollBodies, ragdoll.component + multislot::kRagdollBodies, 0x18);
+        object[0xD85] = 1;
+        const std::int32_t core = 2;
+        std::memcpy(object + 0xD8C, &core, 4);
+    }
+};
+constexpr std::uint32_t kStreamConstruct = 0x79A460, kStreamFrom = 0x12B4530, kStreamBytes = 0x600;
+constexpr std::uint32_t kCarrierAccept = 0x4F7190, kPartsReserve = 0x124190, kPartsRelease = 0x11E9D0;
+constexpr std::uint32_t kHitType = 0x2701;  // a record type nothing in the game subscribes to
+
+multislot::DamageEvent ShotAtCarrier(std::uint32_t seq) {
+    multislot::DamageEvent e;
+    e.seq = seq;
+    e.sender = multislot::HitSenderId();
+    e.kind = 3;
+    e.team = 0;
+    e.point[0] = 10.5f, e.point[1] = 2.5f, e.point[2] = -7.0f;
+    e.damage = 125.0f;
+    e.size = 0.3f;
+    e.extra68 = 1.0f;
+    e.attackerPos[0] = 100.0f;
+    return e;
+}
+
+// Machine 1 (the sender) shoots machine 2's UfoCarrier508 at its core: it finds the body the shot touched in its own
+// copy (HitBodiesFromGdi: +0xB60, body 2), writes the event with the game's stream code and sends it through the
+// game's packet controller, then two forged ones: a sub-hit at +0x1F00 (far into or past the object) and one at +0x7A0
+// (aligned, inside the old search range, where no class has a ragdoll). Machine 2 (the owner) reads each with the
+// game's stream code, admits it through the owner's gate (HitGate) and rebuilds the sub-hit with its own copy's body
+// id, and asks the game's own weak-point filter whether the hit counts.
+int HitAuthority(Machine& machine, bool host) {
+    using namespace multislot;
+    InitHitAuthority(reinterpret_cast<const unsigned char*>(machine.game));
+    Room room;
+    if (!EnterRoom(machine, host, room)) return 1;
+    Transport transport;
+    std::vector<std::vector<std::uint8_t>> received;
+    const auto listen = [&] {
+        transport.Subscribe(kHitType, [&](int, const std::uint8_t* data, std::size_t size) {
+            received.emplace_back(data, data + size);
+        });
+        return true;
+    };
+    if (!Connect(machine, room, transport, listen)) return 1;
+    const auto fn = [&](std::uint32_t rva) { return machine.At<void*>(rva); };
+    static const std::uint64_t carrierTable[4]{};
+    if (host) {
+        static StandInCarrier sender(900, carrierTable);
+        alignas(16) std::uint8_t gdi[kGdiBytes]{};
+        alignas(16) std::uint8_t hits[2 * kHitRecordBytes]{};
+        const float core[4] = {10.5f, 2.5f, -7.0f, 1.0f}, away[4] = {40.0f, 2.5f, -7.0f, 1.0f};
+        const std::uint32_t coreId = 902, otherId = 77777;  // the core body of this copy, and another object's body
+        std::memcpy(hits, core, 16);
+        std::memcpy(hits + kHitRecordBody, &coreId, 4);
+        std::memcpy(hits + kHitRecordBytes, away, 16);
+        std::memcpy(hits + kHitRecordBytes + kHitRecordBody, &otherId, 4);
+        const void* at = hits;
+        std::memcpy(gdi + kGdiHits, &at, 8);
+        const std::size_t two = 2;
+        std::memcpy(gdi + kGdiHitCount, &two, 8);
+        DamageEvent shot = ShotAtCarrier(1);
+        HitBodiesFromGdi(sender.object, gdi, shot, GetTickCount64());
+        Result("hit-sent", "%u sub-hit(s), the first at +0x%X body %u", shot.bodyCount,
+               shot.bodyCount ? shot.bodies[0].component : 0u, shot.bodyCount ? shot.bodies[0].index : 0u);
+        DamageEvent beyond = ShotAtCarrier(2), stray = ShotAtCarrier(3);
+        beyond.bodyCount = stray.bodyCount = 1;
+        beyond.bodies[0] = HitBody{0x1F00, 2, {10.5f, 2.5f, -7.0f}};
+        stray.bodies[0] = HitBody{0x7A0, 2, {10.5f, 2.5f, -7.0f}};
+        std::size_t sent = 0;
+        for (const DamageEvent* event : {&shot, &beyond, &stray}) {
+            alignas(16) std::uint8_t stream[kStreamBytes]{};
+            reinterpret_cast<void*(__fastcall*)(void*, int)>(fn(kStreamConstruct))(stream, 0x40);
+            if (!WriteHitEventMessage(stream, *event)) continue;
+            std::size_t size = 0;
+            std::memcpy(&size, stream + 0x5F0, 8);
+            for (const auto& member : room.members)
+                if (member != machine.user && transport.SendReliable(member, kHitType, stream + 0x10, size)) ++sent;
+        }
+        Result("hit-events-sent", "%zu", sent);
+        const auto finish = FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish");
+        TickUntil(machine, 15000, [&] {
+            transport.Tick();
+            return finish(0) >= 1;
+        });
+        TickUntil(machine, 500, [&] {
+            transport.Tick();
+            return false;
+        });
+        return sent == 3 ? 0 : 1;
+    }
+    TickUntil(machine, 10000, [&] {
+        transport.Tick();
+        return received.size() >= 3;
+    });
+    static StandInCarrier owner(4000, carrierTable);
+    HitGate gate;
+    HitView view;
+    view.targetLocal = view.targetAlive = true;
+    view.targetPos[0] = 12.0f, view.targetPos[2] = -7.0f;
+    for (const auto& bytes : received) {
+        alignas(16) std::uint8_t stream[kStreamBytes]{};
+        reinterpret_cast<void(__fastcall*)(void*, const void*, std::size_t)>(fn(kStreamFrom))(stream, bytes.data(),
+                                                                                               bytes.size());
+        DamageEvent event;
+        if (PeekHitEventMessage(stream, event) != HitMessage::Event) {
+            Result("hit-read", "not a damage event (%zu bytes)", bytes.size());
+            continue;
+        }
+        const HitReject reject = gate.Admit(event, view, GetTickCount64());
+        if (reject != HitReject::None) {
+            Result("hit-refused", "seq %u: %s", event.seq, HitRejectName(reject));
+            continue;
+        }
+        alignas(16) std::uint8_t gdi[kGdiBytes]{};
+        const float one = 1.0f;
+        std::memcpy(gdi + kGdiExtra68, &one, 4);
+        reinterpret_cast<bool(__fastcall*)(void*, std::size_t)>(fn(kPartsReserve))(gdi + kGdiParts, 4);
+        EventToGdi(event, gdi);
+        HitBodiesToGdi(owner.object, gdi, event);
+        std::size_t count = 0;
+        std::memcpy(&count, gdi + kGdiHitCount, 8);
+        std::uint32_t id = 0;
+        const std::uint8_t* entries = nullptr;
+        std::memcpy(&entries, gdi + kGdiHits, 8);
+        if (count && entries) std::memcpy(&id, entries + kHitRecordBody, 4);
+        const bool taken = reinterpret_cast<bool(__fastcall*)(void*, const void*)>(fn(kCarrierAccept))(owner.object, gdi);
+        reinterpret_cast<void(__fastcall*)(void*)>(fn(kPartsRelease))(gdi + kGdiParts);
+        Result("hit-dealt", "seq %u: %zu sub-hit(s), body id %u, the weak-point filter %s", event.seq, count, id,
+               taken ? "takes it" : "refuses it");
+    }
+    FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish")(1);
+    TickUntil(machine, 1000, [&] {
+        transport.Tick();
+        return false;
+    });
+    return received.size() == 3 ? 0 : 1;
+}
+
 }  // namespace
 
 int RunRole(Machine& machine, const std::string& role) {
@@ -1233,6 +1401,7 @@ int RunRole(Machine& machine, const std::string& role) {
     }
     if (step == "link") return Link(machine, host);
     if (step == "sidelink") return Link(machine, host, 5);
+    if (step == "hitauth") return HitAuthority(machine, host);
     if (step == "mission") return Mission(machine, host);
     if (step == "playersync") return PlayerSync(machine, host);
     if (step == "netstats") return NetStats(machine, host);

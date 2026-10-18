@@ -57,6 +57,9 @@ bool startDirect(dn::Config& c, const std::wstring& upnpRecord) {
         dn::logf("NET could not identify the physical adapter; using normal OS routing");
     }
     if (c.direct.mode == dn::Mode::Off) return false;
+    if (c.direct.testBindLoopback != dn::DirectOptions::Loopback::Off)
+        dn::logf("TEST BindLoopback: the direct link listens on %s only",
+                 c.direct.testBindLoopback == dn::DirectOptions::Loopback::V4 ? "127.0.0.1" : "::1");
     if (c.direct.mode == dn::Mode::Join && c.direct.hostAddress.empty()) {
         dn::logf("DIRECT Mode=join but HostAddress is empty; direct link disabled");
         return false;

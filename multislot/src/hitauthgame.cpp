@@ -173,7 +173,7 @@ HitRuleClock rule;
 bool ruleForced = false, forcedForwarding = false, forcedDropping = false;
 struct Stats {
     std::uint64_t forwarded = 0, forwardFailed = 0, dropped = 0, dealt = 0, received = 0, malformed = 0, ownerRule = 0;
-    std::uint64_t rejected[9]{};
+    std::uint64_t rejected[kHitRejectCount]{};
     std::uint64_t lastLogMs = 0;
 } stats;
 thread_local const std::uint8_t* replaying = nullptr;
@@ -184,7 +184,7 @@ void Summarize(std::uint64_t now) {
     stats.lastLogMs = now;
     char reasons[256]{};
     int used = 0;
-    for (int i = 1; i < 9 && used >= 0; ++i)
+    for (int i = 1; i < kHitRejectCount && used >= 0; ++i)
         if (stats.rejected[i])
             used += _snprintf_s(reasons + used, sizeof(reasons) - used, _TRUNCATE, "%s%s %llu", used ? ", " : "",
                                 HitRejectName(static_cast<HitReject>(i)), stats.rejected[i]);
@@ -239,8 +239,8 @@ bool TakesRemoteHits(const std::uint8_t* target) {
 // component may hold any pointer.
 // A search that finds nothing proves nothing about the class: the shot's bodies may all be another object's, or this
 // copy's ragdoll may not have its bodies yet. So a class without a found offset is searched again, at most once per
-// kRagdollRescanMs (the cost of a class that has none), never given up for good.
-constexpr std::size_t kRagdollSearchFrom = 0x300, kRagdollSearchTo = 0x2000;
+// kRagdollRescanMs (the cost of a class that has none), never given up for good. Only the places where a class can
+// have one are tried (kRagdollPlaces), which is also all the owner reads.
 constexpr std::uint64_t kRagdollRescanMs = 1000;
 int GuardedIndex(const std::uint8_t* ragdoll, std::uint32_t id) {
     __try {
@@ -287,10 +287,12 @@ void CollectHitBodies(const std::uint8_t* target, const std::uint8_t* gdi, Damag
         // Each of the first sub-hits' bodies at every guess: the first record may be another object's body and a later
         // one ours. (The first kMostHitBodies only: the search is the expensive part, and what travels is that many.)
         const std::size_t most = static_cast<std::size_t>(kMostHitBodies), tried = count < most ? count : most;
-        for (std::size_t at = kRagdollSearchFrom; at < kRagdollSearchTo && !known; at += 8)
+        for (const std::uint16_t at : kRagdollPlaces) {
             for (std::size_t k = 0; k < tried && !known; ++k)
                 if (GuardedIndex(target + at, Field<std::uint32_t>(hits + k * kHitRecordBytes, kHitRecordBody)) >= 0)
-                    known = static_cast<std::uint16_t>(at);
+                    known = at;
+            if (known) break;
+        }
         AcquireSRWLockExclusive(&lock);
         int slot = -1;
         for (int i = 0; i < ragdollPlaceCount && slot < 0; ++i)
@@ -318,15 +320,23 @@ void CollectHitBodies(const std::uint8_t* target, const std::uint8_t* gdi, Damag
 }
 
 // The owner's side: each sub-hit back as an entry of the GDI's container (reserved for 4), with the id of the body at
-// that place in this machine's copy. A place that holds no such body here is left out.
+// that place in this machine's copy. Only a known ragdoll place is read (kRagdollPlaces; the gate refused an event
+// naming another), and when this machine has found the target class's place itself (it shot one), only that one. A
+// place that holds no such body here is left out.
 void ApplyHitBodies(const std::uint8_t* target, std::uint8_t* gdi, const DamageEvent& event) {
     auto* hits = Field<std::uint8_t*>(gdi, kGdiHits);
     const std::size_t capacity = Field<std::size_t>(gdi, kGdiHitCapacity);
+    std::uint16_t classPlace = 0;
+    const void* vtable = Field<const void*>(target, 0);
+    AcquireSRWLockShared(&lock);
+    for (int i = 0; i < ragdollPlaceCount; ++i)
+        if (ragdollPlaces[i].vtable == vtable) classPlace = ragdollPlaces[i].offset;
+    ReleaseSRWLockShared(&lock);
     std::size_t count = 0;
     for (int k = 0; k < event.bodyCount && count < capacity && hits; ++k) {
         const HitBody& body = event.bodies[k];
         std::uint32_t id = 0;
-        if (body.component < kRagdollSearchFrom || body.component >= kRagdollSearchTo || (body.component & 7) ||
+        if (!KnownRagdollPlace(body.component) || (classPlace && body.component != classPlace) ||
             !GuardedId(target + body.component, body.index, &id))
             continue;
         std::uint8_t* entry = hits + count * kHitRecordBytes;
@@ -494,7 +504,7 @@ HitCounters HitAuthorityCounters() {
     c.dealt = stats.dealt;
     c.malformed = stats.malformed;
     c.ownerRule = stats.ownerRule;
-    for (int i = 1; i < 9; ++i)
+    for (int i = 1; i < kHitRejectCount; ++i)
         if (i != static_cast<int>(HitReject::NotOwner)) c.refused += stats.rejected[i];
     c.notOwner = stats.rejected[static_cast<int>(HitReject::NotOwner)];
     ReleaseSRWLockShared(&lock);

@@ -31,6 +31,7 @@
 #include "../src/updater.h"
 #include "../src/upnp.h"
 #include "../src/wire.h"
+#include "loopback_guard.h"
 
 namespace {
 
@@ -410,6 +411,7 @@ dn::DirectOptions hostOptions(uint16_t port, double drop, const std::string& key
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     o.retransmitBudget = std::make_shared<dn::RetransmitBudget>();  // its own machine, not this process's
+    o.testBindLoopback = dn::DirectOptions::Loopback::V4;  // nothing outside reaches it: no firewall prompt
     return o;
 }
 
@@ -425,6 +427,7 @@ dn::DirectOptions joinOptions(const std::string& address, double drop, const std
     o.testDropRate = drop;
     o.linkTimeoutMs = 5000;
     o.retransmitBudget = std::make_shared<dn::RetransmitBudget>();
+    o.testBindLoopback = dn::DirectOptions::Loopback::V4;
     return o;
 }
 
@@ -464,9 +467,10 @@ struct RawPeer {
     RawPeer& operator=(const RawPeer&) = delete;
     RawPeer() {
         s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        sockaddr_in any{};
-        any.sin_family = AF_INET;
-        bind(s, reinterpret_cast<sockaddr*>(&any), sizeof(any));
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // loopback only, as every socket of the tests
+        bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local));
         u_long nonBlocking = 1;
         ioctlsocket(s, FIONBIO, &nonBlocking);
     }
@@ -1290,20 +1294,75 @@ void testRetiredInstanceIsFreed() {
     printf("  %llu calls through swapped instances\n", static_cast<unsigned long long>(calls.load()));
 }
 
+// A UDP socket bound to `ip` (a loopback address) on a free port.
+SOCKET loopbackSocket(const char* ip, uint16_t* port) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    inet_pton(AF_INET, ip, &local.sin_addr);
+    bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+    int len = sizeof(local);
+    getsockname(s, reinterpret_cast<sockaddr*>(&local), &len);
+    *port = ntohs(local.sin_port);
+    u_long nonBlocking = 1;
+    ioctlsocket(s, FIONBIO, &nonBlocking);
+    return s;
+}
+
 void testReplyFromOtherAddress() {
     // A host bound to the wildcard address answers from whatever source address the OS picks for the
-    // client. With IPv6 privacy addresses that is usually not the (stable) address the client sent to;
-    // on loopback the same happens with 127.0.0.2 -> reply from 127.0.0.1.
+    // client. With IPv6 privacy addresses that is usually not the (stable) address the client sent to.
+    // Played on loopback only (no firewall prompt): the client dials 127.0.0.2, where a relay hands what it gets to the
+    // host and sends the host's answers to the client from 127.0.0.1 - another address than the one dialled - and
+    // takes whatever the client then sends there to the host too.
     printf("direct: host answering from a different address than the client dialled still connects\n");
     dn::DirectNet host;
     CHECK(host.start(hostOptions(0, 0)));
     host.setLocalUser(kHost);
+    uint16_t dialledPort = 0, answerPort = 0, upPort = 0;
+    const SOCKET dialled = loopbackSocket("127.0.0.2", &dialledPort);  // what the client dials
+    const SOCKET answer = loopbackSocket("127.0.0.1", &answerPort);    // where the host's answers come from
+    const SOCKET up = loopbackSocket("127.0.0.1", &upPort);            // the relay's side towards the host
+    std::atomic<bool> relaying{true};
+    std::thread relay([&] {
+        sockaddr_in client{}, hostAddr{};
+        bool knowClient = false;
+        hostAddr.sin_family = AF_INET;
+        hostAddr.sin_port = htons(host.boundPort());
+        inet_pton(AF_INET, "127.0.0.1", &hostAddr.sin_addr);
+        char buf[2048];
+        while (relaying) {
+            bool any = false;
+            for (SOCKET from : {dialled, answer}) {
+                sockaddr_in src{};
+                int len = sizeof(src);
+                const int n = recvfrom(from, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &len);
+                if (n <= 0) continue;
+                any = true;
+                client = src;
+                knowClient = true;
+                sendto(up, buf, n, 0, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+            }
+            sockaddr_in src{};
+            int len = sizeof(src);
+            const int n = recvfrom(up, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &len);
+            if (n > 0 && knowClient) {
+                any = true;
+                sendto(answer, buf, n, 0, reinterpret_cast<const sockaddr*>(&client), sizeof(client));
+            }
+            if (!any) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
     dn::DirectNet a;
-    CHECK(a.start(joinOptions("127.0.0.2:" + std::to_string(host.boundPort()), 0)));
+    CHECK(a.start(joinOptions("127.0.0.2:" + std::to_string(dialledPort), 0)));
     a.setLocalUser(kA);
     CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 5000));
     CHECK(streamInOrder(a, kHost, host, kA, 200));
     CHECK(streamInOrder(host, kA, a, kHost, 200));
+    a.stop();
+    relaying = false;
+    relay.join();
+    for (SOCKET s : {dialled, answer, up}) closesocket(s);
 }
 
 void testHelloCannotHijackLiveLink() {
@@ -1412,8 +1471,27 @@ void testFullRoom() {
     CHECK(waitFor(allArrived, 10000));
 }
 
+// The IPv6 path (the socket of an IPv6 address, the [addr]:port form) on ::1. In the game one dual-stack socket takes
+// both families; bound to loopback (testBindLoopback) a socket has one address, so IPv4 and IPv6 are run apart.
+void testIPv6Loopback() {
+    printf("direct: host + client on IPv6 loopback\n");
+    dn::DirectOptions ho = hostOptions(0, 0.1);
+    ho.testBindLoopback = dn::DirectOptions::Loopback::V6;
+    dn::DirectNet host;
+    CHECK(host.start(ho));
+    host.setLocalUser(kHost);
+    dn::DirectOptions jo = joinOptions("[::1]:" + std::to_string(host.boundPort()), 0.1);
+    jo.testBindLoopback = dn::DirectOptions::Loopback::V6;
+    dn::DirectNet a;
+    CHECK(a.start(jo));
+    a.setLocalUser(kA);
+    CHECK(waitFor([&] { return a.canRoute(kHost) && host.canRoute(kA); }, 10000));
+    CHECK(streamInOrder(a, kHost, host, kA, 500));
+    CHECK(streamInOrder(host, kA, a, kHost, 500));
+}
+
 void testThreeNodesOverLoopback() {
-    printf("direct: host + 2 clients on loopback (IPv4 and IPv6), 20%% loss everywhere\n");
+    printf("direct: host + 2 clients on loopback, 20%% loss everywhere\n");
     dn::DirectNet host;
     CHECK(host.start(hostOptions(0, 0.2)));
     host.setLocalUser(kHost);
@@ -1421,7 +1499,7 @@ void testThreeNodesOverLoopback() {
 
     dn::DirectNet a, b;
     CHECK(a.start(joinOptions("127.0.0.1:" + port, 0.2)));
-    CHECK(b.start(joinOptions("[::1]:" + port, 0.2)));
+    CHECK(b.start(joinOptions("127.0.0.1:" + port, 0.2)));
     a.setLocalUser(kA);
     b.setLocalUser(kB);
 
@@ -3543,6 +3621,7 @@ void testRosterPages() {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    testguard::LoopbackGuard loopbackGuard;  // every UDP socket of this test on loopback (loopback_guard.h)
     if (argc == 2 && std::wstring(argv[1]) == L"--mesh") {
         testRosterPages();
         testMeshLinksJoiners();
@@ -3550,11 +3629,13 @@ int wmain(int argc, wchar_t** argv) {
         testMeshFailsOverAndBack();
         testMeshAndShedSwitches();
         testUnlistedMembersProveTheirEosId();
+        if (!loopbackGuard.report("DirectNetTests")) ++g_failures;
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--receive-lifecycle") {
         testReceiveStateFollowsSession();
+        if (!loopbackGuard.report("DirectNetTests")) ++g_failures;
         printf("\n%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -3603,6 +3684,7 @@ int wmain(int argc, wchar_t** argv) {
     testHelloCannotHijackLiveLink();
     testHelloFloodIsBounded();
     testThreeNodesOverLoopback();
+    testIPv6Loopback();
     testFullRoom();
     testReliableBacklogLimit();
     testRetransmitTimeout();
@@ -3630,6 +3712,7 @@ int wmain(int argc, wchar_t** argv) {
     testMeshFailsOverAndBack();
     testMeshAndShedSwitches();
     testUnlistedMembersProveTheirEosId();
+    if (!loopbackGuard.report("DirectNetTests")) ++g_failures;
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

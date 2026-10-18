@@ -338,8 +338,13 @@ add_library(GameNetEos SHARED tests/gamenet/fake_eos_net.cpp)
 set_target_properties(GameNetEos PROPERTIES OUTPUT_NAME EOSSDK-Win64-Shipping RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_compile_options(GameNetEos PRIVATE ${WARNINGS})
+# The hitauth scenario plays the hit authority's own code (src/hitauth*.cpp, as HitAuthTests links it) on each machine.
 add_executable(GameMachine tests/gamenet/machine.cpp tests/gamenet/roles.cpp tests/gamenet/game.cpp
-    tests/gamenet/missionsync.cpp src/netplayer.cpp)
+    tests/gamenet/missionsync.cpp src/netplayer.cpp src/hitauth.cpp src/hitauthgame.cpp src/netfeature.cpp
+    src/netcompress.cpp src/syncmarker.cpp src/packetfit.cpp src/identity.cpp src/midhook.cpp src/code.cpp src/patches.cpp
+    src/log.cpp)
+target_link_libraries(GameMachine PRIVATE DirectNetPart)
+target_include_directories(GameMachine PRIVATE "${CMAKE_SOURCE_DIR}/..")
 set_target_properties(GameMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GAMENET_DIR}")
 target_include_directories(GameMachine PRIVATE ${MODLOADER_INCLUDE})
 target_compile_options(GameMachine PRIVATE ${WARNINGS})
@@ -348,7 +353,7 @@ add_executable(GameNetTests tests/gamenet/gamenet_test.cpp)
 target_compile_options(GameNetTests PRIVATE ${WARNINGS})
 add_dependencies(GameNetTests GameMachine EDF6Coop)
 add_test(NAME GameNetLogStats COMMAND GameNetTests --log-stats)
-foreach(scenario room link mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon mission4slowpeer
+foreach(scenario room link hitauth mission2 mission4 mission8 mission8late mission8lossy mission8busy mission8rushed sidelink mission4modweapon mission4slowpeer
         playersync mission16 mission32)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
@@ -419,7 +424,7 @@ target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
 target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
 add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
 foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull mission8bulklost slotorder mission8bulkcut slotmigrate slotmigratenodirect slotmigrateearlyroom slotgiveup slotchurn slotchurnlate worldadmission
-        slotfeed slotfeedrescue slotfeedold slotfeedboth slotmigratefeed worldfeed worldfeedold)
+        slotfeed slotfeedrescue slotfeedold slotfeedsession slotfeedboth slotmigratefeed worldfeed worldfeedold)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})

@@ -239,10 +239,13 @@ std::vector<std::string> roomOrder(const std::vector<std::string>& epic, const s
 // EDF6Coop says nothing of the kind and sends nothing over EOS.
 //
 // Which copy is newer: the host stamps every Room message it makes (RoomStamp, after kRemovedMarker, where readers of
-// an older version skip it): a hosting session (`epoch`, from the wall clock when it began hosting, so a later session
-// is higher) and the message's number in it (`seq`). Both paths carry the same stamped message; a member takes one only
-// when its stamp is higher than the one it has, so an older copy coming late over the slower path never replaces a
-// newer one. A message without a stamp comes from a host of an older version, over the direct link only.
+// an older version skip it): a hosting session (`epoch`, a random number the host draws when it begins hosting) and
+// the message's number in it (`seq`). An epoch says nothing of which session came later (no clock: a clock set back
+// would make a later session look older, and its members would drop every message of it); a member orders a sender's
+// sessions by when it first heard of them (RoomSessions): the newest one heard of is the sender's, every one heard of
+// before it is over. Within the session, the higher seq is newer. Both paths carry the same stamped message, so an
+// older copy coming late over the slower path never replaces a newer one. A message without a stamp comes from a host
+// of an older version, over the direct link only.
 constexpr const char* kRoomFeedSocket = "EDF6ROOM";
 constexpr uint8_t kRoomFeedChannel = 0x50;
 constexpr uint8_t kRoomFeedFormat = 1;
@@ -254,13 +257,26 @@ struct RoomStamp {
     uint64_t epoch = 0;
     uint64_t seq = 0;
     bool present = false;
-    // Newer than `o`: a stamp is newer than none; within one, a later session, then a later message.
-    bool newerThan(const RoomStamp& o) const {
-        if (!present) return false;
-        if (!o.present) return true;
-        return epoch != o.epoch ? epoch > o.epoch : seq > o.seq;
-    }
     bool operator==(const RoomStamp& o) const { return present == o.present && epoch == o.epoch && seq == o.seq; }
+};
+
+// One sender's hosting sessions, in the order a member first heard of them (any path), the newest last. Bounded: a
+// session that falls off the end counts as one never heard of, and a sender does not host hundreds of times in one of
+// our rooms.
+class RoomSessions {
+public:
+    static constexpr size_t kKept = 16;
+    // Notes `epoch` (0: nothing). A session not heard of before becomes the newest; one heard of before keeps its place.
+    void heard(uint64_t epoch);
+    // The newest session heard of (0: none).
+    uint64_t newest() const { return order_.empty() ? 0 : order_.back(); }
+    // Newer than `b`: a stamp is newer than none; in one session, the later message; across two, the session heard of
+    // later (one never heard of counts as older than every one heard of).
+    bool newer(const RoomStamp& a, const RoomStamp& b) const;
+
+private:
+    int rank(uint64_t epoch) const;  // index in order_, -1 never heard of
+    std::vector<uint64_t> order_;
 };
 // Adds `stamp` to a Room message (after kRemovedMarker, which it adds when the message has none).
 void appendRoomStamp(std::vector<std::string>& message, const RoomStamp& stamp);
@@ -283,7 +299,8 @@ std::vector<std::vector<uint8_t>> encodeRoomFeed(const std::string& room, const 
 bool decodeRoomFeedPage(const uint8_t* data, size_t size, RoomFeedPage* out);
 
 // Puts a sender's pages together. A page of a message older than the newest one begun or completed from that sender
-// is dropped; a page of a newer one drops what was there of the older one.
+// is dropped; a page of a newer one drops what was there of the older one. A page of a session not heard of from that
+// sender begins its newest session (RoomSessions): what was there of the session before is moot, whatever its numbers.
 class RoomFeedAssembler {
 public:
     // The whole message once its last page is here (its stamp checked against the pages').
@@ -296,6 +313,7 @@ private:
     struct Partial {
         RoomStamp stamp;   // the message being put together
         RoomStamp done;    // the newest completed
+        RoomSessions sessions;
         uint16_t total = 0;
         std::map<uint16_t, std::vector<std::string>> pages;
     };
@@ -325,6 +343,9 @@ public:
 
 private:
     void refresh();
+    // `from`'s sessions with `stamp`'s noted (nullptr: no room for another sender).
+    RoomSessions* heard(const std::string& from, const RoomStamp& stamp);
+    bool newer(const std::string& from, const RoomStamp& a, const RoomStamp& b) const;
     struct Entry {
         std::vector<std::string> list;
         RoomStamp stamp;
@@ -334,6 +355,7 @@ private:
     std::vector<std::string> direct_;
     std::map<std::string, Entry> eos_;          // the newest whole message per sender
     std::map<std::string, RoomStamp> pending_;  // a newer one partly here, per sender
+    std::map<std::string, RoomSessions> sessions_;  // per sender, over both paths
     std::vector<std::string> current_;
     std::string currentFrom_;
     RoomVia currentVia_ = RoomVia::None;

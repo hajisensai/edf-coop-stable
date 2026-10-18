@@ -62,11 +62,54 @@ void stamps() {
     CHECK(!dn::parseRoomStamp({"host", "#removed", "#room-v1:1:2x"}, &s));
     // A slot named like a stamp before the removed marker is a slot, not a stamp.
     CHECK(dn::parseRoomStamp({"#room-v1:1:1"}, &s) && !s.present);
-    // Newer: a stamp beats none; a later session beats any message of an earlier one; then the later message.
+    // Newer: a stamp beats none; in one session the later message; across two, the session heard of later - whatever
+    // the numbers say (an epoch is random: 11 heard of before 10 is the older session).
+    dn::RoomSessions sessions;
     const dn::RoomStamp none, a{10, 7, true}, b{10, 8, true}, c{11, 1, true};
-    CHECK(a.newerThan(none) && !none.newerThan(a));
-    CHECK(b.newerThan(a) && !a.newerThan(b) && !a.newerThan(a));
-    CHECK(c.newerThan(b) && !b.newerThan(c));
+    CHECK(sessions.newer(a, none) && !sessions.newer(none, a));
+    CHECK(sessions.newer(b, a) && !sessions.newer(a, b) && !sessions.newer(a, a));
+    sessions.heard(11);
+    sessions.heard(10);
+    CHECK(sessions.newest() == 10);
+    CHECK(sessions.newer(a, c) && !sessions.newer(c, b));
+    sessions.heard(11);  // heard of again: it keeps its place
+    CHECK(sessions.newest() == 10 && sessions.newer(b, c));
+    sessions.heard(0);  // no session
+    CHECK(sessions.newest() == 10);
+    // Bounded: the oldest falls off.
+    for (uint64_t e = 1000; e < 1000 + dn::RoomSessions::kKept; ++e) sessions.heard(e);
+    CHECK(sessions.newest() == 1000 + dn::RoomSessions::kKept - 1);
+    CHECK(sessions.newer(dn::RoomStamp{1000, 1, true}, a));  // 10 fell off: never heard of, older than any
+}
+
+// The host's clock went back between two hosting sessions of the same room (or it drew a lower epoch): its members
+// follow the new session from its first message, and an old session's message coming late changes nothing.
+void sessionsBackwards() {
+    const std::string room = "0123456789abcdef0123456789abcdef";
+    std::vector<std::string> out;
+    dn::RoomFeedAssembler in;
+    const auto first = stamped({"host", "a"}, 900, 7), second = stamped({"host", "a", "b"}, 100, 1);
+    CHECK(in.add("host", pagesOf(room, first, 900, 7)[0], &out) && out == first);
+    CHECK(in.add("host", pagesOf(room, second, 100, 1)[0], &out) && out == second);
+    CHECK(!in.add("host", pagesOf(room, stamped({"host"}, 900, 8), 900, 8)[0], &out));  // the session that is over
+    const auto third = stamped({"host", "", "b"}, 100, 2);
+    CHECK(in.add("host", pagesOf(room, third, 100, 2)[0], &out) && out == third);
+
+    dn::HostRoomFeed f;
+    uint64_t version = 0;
+    std::string from;
+    f.setOwner("host");
+    CHECK(f.eos("host", first));
+    CHECK(f.eos("host", second));
+    CHECK(f.current(&version, &from) == second);
+    CHECK(!f.eos("host", stamped({"host"}, 900, 8)));
+    f.direct("host", first);  // the direct link still holds the first session's: EOS has the newer one
+    CHECK(f.current(&version, &from) == second);
+    f.pending("host", {900, 9, true});  // a page of the session that is over: no newer message partly here
+    CHECK(f.current(&version, &from) == second);
+    f.direct("host", third);  // the new session over the direct link, ahead of EOS
+    CHECK(f.current(&version, &from) == third);
+    CHECK(!f.eos("host", second));
 }
 
 void pages() {
@@ -178,7 +221,7 @@ void feed() {
         f.direct("host", m6);  // the direct link is ahead now
         CHECK(f.current(&version, &from, &via) == m6 && via == V::Direct);
         CHECK(!f.eos("host", m4));  // late and older: dropped
-        CHECK(f.eos("host", stamped({"host", "a", "b"}, 99, 9)) == false);  // an earlier session: older
+        CHECK(!f.eos("host", stamped({"host", "a"}, 100, 3)));  // an earlier message of the session: older
         CHECK(f.current(&version, &from) == m6);
         f.direct("host", {});  // the link drops: EOS's newest (5) is all there is, and it is a real host message
         CHECK(f.current(&version, &from, &via) == m5 && via == V::Eos);
@@ -189,6 +232,7 @@ void feed() {
         CHECK(f.eos("host", again));
         f.direct("host", m6);
         CHECK(f.current(&version, &from) == again);
+        CHECK(!f.eos("host", stamped({"host", "a"}, 100, 7)));  // the session before is over, whatever the number
         // An unstamped list over the direct link never replaces a stamped one.
         f.direct("host", {"host", "x"});
         CHECK(f.current(&version, &from) == again);
@@ -234,6 +278,7 @@ void feed() {
 int main() {
     stamps();
     pages();
+    sessionsBackwards();
     feed();
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

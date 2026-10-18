@@ -456,6 +456,25 @@ bool decodeRoomFeedPage(const uint8_t* data, size_t size, RoomFeedPage* out) {
     return r.left == 0;
 }
 
+void RoomSessions::heard(uint64_t epoch) {
+    if (!epoch || rank(epoch) >= 0) return;
+    if (order_.size() >= kKept) order_.erase(order_.begin());
+    order_.push_back(epoch);
+}
+
+int RoomSessions::rank(uint64_t epoch) const {
+    for (size_t i = 0; i < order_.size(); ++i)
+        if (order_[i] == epoch) return static_cast<int>(i);
+    return -1;
+}
+
+bool RoomSessions::newer(const RoomStamp& a, const RoomStamp& b) const {
+    if (!a.present) return false;
+    if (!b.present) return true;
+    if (a.epoch == b.epoch) return a.seq > b.seq;
+    return rank(a.epoch) > rank(b.epoch);
+}
+
 bool RoomFeedAssembler::add(const std::string& from, const RoomFeedPage& page, std::vector<std::string>* message) {
     if (from.empty() || !page.stamp.present) return false;
     auto it = partial_.find(from);
@@ -464,8 +483,12 @@ bool RoomFeedAssembler::add(const std::string& from, const RoomFeedPage& page, s
         it = partial_.emplace(from, Partial{}).first;
     }
     Partial& p = it->second;
-    if (!page.stamp.newerThan(p.done)) return false;           // that message, or a newer one, is complete already
-    if (p.stamp.newerThan(page.stamp)) return false;           // a newer one is being put together
+    p.sessions.heard(page.stamp.epoch);
+    if (page.stamp.epoch != p.sessions.newest()) return false;  // a session of this sender that is over
+    // The sender's newest session began: what came of the one before says nothing of this one.
+    if (p.done.present && p.done.epoch != page.stamp.epoch) p.done = {};
+    if (!p.sessions.newer(page.stamp, p.done)) return false;   // that message, or a newer one, is complete already
+    if (p.sessions.newer(p.stamp, page.stamp)) return false;   // a newer one is being put together
     if (!(p.stamp == page.stamp)) {                            // a newer one begins: the older one is moot
         p.stamp = page.stamp;
         p.total = page.total;
@@ -513,10 +536,27 @@ void HostRoomFeed::setOwner(const std::string& owner) {
     refresh();
 }
 
+RoomSessions* HostRoomFeed::heard(const std::string& from, const RoomStamp& stamp) {
+    auto it = sessions_.find(from);
+    if (it == sessions_.end()) {
+        if (from.empty() || sessions_.size() >= kMaxFeedSenders) return nullptr;
+        it = sessions_.emplace(from, RoomSessions{}).first;
+    }
+    if (stamp.present) it->second.heard(stamp.epoch);
+    return &it->second;
+}
+
+bool HostRoomFeed::newer(const std::string& from, const RoomStamp& a, const RoomStamp& b) const {
+    const auto it = sessions_.find(from);
+    return it == sessions_.end() ? RoomSessions{}.newer(a, b) : it->second.newer(a, b);
+}
+
 void HostRoomFeed::direct(const std::string& from, const std::vector<std::string>& list) {
     if (from == directFrom_ && list == direct_) return;
     directFrom_ = list.empty() ? std::string() : from;
     direct_ = list;
+    RoomStamp stamp;
+    if (!directFrom_.empty() && parseRoomStamp(direct_, &stamp)) heard(directFrom_, stamp);
     refresh();
 }
 
@@ -524,21 +564,25 @@ bool HostRoomFeed::eos(const std::string& from, std::vector<std::string> list) {
     RoomStamp stamp;
     if (from.empty() || !parseRoomStamp(list, &stamp) || !stamp.present) return false;
     auto it = eos_.find(from);
-    if (it != eos_.end() && !stamp.newerThan(it->second.stamp)) return false;
     if (it == eos_.end() && eos_.size() >= kMaxFeedSenders) return false;
+    const RoomSessions* sessions = heard(from, stamp);
+    if (!sessions || stamp.epoch != sessions->newest()) return false;  // a session of this sender that is over
+    if (it != eos_.end() && !sessions->newer(stamp, it->second.stamp)) return false;
     eos_[from] = {std::move(list), stamp};
     auto p = pending_.find(from);
-    if (p != pending_.end() && !p->second.newerThan(stamp)) pending_.erase(p);
+    if (p != pending_.end() && !sessions->newer(p->second, stamp)) pending_.erase(p);
     refresh();
     return true;
 }
 
 void HostRoomFeed::pending(const std::string& from, const RoomStamp& stamp) {
     if (from.empty() || !stamp.present) return;
+    const RoomSessions* sessions = heard(from, stamp);
+    if (!sessions || stamp.epoch != sessions->newest()) return;
     auto it = eos_.find(from);
-    if (it != eos_.end() && !stamp.newerThan(it->second.stamp)) return;
+    if (it != eos_.end() && !sessions->newer(stamp, it->second.stamp)) return;
     RoomStamp& p = pending_[from];
-    if (stamp.newerThan(p)) p = stamp;
+    if (sessions->newer(stamp, p)) p = stamp;
     refresh();
 }
 
@@ -570,14 +614,16 @@ void HostRoomFeed::refresh() {
         pickStamp = directStamp;
     }
     const std::string sender = owner_.empty() ? directFrom_ : owner_;
-    if (const auto it = eos_.find(sender); !sender.empty() && it != eos_.end() && (!pick || it->second.stamp.newerThan(pickStamp))) {
+    if (const auto it = eos_.find(sender);
+        !sender.empty() && it != eos_.end() && (!pick || newer(sender, it->second.stamp, pickStamp))) {
         pick = &it->second.list;
         pickFrom = sender;
         pickVia = RoomVia::Eos;
         pickStamp = it->second.stamp;
     }
     // A newer message of the owner partly here: the older one is superseded, nothing is followed until it is whole.
-    if (const auto it = pending_.find(sender); pick && it != pending_.end() && it->second.newerThan(pickStamp)) pick = nullptr;
+    if (const auto it = pending_.find(sender); pick && it != pending_.end() && newer(sender, it->second, pickStamp))
+        pick = nullptr;
     std::vector<std::string> next = pick ? *pick : std::vector<std::string>{};
     if (!pick) {
         pickFrom.clear();

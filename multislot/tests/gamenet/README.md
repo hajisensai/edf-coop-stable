@@ -48,6 +48,8 @@ Guests join one after another in seat order, so seat n is player n+1.
 |---|---|---|
 | `GameNet_room` | 2 | the room is created and joined through the game's imports; every member publishes the split sync marker |
 | `GameNet_link` | 2 | the game's handshake connects them; a record sent through the game's controller arrives; no plaintext crosses EOS |
+| `GameNet_hitauth` | 2 | a forwarded hit on a stand-in UfoCarrier508's core: the sub-hit crosses the game's controller, the owner rebuilds it with its own body id and the game's weak-point filter (4F7190) takes it; two events whose sub-hit names no ragdoll place (+0x1F00, +0x7A0) are refused by the owner's gate (docs/net-re/damage.md 6.7) |
+| `GameNet_slotfeedsession` | 2 | the host begins a second hosting session of its room with a lower epoch (as a clock set back made it when the epoch was the clock): the guest follows the new session's first message |
 | `GameNet_sidelink` | 2 | the guest runs the game without EDF6Coop and gets side packets: its game drops them and runs on |
 | `GameNet_mission2` | 2 | the start sync with `[Test] SplitSyncBudget=200`, so the second record goes beside the start message |
 | `GameNet_mission4` | 4 | a start message that fits: nothing goes beside it |
@@ -69,6 +71,12 @@ when it does not fit, and none may go missing. Each imperfect scenario also chec
 Network imperfections, set per scenario: `EDF6NET_DELAY=<channel>:<ms>`, `EDF6NET_DROP=<bytes>:<count>` (only
 unreliable packets), `EDF6NET_LOBBY_DELAY=<ms>`, `EDF6NET_CHATTER=<bytes>`, `EDF6NET_RUSH=1`; per seat
 `EDF6NET_DELAY_FROM=<user>:<ms>` (everything that machine receives from that member).
+
+Every scenario also checks, on every machine: every EOS P2P call (send, receive, accept, close) ran on the thread
+that ticks EOS (`fake_eos_net.cpp` `OnTickThread`; in the game that is one thread: EDF.dll's `internal_Core::Update`
+12ADB30 calls `EOS_Platform_Tick` and then the P2P receive loop 12C8CC0), and every UDP socket of the driver and the
+machines was bound to loopback (`tests/loopback_guard.h`; the machines' direct links get `[Test] BindLoopback=4`), so
+Windows Defender Firewall never asks to let a test program through.
 
 ## What they caught
 

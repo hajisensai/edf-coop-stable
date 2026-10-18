@@ -245,9 +245,35 @@ inline std::vector<Seat> Seats(int count, const std::string& step, const std::st
     return seats;
 }
 
+// A forwarded hit on a weak point between two machines (roles.cpp HitAuthority): the sub-hit the sender found in its copy
+// crosses the game's packet controller, the owner rebuilds it with its own copy's body and the game's UfoCarrier508
+// filter takes the hit; the two forged events whose sub-hit names a place where no class has a ragdoll are refused by
+// the owner's gate before it reads anything there.
+inline void CheckHitAuth(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckRoom(machines, network);
+    const auto& sender = machines[0];
+    const auto& owner = machines[1];
+    Check(Result(sender, "hit-sent") == "1 sub-hit(s), the first at +0xB60 body 2",
+          "the sender found the core body in its ragdoll (+0xB60) and left the other object's body out (" +
+              Result(sender, "hit-sent") + ")");
+    Check(Result(sender, "hit-events-sent") == "3", "the three events went through the game's controller");
+    Check(Result(owner, "hit-dealt") == "seq 1: 1 sub-hit(s), body id 4002, the weak-point filter takes it",
+          "the owner rebuilt the sub-hit with its own copy's body and the game's filter took the hit (" +
+              Result(owner, "hit-dealt") + ")");
+    Check(owner.results.count("hit-dealt") == 1, "only the true event was dealt");
+    std::vector<std::string> refused;
+    for (auto it = owner.results.equal_range("hit-refused"); it.first != it.second; ++it.first)
+        refused.push_back(it.first->second);
+    const std::string why = "sub-hit at no known ragdoll place";  // HitRejectName(HitReject::BodyPlace)
+    Check(refused.size() == 2 && refused[0] == "seq 2: " + why && refused[1] == "seq 3: " + why,
+          "the sub-hits at +0x1F00 and +0x7A0 were refused for their place (" +
+              (refused.empty() ? std::string("none") : refused[0]) + ")");
+}
+
 inline const std::vector<Scenario>& Scenarios() {
     static const std::vector<Scenario> all = {
         {"room", Seats(2, "room", BaseIni()), 60000, &CheckMarkedRoom},
+        {"hitauth", Seats(2, "hitauth", BaseIni()), 90000, &CheckHitAuth},
         {"link", Seats(2, "link", BaseIni()), 90000, &CheckMarkedLink},
         // Two players, a test budget small enough that the second record goes beside the start message: what two
         // people testing the split by hand ran (SplitSyncBudget).
@@ -1068,6 +1094,39 @@ inline void CheckFeedOldHost(const std::vector<Spawned>& machines, const gamenet
     CheckSameSlotsOnly({&h, &g});
 }
 
+// The host begins a new hosting session of the same room (as after starting its game again into it) whose epoch is
+// lower than the first one's - what a clock set back gave when the epoch was the wall clock: the guest follows the new
+// session from its first message instead of dropping every message of it.
+inline std::vector<Seat> FeedSessionSeats() {
+    const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
+                               "[Update]\r\nAutoUpdate=0\r\nCheckEDF6VR=0\r\n[Test]\r\nLoopbackHosts=1\r\n";
+    auto seats = Seats(2, "slots", common + "[DirectNet]\r\nEnabled=1\r\nMode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n");
+    seats[0].ini = common + "RoomCapacity=8\r\nRoomFeedEpochs=900,100\r\nRoomFeedRestartMs=5000\r\n[DirectNet]\r\nEnabled=1\r\n"
+                            "Mode=off\r\nUPnP=0\r\nBindPhysicalInterface=0\r\n";
+    seats[0].role = "host-slots-host";
+    seats[1].role = "guest-slots-epic";
+    for (auto& seat : seats) {
+        seat.env.push_back({"EDF6NET_FINAL", seats[0].user + "," + seats[1].user});
+        seat.env.push_back({"EDF6NET_SLOTS_ONLY", "1"});
+        seat.env.push_back({"EDF6NET_STAY_MS", "9000"});
+    }
+    return seats;
+}
+
+inline void CheckFeedSession(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    const std::string from = "member slots of " + h.user.substr(0, 8) + " came over EOS (message ";
+    const std::size_t first = g.text.find(from), second = g.text.find(from + "1 of session 100,");
+    Check(h.text.find("TEST RoomFeedRestartMs: a new hosting session of room") != std::string::npos,
+          h.user + " began a second hosting session of its room");
+    Check(first != std::string::npos && g.text.find("of session 900,", first) != std::string::npos,
+          g.user + " followed the host's first session (900) over EOS");
+    Check(second != std::string::npos && second > first,
+          g.user + " then took the first message of the host's new session (100), lower as its epoch is");
+    CheckSameSlotsOnly({&h, &g});
+}
+
 // A host with a direct link the guest reaches and the room feed: the same stamped slots come both ways.
 inline std::vector<Seat> FeedBothSeats() {
     const std::string common = "[MultiSlot]\r\nEnabled=1\r\nEightPlayerRooms=1\r\nMaxPlayers=8\r\nCrashLog=0\r\nNetLog=1\r\n"
@@ -1212,6 +1271,7 @@ inline const std::vector<Scenario>& NetScenarios() {
         {"slotfeed", FeedChurnSeats(), 150000, &CheckSlotFeed, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"slotfeedrescue", FeedRescueSeats(), 120000, &CheckFeedRescue},
         {"slotfeedold", FeedOldHostSeats(), 120000, &CheckFeedOldHost},
+        {"slotfeedsession", FeedSessionSeats(), 120000, &CheckFeedSession},
         {"slotfeedboth", FeedBothSeats(), 150000, &CheckFeedBoth},
         {"slotmigratefeed", MigrateFeedSeats(), 180000, &CheckSlotMigrateFeed, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"worldfeed", WorldFeedSeats(true), 90000, &CheckWorldFeed},

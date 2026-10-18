@@ -49,6 +49,11 @@ struct Fake {
     std::map<std::string, std::unique_ptr<User>> users;
     std::deque<std::function<void()>> completions;  // run by EOS_Platform_Tick
     std::vector<std::string> unimplemented;
+    // EOS documents no thread safety for its interfaces: everything is called on the thread that ticks the platform.
+    // In the game that is one thread (EDF.dll's eos::internal_Core::Update 12ADB30 calls EOS_Platform_Tick, then the
+    // P2P receive loop 12C8CC0 through its observer), so a P2P call from any other thread is the plugin's own doing.
+    DWORD tickThread = 0;            // the thread of the first EOS_Platform_Tick
+    std::vector<std::string> offTick;  // P2P calls seen on another thread, "name thread n" once per name
 
     struct Incoming {
         std::string from;
@@ -343,6 +348,17 @@ void Unimplemented(const char* name) {
     f.unimplemented.emplace_back(name);
 }
 
+// A P2P call: noted when it is not on the thread that ticks EOS (Fake::tickThread). Caller holds `lock`.
+void OnTickThread(const char* name) {
+    Fake& f = F();
+    const DWORD thread = GetCurrentThreadId();
+    if (!f.tickThread || thread == f.tickThread) return;
+    for (const auto& seen : f.offTick)
+        if (seen.rfind(name, 0) == 0) return;
+    f.offTick.emplace_back(std::string(name) + " on thread " + std::to_string(thread) + ", EOS ticks on " +
+                           std::to_string(f.tickThread));
+}
+
 }  // namespace
 
 // --- for the machine ---
@@ -352,6 +368,15 @@ EXPORT std::size_t FakeNet_Unimplemented(char* out, std::size_t size) {
     const std::scoped_lock guard(f.lock);
     std::string all;
     for (const auto& name : f.unimplemented) all += name + "\n";
+    if (out && size) Copy(out, size, all);
+    return all.size();
+}
+// The P2P calls made on another thread than EOS_Platform_Tick's (OnTickThread), one per line.
+EXPORT std::size_t FakeNet_OffTickCalls(char* out, std::size_t size) {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    std::string all;
+    for (const auto& call : f.offTick) all += call + "\n";
     if (out && size) Copy(out, size, all);
     return all.size();
 }
@@ -586,6 +611,8 @@ EXPORT void EOS_Platform_Tick(void*) {
     const bool promotedDue = PromotedDue();
     {
         const std::scoped_lock guard(f.lock);
+        if (!f.tickThread) f.tickThread = GetCurrentThreadId();
+        OnTickThread("EOS_Platform_Tick");
         if (promotedDue) {
             for (auto& promoted : f.promotedHeld) f.completions.push_back(std::move(promoted));
             f.promotedHeld.clear();
@@ -654,6 +681,7 @@ EXPORT EOS_EResult EOS_P2P_SendPacket(EOS_HP2P, const EOS_P2P_SendPacketOptions*
     if (!options || !options->RemoteUserId || !options->SocketId || (!options->Data && options->DataLengthBytes))
         return EOS_InvalidParameters;
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_SendPacket");
     if (!Open()) return EOS_NoConnection;
     const std::string to = Text(options->RemoteUserId), socket = options->SocketId->SocketName;
     Locked locked(f.netLock);
@@ -693,6 +721,7 @@ EXPORT EOS_EResult EOS_P2P_ReceivePacket(EOS_HP2P, const EOS_P2P_ReceivePacketOp
     Fake& f = F();
     if (!options || !peer || !socket || !channel || !data || !size) return EOS_InvalidParameters;
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_ReceivePacket");
     Drain();
     const ULONGLONG now = GetTickCount64();
     for (auto it = f.incoming.begin(); it != f.incoming.end(); ++it) {
@@ -717,6 +746,7 @@ EXPORT EOS_EResult EOS_P2P_GetNextReceivedPacketSize(EOS_HP2P, const EOS_P2P_Rec
     Fake& f = F();
     if (!options || !size) return EOS_InvalidParameters;
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_GetNextReceivedPacketSize");
     Drain();
     const ULONGLONG now = GetTickCount64();
     for (const auto& packet : f.incoming) {
@@ -772,6 +802,7 @@ EXPORT EOS_EResult EOS_P2P_AcceptConnection(EOS_HP2P, const EOS_P2P_PeerConnecti
     if (!options || !options->RemoteUserId || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_AcceptConnection");
     f.accepted.insert({Text(options->RemoteUserId), options->SocketId->SocketName});
     return EOS_Success;
 }
@@ -779,6 +810,7 @@ EXPORT EOS_EResult EOS_P2P_CloseConnection(EOS_HP2P, const EOS_P2P_PeerConnectio
     if (!options || !options->RemoteUserId || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_CloseConnection");
     f.accepted.erase({Text(options->RemoteUserId), options->SocketId->SocketName});
     f.requested.erase({Text(options->RemoteUserId), options->SocketId->SocketName});
     return EOS_Success;
@@ -787,6 +819,7 @@ EXPORT EOS_EResult EOS_P2P_CloseConnections(EOS_HP2P, const EOS_P2P_CloseConnect
     if (!options || !options->SocketId) return EOS_InvalidParameters;
     Fake& f = F();
     const std::scoped_lock guard(f.lock);
+    OnTickThread("EOS_P2P_CloseConnections");
     const std::string socket = options->SocketId->SocketName;
     for (auto it = f.accepted.begin(); it != f.accepted.end();) it = it->second == socket ? f.accepted.erase(it) : ++it;
     for (auto it = f.requested.begin(); it != f.requested.end();) it = it->second == socket ? f.requested.erase(it) : ++it;

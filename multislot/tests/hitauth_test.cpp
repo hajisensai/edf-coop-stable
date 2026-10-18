@@ -362,14 +362,14 @@ void TestRagdollBodies() {
 }
 
 // The sender's search for a class's ragdoll (hitauthgame.cpp CollectHitBodies), without the game: a stand-in object
-// with its ragdoll at +0x7A0 and GDIs of sub-hits.
+// with its ragdoll at +0xAA0 (EventAnimationObject's place) and GDIs of sub-hits.
 void TestHitBodySearch() {
     struct Object {
         alignas(16) std::uint8_t bytes[0x2100]{};
         FakeRagdoll ragdoll;
-        Object(std::uint32_t firstId, const void* vtable) : ragdoll(firstId) {
+        Object(std::uint32_t firstId, const void* vtable, std::size_t at = 0xAA0) : ragdoll(firstId) {
             std::memcpy(bytes, &vtable, 8);
-            std::memcpy(bytes + 0x7A0 + kRagdollBodies, ragdoll.component + kRagdollBodies, 0x18);
+            std::memcpy(bytes + at + kRagdollBodies, ragdoll.component + kRagdollBodies, 0x18);
         }
     };
     struct Gdi {
@@ -393,7 +393,7 @@ void TestHitBodySearch() {
     static Object first(700, firstTable);
     DamageEvent e;
     HitBodiesFromGdi(first.bytes, Gdi{55555, 702}.bytes, e, 10000);
-    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 1.0f,
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0xAA0 && e.bodies[0].index == 2 && e.bodies[0].point[0] == 1.0f,
           "a first sub-hit on another object's body does not hide the target's own");
     // A class's first shot touches none of its bodies: the class is not given up, the next shot finds the ragdoll.
     static const std::uint64_t laterTable[4]{};
@@ -403,10 +403,54 @@ void TestHitBodySearch() {
     HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 10);
     Check(e.bodyCount == 0, "the class is searched again only after a while");
     HitBodiesFromGdi(later.bytes, Gdi{803}.bytes, e, 20000 + 1000);
-    Check(e.bodyCount == 1 && e.bodies[0].component == 0x7A0 && e.bodies[0].index == 3,
+    Check(e.bodyCount == 1 && e.bodies[0].component == 0xAA0 && e.bodies[0].index == 3,
           "a class whose first search found nothing is searched again and its ragdoll found");
     HitBodiesFromGdi(later.bytes, Gdi{55555, 801, 800}.bytes, e, 20000 + 1001);
     Check(e.bodyCount == 2 && e.bodies[0].index == 1 && e.bodies[1].index == 0, "then the class's offset is used");
+
+    // A ragdoll at a place no class has one (+0x7A0) is not looked for: nothing is sent that the owner would refuse.
+    static const std::uint64_t strayTable[4]{};
+    static Object stray(900, strayTable, 0x7A0);
+    HitBodiesFromGdi(stray.bytes, Gdi{902}.bytes, e, 30000);
+    Check(e.bodyCount == 0, "the sender looks only at the known ragdoll places");
+
+    // The owner reads only known places, and for a class whose place it knows (it found it shooting one) only that.
+    struct OwnerGdi {
+        alignas(16) std::uint8_t bytes[kGdiBytes]{};
+        alignas(16) std::uint8_t hits[4 * kHitRecordBytes]{};
+        OwnerGdi() {
+            const void* at = hits;
+            const std::size_t capacity = 4;
+            std::memcpy(bytes + kGdiHits, &at, 8);
+            std::memcpy(bytes + kGdiHitCapacity, &capacity, 8);
+        }
+        std::size_t count() const {
+            std::size_t n = 0;
+            std::memcpy(&n, bytes + kGdiHitCount, 8);
+            return n;
+        }
+        std::uint32_t id(std::size_t k) const {
+            std::uint32_t v = 0;
+            std::memcpy(&v, hits + k * kHitRecordBytes + kHitRecordBody, 4);
+            return v;
+        }
+    };
+    DamageEvent forwarded = SampleEvent();
+    forwarded.bodyCount = 3;
+    forwarded.bodies[0] = HitBody{0xAA0, 1, {0, 0, 0}};  // `later`'s place: its body 1 is 801
+    forwarded.bodies[1] = HitBody{0xB60, 0, {0, 0, 0}};  // a known place, but not this class's
+    forwarded.bodies[2] = HitBody{0x7A0, 0, {0, 0, 0}};  // no class's place
+    OwnerGdi rebuilt;
+    HitBodiesToGdi(later.bytes, rebuilt.bytes, forwarded);
+    Check(rebuilt.count() == 1 && rebuilt.id(0) == 801, "only the class's own place is read on the owner");
+    static const std::uint64_t unseenTable[4]{};
+    static Object unseen(600, unseenTable);  // a class this machine never shot: any known place, none other
+    forwarded.bodies[0] = HitBody{0x7A0, 0, {0, 0, 0}};
+    forwarded.bodies[1] = HitBody{0xAA0, 2, {0, 0, 0}};
+    forwarded.bodyCount = 2;
+    OwnerGdi other;
+    HitBodiesToGdi(unseen.bytes, other.bytes, forwarded);
+    Check(other.count() == 1 && other.id(0) == 602, "a class without a found place: known places only");
 }
 
 void TestGdi() {
@@ -523,6 +567,28 @@ void TestGate() {
     notOwner.targetLocal = false;
     Check(gate.Admit(quiet, notOwner, now) == HitReject::NotOwner, "not the owner");
     Check(gate.Admit(quiet, v, now) == HitReject::None, "the same event, now at its owner, is dealt");
+    // Sub-hits name only places where a class has a ragdoll (kRagdollPlaces): any other place is no sender's, and the
+    // owner would read it in its object - the event is refused, and not remembered.
+    DamageEvent placed = SampleEvent();
+    placed.attackerRef = 0x78;
+    placed.seq = 7;
+    placed.bodyCount = 2;
+    placed.bodies[0] = HitBody{0xB60, 2, {1, 2, 3}};
+    placed.bodies[1] = HitBody{0x7A0, 0, {1, 2, 3}};  // 8-aligned, in the old search range, and no class's
+    Check(gate.Admit(placed, v, now) == HitReject::BodyPlace, "a sub-hit at a place where no class has a ragdoll");
+    placed.bodies[1] = HitBody{0x1F00, 0, {1, 2, 3}};
+    Check(gate.Admit(placed, v, now) == HitReject::BodyPlace, "far into (or past) the object: refused");
+    placed.bodies[1] = HitBody{0xAA0, 1, {1, 2, 3}};
+    Check(gate.Admit(placed, v, now) == HitReject::None, "the same event with known places is dealt (not remembered "
+                                                         "as seen before)");
+    placed.seq = 8;
+    placed.bodyCount = 1;
+    placed.bodies[0] = HitBody{0xFFFF, 0, {1, 2, 3}};
+    Check(gate.Admit(placed, notOwner, now) == HitReject::NotOwner, "a copy that is not the owner reads nothing anyway");
+    Check(KnownRagdollPlace(0xB60) && KnownRagdollPlace(0xAA0) && KnownRagdollPlace(0xB00) && !KnownRagdollPlace(0) &&
+              !KnownRagdollPlace(0x300) && !KnownRagdollPlace(0xB61),
+          "UfoCarrier508 (+0xB60), EventAnimationObject (+0xAA0) and MovingFortress (+0xB00) are known places");
+    Check(std::string(HitRejectName(HitReject::BodyPlace)) != "?", "the refusal has a name for the log");
     // Forgetting a quiet attacker (its machine rejoined, its numbers start over).
     e = SampleEvent();
     e.seq = 1;

@@ -135,6 +135,12 @@ int wmain(int argc, wchar_t** argv) {
     if (unimplemented && unimplemented(names, sizeof(names)))
         for (char *next = nullptr, *line = strtok_s(names, "\n", &next); line; line = strtok_s(nullptr, "\n", &next))
             gamenet::Result("unimplemented-eos", "%s", line);
+    const auto offTick = reinterpret_cast<Unimplemented>(
+        GetProcAddress(GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll"), "FakeNet_OffTickCalls"));
+    char calls[4096]{};
+    if (offTick && offTick(calls, sizeof(calls)))
+        for (char *next = nullptr, *line = strtok_s(calls, "\n", &next); line; line = strtok_s(nullptr, "\n", &next))
+            gamenet::Result("eos-off-tick", "%s", line);
     // The driver goes by this, not by the exit code alone: under a debugger the exit code is the debugger's.
     gamenet::Result("exit", "%d", code);
     std::fflush(stdout);

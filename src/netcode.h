@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace dn {
 
@@ -103,6 +104,10 @@ bool roomFeedAdvertisement(std::string& owner);
 // Tests only ([Test] RoomFeed=0): play an EDF6Coop from before the room feed - publish neither kRoomFeedLobbyKey nor
 // LobbyMarker::kRoomFeedKey, send no Room message over EOS and follow none.
 void setTestRoomFeed(bool on);
+// Tests only ([Test] RoomFeedEpochs / RoomFeedRestartMs): our next hosting sessions take these epochs (0s skipped) in
+// order instead of random ones, and `restartAfterMs` (0: never) after we began hosting a room we begin a new session of
+// it once, as a host that started its game again into the same room does.
+void setTestRoomFeedSessions(const std::vector<uint64_t>& epochs, uint32_t restartAfterMs);
 
 // Tests only ([Test] LoopbackHosts): a room host may advertise a loopback address (gamenet runs on one machine).
 void setTestLoopbackHosts(bool on);

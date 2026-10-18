@@ -227,7 +227,7 @@ struct State {
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
     std::vector<MemberStatusHandler*> statusHandlers;
-    std::atomic<EOS_HP2P> p2p{nullptr};  // written on the game's send/receive thread, read on the tick
+    std::atomic<EOS_HP2P> p2p{nullptr};  // written by the game's first send or receive, read on the tick
     std::atomic<EOS_HP2P> configuredHandle{nullptr};
     std::atomic<EOS_ProductUserId> localUser{nullptr};
     std::mutex notifyMutex;
@@ -334,8 +334,14 @@ struct State {
     std::vector<std::pair<std::string, int>> inherited;
     uint64_t inheritedSinceMs = 0;
     // The room feed (room_view.h): the host's Room message over EOS P2P. A member: what came over EOS and the direct
-    // link, put together (feedMutex: the game's receive thread and the EOS tick both hand packets in). The room's owner:
-    // what it sent (EOS tick only).
+    // link, put together (feedMutex: our receive in the EOS tick and the game's receive hand packets in, and the room
+    // part reads it). The room's owner: what it sent (EOS tick only).
+    // Both receives are on one thread, one after the other, never at once: EDF.dll's eos::internal_Core::Update
+    // (12ADB30) calls EOS_Platform_Tick (hookPlatformTick, where roomFeedReceiveTick runs) and then notifies Core+0x20,
+    // to which p2p::Manager's constructor (12C6280) subscribed its receive loop (12C8CC0, through 12C9520): the only
+    // call of EOS_P2P_ReceivePacket in EDF.dll that anything reaches (12C9CA0 has no caller). EOS documents no thread
+    // safety, so that is what we keep to: every EOS call of ours runs on that thread (GameNet checks it,
+    // fake_eos_net.cpp OnTickThread).
     std::atomic<bool> roomFeedOn{true};
     std::mutex feedMutex;
     HostRoomFeed feed;
@@ -347,7 +353,12 @@ struct State {
         std::vector<std::string> unstamped;       // ...that message without it
         std::vector<std::string> message;         // ...and with it
         std::map<std::string, RoomStamp> sent;    // per member: the newest message that went to it
+        uint64_t sinceMs = 0;                     // when this hosting session began
     } feedHost;
+    // Tests only (setTestRoomFeedSessions; feedMutex): the epochs of our next hosting sessions, and after how long
+    // hosting a room we begin a new session of it once, as after starting the game again into the same room.
+    std::vector<uint64_t> testFeedEpochs;
+    uint64_t testFeedRestartMs = 0;
     // Calls of the game answered by us, completed on the next tick: never inside the call itself.
     std::mutex deferredMutex;
     std::vector<std::function<void()>> deferred;
@@ -1766,13 +1777,20 @@ void hostRoomTick(const std::shared_ptr<DirectNet>& base, uint64_t now) {
     }
 }
 
-// A new hosting session's epoch (RoomStamp): the wall clock in milliseconds, so that a later session of ours is higher
-// than an earlier one also across game starts, and never lower than the last one of this process.
+// A new hosting session's epoch (RoomStamp): 64 random bits, never 0 (no stamp) and never the last one's. Not a clock:
+// a member tells a later session by hearing of it later (RoomSessions), so a clock set back between two sessions of
+// ours cannot make the later one look older. [Test] RoomFeedEpochs: the next of the test's epochs, while there are.
+// Caller holds feedMutex.
 uint64_t newFeedEpoch(uint64_t last) {
-    FILETIME ft{};
-    GetSystemTimeAsFileTime(&ft);
-    const uint64_t ms = ((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
-    return std::max(ms, last + 1);
+    if (!g.testFeedEpochs.empty()) {
+        const uint64_t e = g.testFeedEpochs.front();
+        g.testFeedEpochs.erase(g.testFeedEpochs.begin());
+        return e;
+    }
+    uint64_t e = 0;
+    while (!e || e == last)
+        if (!randomBytes(reinterpret_cast<uint8_t*>(&e), sizeof(e))) e = (last ^ GetTickCount64() ^ GetCurrentProcessId()) | 1;
+    return e;
 }
 
 // The room's owner sends its Room message over EOS (the room feed) to `member`: every page, reliably and in order on
@@ -1837,11 +1855,19 @@ void publishRoomTick(const std::shared_ptr<DirectNet>& base) {
     {
         std::lock_guard<std::mutex> lock(g.feedMutex);
         auto& h = g.feedHost;
-        if (h.room != room) {  // a new hosting session: a room we created, or one Epic made us the owner of
+        const uint64_t now = GetTickCount64();
+        const bool restart = h.room == room && g.testFeedRestartMs && now - h.sinceMs >= g.testFeedRestartMs;
+        if (restart) {
+            g.testFeedRestartMs = 0;
+            logf("TEST RoomFeedRestartMs: a new hosting session of room %s begins", room.c_str());
+        }
+        // A new hosting session: a room we created, or one Epic made us the owner of.
+        if (h.room != room || restart) {
             const uint64_t last = h.stamp.epoch;
             h = {};
             h.room = room;
             h.stamp = {newFeedEpoch(last), 0, true};
+            h.sinceMs = now;
         }
         if (h.message.empty() || members != h.unstamped) {
             ++h.stamp.seq;
@@ -3552,6 +3578,14 @@ bool roomFeedAdvertisement(std::string& owner) {
     if (!roomFeedOn() || !g.marker.inLobby() || !g.marker.isOwner()) return false;
     owner = idString(g.lobbyUser.load());
     return !owner.empty();
+}
+
+void setTestRoomFeedSessions(const std::vector<uint64_t>& epochs, uint32_t restartAfterMs) {
+    std::lock_guard<std::mutex> lock(g.feedMutex);
+    g.testFeedEpochs.clear();
+    for (uint64_t e : epochs)
+        if (e) g.testFeedEpochs.push_back(e);
+    g.testFeedRestartMs = restartAfterMs;
 }
 
 void setTestRoomFeed(bool on) {

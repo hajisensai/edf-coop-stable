@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 #include <thread>
+#include "loopback_guard.h"
 
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(uint32_t, uint32_t, EDF6CoopExtensionApi*) noexcept;
 namespace {
@@ -24,6 +25,7 @@ EDF6CoopSnapshot snap(dn::DirectNet& net) {
 }
 }
 int main() {
+    testguard::LoopbackGuard loopbackGuard;  // every UDP socket of this test on loopback (loopback_guard.h)
     static_assert(sizeof(EDF6CoopPeer) == 65);
     static_assert(sizeof(EDF6CoopSnapshot) == 160);
     static_assert(sizeof(EDF6CoopExtensionApi) == 40);
@@ -41,12 +43,14 @@ int main() {
     ho.mode = dn::Mode::Host;
     ho.listenPort = 0;
     ho.pingIntervalMs = 100;
+    ho.testBindLoopback = dn::DirectOptions::Loopback::V4;  // loopback only: no firewall prompt
     ho.identity = dn::Identity::generate();
     auto ai = dn::Identity::generate(), bi = dn::Identity::generate();
     ho.memberIds = {{aId, ai->commitment()}, {bId, bi->commitment()}};
     CHECK(host.start(ho)); host.setLocalUser(hostId);
     dn::DirectOptions jo;
     jo.mode = dn::Mode::Join; jo.listenPort = 0; jo.pingIntervalMs = 100;
+    jo.testBindLoopback = dn::DirectOptions::Loopback::V4;
     jo.hostAddress = "127.0.0.1:" + std::to_string(host.boundPort());
     jo.roomOwner = hostId; jo.roomOwnerIdentity = ho.identity->commitment();
     jo.identity = ai;
@@ -187,5 +191,6 @@ int main() {
     unavailable.size = sizeof(unavailable);
     CHECK(!api.snapshot(&unavailable) && !unavailable.ready);
     printf("extension transport: %d checks, %d failures\n", checks, failures);
+    if (!loopbackGuard.report("ExtensionTransportTests")) ++failures;
     return failures ? 1 : 0;
 }

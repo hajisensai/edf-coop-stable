@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#include "../../../tests/loopback_guard.h"
 
 namespace {
 
@@ -54,19 +55,21 @@ bool PrepareMachine(const std::wstring& work, const std::wstring& plugin, const 
 
 std::wstring Wide(const std::string& text) { return std::wstring(text.begin(), text.end()); }
 
-// A UDP port nothing on this machine uses now, for a scenario's direct-link host (its INI says @PORT@): other
-// test runs on the same machine get ports of their own.
+// A UDP port nothing on this machine uses now on 127.0.0.1, where every machine's direct link listens (MachineIni),
+// for a scenario's direct-link host (its INI says @PORT@): other test runs on the same machine get ports of their own.
+// Loopback, as every socket of the test: no firewall prompt (tests/loopback_guard.h).
 std::string FreeUdpPort() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
-    const SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in6 any{};
-    any.sin6_family = AF_INET6;
-    int len = sizeof(any);
+    const SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int len = sizeof(local);
     std::string port = "0";
-    if (s != INVALID_SOCKET && bind(s, reinterpret_cast<sockaddr*>(&any), sizeof(any)) == 0 &&
-        getsockname(s, reinterpret_cast<sockaddr*>(&any), &len) == 0)
-        port = std::to_string(ntohs(any.sin6_port));
+    if (s != INVALID_SOCKET && bind(s, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0 &&
+        getsockname(s, reinterpret_cast<sockaddr*>(&local), &len) == 0)
+        port = std::to_string(ntohs(local.sin_port));
     if (s != INVALID_SOCKET) closesocket(s);
     return port;
 }
@@ -76,6 +79,12 @@ std::string WithPort(std::string ini, const std::string& port, const std::string
     for (std::size_t at = ini.find("@PORT2@"); at != std::string::npos; at = ini.find("@PORT2@", at)) ini.replace(at, 7, port2);
     for (std::size_t at = ini.find("@PORT@"); at != std::string::npos; at = ini.find("@PORT@", at)) ini.replace(at, 6, port);
     return ini;
+}
+
+// A machine's EDF6Coop.ini: the scenario's, with its direct links on 127.0.0.1 only ([Test] BindLoopback, which the
+// direct link reads in any [Test] section). A machine without EDF6Coop has none.
+std::string MachineIni(const std::string& ini, const std::string& port, const std::string& port2) {
+    return ini.empty() ? ini : WithPort(ini, port, port2) + "\r\n[Test]\r\nBindLoopback=4\r\n";
 }
 
 bool Spawn(Spawned& machine, const std::wstring& exe, const std::wstring& gameFolder, const std::wstring& work,
@@ -215,6 +224,7 @@ int wmain(int argc, wchar_t** argv) {
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     std::vector<Spawned> machines;
+    testguard::LoopbackGuard loopbackGuard;  // this driver's sockets and every machine's: loopback only
     SetEnvironmentVariableA("EDF6NET_MEMBERS", std::to_string(chosen->seats.size()).c_str());
     for (const char* variable : {gamenet::kDelayVariable, gamenet::kDropVariable, gamenet::kLobbyDelayVariable,
                                  "EDF6NET_CHATTER", "EDF6NET_RUSH"})
@@ -228,7 +238,7 @@ int wmain(int argc, wchar_t** argv) {
         machine.user = seat.user;
         machine.role = seat.role;
         const std::wstring home = folder + L"\\" + Wide(seat.user);
-        Check(PrepareMachine(home, plugin, WithPort(seat.ini, port, port2)), seat.user + ": work folder prepared");
+        Check(PrepareMachine(home, plugin, MachineIni(seat.ini, port, port2)), seat.user + ": work folder prepared");
         machines.push_back(machine);
         for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), value.c_str());
         SetEnvironmentVariableA("EDF6NET_SEAT", std::to_string(machines.size() - 1).c_str());
@@ -239,6 +249,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         for (const auto& [variable, value] : seat.env) SetEnvironmentVariableA(variable.c_str(), nullptr);
         AssignProcessToJobObject(job, machines.back().process.hProcess);
+        loopbackGuard.watch(machines.back().process.dwProcessId);
         ResumeThread(machines.back().process.hThread);  // started suspended, so it is in the job from its first instruction
     }
     Collect(machines, chosen->timeoutMs);
@@ -249,12 +260,17 @@ int wmain(int argc, wchar_t** argv) {
         // Its own word (under EDF6NET_DEBUGGER the exit code is the debugger's), and an exit that agrees with it.
         Check(Result(machine, "exit") == "0" && (debugged || machine.exitCode == 0),
               machine.user + " (" + machine.role + ") passed its own checks");
+        // One thread calls EOS, as in the game (fake_eos_net.cpp Fake::tickThread): the plugin's own receives (the
+        // room feed, the side packets) and sends run where the game's do.
+        Check(machine.results.count("eos-off-tick") == 0,
+              machine.user + " called EOS P2P only on the thread that ticks EOS (" + Result(machine, "eos-off-tick") + ")");
         if (Result(machine, "plugin").rfind("none", 0) == 0) continue;  // the game alone writes no EDF6Coop.log
         Check(Result(machine, "log").find("bytes") != std::string::npos &&
                   machine.text.find("==== EDF6Coop ") != std::string::npos,
               machine.user + "'s EDF6Coop.log was read");
     }
     chosen->check(machines, *network);
+    Check(loopbackGuard.report("this scenario's machines"), "every UDP socket was bound to loopback (no firewall prompt)");
     CloseHandle(job);
     std::printf(failures ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;

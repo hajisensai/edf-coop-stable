@@ -7,6 +7,7 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include "loopback_guard.h"
 namespace {
 int failures = 0, checks = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
@@ -15,6 +16,7 @@ template<typename T> T function(HMODULE module, const char* name) {
 }
 }
 int main(int argc, char** argv) {
+    testguard::LoopbackGuard loopbackGuard;  // every UDP socket of this test on loopback (loopback_guard.h)
     if (argc != 3 && argc != 4) return 2;
     HMODULE eos = LoadLibraryA(argv[1]);
     if (!eos) return 2;
@@ -126,6 +128,7 @@ int main(int argc, char** argv) {
     dn::DirectNet remote;
     dn::DirectOptions hostOptions;
     hostOptions.mode = dn::Mode::Host; hostOptions.listenPort = 0;
+    hostOptions.testBindLoopback = dn::DirectOptions::Loopback::V4;  // loopback only: no firewall prompt
     hostOptions.identity = dn::Identity::generate();
     auto peerIdentity = dn::Identity::generate();
     setText("peer", "EDF6DN_ID", peerIdentity->commitment().c_str());
@@ -133,6 +136,7 @@ int main(int argc, char** argv) {
     CHECK(net->start(hostOptions)); net->setLocalUser("self");
     dn::DirectOptions joinOptions;
     joinOptions.mode = dn::Mode::Join; joinOptions.listenPort = 0;
+    joinOptions.testBindLoopback = dn::DirectOptions::Loopback::V4;
     joinOptions.hostAddress = "127.0.0.1:" + std::to_string(net->boundPort());
     joinOptions.roomOwner = "self"; joinOptions.roomOwnerIdentity = hostOptions.identity->commitment();
     joinOptions.identity = peerIdentity;
@@ -183,5 +187,6 @@ int main(int argc, char** argv) {
     }
     FreeLibrary(eos);
     printf("extension profile: %d checks, %d failures\n", checks, failures);
+    if (!loopbackGuard.report("ExtensionProfileTests")) ++failures;
     return failures ? 1 : 0;
 }

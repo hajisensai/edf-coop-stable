@@ -397,12 +397,62 @@ int wmain(int argc, wchar_t** argv) {
         Poke(base + RoomViewSlot().target + RoomViewSlot().code.size() - 1, &changed, 1);
     }
 
+    // The bytes All Forces (EDF6VehicleCrew, its BVM script-mission support) writes or checks in EDF.dll, by its own
+    // list (2026-10-18; first and last byte, both in; a call site: its 5 bytes): EDF6Coop writes none of them.
+    struct AfBytes {
+        std::uint32_t first, last;
+    };
+    constexpr AfBytes kAllForcesBytes[] = {
+        // written
+        {0x21F3C2, 0x21F3C8}, {0x22912B, 0x22913B}, {0x22B36C, 0x22B37C}, {0x22B470, 0x22B470}, {0x22B569, 0x22B569},
+        {0x22B69D, 0x22B69D}, {0x22B802, 0x22B802},
+        // its call sites
+        {0x210AE0, 0x210AE4}, {0x22AC2F, 0x22AC33}, {0x214007, 0x21400B}, {0x21405F, 0x214063}, {0x214480, 0x214484},
+        {0x214558, 0x21455C}, {0x214610, 0x214614}, {0x221687, 0x22168B}, {0x20EB81, 0x20EB85},
+        // checked
+        {0x21F3C9, 0x21F3C9}, {0x21F3D7, 0x21F3D7}, {0x21F504, 0x21F504}, {0x21F511, 0x21F511}, {0x22274F, 0x222760},
+        {0x228ADD, 0x228AEC}, {0x22A66E, 0x22A684}, {0x2252E7, 0x2252E7}, {0x2253B7, 0x2253B7}};
+    std::vector<std::vector<std::uint8_t>> afBefore;
+    for (const AfBytes& r : kAllForcesBytes) afBefore.emplace_back(base + r.first, base + r.last + 1);
+
     const HMODULE plugin = LoadLibraryW(dll.c_str());
     const auto load = plugin ? reinterpret_cast<Load>(GetProcAddress(plugin, "EML6_Load")) : nullptr;
     Check(load != nullptr, "plugin exports EML6_Load");
     if (!load) return 1;
     PluginInfo info{};
     const bool loaded = load(&info);
+    {
+        bool untouched = true;
+        for (std::size_t i = 0; i < std::size(kAllForcesBytes); ++i) {
+            const AfBytes& r = kAllForcesBytes[i];
+            if (std::memcmp(base + r.first, afBefore[i].data(), afBefore[i].size()) != 0) {
+                std::printf("  EDF+%X..%X changed\n", r.first, r.last);
+                untouched = false;
+            }
+        }
+        Check(untouched, "EDF6Coop leaves every byte All Forces writes or checks as it was");
+    }
+    // EDF6Coop_BvmPlayerTableHooks: the four BVM player table hooks, bit i for the i-th of BvmPlayerTableHooks, while
+    // they hold the jump the plugin wrote; none without the mission phase or when the patches were refused.
+    {
+        using BvmHooksFn = std::uint32_t(__cdecl*)();
+        const auto bvm = reinterpret_cast<BvmHooksFn>(GetProcAddress(plugin, "EDF6Coop_BvmPlayerTableHooks"));
+        Check(bvm != nullptr, "plugin exports EDF6Coop_BvmPlayerTableHooks");
+        if (bvm) {
+            const bool mission = loaded && mode != L"nomission";
+            Check(bvm() == (mission ? 0xFu : 0u), mission ? "all four BVM player table hooks are reported in"
+                                                          : "no BVM player table hook is reported without them");
+            if (mission) {
+                const auto site = BvmPlayerTableHooks()[2];  // 228AED: another plugin writes over it
+                const std::vector<std::uint8_t> jump(base + site.rva, base + site.rva + 5);
+                const std::uint8_t nop5[5] = {0x0F, 0x1F, 0x44, 0x00, 0x00};
+                Poke(base + site.rva, nop5, sizeof(nop5));
+                Check(bvm() == 0xBu, "a hook another plugin wrote over is no longer reported");
+                Poke(base + site.rva, jump.data(), jump.size());
+                Check(bvm() == 0xFu, "and is again once the jump is back");
+            }
+        }
+    }
     const Behaviour after = Observe(base);
     const std::string log = ReadText(logPath);
     const auto guest = GuestPatches();

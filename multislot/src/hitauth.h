@@ -133,6 +133,22 @@ struct HitBody {
 };
 constexpr int kMostHitBodies = 4;  // the GDI's container is reserved for 4 (22FE27)
 
+// Where a ragdoll component sits in a game object, so where a sub-hit's `component` may point (EDF.dll 678CCB46): the
+// object constructors that build one in place (`lea rcx, [obj+X]` before `call 6E3B10`: 265F39 +0xCC0,
+// 29ACD3 +0xAC0, 309D67 +0xCD0, 309E2A +0x4F0, 314CBE +0xD80, 318E32 / 4F5B9C +0xB60 (UfoCarrier508), 3FF922 +0x5E0,
+// 410DBA 449F86 4D59F3 4E8ECF 4ED6F2 5ABA75 5B601B 5CAE03 7C8365 +0xAA0 (EventAnimationObject and its kin), 412029
+// 44ABB7 49D52B +0x650, 4983BE +0x420, 49C711 +0x500, 4A68CD +0xB10, 4B5422 +0xDA0, 4C0C45 4DBD72 51D9C8 533A0F +0xB00
+// (MovingFortress among them), 4CEF3F +0xAF0, 4CFD0A +0x4E0, 4D663D +0x400, 4FE8B7 +0x6F0, 52879C +0x10F0, 5B7041
+// +0xB40, 5E403B 5EA096 +0x520, 56A724 +0xD90, 629597 +0x1320) and the damage code that maps a body through one
+// (`call 6EA430`), which adds +0xE00 (50499B). The ones built outside an object (3291AE: on the heap) or below +0x300
+// (inside a part, 403BB4 +0x170, 5C4A07 +0x10) are no object's. The sender looks only here, the owner reads only here:
+// a sub-hit naming any other place is no sender's and its event is refused (HitReject::BodyPlace), so the owner never
+// reads a place the sender made up, possibly past the end of the object. A new place needs a new protocol.
+constexpr std::uint16_t kRagdollPlaces[] = {0x400, 0x420, 0x4E0, 0x4F0, 0x500, 0x520, 0x5E0, 0x650, 0x6F0, 0xAA0, 0xAC0,
+                                            0xAF0, 0xB00, 0xB10, 0xB40, 0xB60, 0xCC0, 0xCD0, 0xD80, 0xD90, 0xDA0, 0xE00,
+                                            0x10F0, 0x1320};
+bool KnownRagdollPlace(std::uint16_t offset);
+
 // The damage event, as it travels (little-endian, fixed layout behind a magic and a version).
 struct DamageEvent {
     std::uint32_t seq = 0;          // the sender's, increasing
@@ -184,7 +200,9 @@ struct HitLimits {
 };
 enum class HitReject : std::uint8_t {
     None, Malformed, NotOwner, TargetDead, Damage, Offset, Range, Duplicate, Rate,
+    BodyPlace,  // a sub-hit names a place in the target that holds no ragdoll in any class (kRagdollPlaces)
 };
+constexpr int kHitRejectCount = static_cast<int>(HitReject::BodyPlace) + 1;
 const char* HitRejectName(HitReject reject);
 
 // The owner's view of an event's target and attacker.

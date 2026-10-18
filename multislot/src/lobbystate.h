@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <cstdint>
+#include <string>
 
 #include "packetfit.h"
 
@@ -87,5 +88,11 @@ bool InstallLobbyState(HMODULE game, ImportRedirect redirect);
 // room larger than an EOS lobby publishes in its updates (kRoomMembersKey). Unset: nothing is published.
 using RoomMemberCountFn = std::uint32_t (*)(void* lobbyInterface, const void* user, const char* lobbyId);
 void SetRoomMemberCountSource(RoomMemberCountFn source);
+
+// A text attribute the owner of a lobby adds to every update of it the game makes: the room feed's kRoomFeedLobbyKey
+// (src/netcode.h), in the very update that makes the room findable, so that a player joining it reads it. False:
+// nothing to add (not the owner, or no room feed). Unset: nothing is added.
+using OwnerLobbyTextFn = bool (*)(std::string& key, std::string& value);
+void SetOwnerLobbyTextSource(OwnerLobbyTextFn source);
 
 }  // namespace multislot

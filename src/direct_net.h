@@ -91,6 +91,12 @@ struct DirectOptions {
     // Tests only: an uplink of this many bytes per second (0 = unlimited) with a 100 ms queue; what does
     // not fit is dropped, as a full router queue does.
     uint64_t testUplinkBytesPerSecond = 0;
+    // Tests only ([Test] BindLoopback): the socket is bound to a loopback address of one family instead of every
+    // address of the machine (V4: 127.0.0.1 only, V6: ::1 only, no IPv4 then). Nothing outside this machine can reach
+    // it, so Windows Defender Firewall has nothing to ask about (it asks the first time a program listens on an address
+    // others can reach). Off in the game.
+    enum class Loopback : uint8_t { Off, V4, V6 };
+    Loopback testBindLoopback = Loopback::Off;
     // join: link to the room's other joiners directly (protocol 7), the host relaying only what that cannot carry.
     bool mesh = true;
     // host: what the host forwards between joiners comes out of its own uplink. State datagrams relayed beyond

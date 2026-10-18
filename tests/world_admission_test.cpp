@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <functional>
 #include <thread>
+#include "loopback_guard.h"
 
 namespace {
 int checks = 0, failures = 0;
@@ -22,6 +23,7 @@ std::vector<std::string> message(dn::WorldAdmission world) {
 }
 
 int main() {
+    testguard::LoopbackGuard loopbackGuard;  // every UDP socket of this test on loopback (loopback_guard.h)
     using P = dn::WorldPhase;
     using O = dn::ParkedEntryOutcome;
     const dn::WorldAdmission lobby{P::Lobby, 8, {}, true};
@@ -79,6 +81,7 @@ int main() {
     dn::DirectNet host, fresh;
     dn::DirectOptions ho;
     ho.mode = dn::Mode::Host; ho.listenPort = 0; ho.pingIntervalMs = 100;
+    ho.testBindLoopback = dn::DirectOptions::Loopback::V4;  // loopback only: no firewall prompt
     ho.identity = dn::Identity::generate();
     auto identity = dn::Identity::generate();
     ho.memberIds = {{"fresh", identity->commitment()}};
@@ -90,6 +93,7 @@ int main() {
     host.setRoomMembers(message(large));
     dn::DirectOptions jo;
     jo.mode = dn::Mode::Join; jo.listenPort = 0; jo.pingIntervalMs = 100;
+    jo.testBindLoopback = dn::DirectOptions::Loopback::V4;
     jo.identity = identity; jo.roomOwner = "host"; jo.roomOwnerIdentity = ho.identity->commitment();
     jo.hostAddress = "127.0.0.1:" + std::to_string(host.boundPort());
     CHECK(fresh.start(jo)); fresh.setLocalUser("fresh");
@@ -115,5 +119,6 @@ int main() {
     CHECK(!dn::freshWorldEntryAllowed(read()));
     CHECK(read().participants.size() == large.participants.size());
     std::printf("%d checks, %d failed\n", checks, failures);
+    if (!loopbackGuard.report("WorldAdmissionTests")) ++failures;
     return failures ? 1 : 0;
 }

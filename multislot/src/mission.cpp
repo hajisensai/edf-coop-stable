@@ -11,6 +11,7 @@
 #include "crashlog.h"
 #include "log.h"
 #include "patches.h"
+#include "spawn_layout.h"
 #include "../../src/extension_api.h"
 
 namespace multislot {
@@ -434,41 +435,11 @@ std::int32_t WrapHudIndex(std::int32_t index, int tableSize) {
 
 void SetHudTableSize(int size) { hudTableSize.store(size > 0 ? size : kVanillaPlayers); }
 
-void SpawnOffset(std::uint32_t index, const float* table, float* out) {
-    if (index < 4) {
-        std::memcpy(out, table + index * 4, 4 * sizeof(float));
-        return;
-    }
-    if (index < static_cast<std::uint32_t>(kSpawnLinePlayers)) {
-        // Players 5..32 stand along players 2, 3, 4's directions, twice (8: three times, ...) as far out. As every
-        // version with up to 32 slots placed them.
-        const std::uint32_t extra = index - 4;
-        std::memcpy(out, table + (1 + extra % 3) * 4, 4 * sizeof(float));
-        const float scale = 2.0f + static_cast<float>(extra / 3);
-        out[0] *= scale;
-        out[2] *= scale;
-        return;
-    }
-    // Further out the lines would be hundreds of metres long: players 33+ fill rings around player 1's point, as far
-    // apart as players 1 and 2 stand, the first ring just outside the 32 lines' reach of player 2's direction.
-    std::memcpy(out, table, 4 * sizeof(float));
-    const float dx = table[4] - table[0], dz = table[6] - table[2];
-    float spacing = std::sqrt(dx * dx + dz * dz);
-    if (!(spacing > 0.5f)) spacing = 3.0f;
-    const float first = spacing * (2.0f + static_cast<float>((kSpawnLinePlayers - 5) / 3)) + spacing;
-    std::uint32_t slot = index - static_cast<std::uint32_t>(kSpawnLinePlayers);
-    for (int ring = 0;; ++ring) {
-        const float radius = first + spacing * static_cast<float>(ring);
-        const auto seats = static_cast<std::uint32_t>(6.2831853f * radius / spacing);
-        if (slot < seats) {
-            const float angle = 6.2831853f * static_cast<float>(slot) / static_cast<float>(seats);
-            out[0] = table[0] + radius * std::cos(angle);
-            out[2] = table[2] + radius * std::sin(angle);
-            return;
-        }
-        slot -= seats;
-    }
-}
+// One layout for both plugins (spawn_layout.h, a verbatim copy of All Forces' src/spawn_layout.h): + - * / and sqrt
+// only, no FMA contraction, no CRT sin / cos, so every machine and both runtimes (AngelScript here, BVM in All Forces)
+// put a player on the same bits.
+static_assert(kSpawnLinePlayers == static_cast<int>(edf6spawn::kLinePlayers), "mission.h and spawn_layout.h agree");
+void SpawnOffset(std::uint32_t index, const float* table, float* out) { edf6spawn::SpawnOffset(index, table, out); }
 
 bool GhostHarness() { return ghostHarness; }
 

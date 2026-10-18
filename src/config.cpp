@@ -414,6 +414,12 @@ Config loadConfig(const std::wstring& iniPath) {
     c.autoJoin = readBool(ini, s, L"AutoJoin", true, w);
     c.upnp = readBool(ini, s, L"UPnP", true, w);
     c.bindPhysicalInterface = readBool(ini, s, L"BindPhysicalInterface", true, w);
+    // Tests only (DirectOptions::testBindLoopback): 1 or 4 binds the direct link to 127.0.0.1, 6 to ::1.
+    switch (readInt(ini, L"Test", L"BindLoopback", 0, 0, 6, w)) {
+        case 1: case 4: c.direct.testBindLoopback = DirectOptions::Loopback::V4; break;
+        case 6: c.direct.testBindLoopback = DirectOptions::Loopback::V6; break;
+        default: break;
+    }
 
     c.eosFixedPort = static_cast<uint16_t>(readInt(ini, L"EOS", L"FixedPort", 0, 0, 65535, w));
     std::wstring relay = lower(readString(ini, L"EOS", L"Relay", L"default"));

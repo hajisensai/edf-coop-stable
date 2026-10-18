@@ -259,8 +259,15 @@ const char* HitRejectName(HitReject reject) {
         case HitReject::Range: return "attacker too far from the hit point";
         case HitReject::Duplicate: return "duplicate";
         case HitReject::Rate: return "attacker over the event rate";
+        case HitReject::BodyPlace: return "sub-hit at no known ragdoll place";
     }
     return "?";
+}
+
+bool KnownRagdollPlace(std::uint16_t offset) {
+    for (const std::uint16_t place : kRagdollPlaces)
+        if (place == offset) return true;
+    return false;
 }
 
 HitReject CheckEvent(const DamageEvent& event, const HitView& view, const HitLimits& limits) {
@@ -269,6 +276,8 @@ HitReject CheckEvent(const DamageEvent& event, const HitView& view, const HitLim
         !std::isfinite(event.extra68) || !std::isfinite(event.damage))
         return HitReject::Malformed;
     if (!view.targetLocal) return HitReject::NotOwner;
+    for (int i = 0; i < event.bodyCount && i < kMostHitBodies; ++i)
+        if (!KnownRagdollPlace(event.bodies[i].component)) return HitReject::BodyPlace;
     if (!view.targetAlive) return HitReject::TargetDead;
     if (!(event.damage > 0.0f) || event.damage > limits.maxDamage) return HitReject::Damage;
     const float radius = std::max(0.0f, event.radius);

@@ -41,6 +41,20 @@ extern "C" __declspec(dllexport) void EDF6COOP_CALL EDF6AF_MissionPlayerCreated(
 }
 #endif
 extern "C" __declspec(dllexport) void EDF6AF_DecodeRoomType() {}
+#ifndef FAKE_AF_NO_PACKS
+// All Forces' mission-pack check (EDF6AF_RoomPackCompatible): this fixture's one installed pack is content 65 with
+// identity "P65"; every other content id is no pack of ours. The last call is kept for the test.
+static int64_t lastPackContent = -2;
+static char lastPack[64] = "(none)";
+extern "C" __declspec(dllexport) int EDF6AF_RoomPackCompatible(int64_t dlc, const char* afPack) {
+    lastPackContent = dlc;
+    strncpy_s(lastPack, afPack ? afPack : "(null)", _TRUNCATE);
+    if (dlc < 65 || dlc > 71) return 1;
+    return dlc == 65 && afPack && !strcmp(afPack, "P65") ? 1 : 0;
+}
+extern "C" __declspec(dllexport) int64_t FakeAF_LastPackContent() { return lastPackContent; }
+extern "C" __declspec(dllexport) const char* FakeAF_LastPack() { return lastPack; }
+#endif
 extern "C" __declspec(dllexport) bool EDF6AF_RoomIsolationReady() { return ready; }
 extern "C" __declspec(dllexport) void FakeAF_SetReady(bool value) { ready = value; }
 extern "C" __declspec(dllexport) unsigned EDF6AF_SupportProtocolVersion() { return version; }

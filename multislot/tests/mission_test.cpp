@@ -522,6 +522,36 @@ int main(int argc, char** argv) {
     Check(within, "players 33-1024 stand within 200 m of player 1");
     Check(apart, "players 33-1024 never share a spot");
 
+    // The bits All Forces' tests/edf5_online_room_test.cpp holds for its copy of spawn_layout.h: both plugins place
+    // every player on the same bits (a spawn point turned 30 degrees: the creation loop's (0,0,0) (-1,0,-1) (1,0,-1)
+    // (0,0,-2), normalised, turned).
+    {
+        const float turned[16] = {0, 0, 0, 0, -0.25881904f, 0, -0.96592583f, 0, 0.96592583f, 0, -0.25881904f, 0,
+                                  0.5f, 0, -0.8660254f, 0};
+        struct Golden {
+            std::uint32_t index, x, z;
+        };
+        const Golden golden[] = {{0, 0x00000000u, 0x00000000u},   {3, 0x3F000000u, 0xBF5DB3D7u},
+                                 {4, 0xBF0483EEu, 0xBFF746EAu},   {5, 0x3FF746EAu, 0xBF0483EEu},
+                                 {6, 0x3F800000u, 0xBFDDB3D7u},   {31, 0xC0363567u, 0xC12A00C1u},
+                                 {32, 0x413FFFFFu, 0x00000000u},  {33, 0x413F539Du, 0x3F808777u},
+                                 {40, 0x41167819u, 0x40EE854Eu},  {107, 0x414FFFFFu, 0x00000000u},
+                                 {1023, 0xC0E4FEF9u, 0xC19DF1DCu}};
+        bool same = true;
+        for (const Golden& g : golden) {
+            float o[4]{};
+            SpawnOffset(g.index, turned, o);
+            std::uint32_t x = 0, z = 0;
+            std::memcpy(&x, &o[0], 4);
+            std::memcpy(&z, &o[2], 4);
+            if (x != g.x || z != g.z || o[1] != 0 || o[3] != 0) {
+                std::printf("  player index %u: x %08X z %08X, All Forces has %08X %08X\n", g.index, x, z, g.x, g.z);
+                same = false;
+            }
+        }
+        Check(same, "SpawnOffset puts players on All Forces' golden bits (spawn_layout.h, 11 indices)");
+    }
+
     VirtualFree(image, 0, MEM_RELEASE);
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

@@ -1,5 +1,6 @@
 #include "direct_net.h"
 #include "extension_bridge.h"
+#include "extension_limits.h"
 #include "room_view.h"
 #include <cstring>
 #include <algorithm>
@@ -126,5 +127,16 @@ extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionApi* out) noexcept {
     if (!out || version != EDF6COOP_EXTENSION_VERSION || outSize != sizeof(*out)) return 0;
     *out = {sizeof(*out), EDF6COOP_EXTENSION_VERSION, snapshot, peer, send, poll};
+    return 1;
+}
+
+// Pure capability query: available before binding a room and after transport shutdown.
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapacity(
+    uint32_t version, uint32_t outSize, EDF6CoopExtensionCapacity* out) noexcept {
+    if (!out || version != EDF6COOP_EXTENSION_CAPACITY_VERSION || outSize != sizeof(*out)) return 0;
+    *out = {sizeof(*out), EDF6COOP_EXTENSION_CAPACITY_VERSION,
+        EDF6COOP_EXTENSION_MAX_PAYLOAD, EDF6COOP_EXTENSION_MAX_PEERS,
+        dn::extension::kInboxMessages, dn::extension::kPendingBytes,
+        dn::extension::kCongestedBacklogBytes, EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED};
     return 1;
 }

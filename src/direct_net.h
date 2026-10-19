@@ -265,6 +265,7 @@ public:
     void setTestBlackhole(bool on) { testBlackhole_ = on; }
 
 private:
+    friend struct ExtensionTransportTestAccess;
     struct Link {
         sockaddr_storage addr{};
         int addrLen = 0;
@@ -327,6 +328,7 @@ private:
     // Usable, heard lately, losing few pings and not congested (see the file comment).
     bool healthy(const Link& link, uint64_t now) const;
     bool congested(const Link& link) const;
+    bool sendExtensionDataLocked(Link& link, DataMsg msg, uint64_t now);
     uint64_t pingIntervalFor(const Link& link, uint64_t now) const;
     // join: our own link to joiner `remote` (either direction of the handshake), when it is up.
     Link* peerLink(const std::string& remote);

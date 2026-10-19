@@ -42,6 +42,17 @@ typedef struct EDF6CoopExtensionApi {
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionApiFn)(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionApi* out);
 
+// Optional, read-only local capacity proof; does not change ExtensionApi v1.
+// pendingBytes/congestedBacklogBytes count encoded datagrams on the shared link,
+// including ordinary game traffic. flags bit 0 promises one reliable ordered route.
+#define EDF6COOP_EXTENSION_CAPACITY_VERSION 1u
+#define EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED 1u
+typedef struct EDF6CoopExtensionCapacity {
+    uint32_t size, version, maxPayload, maxPeers, inboxMessages, pendingBytes, congestedBacklogBytes, flags;
+} EDF6CoopExtensionCapacity;
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionCapacityFn)(
+    uint32_t version, uint32_t outSize, EDF6CoopExtensionCapacity* out);
+
 // AF -> Coop, in-process only. The producer snapshots actual current-world player
 // PUIDs atomically. Lobby users alone are not participants. ready is 0 while the
 // world is loading, after an unknown player enters it without catch-up, or outside

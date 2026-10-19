@@ -228,6 +228,8 @@ public:
     void extensionSnapshot(EDF6CoopSnapshot& out);
     bool extensionPeer(uint64_t generation, uint32_t index, EDF6CoopPeer& out);
     bool extensionSend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes);
+    uint32_t extensionTrySend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes,
+                              uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
     bool extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out);
 
     // True when a game packet from `remote` arrived over the direct link within `windowMs`.
@@ -329,6 +331,10 @@ private:
     bool healthy(const Link& link, uint64_t now) const;
     bool congested(const Link& link) const;
     bool sendExtensionDataLocked(Link& link, DataMsg msg, uint64_t now);
+    uint32_t admitExtensionDataLocked(Link& link, DataMsg msg, uint64_t now, uint32_t bytesLimit,
+                                     uint32_t packetsLimit, bool failClosed);
+    uint32_t extensionSendWithLimits(uint64_t generation, const std::string& peer, const uint8_t* data,
+                                    uint32_t bytes, uint32_t bytesLimit, uint32_t packetsLimit, bool failClosed);
     uint64_t pingIntervalFor(const Link& link, uint64_t now) const;
     // join: our own link to joiner `remote` (either direction of the handshake), when it is up.
     Link* peerLink(const std::string& remote);
@@ -403,6 +409,7 @@ private:
     uint16_t boundPort_ = 0;
     std::atomic<bool> running_{false};
     std::atomic<bool> testBlackhole_{false};
+    std::atomic<bool> testDropAcks_{false}; // tests: data/application replies still travel
     std::atomic<uint64_t> wireOut_{0}, wireIn_{0}, relayed_{0}, rejected_{0}, sendFailures_{0};
     std::atomic<uint64_t> directOut_{0}, viaRelayOut_{0}, stateShed_{0}, relayShed_{0};
     std::shared_ptr<RetransmitBudget> retransmitBudget_;

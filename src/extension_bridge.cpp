@@ -137,6 +137,20 @@ extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapa
     *out = {sizeof(*out), EDF6COOP_EXTENSION_CAPACITY_VERSION,
         EDF6COOP_EXTENSION_MAX_PAYLOAD, EDF6COOP_EXTENSION_MAX_PEERS,
         dn::extension::kInboxMessages, dn::extension::kPendingBytes,
-        dn::extension::kCongestedBacklogBytes, EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED};
+        dn::extension::kCongestedBacklogBytes,
+        EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED | EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND};
     return 1;
+}
+
+// Local atomic admission: a temporary full queue keeps its identity/generation.
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopTrySendExtension(
+    uint64_t generation, const EDF6CoopPeer* target, const void* data, uint32_t bytes,
+    uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit) noexcept {
+    if (!target || !memchr(target->id, '\0', sizeof(target->id)) || stopped.load())
+        return EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
+    try {
+        auto net = transport.load();
+        return net ? net->extensionTrySend(generation, target->id, static_cast<const uint8_t*>(data), bytes,
+            pendingBytesLimit, pendingPacketsLimit) : EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
+    } catch (...) { return EDF6COOP_EXTENSION_SEND_UNAVAILABLE; }
 }

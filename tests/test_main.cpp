@@ -3482,16 +3482,21 @@ void testMeshFailsOverAndBack() {
     auto p = payloadFor(1);
     m.a.sendClassified(kB, "EDF6", 1, 0, p.data(), p.size(), 1);
     CHECK(waitFor([&] { return m.a.pathTo(kB) == dn::Path::Direct; }, 10000));
-    std::vector<dn::Path> paths;
+    // A suspect direct path still sends a relay copy while reporting Direct as
+    // its primary route. Measure actual sends/forwarding, not a sampled primary
+    // path at the 1.5 s health boundary (the outage has that same duration).
+    m.a.takeWireTraffic(); m.host.takeWireTraffic();
     // 400 datagrams 10 ms apart (4 s); from the 50th on (0.5 s) the direct link loses everything for 1.5 s.
     const Arrivals got = stream(m.a, kB, m.b, 1, 400, 10, [&](uint32_t i) {
         if (i == 50) {
             m.a.setTestBlockPeers(0, 1500);
             m.b.setTestBlockPeers(0, 1500);
         }
-        if (i % 20 == 0) paths.push_back(m.a.pathTo(kB));
     });
-    const bool wentRelay = std::find(paths.begin(), paths.end(), dn::Path::Relay) != paths.end();
+    const auto sent = m.a.takeWireTraffic(), forwarded = m.host.takeWireTraffic();
+    const bool wentRelay = sent.viaRelay > 0 && forwarded.relayed > 0;
+    printf("  relay bytes: joiner sent=%llu, host forwarded=%llu\n",
+           static_cast<unsigned long long>(sent.viaRelay), static_cast<unsigned long long>(forwarded.relayed));
     printf("  %zu of 400 arrived, longest gap %llu ms, went through the host %s, back on the direct link %s\n",
            got.ids.size(), static_cast<unsigned long long>(got.longestGapMs), wentRelay ? "yes" : "NO",
            m.a.pathTo(kB) == dn::Path::Direct ? "yes" : "NO");

@@ -996,6 +996,7 @@ void DirectNet::routeData(DataMsg msg) {
 }
 
 void DirectNet::sendLink(Link& link, Message m) {
+    if (testDropAcks_ && m.type == MsgType::Ack) return; // selective transport-ACK loss fixture
     m.epoch = link.epoch;
     std::vector<uint8_t> dg = encode(m, opt_.key);
     sendSealed(link, dg);

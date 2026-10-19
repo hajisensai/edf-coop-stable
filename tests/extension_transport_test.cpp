@@ -10,9 +10,11 @@
 
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(uint32_t, uint32_t, EDF6CoopExtensionApi*) noexcept;
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapacity(uint32_t, uint32_t, EDF6CoopExtensionCapacity*) noexcept;
+extern "C" uint32_t EDF6COOP_CALL EDF6CoopTrySendExtension(uint64_t, const EDF6CoopPeer*, const void*, uint32_t, uint32_t, uint32_t) noexcept;
 // Observation of real production queues under the same mutex; no fake send path.
 namespace dn {
 struct ExtensionTransportTestAccess {
+    static void dropTransportAcks(DirectNet& net, bool on) { net.testDropAcks_.store(on); }
     static size_t inbox(DirectNet& net) {
         std::lock_guard<std::mutex> lock(net.mu_); return net.extensionInbox_.size();
     }
@@ -72,7 +74,7 @@ int main() {
     CHECK(EDF6CoopGetExtensionCapacity(1, sizeof(capacity), &capacity));
     CHECK(capacity.size == 32 && capacity.version == 1 && capacity.maxPayload == 1024 &&
         capacity.maxPeers == 1024 && capacity.inboxMessages == 4096 && capacity.pendingBytes == 1048576 &&
-        capacity.congestedBacklogBytes == 1048576 && capacity.flags == 1);
+        capacity.congestedBacklogBytes == 1048576 && capacity.flags == 3);
     EDF6CoopExtensionApi api{};
     CHECK(!EDF6CoopGetExtensionApi(1, sizeof(api), nullptr));
     CHECK(!EDF6CoopGetExtensionApi(2, sizeof(api), &api));
@@ -242,6 +244,70 @@ int main() {
     CHECK(!snap(b).ready); // repeating identical room facts cannot reopen an overflow
     b.clearExtensionRoom(); tick();
     CHECK(snap(b).ready);
+
+    // Application Applied replies are Data messages, not transport ACKs. Lose only
+    // B's transport ACKs while every application reply still reaches the host:
+    // application credits may be empty while the real SDK queue remains full.
+    CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }));
+    hs = snap(host); bs = snap(b);
+    dn::bindExtensionTransport(std::shared_ptr<dn::DirectNet>(&host, [](dn::DirectNet*){}));
+    EDF6CoopPeer bPeer{}; memcpy(bPeer.id, bId.data(), bId.size());
+    constexpr uint32_t flowBytes = 768 * 1024, flowPackets = 768;
+    auto trySend = [&](const uint8_t* payload, uint32_t size, uint32_t byteLimit = 768 * 1024,
+                       uint32_t packetLimit = 768) {
+        return EDF6CoopTrySendExtension(hs.generation, &bPeer, payload, size, byteLimit, packetLimit);
+    };
+    CHECK(EDF6CoopTrySendExtension(hs.generation - 1, &bPeer, &byte, 1, flowBytes, flowPackets) == 0);
+    CHECK(EDF6CoopTrySendExtension(hs.generation, nullptr, &byte, 1, flowBytes, flowPackets) == 0);
+    CHECK(trySend(nullptr, 1) == 0 && trySend(&byte, 0) == 0 && trySend(&byte, 1025) == 0);
+    CHECK(trySend(&byte, 1, 0) == 0 && trySend(&byte, 1, capacity.pendingBytes + 1) == 0);
+    CHECK(trySend(&byte, 1, flowBytes, 0) == 0 && trySend(&byte, 1, flowBytes, 8193) == 0);
+    dn::ExtensionTransportTestAccess::dropTransportAcks(b, true);
+    std::vector<uint8_t> flowPayload(capacity.maxPayload, 6);
+    unsigned applied = 0;
+    for (; applied < 900; ++applied) {
+        const auto result = trySend(flowPayload.data(), static_cast<uint32_t>(flowPayload.size()));
+        if (result == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK) break;
+        CHECK(result == EDF6COOP_EXTENSION_SEND_ACCEPTED);
+        if (result != EDF6COOP_EXTENSION_SEND_ACCEPTED) break;
+        CHECK(waitFor([&] { tick(); return b.extensionPoll(bs.generation, 2048, message); }));
+        CHECK(message.src == hostId && message.data == flowPayload);
+        const uint32_t ack = applied;
+        CHECK(b.extensionTrySend(bs.generation, hostId, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+            flowBytes, flowPackets) == EDF6COOP_EXTENSION_SEND_ACCEPTED);
+        CHECK(waitFor([&] { tick(); return host.extensionPoll(hs.generation, 2048, message); }));
+        uint32_t receivedAck = UINT32_MAX;
+        if (message.data.size() == sizeof(receivedAck)) memcpy(&receivedAck, message.data.data(), sizeof(receivedAck));
+        CHECK(message.src == bId && receivedAck == ack);
+    }
+    const auto heldByLostAcks = dn::ExtensionTransportTestAccess::pending(host, bId);
+    CHECK(applied > 512 && applied < flowPackets && heldByLostAcks.second == applied && heldByLostAcks.first <= flowBytes);
+    CHECK(trySend(flowPayload.data(), static_cast<uint32_t>(flowPayload.size())) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
+    CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
+    CHECK(snap(host).ready && snap(host).generation == hs.generation);
+    // The packet limit is checked against the same actual shared queue too.
+    CHECK(trySend(&byte, 1, capacity.pendingBytes, applied) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
+    CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
+    // Ordinary game data may take the shared backlog above the extension ceiling;
+    // that is still flow control, never a new mission/identity generation.
+    for (unsigned i = 0; i < 300; ++i)
+        CHECK(host.send(bId, "EDF6", 1, 2, flowPayload.data(), flowPayload.size()));
+    CHECK(dn::ExtensionTransportTestAccess::pending(host, bId).first > capacity.pendingBytes);
+    CHECK(snap(host).ready && snap(host).generation == hs.generation);
+    CHECK(trySend(&byte, 1) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
+    dn::ExtensionTransportTestAccess::dropTransportAcks(b, false);
+    // One newly acknowledged game packet cumulatively retires the delayed ACK
+    // backlog. The next extension must arrive without a sequence hole or reset.
+    CHECK(host.send(bId, "EDF6", 1, 2, &byte, 1));
+    CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }, 15000));
+    CHECK(snap(host).ready && snap(host).generation == hs.generation);
+    CHECK(trySend(&byte, 1) == EDF6COOP_EXTENSION_SEND_ACCEPTED);
+    CHECK(waitFor([&] { tick(); return b.extensionPoll(bs.generation, 2048, message); }));
+    CHECK(message.src == hostId && message.data == std::vector<uint8_t>{byte});
+    CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }));
+    unsigned background = 0;
+    while (b.pop(nullptr, 2048, message)) ++background;
+    CHECK(background == 301);
 
     // Fill the actual host->B wire backlog while all outgoing host UDP is lost.
     // A can still submit one authenticated relay message; projected overflow must

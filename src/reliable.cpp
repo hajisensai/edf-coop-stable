@@ -33,8 +33,7 @@ constexpr double kRetransmitBytesBurst = 64.0 * 1024;
 // Unacknowledged data one link may hold. EDF6 sends well under 1 Mbit/s per player, so a link
 // stalled for the whole link timeout (60 s) stays far below this; only a peer that receives but
 // never acknowledges (or bounces data back to itself through the host) gets here.
-constexpr size_t kMaxPendingPackets = 8192;
-constexpr size_t kMaxPendingBytes = 8u << 20;
+// ReliableSender publishes these limits so extension admission cannot exceed them.
 
 }  // namespace
 

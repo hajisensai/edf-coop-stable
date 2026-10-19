@@ -222,6 +222,7 @@ The auto-updater of every installed copy downloads `EDF6Coop.dll` / `.dll.sig` f
 | `src/hold.*` | Disconnect grace |
 | `src/lobby_marker.*` | Lobby member attributes: detecting who has the plugin, distributing the host address |
 | `src/direct_net.*`, `src/reliable.*`, `src/wire.*`, `src/auth.*` | Direct-connect transport |
+| `src/extension_api.h`, `src/extension_limits.h` | API v1 plus optional capacity proof and atomic TrySend flow control: 4096 queued messages, 1 MiB shared wire backlog; [consumer contract](docs/extension-transport.md) |
 | `src/netif.*`, `src/upnp.*` | Physical adapter detection, UPnP |
 | `src/updater.*`, `src/product.h` | Signed automatic updates; the version every release carries |
 | `multislot/CMakeLists.txt` | The build and the one version number (`project(EDF6Coop VERSION x.y.z)`) |

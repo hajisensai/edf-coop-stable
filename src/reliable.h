@@ -42,6 +42,8 @@ public:
     // EDF6 sends such state 15-20 times a second per player, so after 2 s it has been replaced many
     // times over, and a packet the network keeps losing costs at most these few resends.
     static constexpr uint64_t kExpireMs = 2000;
+    static constexpr size_t kMaxPendingPackets = 8192;
+    static constexpr size_t kMaxPendingBytes = 8u << 20;
 
     struct Pending {
         std::vector<uint8_t> datagram;

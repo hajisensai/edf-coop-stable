@@ -1,5 +1,6 @@
 #include "direct_net.h"
 #include "extension_bridge.h"
+#include "extension_limits.h"
 #include "room_view.h"
 #include <cstring>
 #include <algorithm>
@@ -127,4 +128,29 @@ extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(
     if (!out || version != EDF6COOP_EXTENSION_VERSION || outSize != sizeof(*out)) return 0;
     *out = {sizeof(*out), EDF6COOP_EXTENSION_VERSION, snapshot, peer, send, poll};
     return 1;
+}
+
+// Pure capability query: available before binding a room and after transport shutdown.
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapacity(
+    uint32_t version, uint32_t outSize, EDF6CoopExtensionCapacity* out) noexcept {
+    if (!out || version != EDF6COOP_EXTENSION_CAPACITY_VERSION || outSize != sizeof(*out)) return 0;
+    *out = {sizeof(*out), EDF6COOP_EXTENSION_CAPACITY_VERSION,
+        EDF6COOP_EXTENSION_MAX_PAYLOAD, EDF6COOP_EXTENSION_MAX_PEERS,
+        dn::extension::kInboxMessages, dn::extension::kPendingBytes,
+        dn::extension::kCongestedBacklogBytes,
+        EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED | EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND};
+    return 1;
+}
+
+// Local atomic admission: a temporary full queue keeps its identity/generation.
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopTrySendExtension(
+    uint64_t generation, const EDF6CoopPeer* target, const void* data, uint32_t bytes,
+    uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit) noexcept {
+    if (!target || !memchr(target->id, '\0', sizeof(target->id)) || stopped.load())
+        return EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
+    try {
+        auto net = transport.load();
+        return net ? net->extensionTrySend(generation, target->id, static_cast<const uint8_t*>(data), bytes,
+            pendingBytesLimit, pendingPacketsLimit) : EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
+    } catch (...) { return EDF6COOP_EXTENSION_SEND_UNAVAILABLE; }
 }

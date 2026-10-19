@@ -1,4 +1,5 @@
 #include "direct_net.h"
+#include "extension_limits.h"
 
 #include <algorithm>
 #include <cstring>
@@ -9,8 +10,7 @@ namespace {
 std::atomic<uint64_t> nextGeneration{1}; // unique across retired/replaced DirectNet instances
 constexpr uint64_t kRoomLeaseMs = 2000;
 constexpr uint64_t kLinkFreshMs = 3000;
-constexpr size_t kInboxLimit = 256;
-constexpr size_t kPendingLimit = 256 * 1024;
+
 uint64_t extensionNowMs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -77,8 +77,9 @@ bool DirectNet::refreshExtensionLocked() {
     for (const auto& id : extensionMembers_) ready = ready && validId(id);
     std::vector<uint64_t> links;
     auto live = [&](const Link& link) {
-        return usable(link) && now - link.lastRecvMs <= kLinkFreshMs &&
-            link.tx.pendingBytes() < kPendingLimit && !congested(link);
+        // Backlog is flow control, not an identity/session boundary. Admission
+        // measures the actual queue atomically; congestion must not reset leases.
+        return usable(link) && now - link.lastRecvMs <= kLinkFreshMs;
     };
     if (ready && opt_.mode == Mode::Host && extensionHost_ == localPuid_) {
         for (const auto& id : extensionPeers_) {
@@ -129,11 +130,49 @@ bool DirectNet::extensionPeer(uint64_t generation, uint32_t index, EDF6CoopPeer&
     return true;
 }
 
+bool DirectNet::sendExtensionDataLocked(Link& link, DataMsg msg, uint64_t now) {
+    return admitExtensionDataLocked(link, std::move(msg), now, extension::kPendingBytes,
+        static_cast<uint32_t>(ReliableSender::kMaxPendingPackets), true) == EDF6COOP_EXTENSION_SEND_ACCEPTED;
+}
+
+uint32_t DirectNet::admitExtensionDataLocked(Link& link, DataMsg msg, uint64_t now,
+                                          uint32_t bytesLimit, uint32_t packetsLimit, bool failClosed) {
+    // Measure the same encoding sendData tracks, before it allocates a sequence.
+    // Refusal must not leave a gap in the shared reliable ordered sequence space.
+    Message wire;
+    wire.type = MsgType::Data;
+    wire.epoch = link.epoch;
+    wire.data = msg;
+    const size_t bytes = encode(wire, opt_.key).size();
+    if (bytes > bytesLimit || link.tx.pendingBytes() > bytesLimit - bytes ||
+        link.tx.pendingCount() >= packetsLimit) {
+        if (!failClosed) return EDF6COOP_EXTENSION_SEND_WOULD_BLOCK;
+        extensionFault_ = true;
+        resetExtensionLocked();
+        return EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
+    }
+    sendData(link, std::move(msg), now);
+    return EDF6COOP_EXTENSION_SEND_ACCEPTED;
+}
+
 bool DirectNet::extensionSend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes) {
+    return extensionSendWithLimits(generation, peer, data, bytes, extension::kPendingBytes,
+        static_cast<uint32_t>(ReliableSender::kMaxPendingPackets), true) == EDF6COOP_EXTENSION_SEND_ACCEPTED;
+}
+
+uint32_t DirectNet::extensionTrySend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes,
+                                   uint32_t bytesLimit, uint32_t packetsLimit) {
+    return extensionSendWithLimits(generation, peer, data, bytes, bytesLimit, packetsLimit, false);
+}
+
+uint32_t DirectNet::extensionSendWithLimits(uint64_t generation, const std::string& peer, const uint8_t* data,
+                                         uint32_t bytes, uint32_t bytesLimit, uint32_t packetsLimit, bool failClosed) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!data || !bytes || bytes > EDF6COOP_EXTENSION_MAX_PAYLOAD || !refreshExtensionLocked() ||
-        generation != extensionGeneration_ || !std::binary_search(extensionPeers_.begin(), extensionPeers_.end(), peer))
-        return false;
+    if (!data || !bytes || bytes > EDF6COOP_EXTENSION_MAX_PAYLOAD || !bytesLimit ||
+        bytesLimit > extension::kPendingBytes || !packetsLimit || packetsLimit > ReliableSender::kMaxPendingPackets ||
+        !refreshExtensionLocked() || generation != extensionGeneration_ ||
+        !std::binary_search(extensionPeers_.begin(), extensionPeers_.end(), peer))
+        return EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
     // Always one stable ordered path. Joiner-to-joiner packets go through the host;
     // switching between mesh and relay would make two independent ordering domains.
     Link* link = opt_.mode == Mode::Host ? &clients_.at(peer) : &*hostLink_;
@@ -144,8 +183,7 @@ bool DirectNet::extensionSend(uint64_t generation, const std::string& peer, cons
     msg.channel = kExtensionChannel;
     msg.reliability = 2; // EOS_PR_ReliableOrdered
     msg.payload.assign(data, data + bytes);
-    sendData(*link, std::move(msg), extensionNowMs());
-    return true;
+    return admitExtensionDataLocked(*link, std::move(msg), extensionNowMs(), bytesLimit, packetsLimit, failClosed);
 }
 
 bool DirectNet::extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out) {
@@ -169,10 +207,10 @@ bool DirectNet::extensionPacket(const DataMsg& msg) {
     if (msg.dst != localPuid_) {
         if (opt_.mode != Mode::Host || msg.src == msg.dst) return true;
         auto it = clients_.find(msg.dst);
-        if (it != clients_.end() && usable(it->second)) sendData(it->second, msg, extensionNowMs());
+        if (it != clients_.end() && usable(it->second)) sendExtensionDataLocked(it->second, msg, extensionNowMs());
         return true;
     }
-    if (extensionInbox_.size() >= kInboxLimit) {
+    if (extensionInbox_.size() >= extension::kInboxMessages) {
         extensionFault_ = true; // no silent truncation of a reliable transaction
         resetExtensionLocked();
         return true;

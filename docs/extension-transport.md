@@ -5,6 +5,36 @@
 the exact API structure size. Callers initialize `Snapshot.size` before querying.
 All callbacks return `uint32_t` 0/1 and catch C++ exceptions at the boundary.
 
+High-volume consumers additionally resolve the optional read-only export
+`EDF6CoopGetExtensionCapacity(version, outSize, out)`. Version 1 requires the exact
+32-byte `EDF6CoopExtensionCapacity`: eight `uint32_t` fields in order `size`,
+`version`, `maxPayload`, `maxPeers`, `inboxMessages`, `pendingBytes`,
+`congestedBacklogBytes`, `flags`. It reports 1024-byte payloads, 1024 reserved remote
+peer slots, 4096 inbox messages and a 1 MiB per-link encoded-datagram backlog.
+Flag bit 0 means reliable ordered delivery on one stable route. Bit 1 proves the
+optional `EDF6CoopTrySendExtension` flow-control export described below; other bits
+are zero.
+Bad version, size or null output returns 0 without writing. No room or ready
+transport is required, and the query neither changes transport state nor grants
+mission authority. The existing 40-byte `EDF6CoopExtensionApi` remains version 1.
+Older DLLs without this export can still serve ordinary API v1 consumers; consumers
+requiring the larger budget must prove it through this query on every participant.
+Consumers needing recoverable queue pressure also require flag bit 1 and resolve
+`EDF6CoopTrySendExtension(expectedGeneration, peer, data, bytes, pendingBytesLimit,
+pendingPacketsLimit)`. The fixed x64 ABI returns 0 for unavailable/invalid, 1 for
+accepted and 2 for would-block. Limits must be nonzero and at most 1 MiB/8192
+packets. Admission holds the transport mutex and checks actual encoded bytes and
+packet count on the shared outgoing link, including ordinary game traffic. A
+would-block result allocates no sequence, changes no generation and leaves all
+pending datagrams intact; the consumer retains its work until transport ACKs make
+room. Use a smaller ceiling (enemy control uses 768 KiB/768 packets) to leave room
+for control/game traffic. An application Applied/Restored ACK is a separate Data
+message and never proves the SDK transport ACK has arrived. Consequently consumer
+application credits alone cannot bound this real queue. The atomic limit covers
+only this local outgoing link: host fan-out and joiner-to-host have one link;
+joiner-to-joiner still requires the host's separately bounded relay, which retains
+its fail-closed overflow policy.
+
 The snapshot exposes local and host EOS ProductUserIds, remote peer count, and a
 process-local opaque generation. Enumerate peers with that generation, then pass
 the same generation to send/poll. A generation mismatch fails. A snapshot that
@@ -104,12 +134,24 @@ The extension inbox is separate from the game's inbox. Either reserved socket
 or reserved channel removes a packet from game delivery, including malformed or
 unavailable-extension packets and wildcard game reads. Valid messages enter only
 the extension queue. A short poll buffer leaves its packet queued. There are at
-most 256 queued messages (at most 256 KiB payload); overflow invalidates the
+most 4096 queued messages (at most 4 MiB payload); overflow invalidates the
 extension session instead of losing part of an acknowledged transaction silently.
 Overflow remains closed until the room authority is explicitly invalidated.
 
-Every query/send/poll revalidates route identities, reconnect link IDs, readiness,
-and congestion while holding DirectNet's mutex. Room facts expire after two
+Every query/send/poll revalidates route identities, reconnect link IDs and readiness
+while holding DirectNet's mutex. Direct and relayed extension sends preflight the
+actual encoded datagram before allocating a sequence: extension admission never
+takes pending wire bytes above 1 MiB, and the 8192-packet reliable-link ceiling also
+applies. Ordinary game traffic consumes this shared backlog and may itself exceed
+the extension admission ceiling; congestion alone does not change a generation or
+cancel a mission. The capacity query does not reserve payload space. Legacy API v1
+send and the host relay still latch the extension session closed if they would
+exceed either ceiling. Only the explicit TrySend API reports transient pressure as
+would-block. Inbox overflow remains fatal, as does loss of identity/room authority.
+Pending reliable game packets are never trimmed by extension resets.
+The game routing heuristic (256 KiB backlog or a measured RTT increase over 150 ms)
+does not invalidate this stable extension route; its ordinary game routing remains
+unchanged. Room facts expire after two
 seconds without an EOS tick; a link unheard for three seconds is not ready.
 Participant membership, key, host, world and room changes invalidate generations and clear queued
 messages. Loss detection is bounded by the freshness window, not instantaneous.
@@ -121,7 +163,12 @@ Validation uses real localhost UDP with three independently keyed peers, the
 production retransmission and relay implementation, ABI callbacks, EOS's existing
 test SDK, and a test-only All Forces readiness DLL. `ExtensionTransport` covers
 ordered repair, authenticated sender, reserved-channel isolation, bounds, stale
-generations, key rebinding, reconnect, queue overflow and room lease expiry.
+generations, key rebinding, reconnect, queue overflow and room lease expiry. Its
+selective transport-ACK-loss fixture delivers every application reply while real
+SDK pending bytes remain charged, then verifies would-block without sequence or
+generation changes, shared game backlog above the extension admission ceiling,
+and resumed ordered delivery after cumulative transport ACKs return. Legacy
+send/relay fatal byte and packet boundaries remain independently covered.
 `ExtensionProfile` covers old/missing/mismatched/current member capabilities,
 missing room details, readiness failure and normal Coop marker publication.
 It also calls the exact production `publishExtensionRoom` with the real marker,

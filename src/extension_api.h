@@ -42,6 +42,31 @@ typedef struct EDF6CoopExtensionApi {
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionApiFn)(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionApi* out);
 
+// Optional, read-only local capacity proof; does not change ExtensionApi v1.
+// pendingBytes/congestedBacklogBytes count encoded datagrams on the shared link,
+// including ordinary game traffic. flags bit 0 promises one reliable ordered route;
+// bit 1 proves EDF6CoopTrySendExtension atomic, nonfatal bounded admission.
+#define EDF6COOP_EXTENSION_CAPACITY_VERSION 1u
+#define EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED 1u
+#define EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND 2u
+typedef struct EDF6CoopExtensionCapacity {
+    uint32_t size, version, maxPayload, maxPeers, inboxMessages, pendingBytes, congestedBacklogBytes, flags;
+} EDF6CoopExtensionCapacity;
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionCapacityFn)(
+    uint32_t version, uint32_t outSize, EDF6CoopExtensionCapacity* out);
+
+// Optional atomic admission on the local host route. Limits include all pending
+// encoded datagrams (ordinary game traffic too), and must be nonzero and no larger
+// than pendingBytes/8192 packets. WOULD_BLOCK keeps the generation and sequence;
+// retain the application work until transport ACKs make room. This does not reserve
+// capacity at a second joiner's host relay; host-originated fan-out has one link.
+#define EDF6COOP_EXTENSION_SEND_UNAVAILABLE 0u
+#define EDF6COOP_EXTENSION_SEND_ACCEPTED 1u
+#define EDF6COOP_EXTENSION_SEND_WOULD_BLOCK 2u
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopTrySendExtensionFn)(
+    uint64_t expectedGeneration, const EDF6CoopPeer* peer, const void* data, uint32_t bytes,
+    uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
+
 // AF -> Coop, in-process only. The producer snapshots actual current-world player
 // PUIDs atomically. Lobby users alone are not participants. ready is 0 while the
 // world is loading, after an unknown player enters it without catch-up, or outside

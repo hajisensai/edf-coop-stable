@@ -227,8 +227,11 @@ struct State {
     std::mutex handlerMutex;
     std::vector<ClosedHandler*> closedHandlers;
     std::vector<MemberStatusHandler*> statusHandlers;
-    std::atomic<EOS_HP2P> p2p{nullptr};  // written by the game's first send or receive, read on the tick
+    // The P2P interface: from the game's first EOS_Platform_GetP2PInterface, send or receive, or taken by the room feed
+    // itself (roomFeedP2P) while the game has none yet. Read on the tick.
+    std::atomic<EOS_HP2P> p2p{nullptr};
     std::atomic<EOS_HP2P> configuredHandle{nullptr};
+    std::atomic<EOS_HPlatform> platform{nullptr};  // the platform the game ticks (hookPlatformTick)
     std::atomic<EOS_ProductUserId> localUser{nullptr};
     std::mutex notifyMutex;
     std::unordered_set<std::string> notifiedUsers;  // local users whose connection events we log
@@ -347,6 +350,7 @@ struct State {
     HostRoomFeed feed;
     RoomFeedAssembler feedPages;
     std::set<std::string> feedAccepted;  // members whose EOS connection on kRoomFeedSocket we accepted
+    std::set<std::string> feedDeferred;  // members whose connection waits for a P2P interface or our lobby user
     struct FeedHost {
         std::string room;                         // the room this hosting session is for ("" not hosting)
         RoomStamp stamp;                          // our newest Room message's stamp...
@@ -732,6 +736,7 @@ void resetRoomFeed() {
     g.feed.clear();
     g.feedPages.clear();
     g.feedAccepted.clear();
+    g.feedDeferred.clear();
     g.feedHost = {};
 }
 
@@ -1026,16 +1031,33 @@ bool roomOwnerSendsRoomFeed(const std::string& owner) {
     return !room.empty() && ownerSendsRoomFeed(lobby, room.c_str(), g.lobbyUser.load(), owner);
 }
 
+EOS_HP2P roomFeedP2P();
+
 // A member: lets `member`'s packets on kRoomFeedSocket in (EOS holds a peer's packets until the connection is
-// accepted). Once per member and room. EOS calls: on the EOS tick.
+// accepted). Once per member and room. Without a P2P interface or our lobby user yet it is not dropped: it is said once
+// and done by roomFeedAcceptTick as soon as both are there. EOS calls: on the EOS tick.
 void acceptRoomFeed(const std::string& member) {
-    EOS_HP2P p2p = g.p2p;
-    EOS_ProductUserId local = g.lobbyUser.load();
     EOS_ProductUserId remote = member.empty() ? nullptr : idHandle(member);
-    if (!roomFeedOn() || !p2p || !local || !remote || !g.api.accept) return;
+    if (!roomFeedOn() || !remote || !g.api.accept) return;
+    EOS_ProductUserId local = g.lobbyUser.load();
+    EOS_HP2P p2p = local ? roomFeedP2P() : nullptr;
+    if (!p2p || !local) {
+        bool first = false;
+        {
+            std::lock_guard<std::mutex> lock(g.feedMutex);
+            if (g.feedAccepted.count(member)) return;
+            first = g.feedDeferred.insert(member).second;
+        }
+        if (first)
+            logf("ROOM taking member slots from %s over EOS once we have %s (EOS keeps its packets until then)",
+                 shortId(member).c_str(), local ? "an EOS P2P interface" : "our lobby user");
+        return;
+    }
+    bool deferred = false;
     {
         std::lock_guard<std::mutex> lock(g.feedMutex);
         if (!g.feedAccepted.insert(member).second) return;
+        deferred = g.feedDeferred.erase(member) != 0;
     }
     EOS_P2P_SocketId socket{1, {}};
     strncpy_s(socket.SocketName, kRoomFeedSocket, _TRUNCATE);
@@ -1044,6 +1066,8 @@ void acceptRoomFeed(const std::string& member) {
     if (r != EOS_Success)
         logf("ROOM cannot take member slots from %s over EOS: accepting its connection failed (%s)", shortId(member).c_str(),
              resultName(r));
+    else if (deferred)
+        logf("ROOM taking member slots from %s over EOS now", shortId(member).c_str());
 }
 
 // Completion of the game's CreateLobby / JoinLobby: once we are in, publish our plugin marker.
@@ -1483,7 +1507,8 @@ void onNatType(const EOS_P2P_OnQueryNATTypeCompleteInfo* i) {
     logf("EOS NAT type: %s (query result %s)", natName(i->NATType), resultName(i->ResultCode));
 }
 
-// Applies EOS tuning once per P2P handle. Runs on the game thread.
+// Applies EOS tuning once per P2P handle (EOS has one per platform: the game asking for it again, or sending and
+// receiving with it, changes nothing). Runs on the game thread.
 void configureHandle(EOS_HP2P h) {
     if (!h || g.configuredHandle.exchange(h) == h) return;
     g.p2p = h;  // atomic store
@@ -1521,6 +1546,23 @@ void configureHandle(EOS_HP2P h) {
         EOS_P2P_QueryNATTypeOptions o{1};
         g.api.queryNat(h, &o, nullptr, onNatType);
     }
+}
+
+// The P2P interface the room feed sends, accepts and receives with. The game asks EOS for its own only once its join
+// completed (EDF.dll's EOS_Platform_GetP2PInterface at 12C8154 is in p2p::Manager::Initialize, which the room it builds
+// then runs), and a join into a room whose host says its member slots waits for them before it completes
+// (parkedEntryTick): waiting for the game's would wait for ever. So the room feed takes the platform's P2P interface from
+// EOS itself; the game later gets the same one (one per platform), which configureHandle has tuned already. On the EOS
+// tick.
+EOS_HP2P roomFeedP2P() {
+    EOS_HP2P p2p = g.p2p;
+    if (p2p || g_shutdown || !g.api.getP2P) return p2p;
+    const EOS_HPlatform platform = g.platform.load();
+    if (!platform) return nullptr;
+    configureHandle(g.api.getP2P(platform));
+    p2p = g.p2p;
+    if (p2p) logf("EOS P2P interface taken for the room feed, before the game asked for it");
+    return p2p;
 }
 
 // Registers connection diagnostics and tells the direct transport who we are.
@@ -1795,14 +1837,15 @@ uint64_t newFeedEpoch(uint64_t last) {
 
 // The room's owner sends its Room message over EOS (the room feed) to `member`: every page, reliably and in order on
 // kRoomFeedChannel (EOS keeps them until the member accepted the connection). Not yet: there is no P2P interface to
-// send with (the game has not asked EOS for one yet), so nothing went - it goes on a later tick. Refused: EOS refused
+// send with (EOS has not been ticked yet, roomFeedP2P), so nothing went - it goes on a later tick. Refused: EOS refused
 // a page (logged); the member gets the next message.
 enum class FeedSend { Sent, NotYet, Refused };
 FeedSend sendRoomFeed(const std::string& member, const std::vector<std::vector<uint8_t>>& pages) {
-    EOS_HP2P p2p = g.p2p;
     EOS_ProductUserId local = g.lobbyUser.load();
     EOS_ProductUserId remote = idHandle(member);
-    if (!p2p || !local || !g.api.send) return FeedSend::NotYet;
+    if (!local || !g.api.send) return FeedSend::NotYet;
+    EOS_HP2P p2p = roomFeedP2P();
+    if (!p2p) return FeedSend::NotYet;
     if (!remote) return FeedSend::Refused;
     EOS_P2P_SocketId socket{1, {}};
     strncpy_s(socket.SocketName, kRoomFeedSocket, _TRUNCATE);
@@ -1942,9 +1985,10 @@ bool takeRoomFeed(const std::string& src, uint8_t channel, const uint8_t* data, 
 // A member: our own reads of kRoomFeedChannel, so the room's slots arrive whether or not the game reads packets now (it
 // does not while its join waits for them). On the EOS tick.
 void roomFeedReceiveTick() {
-    EOS_HP2P p2p = g.p2p;
     EOS_ProductUserId local = g.lobbyUser.load();
-    if (!roomFeedOn() || !p2p || !local || !g.api.receive || !g.marker.inLobby()) return;
+    if (!roomFeedOn() || !local || !g.api.receive || !g.marker.inLobby()) return;
+    EOS_HP2P p2p = roomFeedP2P();  // the game may have none yet: its join waits for what comes here
+    if (!p2p) return;
     EOS_P2P_ReceivePacketOptions o{};
     o.ApiVersion = 2;
     o.LocalUserId = local;
@@ -2031,8 +2075,9 @@ void followHostTick(uint64_t now) {
                  c.status == kKicked ? "the room's host no longer has us in its room" : "the room's host says so");
 }
 
-// A parked entry given up: the game was told its join failed, so it will not leave Epic's lobby itself.
-void leaveParkedLobby(const std::string& lobbyId) {
+// A parked entry that fails (given up, or the room went meanwhile): the game is told its join failed, so it will not
+// leave Epic's lobby itself. `why`: for the log.
+void leaveParkedLobby(const std::string& lobbyId, const char* why) {
     struct LeaveOptions {  // EOS_Lobby_LeaveLobbyOptions, ApiVersion 1
         int32_t ApiVersion;
         EOS_ProductUserId LocalUserId;
@@ -2045,9 +2090,9 @@ void leaveParkedLobby(const std::string& lobbyId) {
     }
     const PFN_EOS_Lobby_LeaveOrDestroy leave = g.outer.leave ? g.outer.leave : g.api.gameLeaveLobby;
     EOS_ProductUserId user = g.lobbyUser.load();
-    leftLobby("the join was given up: its host's member slots did not come");
+    leftLobby(why);
     // A room we could not enter is nothing to come back into either (it would show up as REJOIN).
-    forgetLastRoom("the join was given up");
+    forgetLastRoom(why);
     if (!leave || !lobby || !user) return;
     const LeaveOptions options{1, user, lobbyId.c_str()};
     // The id is copied by EOS; the completion only logs.
@@ -2150,18 +2195,29 @@ void parkedEntryTick(uint64_t now) {
              world && !currentWorld.present && !feed && !address
                  ? "its host's EDF6Coop sends no world state at all: the host must update EDF6Coop"
                  : (why + ". Entering without them would put members in other slots than the host's game has them").c_str());
-        leaveParkedLobby(lobbyId);
+        leaveParkedLobby(lobbyId, "the join was given up: its host's member slots did not come");
         info.ResultCode = EOS_NoConnection;
+        callback(&info);
+        return;
+    }
+    if (outcome == ParkedEntryOutcome::Gone) {
+        // We are not in the room any more (it closed, or we were removed from it): the game's completion would read the
+        // lobby's details, and Epic has none for a lobby we are not in (EDF.dll 12B1A30; then a null details handle is
+        // read at 12AEBF3). The join fails as Epic fails a join into a lobby that is not there.
+        logf("ROOM NOT entering room %s after %llu s: the room went while the join waited for its host's member slots. "
+             "The join fails",
+             lobbyId.c_str(), static_cast<unsigned long long>(waited / 1000));
+        leaveParkedLobby(lobbyId, "the room went before we entered it");
+        info.ResultCode = EOS_NotFound;
         callback(&info);
         return;
     }
     logf("ROOM entering room %s %s", lobbyId.c_str(),
          outcome == ParkedEntryOutcome::Slotted ? "with its host's member slots"
-         : outcome == ParkedEntryOutcome::NoHost
-             ? "without member slots: its host sends them neither over EOS nor over a direct link (the room's owner "
-               "changed to one with no EDF6Coop, or one from before the room feed), so nobody says slots in this room "
-               "and the game goes as it would without the plugin"
-             : "(the room is gone)");
+                                                : "without member slots: its host sends them neither over EOS nor over a "
+                                                  "direct link (the room's owner changed to one with no EDF6Coop, or one "
+                                                  "from before the room feed), so nobody says slots in this room and the "
+                                                  "game goes as it would without the plugin");
     callback(&info);
 }
 
@@ -2589,6 +2645,7 @@ void extensionRoomTick() {
 
 // Runs after every EOS_Platform_Tick, i.e. where EOS itself would deliver callbacks to the game.
 void hookPlatformTick(EOS_HPlatform platform) {
+    g.platform = platform;  // before the tick: the lobby completions it runs may need the P2P interface (roomFeedP2P)
     g.api.tick(platform);
     if (g_shutdown) return;
     static bool loggedThread = false;

@@ -1209,6 +1209,58 @@ inline void CheckWorldFeedOld(const std::vector<Spawned>& machines, const gamene
     Check(took < 15000, g.user + "'s join ended within the wait for a host that says nothing (" + Result(g, "world-took") + " ms)");
 }
 
+// The player report of 2026-10-24 (both joins waited 45 s and failed; the second crashed). The game asks EOS for its P2P
+// interface only once its join completed (EDF.dll 12C8154, p2p::Manager::Initialize), so a parked join must not wait for
+// the game to have one before the host's member slots can come in over EOS.
+inline std::vector<Seat> WorldFeedLateP2PSeats() {
+    auto seats = WorldFeedSeats(true);
+    seats[1].env.emplace_back("EDF6NET_GAME_P2P", "late");
+    return seats;
+}
+
+inline void CheckWorldFeedLateP2P(const std::vector<Spawned>& machines, const gamenet::Network& network) {
+    CheckWorldFeed(machines, network);
+    const auto& g = machines[1];
+    Check(Result(g, "game-p2p") == "taken after the join", g.user + "'s game took its P2P interface after its join");
+    Check(g.text.find("EOS P2P interface taken for the room feed, before the game asked for it") != std::string::npos,
+          g.user + " took the P2P interface itself while its join waited");
+    std::size_t tuned = 0;
+    for (std::size_t at = g.text.find("EOS packet queues in"); at != std::string::npos;
+         at = g.text.find("EOS packet queues in", at + 1))
+        ++tuned;
+    Check(tuned == 1, g.user + " tuned its P2P interface once, not again when the game took the same one (" +
+                          std::to_string(tuned) + " times)");
+    const std::size_t slots = g.text.find("came over EOS"), entering = g.text.find("with its host's member slots");
+    Check(slots != std::string::npos && entering != std::string::npos && slots < entering,
+          g.user + "'s slots came over EOS before its join completed");
+    Check(Result(g, "world-details").rfind("0", 0) == 0, g.user + "'s game could read the room it entered (" +
+                                                              Result(g, "world-details") + ")");
+}
+
+// The second join of that report: the host closed its room while the guest's join waited. The join must fail (the lobby
+// is gone: the game's completion would read its details, and there are none), never complete as entered.
+inline std::vector<Seat> WorldFeedClosedSeats() {
+    auto seats = WorldFeedSeats(true);
+    seats[0].env.emplace_back("EDF6NET_HOST_SEALED", "1");
+    seats[0].env.emplace_back("EDF6NET_CLOSE_AFTER_MS", "3000");
+    seats[1].env.emplace_back("EDF6NET_GAME_P2P", "late");
+    return seats;
+}
+
+inline void CheckWorldFeedClosed(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    for (const auto& machine : machines) Check(Result(machine, "af-profile") == "loaded", machine.user + " loaded the AF test fixture");
+    Check(Result(h, "world-closed") == "while the guest's join waited 0",
+          h.user + " closed its room while the guest's join waited (" + Result(h, "world-closed") + ")");
+    Check(Result(g, "world-callback").rfind("1 result=", 0) == 0 && Result(g, "world-callback").find("result=0") == std::string::npos,
+          g.user + "'s join failed once (" + Result(g, "world-callback") + ")");
+    Check(g.results.count("world-details") == 0,
+          g.user + "'s game was not sent into a room that is gone (" + Result(g, "world-details") + ")");
+    Check(g.text.find("the room went while the join waited") != std::string::npos, g.user + " said why its join failed");
+    Check(g.text.find("(the room is gone)") == std::string::npos, g.user + " did not enter the room that is gone");
+}
+
 inline std::vector<Seat> WorldAdmissionSeats() {
     // Use the established loopback socket setup; the real EOS callback still passes through the production gate.
     auto seats = DirectSeats(2, "worldadmission", "[Test]\r\nLoopbackHosts=1\r\n");
@@ -1276,6 +1328,8 @@ inline const std::vector<Scenario>& NetScenarios() {
         {"slotmigratefeed", MigrateFeedSeats(), 180000, &CheckSlotMigrateFeed, {{"EDF6NET_EPIC_MEMBERS", "4"}}},
         {"worldfeed", WorldFeedSeats(true), 90000, &CheckWorldFeed},
         {"worldfeedold", WorldFeedSeats(false), 90000, &CheckWorldFeedOld},
+        {"worldfeedlatep2p", WorldFeedLateP2PSeats(), 90000, &CheckWorldFeedLateP2P},
+        {"worldfeedclosed", WorldFeedClosedSeats(), 90000, &CheckWorldFeedClosed},
         {"slotchurn", ChurnSeats(false), 150000,
          [](const std::vector<Spawned>& m, const gamenet::Network& n) { CheckSlotChurn(m, n, false); },
          {{"EDF6NET_EPIC_MEMBERS", "4"}}},

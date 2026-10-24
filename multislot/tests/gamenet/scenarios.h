@@ -1212,11 +1212,7 @@ inline void CheckWorldFeedOld(const std::vector<Spawned>& machines, const gamene
 // The player report of 2026-10-24 (both joins waited 45 s and failed; the second crashed). The game asks EOS for its P2P
 // interface only once its join completed (EDF.dll 12C8154, p2p::Manager::Initialize), so a parked join must not wait for
 // the game to have one before the host's member slots can come in over EOS.
-inline std::vector<Seat> WorldFeedLateP2PSeats() {
-    auto seats = WorldFeedSeats(true);
-    seats[1].env.emplace_back("EDF6NET_GAME_P2P", "late");
-    return seats;
-}
+inline std::vector<Seat> WorldFeedLateP2PSeats() { return WorldFeedSeats(true); }
 
 inline void CheckWorldFeedLateP2P(const std::vector<Spawned>& machines, const gamenet::Network& network) {
     CheckWorldFeed(machines, network);
@@ -1243,7 +1239,6 @@ inline std::vector<Seat> WorldFeedClosedSeats() {
     auto seats = WorldFeedSeats(true);
     seats[0].env.emplace_back("EDF6NET_HOST_SEALED", "1");
     seats[0].env.emplace_back("EDF6NET_CLOSE_AFTER_MS", "3000");
-    seats[1].env.emplace_back("EDF6NET_GAME_P2P", "late");
     return seats;
 }
 
@@ -1259,6 +1254,28 @@ inline void CheckWorldFeedClosed(const std::vector<Spawned>& machines, const gam
           g.user + "'s game was not sent into a room that is gone (" + Result(g, "world-details") + ")");
     Check(g.text.find("the room went while the join waited") != std::string::npos, g.user + " said why its join failed");
     Check(g.text.find("(the room is gone)") == std::string::npos, g.user + " did not enter the room that is gone");
+}
+
+// Epic closes the room while the guest's join waits for a sealed world and the host's direct link to it is up: the
+// resilience hold (holdLobbyStatus: Epic closed the room but the host's link is up) must not keep a join that is not
+// in the room yet waiting, nor let it complete into the closed lobby.
+inline void CheckWorldAdmissionClosed(const std::vector<Spawned>& machines, const gamenet::Network&) {
+    const auto& h = machines[0];
+    const auto& g = machines[1];
+    Check(Result(h, "world-held") == "callback pending for 2000ms after EOS join", g.user + "'s join waited for the sealed world");
+    Check(Result(h, "world-closed") == "the guest's join failed",
+          "Epic closed the room and " + g.user + "'s join failed (" + Result(h, "world-closed") + ")");
+    Check(Result(g, "world-callback").rfind("1 result=", 0) == 0 && Result(g, "world-callback").find("result=0") == std::string::npos,
+          g.user + "'s join failed once (" + Result(g, "world-callback") + ")");
+    Check(g.results.count("world-details") == 0, g.user + "'s game was not sent into the closed room");
+    const std::size_t linked = g.text.find("DIRECT connected to host"), closed = g.text.find("-> CLOSED");
+    Check(linked != std::string::npos && closed != std::string::npos && linked < closed,
+          g.user + "'s direct link to the host was up when Epic closed the room");
+    Check(g.text.find("ROOM world admission waiting") != std::string::npos,
+          g.user + " had the host's slots over the direct link and waited for its world");
+    Check(g.text.find("Epic closed the room but the host's direct link is up: hidden from the game") == std::string::npos,
+          g.user + " did not hide the closing from a join that waits");
+    Check(g.text.find("the room went while the join waited") != std::string::npos, g.user + " said why its join failed");
 }
 
 inline std::vector<Seat> WorldAdmissionSeats() {
@@ -1293,6 +1310,7 @@ inline void CheckWorldAdmission(const std::vector<Spawned>& machines, const game
 inline const std::vector<Scenario>& NetScenarios() {
     static const std::vector<Scenario> all = {
         {"worldadmission", WorldAdmissionSeats(), 90000, &CheckWorldAdmission},
+        {"worldadmissionclosed", WorldAdmissionSeats(), 90000, &CheckWorldAdmissionClosed, {{"EDF6NET_EPIC_CLOSES", "1"}}},
         {"netstats", Seats(3, "netstats", BaseIni("[Netcode]\r\nStatsSeconds=1\r\n")), 90000, &CheckNetStats,
          {{"EDF6NET_SECONDS", "8"}}},
         {"versiongate",

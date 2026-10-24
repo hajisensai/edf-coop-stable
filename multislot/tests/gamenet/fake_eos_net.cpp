@@ -405,6 +405,19 @@ EXPORT void* FakeNet_RoomDetails() {
     return GiveDetails(f.net->lobby);
 }
 
+// Epic closes the room under everyone (none of its members left or destroyed it): each is told CLOSED on its next tick.
+EXPORT void FakeNet_CloseLobby() {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open()) return;
+    Locked locked(f.netLock);
+    const std::uint32_t version = f.net->lobby.version;  // stays monotonic: the others compare it
+    f.net->lobby = gamenet::Lobby{};
+    f.net->lobby.version = version + 1;
+    std::printf("RESULT epic-closed the lobby\n");
+    std::fflush(stdout);
+}
+
 // Counts this machine as done (`finish` 1) and returns how many are: machines keep the room's network running
 // until everyone is done, as players stay in the room.
 EXPORT std::uint32_t FakeNet_Finish(int finish) {

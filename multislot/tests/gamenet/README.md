@@ -62,6 +62,7 @@ Guests join one after another in seat order, so seat n is player n+1.
 | `GameNet_mission8rushed` | 8 | Epic relays lobby attributes 2.5 s late and the mission starts as the last player is in, before anyone's marker reached the host |
 | `GameNet_worldfeedlatep2p` | 2 | the guest's game asks EOS for nothing P2P until its join completed, as EDF.dll does (the `EOS_Platform_GetP2PInterface` of its network, 12C8154 in `p2p::Manager::Initialize`, runs in the room it builds then): the host's member slots and world state still come over EOS, the join completes with them, and the P2P interface is tuned once |
 | `GameNet_worldfeedclosed` | 2 | the host closes its room while the guest's join waits for its slots: the guest's join fails (`EOS_NotFound`) and its game is never sent into the room that is gone |
+| `GameNet_worldadmissionclosed` | 2 | Epic closes the room while the guest's join waits for a sealed world and its direct link to the host is up: the closing is not hidden from a join that is not in the room yet, and the join fails |
 
 The mission scenarios check, on every machine: the sync finished, the player count, the host's mission and
 difficulty, and for every player the class, a marker and the armor that player's own machine set - and that every
@@ -73,6 +74,8 @@ when it does not fit, and none may go missing. Each imperfect scenario also chec
 Network imperfections, set per scenario: `EDF6NET_DELAY=<channel>:<ms>`, `EDF6NET_DROP=<bytes>:<count>` (only
 unreliable packets), `EDF6NET_LOBBY_DELAY=<ms>`, `EDF6NET_CHATTER=<bytes>`, `EDF6NET_RUSH=1`; per seat
 `EDF6NET_DELAY_FROM=<user>:<ms>` (everything that machine receives from that member).
+
+Like the game, a machine asks EOS for nothing P2P before its CreateLobby or JoinLobby completed (`roles.cpp` `GameEnteredRoom`: EDF.dll's `EOS_Platform_GetP2PInterface` for its network, 12C8154, and its receive loop come with the room it builds then), and every scenario checks that no machine's game heard a member status of a lobby before its join completed (`status-before-join`).
 
 Every scenario also checks, on every machine: every EOS P2P call (send, receive, accept, close) ran on the thread
 that ticks EOS (`fake_eos_net.cpp` `OnTickThread`; in the game that is one thread: EDF.dll's `internal_Core::Update`

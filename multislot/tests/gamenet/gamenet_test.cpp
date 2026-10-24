@@ -264,6 +264,10 @@ int wmain(int argc, wchar_t** argv) {
         // room feed, the side packets) and sends run where the game's do.
         Check(machine.results.count("eos-off-tick") == 0,
               machine.user + " called EOS P2P only on the thread that ticks EOS (" + Result(machine, "eos-off-tick") + ")");
+        // Epic tells a game nothing of a lobby before its JoinLobby completed (roles.cpp joinPending).
+        Check(machine.results.count("status-before-join") == 0,
+              machine.user + "'s game heard no member status before its join completed (" +
+                  Result(machine, "status-before-join") + ")");
         if (Result(machine, "plugin").rfind("none", 0) == 0) continue;  // the game alone writes no EDF6Coop.log
         Check(Result(machine, "log").find("bytes") != std::string::npos &&
                   machine.text.find("==== EDF6Coop ") != std::string::npos,

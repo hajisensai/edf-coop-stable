@@ -84,6 +84,7 @@ struct Fake {
     std::uint32_t lobbyVersionSeen = 0;
     std::vector<std::string> membersSeen;  // the room's members at the last tick (status notifications)
     std::string lobbySeen;
+    std::string lobbyLeft;  // the lobby this machine left (or destroyed) itself: EOS tells it nothing of that one
     // EDF6NET_DELAY / EDF6NET_DROP
     int delayedChannel = -1;
     ULONGLONG delayMs = 0;
@@ -404,6 +405,19 @@ EXPORT void* FakeNet_RoomDetails() {
     return GiveDetails(f.net->lobby);
 }
 
+// Epic closes the room under everyone (none of its members left or destroyed it): each is told CLOSED on its next tick.
+EXPORT void FakeNet_CloseLobby() {
+    Fake& f = F();
+    const std::scoped_lock guard(f.lock);
+    if (!Open()) return;
+    Locked locked(f.netLock);
+    const std::uint32_t version = f.net->lobby.version;  // stays monotonic: the others compare it
+    f.net->lobby = gamenet::Lobby{};
+    f.net->lobby.version = version + 1;
+    std::printf("RESULT epic-closed the lobby\n");
+    std::fflush(stdout);
+}
+
 // Counts this machine as done (`finish` 1) and returns how many are: machines keep the room's network running
 // until everyone is done, as players stay in the room.
 EXPORT std::uint32_t FakeNet_Finish(int finish) {
@@ -461,7 +475,7 @@ struct MemberStatusInfo {
     void* ClientData;
     const char* LobbyId;
     const void* TargetUserId;
-    std::int32_t CurrentStatus;  // 0 joined, 1 left
+    std::int32_t CurrentStatus;  // 0 joined, 1 left, 4 promoted, 5 closed
 };
 struct MemberUpdateInfo {
     void* ClientData;
@@ -490,6 +504,19 @@ void NoticeRoomChanges() {
     const bool in = std::find(members.begin(), members.end(), f.self) != members.end();
     const std::string id = lobby.id;
     if (!in || id != f.lobbySeen) {
+        // The room we were in is gone (its owner destroyed it) and we did not leave it ourselves: as EOS does, every
+        // member is told CLOSED, about itself (EOS_LMS_CLOSED, the local user as its target).
+        if (!f.lobbySeen.empty() && id != f.lobbySeen && f.lobbyLeft != f.lobbySeen) {
+            const std::string closed = f.lobbySeen, self = f.self;
+            for (const auto& notify : f.lobbyNotifies) {
+                if (notify.kind != 0) continue;
+                const auto n = notify;
+                f.completions.emplace_back([=]() {
+                    MemberStatusInfo info{n.clientData, closed.c_str(), Handle(self), 5};
+                    reinterpret_cast<void (*)(const MemberStatusInfo*)>(n.callback)(&info);
+                });
+            }
+        }
         f.membersSeen = in ? members : std::vector<std::string>();
         f.mostSeen = in ? members.size() : 0;
         f.lobbySeen = in ? id : std::string();
@@ -929,6 +956,7 @@ EXPORT void EOS_Lobby_JoinLobby(void*, const EOS_Lobby_JoinLobbyOptionsHead* opt
         Copy(member.user, sizeof(member.user), f.self);
         ++lobby.version;
     }
+    if (f.lobbyLeft == wanted) f.lobbyLeft.clear();  // in it again: told when it closes
     Complete(callback, clientData, EOS_Success, wanted);
 }
 
@@ -941,6 +969,7 @@ void Leave(const LeaveOptions* options, void* clientData, void* callback, bool d
     Locked locked(f.netLock);
     gamenet::Lobby& lobby = f.net->lobby;
     if (id != lobby.id) return Complete(callback, clientData, EOS_NotFound, id);
+    f.lobbyLeft = id;
     if (destroy) {
         const std::uint32_t version = lobby.version;  // stays monotonic: the others compare it
         lobby = gamenet::Lobby{};

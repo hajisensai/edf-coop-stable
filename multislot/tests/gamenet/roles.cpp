@@ -22,6 +22,7 @@ namespace {
 
 constexpr const char* kSplitSyncKey = "EDF6MS_SPLITSYNC";  // syncmarker.h
 void* const kPlatform = reinterpret_cast<void*>(0x1000);     // what the fake's EOS_Platform_Create hands out
+void* const kP2P = reinterpret_cast<void*>(0x2000);          // what the fake's EOS_Platform_GetP2PInterface hands out
 void* const kLobbyInterface = reinterpret_cast<void*>(0x3000);
 
 template <typename T>
@@ -261,7 +262,7 @@ void SendSidePackets(const Machine& machine, const Room& room, int count) {
             options.Data = packet.data();
             options.Reliability = EOS_PR_ReliableOrdered;
             options.bAllowDelayedDelivery = 1;
-            Result("side-packet", "to %s: result %d", member.c_str(), send(kPlatform, &options));
+            Result("side-packet", "to %s: result %d", member.c_str(), send(kP2P, &options));
         }
     }
 }
@@ -661,7 +662,7 @@ void PollP2P(const Machine& machine) {
     std::uint32_t size = 0;
     const auto receive = Import<EOS_EResult (*)(void*, const EOS_P2P_ReceivePacketOptions*, EOS_ProductUserId*, EOS_P2P_SocketId*,
                                                 std::uint8_t*, void*, std::uint32_t*)>(machine, "EOS_P2P_ReceivePacket");
-    while (receive(kPlatform, &options, &peer, &socket, &channel, data.data(), &size) == EOS_Success) {
+    while (receive(kP2P, &options, &peer, &socket, &channel, data.data(), &size) == EOS_Success) {
     }
 }
 
@@ -989,6 +990,7 @@ int SlotRoom(Machine& machine, const std::string& how) {
 struct WorldEntered {
     Entered entered;
     unsigned callbacks = 0;
+    const Machine* machine = nullptr;
 };
 
 void OnWorldEntered(const LobbyCallbackInfo* info) {
@@ -997,6 +999,20 @@ void OnWorldEntered(const LobbyCallbackInfo* info) {
     LobbyCallbackInfo copy = *info;
     copy.ClientData = &state->entered;
     OnEntered(&copy);
+    // What the game's join completion does first on success (12B1A30): copy the lobby's details through its import. A
+    // lobby that is gone has none, and the game then reads its owner through a null details handle (12AEBF3).
+    if (info->ResultCode == 0 && state->machine) {
+        struct CopyOptions {
+            std::int32_t ApiVersion;
+            const char* LobbyId;
+            const void* LocalUserId;
+        } options{1, info->LobbyId, Self(*state->machine)};
+        void* details = nullptr;
+        const std::int32_t copied = Import<std::int32_t (*)(void*, const void*, void**)>(
+            *state->machine, "EOS_Lobby_CopyLobbyDetailsHandle")(kLobbyInterface, &options, &details);
+        Result("world-details", "%d%s", copied, details ? "" : " (no details: the game would read its owner through null)");
+        if (details) Import<void (*)(void*)>(*state->machine, "EOS_LobbyDetails_Release")(details);
+    }
     // Count all callbacks separately from successful completions. A failed join must never satisfy release.
     if (info->ResultCode == 0) FakeExport<std::uint32_t (*)(int)>("FakeNet_Finish")(1);
     FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready")(1);
@@ -1008,6 +1024,11 @@ void OnWorldEntered(const LobbyCallbackInfo* info) {
 // its lobby (Lobby phase) from the start. `feed`: the host sends its Room message over EOS, so the guest's parked join
 // completes with its slots and world state; without (a host of an older EDF6Coop, [Test] RoomFeed=0) nothing can
 // admit the guest, and its join fails with a line saying why. The guest reports how its join ended ("world-callback").
+// EDF6NET_GAME_P2P=late (the guest): as the game, it asks EOS for nothing P2P until its join completed - EDF.dll's
+// EOS_Platform_GetP2PInterface for its network (12C8154, p2p::Manager::Initialize) and its receive loop come with the
+// room it builds then - and afterwards takes the P2P interface through its import ("game-p2p").
+// EDF6NET_HOST_SEALED=1 (the host): its world is sealed, so the guest waits in its parked join.
+// EDF6NET_CLOSE_AFTER_MS=<ms> (the host): that long after the guest is in Epic's lobby the host destroys the lobby.
 int WorldFeed(Machine& machine, bool host) {
     ListenToMembers(machine);
     const auto setAdmission = reinterpret_cast<void (EDF6COOP_CALL *)(uint32_t, const char*)>(
@@ -1021,6 +1042,7 @@ int WorldFeed(Machine& machine, bool host) {
     const auto callbacks = FakeExport<std::uint32_t (*)(int)>("FakeNet_Ready");
     setAdmission(1, nullptr);
     if (host) {
+        if (Variable("EDF6NET_HOST_SEALED") == "1") setAdmission(3, machine.user.c_str());
         Entered entered;
         CreateOptions options;
         options.LocalUserId = Self(machine);
@@ -1033,6 +1055,25 @@ int WorldFeed(Machine& machine, bool host) {
         }
         Transport transport;
         if (!transport.Start(machine, entered.lobby, GameRoomMembers(machine, entered.lobby))) return 1;
+        if (const int closeAfter = std::atoi(Variable("EDF6NET_CLOSE_AFTER_MS").c_str()); closeAfter > 0) {
+            TickUntil(machine, static_cast<unsigned>(closeAfter), [&] {
+                transport.Tick();
+                return callbacks(0) != 0;
+            });
+            struct DestroyOptions {
+                std::int32_t ApiVersion;
+                const void* LocalUserId;
+                const char* LobbyId;
+            } destroy{1, Self(machine), entered.lobby.c_str()};
+            Entered destroyed;
+            Import<LobbyCall>(machine, "EOS_Lobby_DestroyLobby")(kLobbyInterface, &destroy, &destroyed, &OnEntered);
+            TickUntil(machine, 5000, [&] {
+                transport.Tick();
+                return destroyed.done;
+            });
+            Result("world-closed", "%s %d", callbacks(0) ? "after the guest's join ended" : "while the guest's join waited",
+                   destroyed.result);
+        }
         // Until the guest's join ended one way or the other (its callback ran), and it saw that we saw it.
         const bool ended = TickUntil(machine, 40000, [&] {
             transport.Tick();
@@ -1074,18 +1115,25 @@ int WorldFeed(Machine& machine, bool host) {
         Result("world-admission", "the room went");
         return 1;
     }
+    const bool lateP2P = Variable("EDF6NET_GAME_P2P") == "late";
     WorldEntered state;
+    state.machine = &machine;
     JoinOptions options;
     options.LocalUserId = Self(machine);
     options.LobbyDetailsHandle = details;
     const ULONGLONG start = GetTickCount64();
     Import<LobbyCall>(machine, "EOS_Lobby_JoinLobby")(kLobbyInterface, &options, &state, &OnWorldEntered);
-    const bool completed = TickUntil(machine, 40000, [&] {
-        PollP2P(machine);
+    const bool completed = TickUntil(machine, 50000, [&] {
+        if (!lateP2P) PollP2P(machine);
         return state.entered.done;
     });
     const ULONGLONG took = GetTickCount64() - start;
     release(details);
+    if (lateP2P && completed && state.entered.result == 0) {
+        // The room the game builds once its join completed asks EOS for the P2P interface (12C8154).
+        const void* p2p = Import<void* (*)(void*)>(machine, "EOS_Platform_GetP2PInterface")(kPlatform);
+        Result("game-p2p", "%s", p2p == kP2P ? "taken after the join" : "none");
+    }
     const bool acknowledged = completed && TickUntil(machine, 5000, [&] {
         PollP2P(machine);
         return finish(0) >= (state.entered.result == 0 ? 2u : 1u);

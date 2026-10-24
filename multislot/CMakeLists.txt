@@ -424,7 +424,8 @@ target_compile_options(NetFeatureTests PRIVATE ${WARNINGS})
 target_link_libraries(NetFeatureTests PRIVATE DirectNetPart)
 add_test(NAME NetcodeVersionGate COMMAND NetFeatureTests)
 foreach(scenario netstats versiongate bulk mesh meshblocked meshflap mission8xpress mission32bulk netstatsmixed meshoff joinfull mission8bulklost slotorder mission8bulkcut slotmigrate slotmigratenodirect slotmigrateearlyroom slotgiveup slotchurn slotchurnlate worldadmission
-        slotfeed slotfeedrescue slotfeedold slotfeedsession slotfeedboth slotmigratefeed worldfeed worldfeedold)
+        slotfeed slotfeedrescue slotfeedold slotfeedsession slotfeedboth slotmigratefeed worldfeed worldfeedold
+        worldfeedlatep2p worldfeedclosed)
     add_test(NAME GameNet_${scenario} COMMAND GameNetTests "${EDF6_GAME_DIR}" "$<TARGET_FILE:EDF6Coop>"
              "$<TARGET_FILE:GameMachine>" "${CMAKE_BINARY_DIR}/gamenettest" ${scenario})
     set_tests_properties(GameNet_${scenario} PROPERTIES SKIP_RETURN_CODE ${GAME_TEST_SKIPPED})
@@ -436,7 +437,8 @@ target_include_directories(NetInterestTests PRIVATE "${CMAKE_SOURCE_DIR}/..")
 target_compile_options(NetInterestTests PRIVATE ${WARNINGS})
 target_link_libraries(NetInterestTests PRIVATE DirectNetPart winhttp)
 add_test(NAME NetInterestOnTheWire COMMAND NetInterestTests)
-set_tests_properties(GameNet_worldadmission GameNet_worldfeed GameNet_worldfeedold
+set_tests_properties(GameNet_worldadmission GameNet_worldfeed GameNet_worldfeedold GameNet_worldfeedlatep2p
+    GameNet_worldfeedclosed
     PROPERTIES ENVIRONMENT "EDF6NET_AF_PROFILE=$<TARGET_FILE:FakeExtensionProfile>")
 
 add_executable(ModRoomIsolationTests ../tests/mod_room_test.cpp)

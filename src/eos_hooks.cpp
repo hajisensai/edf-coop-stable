@@ -3890,6 +3890,11 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
     g.bulks.push_back(std::move(pending));
     return true;
 }
+// Read-only, for the game-code tests (tests/gamenet, EDF6NET_STATUS_PAIR): 1 while this machine's direct link to `member`
+// is up - what keeps Epic's LEFT of a member from the game (holdLobbyStatus) - 0 otherwise.
+extern "C" __declspec(dllexport) int EDF6Coop_DirectLinkUp(const char* member) {
+    return member && !g_shutdown && reachableDirectly(member) ? 1 : 0;
+}
 extern "C" __declspec(dllexport) int EDF6Coop_AllForcesVirtualRoom(void* details) {
     FakeDetails d;
     if (!g.fakes.lookup(static_cast<EOS_HLobbyDetails>(details), &d)) return -1;

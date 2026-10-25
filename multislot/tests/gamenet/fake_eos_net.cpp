@@ -100,6 +100,13 @@ struct Fake {
     std::size_t delayAfter = 0;                      // EDF6NET_STATUS_DELAY_AFTER
     std::size_t mostSeen = 0;                        // the most members this machine saw in its room
     std::vector<std::function<void()>> heldLeaves;   // LEFTs waiting for the next JOINED
+    std::set<std::string> heldLeaving;               // whose LEFTs those are
+    // The LEFTs a JOINED came for and that JOINED (and any after it), in that order, until this machine's EDF6Coop has
+    // no direct link up to any of the members who left (EDF6Coop_DirectLinkUp): Epic's LEFT comes after the leaver's
+    // direct-link bye, as with Epic's real latency, so the plugin's disconnect hold (holdLobbyStatus) does not keep the
+    // LEFT from the game while the JOINED goes through.
+    std::vector<std::function<void()>> pairHeld;
+    std::set<std::string> pairLeaving;               // whose LEFTs are in pairHeld
     bool joinWhenSlotted = false;                    // EDF6NET_JOIN_WHEN_SLOTTED
     std::vector<std::pair<std::string, std::function<void()>>> joinsUntilSlotted;
     std::vector<std::function<void()>> leavesAfterJoin;
@@ -532,14 +539,19 @@ void NoticeRoomChanges() {
             const auto n = notify;
             const bool late = kind == 0 && delaying && f.delayedStatuses.count(status) != 0;
             const bool held = f.pairStatuses && kind == 0 && status == 1;
-            if (f.pairStatuses && kind == 0 && status == 0 && !f.heldLeaves.empty()) {
-                for (auto& leave : f.heldLeaves) f.completions.push_back(std::move(leave));
+            if (held) f.heldLeaving.insert(member);
+            const bool paired = f.pairStatuses && kind == 0 && status == 0 && (!f.heldLeaves.empty() || !f.pairHeld.empty());
+            if (paired) {
+                for (auto& leave : f.heldLeaves) f.pairHeld.push_back(std::move(leave));
                 f.heldLeaves.clear();
+                f.pairLeaving.insert(f.heldLeaving.begin(), f.heldLeaving.end());
+                f.heldLeaving.clear();
             }
             const bool slotGated = f.joinWhenSlotted && delaying && kind == 0;
             const bool promotedGated = !f.promotedAfterSlot.empty() && kind == 0 && status == 4;
             auto& target = promotedGated              ? f.promotedHeld.emplace_back()
                            : held                     ? f.heldLeaves.emplace_back()
+                           : paired                   ? f.pairHeld.emplace_back()
                            : slotGated && status == 0 ? f.joinsUntilSlotted.emplace_back(member, nullptr).second
                            : slotGated && status == 1 ? f.leavesAfterJoin.emplace_back()
                            : late ? f.later.emplace_back(GetTickCount64() + f.statusDelayMs, nullptr).second
@@ -619,6 +631,30 @@ std::set<std::string> SlottedNow() {
     return slotted;
 }
 
+// EDF6NET_STATUS_PAIR: whether this machine's EDF6Coop has a direct link up to `member` (EDF6Coop_DirectLinkUp; none
+// without the plugin). Asked without the fake's lock, as PluginHostSlot.
+bool PluginDirectLinkUp(const std::string& member) {
+    const HMODULE plugin = GetModuleHandleA("EDF6Coop.dll");
+    const auto linkUp = plugin ? reinterpret_cast<int (*)(const char*)>(
+                                     reinterpret_cast<void*>(GetProcAddress(plugin, "EDF6Coop_DirectLinkUp")))
+                               : nullptr;
+    return linkUp && linkUp(member.c_str()) != 0;
+}
+
+// Of the members whose LEFT waits in pairHeld, those without a direct link up now.
+std::set<std::string> UnlinkedNow() {
+    Fake& f = F();
+    std::set<std::string> waiting;
+    {
+        const std::scoped_lock guard(f.lock);
+        waiting = f.pairLeaving;
+    }
+    std::set<std::string> unlinked;
+    for (const auto& member : waiting)
+        if (!PluginDirectLinkUp(member)) unlinked.insert(member);
+    return unlinked;
+}
+
 // EDF6NET_PROMOTED_AFTER_SLOT: the plugin follows a host list without the old owner and with the named member.
 bool PromotedDue() {
     Fake& f = F();
@@ -636,6 +672,7 @@ EXPORT void EOS_Platform_Tick(void*) {
     std::deque<std::function<void()>> run;
     const std::set<std::string> slotted = SlottedNow();
     const bool promotedDue = PromotedDue();
+    const std::set<std::string> unlinked = UnlinkedNow();
     {
         const std::scoped_lock guard(f.lock);
         if (!f.tickThread) f.tickThread = GetCurrentThreadId();
@@ -677,6 +714,14 @@ EXPORT void EOS_Platform_Tick(void*) {
             }
         }
         NoticeRoomChanges();
+        // The LEFTs a JOINED came for, then that JOINED, in one tick once every one who left has no direct link here.
+        // A LEFT held this tick was not asked about yet (UnlinkedNow): it waits for the next.
+        if (!f.pairHeld.empty() &&
+            std::all_of(f.pairLeaving.begin(), f.pairLeaving.end(), [&](const std::string& m) { return unlinked.count(m) != 0; })) {
+            for (auto& status : f.pairHeld) f.completions.push_back(std::move(status));
+            f.pairHeld.clear();
+            f.pairLeaving.clear();
+        }
         const ULONGLONG now = GetTickCount64();
         while (!f.later.empty() && f.later.front().first <= now) {
             f.completions.push_back(std::move(f.later.front().second));

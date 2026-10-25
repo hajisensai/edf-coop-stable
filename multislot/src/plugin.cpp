@@ -45,6 +45,7 @@
 #include "patches.h"
 #include "peertimeout.h"
 #include "syncmarker.h"
+#include "roomrows.h"
 #include "roomview.h"
 #include "rooms.h"
 #include "smoothing.h"
@@ -63,6 +64,7 @@
 #include "src/log.h"
 #include "src/product.h"
 #include "src/updater.h"
+#include "src/room_notice.h"
 
 namespace multislot {
 namespace {
@@ -134,32 +136,22 @@ HostDataSettings ReadHostData(const wchar_t* ini, int* acceptKey, int* pageKey) 
 
 RoomViewSettings ReadRoomView(const wchar_t* ini) {
     RoomViewSettings settings;
-    const auto button = IniText(ini, L"RoomScreen", L"PageButton", L"RightStick");
-    const int offset = PadButtonOffset(button.c_str());
-    if (offset < 0) Log("PageButton=%ls is not a known button; using RightStick", button.c_str());
-    settings.padButton = static_cast<std::uint32_t>(offset < 0 ? 0xB8 : offset);
     const auto key = [&](const wchar_t* name, const wchar_t* fallback, int fallbackKey) {
         const auto text = IniText(ini, L"RoomScreen", name, fallback);
         const int vk = VirtualKey(text.c_str());
         if (vk < 0) Log("%ls=%ls is not a known key; using %ls", name, text.c_str(), fallback);
         return vk < 0 ? fallbackKey : vk;
     };
-    // 0.6.0: F2 became the 8Player MOD key, so the page key moved (PageKey=F2 was the old default).
-    if (IniText(ini, L"RoomScreen", L"PageKey", L"").size())
-        Log("[RoomScreen] PageKey is no longer used: PageKeys (default F3,Tab) switches member pages");
-    const auto pageText = IniText(ini, L"RoomScreen", L"PageKeys", L"F3,Tab");
-    wchar_t skipped[64]{};
-    int pageKeys[kMaxPageKeys]{};
-    ParseKeyList(pageText.c_str(), pageKeys, kMaxPageKeys, skipped, 64);
-    if (skipped[0]) Log("PageKeys: %ls left out (not a known key, or F2, which is the 8Player MOD key)", skipped);
-    std::memcpy(settings.pageKeys, pageKeys, sizeof(pageKeys));
+    // Up to 2.6: four members per page and keys to switch pages. The room screen shows every member now.
+    for (const wchar_t* old : {L"PageKey", L"PageKeys", L"PageButton"})
+        if (IniText(ini, L"RoomScreen", old, L"").size())
+            Log("[RoomScreen] %ls is no longer used: the room screen shows every member, without pages", old);
     settings.dummies = GetPrivateProfileIntW(L"RoomScreen", L"DummyMembers", 0, ini) != 0;
     settings.dummyAddKey = key(L"DummyAddKey", L"F6", VK_F6);
     settings.dummyRemoveKey = key(L"DummyRemoveKey", L"F7", VK_F7);
     if (ResolveDummyKeys(settings) && settings.dummies)
-        Log("Dummy keys may not be F2 or a page key: using add %d, remove %d (virtual keys, 0 = none)",
+        Log("Dummy keys may not be F2 or each other: using add %d, remove %d (virtual keys, 0 = none)",
             settings.dummyAddKey, settings.dummyRemoveKey);
-    BuildPageHint(settings);
     return settings;
 }
 
@@ -228,6 +220,9 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     auto patches = GuestPatches();
     const auto sessionPatches = SessionPatches();
     patches.insert(patches.end(), sessionPatches.begin(), sessionPatches.end());
+    // One panel per room member, whatever the number (roomview.h).
+    const auto panelPatches = RoomPanelPatches();
+    patches.insert(patches.end(), panelPatches.begin(), panelPatches.end());
     // Bounds of the room size an imm8 cannot hold (widecmp.h): the room tables always, the mission phase with it.
     std::vector<WideCompare> compares = SessionCompares();
     if (mission) {
@@ -286,9 +281,7 @@ bool Apply(unsigned char* base, bool mission, bool hudColours, bool spawns, int 
     SetGameOperatorNew(std::bit_cast<std::uintptr_t>(base + sessionCalls[0].target));
     for (const auto& call : sessionCalls) redirects.emplace_back(call, std::bit_cast<void*>(&VectorOperatorNew));
     const auto room = RoomViewCalls();
-    redirects.push_back({room[0], reinterpret_cast<void*>(&BuildPanelsHook)});
-    redirects.push_back({room[1], reinterpret_cast<void*>(&BuildPanelsHook)});
-    redirects.push_back({room[2], reinterpret_cast<void*>(&UpdateVoiceIconsHook)});
+    for (const auto& call : room) redirects.push_back({call, reinterpret_cast<void*>(&BuildPanelsHook)});
     // Always, not only with dummy members: the member list is cut to this build's room size (fakemembers.h).
     for (const auto& call : MemberListCalls()) redirects.push_back({call, MemberListCallHandler(call.rva)});
     if (diagnostics)
@@ -591,24 +584,20 @@ bool LoadRooms(const wchar_t* iniPath) {
     }
     if (!mission) ghosts = 0;
     const bool spawns = mission && GetPrivateProfileIntW(L"Mission", L"ExtraEnemies", 1, iniPath) != 0;
-    // 8Player MOD: switched outside a room only, because inside one the same inputs page through the members.
+    // 8Player MOD: switched outside a room only (a room keeps the size it was created with).
     const auto hostKeyText = IniText(iniPath, L"MultiSlot", L"Key", L"F2");
     int hostModeKey = VirtualKey(hostKeyText.c_str());
     if (hostModeKey < 0) {
         Log("[MultiSlot] Key=%ls is not a known key; using F2", hostKeyText.c_str());
         hostModeKey = VK_F2;
     }
-    // The left stick is free outside a room (the page button is the right one, and copy armor only works
-    // inside a room), so it can switch the setting there without taking anything away.
+    // The left stick is free outside a room (copy armor only works inside a room), so it can switch the setting
+    // there without taking anything away.
     const auto hostPadText = IniText(iniPath, L"MultiSlot", L"PadButton", L"LeftStick");
     int hostPadOffset = PadButtonOffset(hostPadText.c_str());
     if (hostPadOffset < 0) {
         Log("[MultiSlot] PadButton=%ls is not a known button; using LeftStick", hostPadText.c_str());
         hostPadOffset = 0xB0;
-    }
-    if (hostPadOffset && static_cast<std::uint32_t>(hostPadOffset) == roomView.padButton) {
-        Log("[MultiSlot] PadButton may not be the page button; using none");
-        hostPadOffset = 0;
     }
     const auto hostModePad = static_cast<std::uint32_t>(hostPadOffset);
     wchar_t hostModeHint[24]{};
@@ -620,7 +609,6 @@ bool LoadRooms(const wchar_t* iniPath) {
     }
 
     // "copy armor": with neither a key nor a pad button the three armor sites are left alone entirely.
-    // It works inside a room, where the page inputs also work, so it may share neither of them.
     int copyArmorKey = 0;
     std::uint32_t copyArmorPad = 0;
     int copyArmorIgnore = 0;
@@ -635,19 +623,10 @@ bool LoadRooms(const wchar_t* iniPath) {
             Log("[CopyArmor] Key may not be the Player MOD key; using F4");
             copyArmorKey = copyArmorKey == VK_F4 ? 0 : VK_F4;
         }
-        for (const int page : roomView.pageKeys)
-            if (page && page == copyArmorKey) {
-                Log("[CopyArmor] Key may not be a page key; using F4");
-                copyArmorKey = copyArmorKey == VK_F4 ? 0 : VK_F4;
-            }
         const auto padText = IniText(iniPath, L"CopyArmor", L"PadButton", L"LeftStick");
         const int padOffset = PadButtonOffset(padText.c_str());
         if (padOffset < 0) Log("[CopyArmor] PadButton=%ls is not a known button; using LeftStick", padText.c_str());
         copyArmorPad = static_cast<std::uint32_t>(padOffset < 0 ? 0xB0 : padOffset);
-        if (copyArmorPad && copyArmorPad == roomView.padButton) {
-            Log("[CopyArmor] PadButton may not be the page button; using none");
-            copyArmorPad = 0;
-        }
         // Someone barely different from you is no help to copy, so they are passed over for the next one up.
         copyArmorIgnore = static_cast<int>(GetPrivateProfileIntW(L"CopyArmor", L"IgnoreWithin", 300, iniPath));
         if (copyArmorIgnore < 0) {
@@ -665,10 +644,6 @@ bool LoadRooms(const wchar_t* iniPath) {
             if (copyArmorCaps[i] >= 0) continue;
             Log("[CopyArmor] %ls=%d is below zero; using no ceiling", caps[i].key, copyArmorCaps[i]);
             copyArmorCaps[i] = 0;
-        }
-        if (copyArmorPad && copyArmorPad == roomView.padButton) {
-            Log("[CopyArmor] PadButton may not be the page button; using none");
-            copyArmorPad = 0;
         }
         wchar_t keyName[8]{};
         if (copyArmorKey) KeyName(copyArmorKey, keyName, 8);
@@ -746,9 +721,8 @@ bool LoadRooms(const wchar_t* iniPath) {
         _snprintf_s(hosting, _TRUNCATE, "%dPlayer MOD ON", roomSize);
     else
         _snprintf_s(hosting, _TRUNCATE, "Player MOD OFF");
-    Log("Hosting: %s (%ls on a menu screen outside a room steps OFF/8/10/12/16/24/32/48/64/128/256/512/1024; inside one "
-        "those page through "
-        "the members instead): OFF = normal 4-player rooms anyone can join, N = MultiSlot rooms for N players, "
+    Log("Hosting: %s (%ls on a menu screen outside a room steps OFF/8/10/12/16/24/32/48/64/128/256/512/1024): "
+        "OFF = normal 4-player rooms anyone can join, N = MultiSlot rooms for N players, "
         "hidden from players without this mod",
         hosting, hostModeHint);
     if (copyArmorKey || copyArmorPad)
@@ -758,8 +732,8 @@ bool LoadRooms(const wchar_t* iniPath) {
             copyArmorHint, copyArmorIgnore, copyArmorCaps[0], copyArmorCaps[1], copyArmorCaps[2], copyArmorCaps[3]);
     else
         Log("Copy armor: off, the armor sites are untouched");
-    Log("Room screen: 4 member panels per page, switched with %ls; fake members %s", roomView.pageHint[0] ? roomView.pageHint : L"(nothing)",
-        roomView.dummies ? "ON (test mode: F6 adds one to the room's member list, F7 removes one)" : "off");
+    Log("Room screen: one member panel per member, in rows that fit the screen (up to %zu shown); fake members %s",
+        rows::kMaxRows, roomView.dummies ? "ON (test mode: F6 adds one to the room's member list, F7 removes one)" : "off");
     if (mission) {
         Log("Mission: players 5-%d get loadout sidecars, player slots 5-%d and spawn points (4 or fewer: unchanged)",
             kMaxPlayers, kMaxPlayers);
@@ -961,6 +935,7 @@ bool LoadCoop(PluginInfo* info) {
     LogOpen(logPath);
     dn::logToSink(&ForwardDirectNetLine);
     dn::statusToSink(&SetPluginStatus);
+    dn::roomNoticeToSink(&SetRoomNotice);
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDF6Coop";
     info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);

@@ -63,7 +63,7 @@
 
 - ❌ **EOS P2P 连接数 / 星型拓扑**：游戏里每个客人只连房主，房主要维持 1023 条 P2P 链路，每 90 ms 一次的包控制器要轮询 1024 个会话。会话本身每项大小没测过。这是 W1 网状拓扑和发送调度要解决的事；W6 只保证槽位和会话够数。
 - ⚠️ **语音聊天 HUD**：每个成员写一条记录，1024×0x50 = 80 KiB，够用。但超过 16 人的房间本来就没有 Epic 语音房间（`kVoiceRoomMaxPlayers`）。
-- ⚠️ **房间画面**：每页 4 人，1024 人就是 256 页。功能不受影响，只是翻页没法用。
+- ⚠️ **房间画面**：不再分页，游戏为每个成员建一个面板，插件按人数重新排行，最多显示前 32 个（[roompanels.md](roompanels.md)）。
 - ❌ **引擎渲染 / 模拟 1024 个士兵**：每台机器都要为每个玩家创建一个 SoldierBase 并跑完整物理（online-re §1）。1024 个玩家对象的 CPU、显存、动画、HUD 名字标签能不能撑住，只有真机能回答；预计是硬性瓶颈，与网络无关。
 - ❌ **出生点**：环形布局只解决重叠；任务地图上的出生区域放不下这么多人时可能出现在墙里。待真机看。
 
@@ -116,7 +116,7 @@
   - 下发：房主的 `Room` 列表直接发这张表，下标就是槽位，`""` 表示空槽（`eos_hooks.cpp` hostRoomTick）。
   - 客人：跟随房主槽位（`RoomView::slotted`）以后，Users::Add 把成员放进房主给它的槽位（`ChooseUserSlot`，要求这个槽位在本机是空的）。
   - 没进房主槽位表的成员先不交给游戏：大厅副本只列房主槽位表里、游戏已经被告知的成员，按槽位顺序（`slottedMembers`）；Epic 发来的这类成员的 JOINED 先扣住（`admitStatus` → `joinHeldBack`），等房主的游戏有了它，再由 followHost 补发。
-  - 同一槽位一出一进（第三轮复核 2）：followHost 同一轮里先发离开、再发加入（`RoomView::followHost`）。成员在房主那边的槽位在本机还被别人占着（比如那个人的 LEFT 还没到），它的 JOINED 就一直扣住，直到槽位空出来，绝不放进别的槽（`joinHeldBack` 查本机的 `GameSlotTable`）。gamenet `slotchurn` / `slotchurnlate` 覆盖。`slotchurnlate` 原来靠 B 晚 8 s 收到 LEFT 来赌顺序，20 次里失败 2 次（10%）：根因是 Y 的 Epic JOINED 和房主列出 Y 的 Room 消息谁先到 B 是竞态——JOINED 先到时 B 只能以「槽位还不知道」扣住，之后 followHost 同一轮先离开后加入，「槽被占着」那一层根本没触发。现在由测试框架定顺序（`EDF6NET_JOIN_WHEN_SLOTTED`）：B 的 Epic JOINED 要等 B 的插件已经知道 Y 的槽位（`EDF6Coop_HostSlot` 导出）才送达，X 的 LEFT 紧跟在它后面；房主用 `EDF6NET_STATUS_PAIR`，第一张不含 X 的表里 Y 就占了 X 的槽，房主那边说 X 离开要再等 5 s，所以 Y 的 JOINED 到时 X 一定还在 B 的游戏里。
+  - 同一槽位一出一进（第三轮复核 2）：followHost 同一轮里先发离开、再发加入（`RoomView::followHost`）。成员在房主那边的槽位在本机还被别人占着（比如那个人的 LEFT 还没到），它的 JOINED 就一直扣住，直到槽位空出来，绝不放进别的槽（`joinHeldBack` 查本机的 `GameSlotTable`）。gamenet `slotchurn` / `slotchurnlate` 覆盖。`slotchurnlate` 原来靠 B 晚 8 s 收到 LEFT 来赌顺序，20 次里失败 2 次（10%）：根因是 Y 的 Epic JOINED 和房主列出 Y 的 Room 消息谁先到 B 是竞态——JOINED 先到时 B 只能以「槽位还不知道」扣住，之后 followHost 同一轮先离开后加入，「槽被占着」那一层根本没触发。现在由测试框架定顺序（`EDF6NET_JOIN_WHEN_SLOTTED`）：B 的 Epic JOINED 要等 B 的插件已经知道 Y 的槽位（`EDF6Coop_HostSlot` 导出）才送达，X 的 LEFT 紧跟在它后面；房主用 `EDF6NET_STATUS_PAIR`，第一张不含 X 的表里 Y 就占了 X 的槽，房主那边说 X 离开要再等 5 s，所以 Y 的 JOINED 到时 X 一定还在 B 的游戏里。`slotchurn` / `slotchurnlate` 后来在 main 上约一半失败（2.6.1 的 acebc8d 上同样，5 次里 slotchurn 3 败、slotchurnlate 3 败）：房主开着直连，X 离开时先发直连 bye 再离开 Epic 大厅（`hookLeaveLobby` → `setActive(false)`），但假 EOS 的大厅变化是即时的，房主的 EOS tick 常在处理 bye 之前就拿到 X 的 LEFT；X 的直连还算活着，断线保护（`holdLobbyStatus` 的 LEFT 分支）就把 LEFT 扣到直连断开，同一 tick 配对来的 Y 的 JOINED 先进游戏，Y 拿到第 4 位而不是 X 空出的第 1 位（所有机器编号一致，没有错位；只是场景前提没成立）。真实 Epic 的 LEFT 有服务器延迟，bye 先到。现在 `EDF6NET_STATUS_PAIR` 也等房主的插件对 X 已无直连（测试用只读导出 `EDF6Coop_DirectLinkUp`）才把 LEFT 和 JOINED 一起放出，顺序由测试框架定：修复后连跑 6 轮 slotchurn / slotchurnlate / slotfeed 全过。
   - 通过 Epic 加入一个房主开了直连的房间（大厅上有 `EDF6DN_HOSTADDR`）：游戏的 JoinLobby 完成回调要等房主槽位到了再发（`lobbyEnteredWrapper` 先挂起，`parkedEntryTick` 处理），游戏一进房就按房主槽位添加全部成员（`RoomView::adoptHost`）。
   - 挂起超时（第三轮复核 3）：不再在 10 s 后按 Epic 顺序进房。一旦按错的顺序放进游戏，这个成员和之后的人都纠正不回来（游戏不会给已有成员换槽，重排只能靠先踢出再加入，任务中会丢人）。所以选「放宽等待 + 明确上限 + 整体放弃」：到房主的直连在建（尝试中或已连上、槽位表在路上）就继续等；直连 10 s 没进展（`kParkedEntryMs`）或总共 45 s（`kParkedEntryCapMs`）还没有槽位表，就让这次加入以 `EOS_NoConnection` 失败、退出 Epic 大厅，日志写 `ROOM NOT entering room ...` 和原因（`decideParkedEntry`，单元测试在 `tests/test_main.cpp`）。
   - 房主迁移（第三轮复核 1）：PROMOTED 传到游戏时（`admitStatus` → `RoomView::promoted`）旧房主的槽位表作废。

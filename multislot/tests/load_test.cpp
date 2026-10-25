@@ -486,7 +486,7 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"codechanged") {
         Check(!loaded, "a changed HUiRoom::OnUpdate is refused, though its slot is another plugin's");
         Check(Untouched(base, guest) == static_cast<int>(guest.size()) &&
-                  Untouched(base, sessions) == static_cast<int>(sessions.size()),
+                  Untouched(base, sessions) == static_cast<int>(sessions.size()) && Untouched(base, RoomPanelPatches()) == 2,
               "the refusal changes nothing (all or nothing)");
         for (const auto& call : calls) Check(CallTargets(base + call.rva, call.rva, call.target), "calls stay untouched");
         Check(SlotValue(base, RoomViewSlot()) == foreignHook && SlotValue(base, MainFrameSlot()) == foreignHook,
@@ -497,6 +497,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(!loaded, "Enabled=0 asks the loader to unload");
         Check(Untouched(base, guest) == static_cast<int>(guest.size()), "Enabled=0 leaves every guest patch site untouched");
         Check(Untouched(base, sessions) == static_cast<int>(sessions.size()), "Enabled=0 leaves the room tables at four");
+        Check(Untouched(base, RoomPanelPatches()) == 2, "Enabled=0 leaves the panel builder alone");
         for (const auto& site : SessionCompares()) Check(CompareUntouched(base, site), "Enabled=0 leaves the room table bounds at four");
         for (const auto& hook : hostHooks) Check(SiteUntouched(base, hook), "Enabled=0 leaves the host room sites untouched");
         for (const auto& hook : HostDataHooks()) Check(SiteUntouched(base, hook), "Enabled=0 leaves the file open untouched");
@@ -563,6 +564,7 @@ int wmain(int argc, wchar_t** argv) {
               "the room table size is logged");
         for (const auto& call : calls) Check(RedirectedInto(base + call.rva, plugin), "member count call reaches the plugin through a stub");
         for (const auto& call : RoomViewCalls()) Check(RedirectedInto(base + call.rva, plugin), "room screen call reaches the plugin through a stub");
+        Check(Applied(base, RoomPanelPatches()) == 2, "the panel builder makes one panel per member");
         Check(SlotInto(base, RoomViewSlot(), plugin), "HUiRoom OnUpdate vtable slot points into the plugin");
         if (mode == L"chained") {
             Check(Contains(log, "HUiRoom OnUpdate: EDF+180AC48 already holds") &&
@@ -591,11 +593,12 @@ int wmain(int argc, wchar_t** argv) {
         if (upgrade) {
             const std::string written = ReadIniText(iniPath);
             Check(Contains(written, "RoomSize=8\r\n") && !Contains(written, "EightPlayerRooms") &&
-                      Contains(written, "PageKeys=F2,Tab\r\n") &&
+                      !Contains(written, "PageKeys") &&
                       Contains(written, "Key=secret\r\n") && Contains(written, "AutoUpdate=0\r\n"),
                   "the replaced plugins' settings are carried into EDF6Coop.ini");
             Check(!Contains(written, "MaxPlayers="), "a setting that no longer exists is not carried over");
-            Check(Contains(log, "MaxPlayers=8 is no longer a setting"), "and the log says which one was dropped");
+            Check(Contains(log, "MaxPlayers=8 is no longer a setting") && Contains(log, "PageKeys=F2,Tab is no longer a setting"),
+                  "and the log says which ones were dropped (the member pages are gone)");
             for (const auto& old : {oldRooms, oldDirect})
                 Check(GetFileAttributesW((old + L".dll").c_str()) == INVALID_FILE_ATTRIBUTES &&
                           GetFileAttributesW((old + L".dll.disabled").c_str()) != INVALID_FILE_ATTRIBUTES,
@@ -608,7 +611,7 @@ int wmain(int argc, wchar_t** argv) {
             Check(ReadText(iniPath).rfind("\xFF\xFE", 0) == 0, "the INI is written as UTF-16LE with a BOM");
             Check(Contains(written, "[RoomScreen]") && Contains(written, "RoomSize=0\r\n") && Contains(written, "NetLog=1\r\n") &&
                       Contains(written, "[DirectNet]") && Contains(written, "[Update]") &&
-                      Contains(written, "DummyMembers=0") && Contains(written, "PageKeys=F3,Tab\r\n") &&
+                      Contains(written, "DummyMembers=0") && !Contains(written, "PageKeys") && !Contains(written, "PageButton") &&
                       Contains(written, "[CopyArmor]") && Contains(written, "PadButton=LeftStick\r\n") &&
                       Contains(written, "DummyAddKey=F6\r\n") && !Contains(written, "MaxPlayers=") && !Contains(written, "\r\nPageKey=") &&
                       !Contains(written, "@MULTISLOT_"),
@@ -652,13 +655,11 @@ int wmain(int argc, wchar_t** argv) {
         // marker never fires and every start misreports the last one as cut, which is what 1.5.2-1.5.8 did.
         Check(Contains(log, "Exit marker: a normal quit now writes SHUTDOWN"),
               "the TerminateProcess import is wrapped, so a clean exit can be recorded");
-        Check(Contains(log, upgrade ? "switched with Tab/RS" : "switched with F3/Tab/RS"),
-              "member pages switch with the configured keys (F3, Tab; upgrade carries Tab alone) and the right stick");
+        Check(Contains(log, "Room screen: one member panel per member"), "the room screen's rows are logged");
         if (mode == L"host8") {
             // An INI from 0.5.0: PageKey=F2 and dummy keys F3/F4.
             Check(Contains(log, "PageKey is no longer used"), "the old page key is reported as unused");
-            Check(Contains(log, "Dummy keys may not be F2 or a page key: using add 117, remove 115"),
-                  "a dummy key on a page key moves to its default (F6), the other stays (F4)");
+            Check(!Contains(log, "Dummy keys may not be"), "dummy keys F3/F4 stay: no page key takes them any more");
         }
         if (mode == L"nomission") Check(Contains(log, "MaxPlayers is no longer used"), "an old MaxPlayers setting is reported as unused");
         else Check(!Contains(log, "MaxPlayers is no longer used"), "no MaxPlayers report without the key");

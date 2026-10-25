@@ -236,6 +236,35 @@ std::wstring PluginStatus() {
     return slot.text;
 }
 
+namespace {
+struct RoomNoticeSlot {
+    std::mutex lock;
+    std::wstring text;
+    std::uint64_t at = 0;  // GetTickCount64 when the join was refused
+};
+RoomNoticeSlot& NoticeSlot() {
+    static RoomNoticeSlot slot;
+    return slot;
+}
+}  // namespace
+
+void SetRoomNoticeAt(const char* text, std::uint64_t tick) {
+    std::wstring wide = Widen(text);
+    RoomNoticeSlot& slot = NoticeSlot();
+    std::scoped_lock lock(slot.lock);
+    slot.text = std::move(wide);
+    slot.at = tick;
+}
+
+void SetRoomNotice(const char* text) { SetRoomNoticeAt(text, GetTickCount64()); }
+
+std::wstring RoomNotice(std::uint64_t now) {
+    RoomNoticeSlot& slot = NoticeSlot();
+    std::scoped_lock lock(slot.lock);
+    if (slot.text.empty() || now < slot.at || now - slot.at >= kRoomNoticeMs) return {};
+    return slot.text;
+}
+
 void SetUpdateNoticeForTest(const wchar_t* text) {
     if (!text || !text[0]) {
         notice[0] = 0;

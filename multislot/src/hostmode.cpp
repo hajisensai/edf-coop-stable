@@ -265,7 +265,6 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
     out[0] = 0;
     // The room's size as its lobby says, once read; until then what this machine created its room as.
     const int room = context.roomMode >= 0 ? (context.roomMode != 0 ? context.roomCapacity : 0) : created;
-    const bool roomOn = room != 0;
     wchar_t size[24]{};
     // _TRUNCATE: a text that does not fit is cut off (and still terminated).
     if (!context.inRoom) {
@@ -273,30 +272,10 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
         _snwprintf_s(out, outChars, _TRUNCATE, L"%ls%s%s", context.hostModeHint ? context.hostModeHint : L"",
                      context.hostModeHint && context.hostModeHint[0] ? L" " : L"", size);
     } else {
-        // The page guide: while the room screen shows more than four members, and always in a MultiSlot room
-        // this player hosts (there it names the second page before anyone fills it).
-        wchar_t pages[64]{};  // room for "...: Members 9-12" behind a long key hint
-        const RoomPageView& view = context.pages;
-        const bool guide = view.pages > 1 || (context.roomHost && roomOn);
-        if (view.active && guide && context.pageHint && context.pageHint[0]) {
-            std::size_t first = kPanelsPerPage + 1, last = kPanelsPerPage * 2;
-            if (view.pages > 1) {
-                const int next = (view.page + 1) % view.pages;
-                first = static_cast<std::size_t>(next) * kPanelsPerPage + 1;
-                last = first + kPanelsPerPage - 1 < view.shown ? first + kPanelsPerPage - 1 : view.shown;
-            }
-            if (last > first)
-                _snwprintf_s(pages, _TRUNCATE, L"%s: Members %zu-%zu", context.pageHint, first, last);
-            else
-                _snwprintf_s(pages, _TRUNCATE, L"%s: Member %zu", context.pageHint, first);
-        }
         // The host sees the room's own setting, which nothing here can change but is worth knowing. A guest
-        // sees only what the inputs do here: the pages, and copy armor after them.
+        // sees only what the inputs do here: copy armor.
         SizeText(room, size);
-        if (context.roomHost)
-            _snwprintf_s(out, outChars, _TRUNCATE, L"%s%s%s", size, pages[0] ? L"   " : L"", pages);
-        else
-            _snwprintf_s(out, outChars, _TRUNCATE, L"%s", pages);
+        if (context.roomHost) _snwprintf_s(out, outChars, _TRUNCATE, L"%s", size);
     }
     // "copy armor" (armor.h): only in a room, where there is something to copy from and where its inputs work.
     if (context.inRoom && context.copyArmorHint && context.copyArmorHint[0]) {
@@ -310,6 +289,11 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
                          CopyArmor() ? L"ON" : L"OFF");
         wcsncat_s(out, outChars, copy, _TRUNCATE);
     }
+    // A join just refused (updatecheck.h RoomNotice), outside rooms: what the player tried last and why it failed.
+    // Before the EDF6VR notice and the status, which say nothing about it.
+    if (!context.inRoom)
+        if (const std::wstring refused = RoomNotice(GetTickCount64()); !refused.empty())
+            wcsncat_s(out, outChars, ((out[0] ? L"   " : L"") + refused).c_str(), _TRUNCATE);
     // Last on purpose. The field holds 96 characters and the guides above tell the player what the
     // buttons do right now; if something has to be cut it should be this, so the notice is appended with
     // _TRUNCATE after everything else rather than competing with it.
@@ -343,6 +327,8 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
 void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
     const bool pressed = keyDown && !keyWasDown;
     keyWasDown = keyDown;
+    // In a room the last refused join is over: it is not shown again once the player is back outside.
+    if (context.inRoom) SetRoomNotice("");
     if (pressed && !context.inRoom) {
         const int previous = roomSize.load(), size = NextRoomSize(previous);
         roomSize.store(size);
@@ -432,8 +418,6 @@ std::uint64_t MainFrameOnUpdateHook(void* frame, void* context) {
     menu.roomHost = menu.inRoom && (RoomHost() || CreatedCurrentLobby());
     menu.roomMode = menu.inRoom ? static_cast<int>(CurrentLobbyKind()) : -1;
     menu.roomCapacity = menu.inRoom ? CurrentLobbyCapacity() : 0;
-    menu.pages = CurrentRoomPage();
-    menu.pageHint = PageHint();
     menu.ghosts = GhostHarness() ? GhostPlayers() : 0;
     // Only what can be done here: the setting is switched outside a room, copy armor inside one. ComposeLabel
     // leaves each out where it does not apply.

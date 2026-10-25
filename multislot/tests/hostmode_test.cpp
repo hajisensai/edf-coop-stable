@@ -106,15 +106,10 @@ std::uint64_t Stack64(const std::uint8_t* at) {
     return value;
 }
 
-MenuContext Menu(bool inRoom, bool host, std::size_t members = 0, int page = 0, bool active = true) {
+MenuContext Menu(bool inRoom, bool host) {
     MenuContext context{};
     context.inRoom = inRoom;
     context.roomHost = host;
-    context.pages.active = active && members > 0;
-    context.pages.shown = members;
-    context.pages.pages = PageCount(members);
-    context.pages.page = page;
-    context.pageHint = L"F3/Tab/RS";
     context.hostModeHint = L"F2/LS";
     return context;
 }
@@ -326,103 +321,87 @@ int main() {
     MenuContext weapons = outside;
     weapons.weaponsNotice = L"F6 Page:Laser";
     Check(Compose(weapons, 0, kSize) == L"F6 Page:Laser   F2/LS Player MOD :OFF", "weapons first outside a room");
-    MenuContext roomWeapons = Menu(true, true, 3);
+    MenuContext roomWeapons = Menu(true, true);
     roomWeapons.weaponsNotice = L"ROOM WEAPONS :ON (2)";
-    Check(Compose(roomWeapons, 0, kSize) == L"ROOM WEAPONS :ON (2)   " + Size(kSize) + L"   F3/Tab/RS: Members 5-8",
-          "and in a room");
+    Check(Compose(roomWeapons, 0, kSize) == L"ROOM WEAPONS :ON (2)   " + Size(kSize), "and in a room");
     const std::wstring longNotice(kLabelChars + 10, L'W');
     roomWeapons.weaponsNotice = longNotice.c_str();
     Check(Compose(roomWeapons, 0, kSize) == longNotice.substr(0, kLabelChars - 1), "a notice too long is what is left");
-    Check(Compose(Menu(true, true, 3), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-8",
-          "hosting a MultiSlot room: its size and the page guide, before anyone is on page 2");
-    Check(Compose(Menu(true, true, 3), kSize, 0) == Size(0), "hosting a normal room: no page guide");
+    Check(Compose(Menu(true, true), 0, kSize) == Size(kSize), "hosting a MultiSlot room: its size");
+    Check(Compose(Menu(true, true), kSize, 0) == Size(0), "hosting a normal room: OFF");
     // The room's own kind and size, read from its lobby, win over what this machine created its last room as.
-    MenuContext readOn = Menu(true, true, 3);
+    MenuContext readOn = Menu(true, true);
     readOn.roomMode = static_cast<int>(LobbyKind::MultiSlot);
     readOn.roomCapacity = 16;
-    Check(Compose(readOn, 0, kSize) == Size(16) + L"   F3/Tab/RS: Members 5-8", "a MultiSlot lobby shows its own size");
+    Check(Compose(readOn, 0, kSize) == Size(16), "a MultiSlot lobby shows its own size");
     readOn.roomMode = static_cast<int>(LobbyKind::Normal);
     readOn.roomCapacity = 0;
     Check(Compose(readOn, kSize, kSize) == Size(0), "a normal lobby shows OFF");
-    Check(Compose(Menu(true, true, 3, 0, false), 0, kSize) == Size(kSize), "no page guide off the room screen");
-    Check(Compose(Menu(true, false, 3), kSize, kSize) == L" ",
+    Check(Compose(Menu(true, false), kSize, kSize) == L" ",
           "a guest with nothing to do here sees nothing");
-    Check(Compose(Menu(true, true, 6, 0), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-6", "host, page 1 of 6 members");
-    Check(Compose(Menu(true, true, 8, 1), 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 1-4", "host, page 2 of eight members");
-    Check(Compose(Menu(true, false, 5, 0), 0, kSize) == L"F3/Tab/RS: Member 5", "guest, page 1 of 5 members");
-    Check(Compose(Menu(true, false, 8, 0, false), 0, kSize) == L" ",
-          "no page hint while the room screen is not updating");
-    MenuContext noInputs = Menu(true, false, 8, 0);
-    noInputs.pageHint = L"";
-    Check(Compose(noInputs, 0, kSize) == L" ", "no page hint without page inputs");
     // The copy armor guide follows whatever else the label carries, and is absent while it is not installed.
-    MenuContext copyingGuest = Menu(true, false, 5, 0);
+    MenuContext copyingGuest = Menu(true, false);
     copyingGuest.copyArmorHint = L"F4/LS";
-    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :OFF",
-          "in a room, the pages and copy armor");
+    Check(Compose(copyingGuest, 0, kSize) == L"F4/LS copy armor :OFF", "in a room, copy armor");
     // The room panel keeps the real armor, so the number being given is shown here, with (Max) when it is
     // this class's ceiling rather than what was found in the room.
     copyingGuest.copyArmorTo = 2000;
-    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000",
-          "the armor being given is shown");
+    Check(Compose(copyingGuest, 0, kSize) == L"F4/LS copy armor :2000", "the armor being given is shown");
     copyingGuest.copyArmorAtMax = true;
-    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   F4/LS copy armor :2000(Max)",
-          "and says so when it is the ceiling");
+    Check(Compose(copyingGuest, 0, kSize) == L"F4/LS copy armor :2000(Max)", "and says so when it is the ceiling");
     copyingGuest.copyArmorTo = 0;
     copyingGuest.copyArmorAtMax = false;
     copyingGuest.copyArmorHint = L"LS";
-    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5   LS copy armor :OFF",
-          "a pad button alone still names itself");
+    Check(Compose(copyingGuest, 0, kSize) == L"LS copy armor :OFF", "a pad button alone still names itself");
     copyingGuest.copyArmorHint = L"";
-    Check(Compose(copyingGuest, 0, kSize) == L"F3/Tab/RS: Member 5", "nothing installed, nothing shown");
-    MenuContext copyingHost = Menu(true, true, 3);
+    Check(Compose(copyingGuest, 0, kSize) == L" ", "nothing installed, nothing shown");
+    MenuContext copyingHost = Menu(true, true);
     copyingHost.copyArmorHint = L"F4/LS";
-    Check(Compose(copyingHost, 0, kSize) == Size(kSize) + L"   F3/Tab/RS: Members 5-8   F4/LS copy armor :OFF",
-          "the host also sees the room's own size");
+    Check(Compose(copyingHost, 0, kSize) == Size(kSize) + L"   F4/LS copy armor :OFF", "the host also sees the room's own size");
     MenuContext copyingOutside = Menu(false, false);
     copyingOutside.copyArmorHint = L"F4/LS";
     Check(Compose(copyingOutside, kSize, 0) == L"F2/LS " + Size(kSize),
           "outside a room there is nothing to copy from, so the guide stays away");
     wchar_t tiny[8]{};
-    Check(ComposeLabel(Menu(true, true, 8, 0), 0, kSize, tiny, 8) == 7 && tiny[7] == 0, "a short buffer is truncated, not overrun");
+    Check(ComposeLabel(Menu(true, true), 0, kSize, tiny, 8) == 7 && tiny[7] == 0, "a short buffer is truncated, not overrun");
 
     // The "a newer EDF6VR exists" line (updatecheck.h) goes on the end, and is the part that gives way
     // when the field is full: the guides above it say what the buttons do right now, the notice does not.
     SetUpdateNoticeForTest(L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat");
-    const std::wstring withNotice = Compose(Menu(false, false, 0, 0), kSize, 0);
+    const std::wstring withNotice = Compose(Menu(false, false), kSize, 0);
     const std::wstring modOn = Size(kSize);
     Check(withNotice.find(modOn) != std::wstring::npos, "the controls still come first");
     Check(withNotice.find(L"NEW EDF6VR") > withNotice.find(modOn), "the notice comes after them");
     Check(withNotice.find(L"Update_EDF6VR.bat") != std::wstring::npos, "and says what to run");
     wchar_t squeezed[32]{};
-    ComposeLabel(Menu(false, false, 0, 0), kSize, 0, squeezed, 32);
+    ComposeLabel(Menu(false, false), kSize, 0, squeezed, 32);
     const std::wstring cut = squeezed;
     Check(cut.find(modOn) != std::wstring::npos, "a full field keeps the controls");
     Check(cut.find(L"Update_EDF6VR.bat") == std::wstring::npos, "and drops the notice, not the other way round");
     SetUpdateNoticeForTest(L"");
-    Check(Compose(Menu(false, false, 0, 0), kSize, 0).find(L"NEW EDF6VR") == std::wstring::npos,
+    Check(Compose(Menu(false, false), kSize, 0).find(L"NEW EDF6VR") == std::wstring::npos,
           "with nothing to say the label is exactly as before");
 
     // EDF6Coop's own version and update (dn::menuStatusText): outside rooms, after everything else.
     const std::wstring controls = L"F2/LS " + Size(kSize);
     const std::wstring vrNotice = L"NEW EDF6VR 2.0.1 → 2.1.0 - Update_EDF6VR.bat";
-    const std::wstring inRoomHost = Compose(Menu(true, true, 8, 0), 0, kSize);
-    const std::wstring inRoomGuest = Compose(Menu(true, false, 8, 0), 0, kSize);
+    const std::wstring inRoomHost = Compose(Menu(true, true), 0, kSize);
+    const std::wstring inRoomGuest = Compose(Menu(true, false), 0, kSize);
     SetPluginStatus("EDF6Coop 2.3.2 (updated from 2.3.1)");
-    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == controls + L"   EDF6Coop 2.3.2 (updated from 2.3.1)",
+    Check(Compose(Menu(false, false), kSize, 0) == controls + L"   EDF6Coop 2.3.2 (updated from 2.3.1)",
           "outside a room the label says which version runs and that it was updated");
     // The VR notice asks the player to run something, so it keeps its place and the status is what gives way.
     SetUpdateNoticeForTest(vrNotice.c_str());
-    Check(Compose(Menu(false, false, 0, 0), kSize, 0).starts_with(controls + L"   " + vrNotice),
+    Check(Compose(Menu(false, false), kSize, 0).starts_with(controls + L"   " + vrNotice),
           "the EDF6VR notice comes before the status, whole");
     SetUpdateNoticeForTest(L"");
-    Check(Compose(Menu(true, true, 8, 0), 0, kSize) == inRoomHost && Compose(Menu(true, false, 8, 0), 0, kSize) == inRoomGuest,
-          "in a room the field belongs to the page and copy armor guides");
+    Check(Compose(Menu(true, true), 0, kSize) == inRoomHost && Compose(Menu(true, false), 0, kSize) == inRoomGuest,
+          "in a room the field belongs to the room's size and the copy armor guide");
     std::array<wchar_t, 32> narrow{};
-    ComposeLabel(Menu(false, false, 0, 0), kSize, 0, narrow.data(), narrow.size());
+    ComposeLabel(Menu(false, false), kSize, 0, narrow.data(), narrow.size());
     Check(std::wstring(narrow.data()).starts_with(controls), "a full field keeps the size before the version");
     SetPluginStatus("");
-    Check(Compose(Menu(false, false, 0, 0), kSize, 0) == L"F2/LS " + Size(kSize), "no status, no text");
+    Check(Compose(Menu(false, false), kSize, 0) == L"F2/LS " + Size(kSize), "no status, no text");
 
     // Menu frame updates write the label through the game's functions, once per change.
     wchar_t iniPath[MAX_PATH]{};
@@ -446,15 +425,11 @@ int main() {
           "the size is saved, and the old setting is gone");
     UpdateMenuFrame(&frameA, true, outside);
     Check(HostRoomSize() == 8, "holding F2 switches once");
-    UpdateMenuFrame(&frameA, false, Menu(true, true, 2));
-    UpdateMenuFrame(&frameA, true, Menu(true, true, 2));
+    UpdateMenuFrame(&frameA, false, Menu(true, true));
+    UpdateMenuFrame(&frameA, true, Menu(true, true));
     Check(HostRoomSize() == 8 && shown == Size(0), "in a room F2 does nothing; the host sees the room's setting");
-    UpdateMenuFrame(&frameA, false, Menu(true, true, 5, 0));
-    Check(shown == Size(0) + L"   F3/Tab/RS: Member 5", "the page hint appears with the fifth member");
-    UpdateMenuFrame(&frameA, false, Menu(true, true, 5, 1));
-    Check(shown == Size(0) + L"   F3/Tab/RS: Members 1-4", "and follows the page");
-    UpdateMenuFrame(&frameA, false, Menu(true, false, 2));
-    Check(shown == L" ", "a guest with four or fewer members has nothing to do here");
+    UpdateMenuFrame(&frameA, false, Menu(true, false));
+    Check(shown == L" ", "a guest has nothing to do here");
     UpdateMenuFrame(&frameB, false, outside);
     Check(lookupFrame == &frameB && shown == L"F2/LS " + Size(8), "another frame gets its own label");
     const int before = setTextCalls;

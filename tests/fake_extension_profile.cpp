@@ -41,6 +41,11 @@ extern "C" __declspec(dllexport) void EDF6COOP_CALL EDF6AF_MissionPlayerCreated(
 }
 #endif
 extern "C" __declspec(dllexport) void EDF6AF_DecodeRoomType() {}
+#ifndef FAKE_AF_NO_NAMESPACE
+// All Forces' room namespace (its mod_room.h, room protocol 2): SEARCH_TYPE prefix and the AF_PROFILE value.
+extern "C" __declspec(dllexport) int64_t EDF6AF_RoomPrefix() { return 0x41460200; }
+extern "C" __declspec(dllexport) int64_t EDF6AF_RoomProfile() { return 2; }
+#endif
 #ifndef FAKE_AF_NO_PACKS
 // All Forces' mission-pack check (EDF6AF_RoomPackCompatible): this fixture's one installed pack is content 65 with
 // identity "P65"; every other content id is no pack of ours. The last call is kept for the test.

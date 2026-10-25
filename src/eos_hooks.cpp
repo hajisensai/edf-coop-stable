@@ -2581,7 +2581,7 @@ void startVirtualJoinRoom(const LastRoom& room, EOS_ProductUserId user, const st
     PackCheck pack = PackCheck::NoExport;
     if (!CompatibleLocalRoom(room.attributes, &pack)) {
         logf("REJOIN not joining room %s over the direct link: %s", roomId.c_str(),
-             PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
+             PackAllowed(pack) ? AllForcesRoomRefusal(LocalAllForces()) : PackCheckName(pack));
         defer([callback, clientData, roomId] {
             completeLobbyCall(reinterpret_cast<void*>(callback), clientData, EOS_InvalidParameters, roomId);
         });
@@ -3110,7 +3110,7 @@ bool addRememberedRoom(EOS_HLobbySearch search, EOS_EResult result) {
     if (r.roomId.empty() || g.marker.inLobby()) return false;
     if (PackCheck pack = PackCheck::NoExport; !CompatibleLocalRoom(r.attributes, &pack)) {
         logRateLimited("rejoin-incompatible", 60000, "REJOIN room %s is not offered: %s", r.roomId.c_str(),
-                       PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
+                       PackAllowed(pack) ? AllForcesRoomRefusal(LocalAllForces()) : PackCheckName(pack));
         return false;
     }
     {
@@ -3265,11 +3265,18 @@ void hookVirtualJoin(EOS_HLobby h, const EOS_Lobby_JoinLobbyOptionsHead* o, void
     if (g.fakes.lookup(o->LobbyDetailsHandle, &d)) {
         if (PackCheck pack = PackCheck::NoExport; !CompatibleLocalRoom(d.attributes, &pack)) {
             logf("REJOIN not joining room %s: %s", d.roomId.c_str(),
-                 PackAllowed(pack) ? "its All Forces room profile does not match this machine's" : PackCheckName(pack));
+                 PackAllowed(pack) ? AllForcesRoomRefusal(LocalAllForces()) : PackCheckName(pack));
             defer([cb, clientData] { completeLobbyCall(cb, clientData, EOS_InvalidParameters, ""); });
             return;
         }
         return startVirtualJoin(o->LocalUserId, d.roomId, clientData, cb);
+    }
+    // An All Forces from before its room protocol exports (mod_room_compat.h) shares no room with this EDF6Coop: not
+    // its own old namespace, not anyone else's. Refused here, before Epic, with the reason in the log.
+    if (const AllForcesRooms local = LocalAllForces(); local.loaded && !local.published) {
+        logRateLimited("allforces-old", 10000, "ROOM not joining a room: %s", AllForcesRoomRefusal(local));
+        defer([cb, clientData] { completeLobbyCall(cb, clientData, EOS_InvalidParameters, ""); });
+        return;
     }
     LastRoom room = fullRoomFrom(o->LobbyDetailsHandle);
     if (!room.usable()) return g.outer.join(h, o, clientData, cb);
@@ -3886,7 +3893,7 @@ bool sendBulk(const std::string& remote, uint16_t tag, const uint8_t* data, size
 extern "C" __declspec(dllexport) int EDF6Coop_AllForcesVirtualRoom(void* details) {
     FakeDetails d;
     if (!g.fakes.lookup(static_cast<EOS_HLobbyDetails>(details), &d)) return -1;
-    if (!RoomIsolationAvailable() || !CompatibleRoom(d.attributes, true)) return 0;
+    if (!RoomIsolationAvailable() || !CompatibleRoom(d.attributes, LocalAllForces())) return 0;
     const PackCheck pack = PackCompatibleRoom(d.attributes);
     if (PackAllowed(pack)) return 1;
     logf("REJOIN All Forces asked about room %s: not joinable, %s", d.roomId.c_str(), PackCheckName(pack));

@@ -157,6 +157,10 @@ EDF6 会把收到的任何 EOS 包都当游戏数据解析（`ReceivePacket` 的
 
 装了全军出击（`EDF6VehicleCrew.dll`）时，加入还要等房主的世界状态（新玩家只在房主处于大厅时进入，任务进行中不进）。房主的 EDF6Coop 既不经 EOS 发位次、又没开直连时永远给不出它，这样的加入 10 秒后失败，日志为 `... its host's EDF6Coop sends no world state at all: the host must update EDF6Coop`。
 
+全军出击的房间有自己的命名空间：`SEARCH_TYPE` 是全军出击的前缀加游戏的值，大厅里 `AF_PROFILE` = 全军出击的房间协议号。EDF6Coop 从全军出击本身读这两个值（`EDF6AF_RoomPrefix` / `EDF6AF_RoomProfile`），所以只加入同一房间协议的房间，不兼容其他协议。没有这两个导出的全军出击是更早的版本：装着它时任何房间都不加入（日志 `... exports no room protocol ... update All Forces`）。不装全军出击时一切照旧，只是不加入全军出击的房间。
+
+房间画面显示全部成员。4 人以内保持游戏原样；更多时插件在游戏每次建好面板后重新排布，让它们放得下：5-8 人每行两行字，9-17 人每行一行，18-32 人分两列，更大的房间显示前 32 人（其余人在房间里，只是画面上不显示）。开了全军出击的 PvP 时，每行还用阵营颜色显示该成员的阵营和职务（`EDF6AF_PvpMemberLabel`）。`[RoomScreen] DummyMembers=1` 可以加本地假成员（F6 / F7）一个人试。
+
 房间里只有房主一人时也不跳过等待：房主自己的位次只有在它就是建房者时才是 0（房间换过房主后可以是任何位次），没有房主的位次就无法知道加入者的位次。
 
 ### 武器页与房间里的武器文件

@@ -48,7 +48,8 @@ settings files are left alone.
   ON: you create a room of the size you picked that only players with EDF6Coop 2.6.0 or later see.
   The room search shows normal rooms and bigger rooms of every size, whatever the setting.
   A room keeps the size it was created with; inside a room the menu shows that room's size.
-- In a room, F3 / Tab / right stick switches the member page (four members per page).
+- The room screen shows every member: more than four in smaller rows (two columns from 18), the first 32
+  of a larger room. With All Forces' PvP on, each row also shows the member's faction in its colour.
 - In a room, F4 / left stick turns "copy armor" on: your armor is raised, for the mission only, to the
   lowest armor of the others in the room (same class first). For new players; nothing is saved.
 - Missions with more than four players: extra players get their gear, spawn points and items. Enemy

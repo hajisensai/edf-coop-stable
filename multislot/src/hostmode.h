@@ -21,7 +21,7 @@ namespace multislot {
 // exists. The menu frame (UI/LYT_MAINFRAME.SGO, which the plugin writes to Mods\UI with an extra text field
 // MSLabel, modfile.h) shows the label in its lower left corner. The main script plays that frame on the HQ,
 // lobby and room screens but not in missions, so the label is gone once a mission starts. In a room it shows
-// the room's size to its host and, as a control guide, which keys switch the member page (see ComposeLabel).
+// the room's size to its host (see ComposeLabel).
 constexpr int kRoomSizes[] = {8, 10, 12, 16, 24, 32, 48, 64, 128, 256, 512, 1024};
 static_assert(kRoomSizes[std::size(kRoomSizes) - 1] == kMaxPlayers, "F2 must reach the largest room");
 // Epic refuses a lobby with a voice chat room (bEnableRTCRoom) for more than this many members ("Lobbies that
@@ -73,8 +73,6 @@ void ChainMainFrameOnUpdate(std::uint64_t next);
 struct MenuContext {
     bool inRoom;               // an online room session exists
     bool roomHost;             // and this player hosts it
-    RoomPageView pages;        // the room screen (roomview.h)
-    const wchar_t* pageHint;   // "F3/Tab/RS"
     int ghosts;                // ghost players the solo test harness would add (0 = off or not installed)
     const wchar_t* copyArmorHint;  // "F3/RS" while copy armor is installed, nullptr or "" when it is not
     const wchar_t* hostModeHint;   // "F2/LS", what switches the setting outside a room
@@ -84,13 +82,12 @@ struct MenuContext {
     int roomCapacity = 0;          // and in a MultiSlot room its size (the lobby's MaxMembers)
     const wchar_t* weaponsNotice = nullptr;  // the weapon feature's words (SetWeaponFeature), first in the label
 };
-// Long enough for the fullest line a room can show: the room's setting, the page guide and copy armor.
+// Long enough for the fullest line a room can show: the weapon feature's words, the room's setting and copy armor.
 constexpr std::size_t kLabelChars = 96;
 // Only what the player can do where they are. Outside a room: "F2/LS 12Player MOD :ON" / "F2/LS Player MOD :OFF",
 // the setting for the rooms they create, which is the one thing there is to do there. In a room: the host also
-// sees that room's own size ("12Player MOD :ON"), which nothing can change now but nothing else reports; then the
-// page guide "F3/Tab/RS: Members 5-8" (the page those inputs switch to) while more than four members are shown, and
-// always in a MultiSlot room this player hosts; then "F4/LS copy armor :ON" / ":OFF". Nothing to show is a single
+// sees that room's own size ("12Player MOD :ON"), which nothing can change now but nothing else reports; then
+// "F4/LS copy armor :ON" / ":OFF". (The room screen shows every member itself: roomview.h.) Nothing to show is a single
 // space. roomSize: the setting (0 OFF); createdSize: the size this machine created its last room with (0 normal),
 // shown while context.roomMode is -1.
 std::size_t ComposeLabel(const MenuContext& context, int roomSize, int createdSize, wchar_t* out, std::size_t outChars);

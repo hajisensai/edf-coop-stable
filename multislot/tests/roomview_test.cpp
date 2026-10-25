@@ -1,5 +1,5 @@
-// Room screen paging without the game: a fake HUiRoom member vector and fake "original" functions
-// record what the panel builder would see for each page and with dummy members.
+// The room screen without the game: the member rows roomview.cpp lays out on fake HUiRoom panels (the game's builder,
+// SetArea, CreateByName and SetText replaced by recorders), the faction labels, and the input names it keeps.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -8,11 +8,16 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <deque>
+#include <map>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../src/identity.h"
 #include "../src/patches.h"
+#include "../src/roomrows.h"
 #include "../src/roomview.h"
 
 using namespace multislot;
@@ -21,169 +26,279 @@ namespace {
 
 int failures = 0;
 
-void Check(bool condition, const char* what) {
+void Check(bool condition, const std::string& what) {
     if (!condition) {
         ++failures;
-        std::printf("FAIL: %s\n", what);
+        std::printf("FAIL: %s\n", what.c_str());
     }
 }
 
+// The game's object layouts as roomview.cpp reads them.
+struct Block;
+struct BlockVtable {
+    void(__fastcall* destroy)(Block*);
+    void(__fastcall* deleteThis)(Block*);
+};
+struct Block {
+    BlockVtable* vtable;
+    long uses;
+    long weaks;
+};
+int destroyed = 0;
+void __fastcall Destroy(Block*) { ++destroyed; }
+void __fastcall DeleteThis(Block*) {}
+BlockVtable blockVtable{&Destroy, &DeleteThis};
+
+struct Node {
+    Node* next;
+    Node* prev;
+    void* object;
+    void* control;
+};
 struct Entry {
     void* object;
     void* control;
 };
-struct MemberVector {
-    Entry* data;
-    std::size_t capacity;
-    std::size_t size;
+
+template <typename T>
+T& At(void* object, std::size_t offset) {
+    return *reinterpret_cast<T*>(static_cast<unsigned char*>(object) + offset);
+}
+
+struct Component {
+    std::vector<unsigned char> bytes = std::vector<unsigned char>(0x300, 0);
+    Block block{&blockVtable, 1, 1};
+    Node head{};       // +0x138: the child list
+    Node headToo{};    // +0x158: the other one, empty here
+    std::deque<Node> nodes;
+    void* self() { return bytes.data(); }
+    Component() {
+        head.next = head.prev = &head;
+        headToo.next = headToo.prev = &headToo;
+        At<Node*>(self(), 0x138) = &head;
+        At<Node*>(self(), 0x158) = &headToo;
+        At<std::uint8_t>(self(), 0x1F8) = 1;
+        At<float>(self(), 0x170) = At<float>(self(), 0x184) = 1.0f;
+    }
+    void Add(Component& child) {
+        nodes.push_back({&head, head.prev, child.self(), &child.block});
+        head.prev->next = &nodes.back();
+        head.prev = &nodes.back();
+    }
+};
+float X(Component& c) { return At<float>(c.self(), 0x1A0); }
+float Y(Component& c) { return At<float>(c.self(), 0x1A4); }
+float W(Component& c) { return At<float>(c.self(), 0x1B8); }
+bool Visible(Component& c) { return At<std::uint8_t>(c.self(), 0x1F8) != 0; }
+
+// A panel as the builder leaves it: its children at their stock places, its MemberInfo at +0x200.
+struct Panel {
+    Component panel;
+    std::deque<Component> children;
+    std::string member;  // what the member-id source reads from the MemberInfo
+    explicit Panel(bool master, std::string id) : member(std::move(id)) {
+        At<float>(panel.self(), 0x1B8) = rows::kPanelWidth;
+        At<float>(panel.self(), 0x1BC) = master ? rows::kMasterHeight : rows::kMemberHeight;
+        for (int ordinal = 0; ordinal < (master ? 18 : 17); ++ordinal) {
+            children.emplace_back();
+            Component& c = children.back();
+            At<std::int32_t>(c.self(), 0x110) = ordinal;
+            const rows::Rect r = rows::StockRect(rows::RoleOf(ordinal, master));
+            At<float>(c.self(), 0x1A0) = r.x;
+            At<float>(c.self(), 0x1A4) = r.y;
+            At<float>(c.self(), 0x1B8) = r.w;
+            At<float>(c.self(), 0x1BC) = r.h;
+            panel.Add(c);
+        }
+        At<const void*>(panel.self(), 0x200) = &member;
+    }
+    Component& Child(int ordinal) { return children[static_cast<std::size_t>(ordinal)]; }
 };
 
-struct Seen {
-    std::vector<Entry> entries;
-    Entry* data = nullptr;
-    std::size_t size = 0;
-    int calls = 0;
+struct Room {
+    std::vector<unsigned char> bytes = std::vector<unsigned char>(0x1000, 0);
+    std::deque<Panel> panels;
+    std::vector<Entry> list;
+    void* self() { return bytes.data(); }
+    void Build(std::size_t members) {
+        panels.clear();
+        list.clear();
+        for (std::size_t i = 0; i < members; ++i) {
+            panels.emplace_back(i == 0, "member" + std::to_string(i));
+            At<float>(panels.back().panel.self(), 0x1A4) = i ? rows::kMasterHeight + rows::kMemberHeight * (i - 1) : 0.0f;
+        }
+        for (auto& p : panels) list.push_back({p.panel.self(), &p.panel.block});
+        At<Entry*>(self(), 0xB58) = list.data();
+        At<std::size_t>(self(), 0xB68) = list.size();
+    }
 };
-Seen seen;
 
-MemberVector* Members(void* room) { return static_cast<MemberVector*>(static_cast<void*>(static_cast<char*>(room) + 0x900)); }
+// The game's functions, recorded.
+std::map<void*, std::wstring> texts;
+std::map<void*, int> disabled;
+std::deque<Component> made;  // components CreateByName made
+int areaCalls = 0, createCalls = 0, consumed = 0;
+std::wstring lastDefinition;
+void __fastcall FakeSetArea(void* button, const float* area) {
+    ++areaCalls;
+    std::memcpy(static_cast<unsigned char*>(button) + 0x1B0, area, 16);
+}
+void __fastcall FakeSetEnabled(void* component, bool enabled) {
+    if (!enabled) ++disabled[component];
+}
+void* __fastcall FakeCreate(void* screen, void* out, void* parent, const wchar_t* name) {
+    (void)screen;
+    ++createCalls;
+    lastDefinition = name;
+    auto* p = static_cast<Entry*>(parent);
+    auto* panelBlock = static_cast<Block*>(p->control);
+    --panelBlock->uses;  // consumed
+    ++consumed;
+    made.emplace_back();
+    Component& label = made.back();
+    label.block.uses = 2;  // the panel's reference and the caller's
+    // The new child goes on the end of the panel's list (the game's tail insert).
+    auto* head = At<Node*>(p->object, 0x138);
+    auto* node = new Node{head, head->prev, label.self(), &label.block};
+    head->prev->next = node;
+    head->prev = node;
+    *static_cast<Entry*>(out) = {label.self(), &label.block};
+    return out;
+}
+void __fastcall FakeSetText(void* field, const wchar_t* text, const void*) { texts[field] = text; }
+void* __cdecl Identity(void* component) { return component; }
 
-std::uint64_t FakeOriginal(void* room) {
-    const MemberVector* members = Members(room);
-    seen.data = members->data;
-    seen.size = members->size;
-    seen.entries.assign(members->data, members->data + members->size);
-    ++seen.calls;
+const char* MemberOf(const void* memberInfo, char* out, std::size_t outChars) {
+    strncpy_s(out, outChars, static_cast<const std::string*>(memberInfo)->c_str(), _TRUNCATE);
+    return out;
+}
+
+// All Forces' labels: members listed here have a faction.
+std::map<std::string, std::pair<std::wstring, std::uint32_t>> factions;
+int labelCalls = 0;
+int Label(const char* id, wchar_t* out, std::uint32_t outChars, std::uint32_t* argb) {
+    ++labelCalls;
+    out[0] = 0;
+    const auto it = factions.find(id);
+    if (it == factions.end()) return 0;
+    wcsncpy_s(out, outChars, it->second.first.c_str(), _TRUNCATE);
+    *argb = it->second.second;
+    return 1;
+}
+
+Component* LabelOf(Panel& p) {
+    for (Node* n = At<Node*>(p.panel.self(), 0x138)->next; n != At<Node*>(p.panel.self(), 0x138); n = n->next)
+        for (auto& m : made)
+            if (n->object == m.self()) return &m;
+    return nullptr;
+}
+
+int builds = 0;
+std::uint64_t FakeBuilder(void*) {
+    ++builds;
     return 0x1234;
-}
-
-int profileCalls = 0;
-std::uint64_t FakeProfile(void*, void*) {
-    ++profileCalls;
-    return 7;
-}
-
-std::wstring NameOf(void* object) {
-    const auto* body = static_cast<const std::uint8_t*>(object);
-    std::uint64_t length = 0;
-    std::memcpy(&length, body + 0x28, sizeof(length));
-    if (length > 7) return L"(heap)";
-    return std::wstring(reinterpret_cast<const wchar_t*>(body + 0x18), length);
 }
 
 }  // namespace
 
 int main() {
-    // Pure page arithmetic.
-    Check(PageCount(0) == 1 && PageCount(4) == 1 && PageCount(5) == 2 && PageCount(8) == 2 && PageCount(9) == 3, "page count");
-    PageSlice slice = SliceForPage(6, 1);
-    Check(slice.first == 4 && slice.count == 2 && slice.page == 1, "page 2 of 6 members shows members 5-6");
-    slice = SliceForPage(6, 7);
-    Check(slice.page == 1 && slice.first == 4, "page past the end is clamped");
-    slice = SliceForPage(3, 1);
-    Check(slice.page == 0 && slice.first == 0 && slice.count == 3, "four or fewer members stay on page 1");
-    Check(NextPage(8, 0) == 1 && NextPage(8, 1) == 0 && NextPage(4, 0) == 0, "next page wraps");
+    static std::uint8_t gameBase[16];
+    InitRoomView(gameBase, RoomViewSettings{});
+    SetRoomUiCalls({&FakeSetArea, &FakeSetEnabled, &FakeCreate, &FakeSetText, &Identity});
+    SetPanelMemberIdSource(&MemberOf);
+    SetMemberLabelSource(&Label);
+    Room room;
+
+    // Four or fewer: the game's layout untouched; a label per row where All Forces has one, in the clear rate's place.
+    factions["member0"] = {L"EDF / Ranger", 0xFF3C8CFFu};
+    factions["member2"] = {L"Monster / Unit", 0xFFE04040u};
+    room.Build(3);
+    Check(CallBuilder(room.self(), &FakeBuilder) == 0x1234 && builds == 1, "the game's builder runs and its result is kept");
+    Check(areaCalls == 0 && Y(room.panels[1].panel) == rows::kMasterHeight && Y(room.panels[2].panel) == rows::kMasterHeight + rows::kMemberHeight,
+          "three members: the panels stay where the game put them");
+    Check(createCalls == 3 && consumed == 3 && lastDefinition == L"_pl_Name", "a label is made from _pl_Name for every row");
+    for (auto& p : room.panels) Check(p.panel.block.uses == 1, "the parent reference CreateByName consumes was the plugin's own");
+    for (auto& m : made) Check(m.block.uses == 1, "the plugin lets go of its reference to each label: the panel keeps it");
+    Component* label0 = LabelOf(room.panels[0]);
+    Component* label1 = LabelOf(room.panels[1]);
+    Check(label0 && label1 && Visible(*label0) && !Visible(*label1), "a label shows where All Forces has a faction, only there");
+    Check(label0 && texts[label0->self()] == L"EDF / Ranger" && X(*label0) == 332 && Y(*label0) == 122,
+          "the label's text, in the clear rate's place");
+    const float* colour = label0 ? &At<float>(label0->self(), 0x2B0) : nullptr;
+    Check(colour && colour[0] > 0.23f && colour[0] < 0.24f && colour[2] == 1.0f && colour[3] == 1.0f, "in the faction's colour");
+    Check(!Visible(room.panels[0].Child(4)) && !Visible(room.panels[0].Child(5)) && Visible(room.panels[1].Child(5)),
+          "the clear rate gives way to a label, and only to one");
+    Check(X(room.panels[0].Child(1)) == 166 && Visible(room.panels[0].Child(6)), "everything else is the game's");
+
+    // A refresh follows All Forces: a new pick, PvP turned off.
+    factions["member0"] = {L"EDF 2 / Ranger", 0xFFF0A030u};
+    factions.erase("member2");
+    RefreshLabels(room.self());
+    Check(label0 && texts[label0->self()] == L"EDF 2 / Ranger", "a changed faction is written again");
+    Component* label2 = LabelOf(room.panels[2]);
+    Check(label2 && !Visible(*label2) && Visible(room.panels[2].Child(5)), "a faction gone: the label hides, the clear rate is back");
+    const int calls = labelCalls;
+    SetMemberLabelSource(nullptr);
+    RefreshLabels(room.self());
+    Check(labelCalls == calls, "without All Forces' export nothing is asked");
+    SetMemberLabelSource(&Label);
+
+    // Ten members: one-line rows, every panel moved and sized, the children placed for it.
+    made.clear();
+    texts.clear();
+    room.Build(10);
+    CallBuilder(room.self(), &FakeBuilder);
+    const rows::Plan ten = rows::PlanRows(10);
+    Check(ten.mode == rows::Mode::OneLine && areaCalls == 10, "ten members: one-line rows, each panel's area set");
+    bool placed = true;
+    for (std::size_t i = 0; i < 10; ++i) {
+        rows::Rect r{};
+        rows::RowRect(ten, i, r);
+        Panel& p = room.panels[i];
+        placed = placed && X(p.panel) == r.x && Y(p.panel) == r.y && At<float>(p.panel.self(), 0x1B8) == r.w &&
+                 At<float>(p.panel.self(), 0x1BC) == r.h;
+    }
+    Check(placed, "each row where roomrows.h puts it, the host's first");
+    Panel& host = room.panels[0];
+    Check(X(host.Child(0)) == 8 && W(host.Child(0)) == 104 && X(host.Child(1)) == 116 && W(host.Child(1)) == 170,
+          "class and name on one line");
+    Check(!Visible(host.Child(6)) && !Visible(host.Child(11)) && !Visible(host.Child(12)) && !Visible(host.Child(3)),
+          "weapons and status hidden; the armor gives way to the label");
+    Check(X(host.Child(14)) == 417 && Visible(host.Child(14)) && X(host.Child(13)) == 420, "voice icons moved, the host's mark kept");
+    Check(Visible(room.panels[3].Child(3)) && X(room.panels[3].Child(3)) == 296, "a row without a label shows the armor there");
+    Component* tenLabel = LabelOf(host);
+    Check(tenLabel && X(*tenLabel) == 290 && Visible(*tenLabel), "the host's label beside the name");
+
+    // Forty members: two columns of 16, the first 32 shown; the rest hidden and out of the focus.
+    made.clear();
+    disabled.clear();
+    createCalls = 0;
+    room.Build(40);
+    CallBuilder(room.self(), &FakeBuilder);
+    const rows::Plan forty = rows::PlanRows(40);
+    Check(forty.mode == rows::Mode::Narrow && forty.shown == 32 && createCalls == 32, "forty members: 32 rows, 32 labels");
+    bool hidden = true;
+    for (std::size_t i = 32; i < 40; ++i)
+        hidden = hidden && !Visible(room.panels[i].panel) && disabled[room.panels[i].panel.self()] == 1;
+    Check(hidden, "panels past the cap are hidden and disabled");
+    Check(X(room.panels[16].panel) == forty.rowWidth + rows::kColumnGap && Y(room.panels[16].panel) == 0,
+          "the 17th row starts the second column");
+    Check(!Visible(room.panels[5].Child(0)) && W(room.panels[5].Child(1)) == forty.rowWidth - 52, "narrow rows: the name, no class");
+
+    // A panel list that changed without a build the hook saw: the old rows are not refreshed.
+    std::swap(room.list[0], room.list[1]);
+    const int before = labelCalls;
+    RefreshLabels(room.self());
+    Check(labelCalls == before, "rows of panels that are gone are left alone");
+
+    // Input names the other features keep using.
     Check(PadButtonOffset(L"RightStick") == 0xB8 && PadButtonOffset(L"rt") == 0x48 && PadButtonOffset(L"None") == 0 &&
               PadButtonOffset(L"Triangle") == -1,
           "pad button names");
     Check(VirtualKey(L"F2") == VK_F2 && VirtualKey(L"f24") == VK_F24 && VirtualKey(L"Tab") == VK_TAB &&
               VirtualKey(L"None") == 0 && VirtualKey(L"65") == 65 && VirtualKey(L"F25") == -1 && VirtualKey(L"Q") == -1,
           "key names");
-    // A fake room with six members whose objects look like MemberInfo (0xA8 bytes).
-    static std::uint8_t gameBase[16];
-    InitRoomView(gameBase, RoomViewSettings{});
-    std::vector<std::uint8_t> room(0x1000, 0);
-    std::vector<std::vector<std::uint8_t>> objects(6, std::vector<std::uint8_t>(0xA8, 0));
-    std::vector<std::int32_t> controls(12, 1);
-    std::vector<Entry> real;
-    for (std::size_t i = 0; i < objects.size(); ++i) {
-        objects[i][0x0C] = static_cast<std::uint8_t>(i + 1);  // soldier type
-        std::uint64_t heapLength = 20, heapCapacity = 31;     // a long name living on the heap
-        std::memcpy(objects[i].data() + 0x28, &heapLength, 8);
-        std::memcpy(objects[i].data() + 0x30, &heapCapacity, 8);
-        std::memset(objects[i].data() + 0x98, 0xEE, 16);      // user shared_ptr
-        real.push_back({objects[i].data(), &controls[i]});
-    }
-    MemberVector* members = Members(room.data());
-    *members = {real.data(), real.size(), real.size()};
-    const MemberVector original = *members;
-
-    SetDummyCount(0);
-    SetPage(room.data(), 0);
-    Check(CallWithPageView(room.data(), &FakeOriginal) == 0x1234, "original's return value is passed through");
-    Check(seen.size == 4 && seen.entries[0].object == objects[0].data() && seen.entries[3].object == objects[3].data(),
-          "page 1 of 6 shows members 1-4");
-    Check(members->data == original.data && members->size == original.size && members->capacity == original.capacity,
-          "member vector restored after the call");
-    SetPage(room.data(), 1);
-    CallWithPageView(room.data(), &FakeOriginal);
-    Check(seen.size == 2 && seen.entries[0].object == objects[4].data() && seen.entries[1].object == objects[5].data(),
-          "page 2 of 6 shows members 5-6");
-
-    // Four or fewer members and no dummies: the game's call sees its own vector.
-    *members = {real.data(), 3, 3};
-    SetPage(room.data(), 1);
-    CallWithPageView(room.data(), &FakeOriginal);
-    Check(seen.data == real.data() && seen.size == 3, "vanilla case is untouched");
-
-    // Fake members are part of the game's own member list (fakemembers.h), so the page view only slices
-    // what the list holds. A full room is kMaxPlayers members, four to a page.
-    constexpr std::size_t kFullPages = (kMaxPlayers + kPanelsPerPage - 1) / kPanelsPerPage;
-    constexpr std::size_t kLastPageCount = kMaxPlayers - (kFullPages - 1) * kPanelsPerPage;
-    static_assert(kMaxPlayers > kPanelsPerPage, "a full room has to be more than one page");
-    std::vector<Entry> full;
-    std::vector<std::vector<std::uint8_t>> bodies(kMaxPlayers, std::vector<std::uint8_t>(0xA8, 0));
-    std::vector<std::int32_t> fullControls(2 * kMaxPlayers, 1);
-    for (std::size_t i = 0; i < bodies.size(); ++i) full.push_back({bodies[i].data(), &fullControls[i]});
-    *members = {full.data(), full.size(), full.size()};
-    SetPage(room.data(), 1);
-    CallWithPageView(room.data(), &FakeOriginal);
-    Check(seen.size == kPanelsPerPage && seen.entries[0].object == bodies[kPanelsPerPage].data() &&
-              seen.entries[kPanelsPerPage - 1].object == bodies[2 * kPanelsPerPage - 1].data(),
-          "page 2 of a full room shows members 5-8");
-    SetPage(room.data(), static_cast<int>(kFullPages) - 1);
-    CallWithPageView(room.data(), &FakeOriginal);
-    Check(seen.size == kLastPageCount && seen.entries[0].object == bodies[(kFullPages - 1) * kPanelsPerPage].data(),
-          "the last page shows the members left over");
-    Check(members->data == full.data() && members->size == kMaxPlayers, "member vector restored after paging a full room");
-    Check(DummyCount() == 0, "no fake members are asked for by default");
-    SetDummyCount(3);
-    Check(DummyCount() == 3, "the fake member count is what the harness adds to the list");
-    SetDummyCount(0);
-
-    // What the menu label reads: members shown, the page, and whether the screen is live.
-    SetPage(room.data(), 1);
-    NoteRoomUpdate(room.data(), 10000);
-    RoomPageView view = RoomPageAt(10100);
-    Check(view.active && view.shown == kMaxPlayers && view.pages == static_cast<int>(kFullPages) && view.page == 1,
-          "room page view: a full room, page 2");
-    Check(!RoomPageAt(10600).active, "room page view goes stale half a second after the last room screen update");
-    *members = {real.data(), 3, 3};
-    NoteRoomUpdate(room.data(), 20000);
-    view = RoomPageAt(20000);
-    Check(view.active && view.shown == 3 && view.pages == 1 && view.page == 0, "three members: one page, page clamped");
-    *members = {real.data(), kMaxPlayers + 200, kMaxPlayers + 200};
-    NoteRoomUpdate(room.data(), 30000);
-    Check(RoomPageAt(30000).shown == 0, "a vector that is not one shows nothing");
-
-    // Keys: the page key list, the dummy keys kept off F2 and the page keys, and the label's names for them.
-    int keys[kMaxPageKeys]{};
-    wchar_t skipped[32]{};
-    Check(ParseKeyList(L"F3,Tab", keys, kMaxPageKeys, skipped, 32) == 2 && keys[0] == VK_F3 && keys[1] == VK_TAB && !skipped[0],
-          "PageKeys=F3,Tab");
-    std::memset(keys, 0, sizeof(keys));
-    Check(ParseKeyList(L" f2 ; Q, None,F3 F3,,tab,F9,F10,F11", keys, kMaxPageKeys, skipped, 32) == 4 && keys[0] == VK_F3 &&
-              keys[1] == VK_TAB && keys[2] == VK_F9 && keys[3] == VK_F10 && std::wcscmp(skipped, L"f2,Q") == 0,
-          "F2 and unknown names are left out and listed; duplicates and None ignored; at most four");
-    std::memset(keys, 0, sizeof(keys));
-    Check(ParseKeyList(L"", keys, kMaxPageKeys, skipped, 32) == 0 && keys[0] == 0, "an empty list: pad only");
-    Check(ParseKeyList(L"VeryLongKeyNameThatIsNotAKey", keys, kMaxPageKeys, skipped, 4) == 0 && skipped[0] == 0,
-          "a skipped name that does not fit is dropped from the report, not overrun");
     RoomViewSettings keySettings;
-    keySettings.dummyAddKey = VK_F3;     // the old defaults F3/F4 from an existing INI
-    keySettings.dummyRemoveKey = VK_F4;
-    Check(ResolveDummyKeys(keySettings) && keySettings.dummyAddKey == VK_F6 && keySettings.dummyRemoveKey == VK_F4,
-          "a dummy key on a page key moves to its default");
     keySettings.dummyAddKey = VK_F2;
     keySettings.dummyRemoveKey = VK_F2;
     Check(ResolveDummyKeys(keySettings) && keySettings.dummyAddKey == VK_F6 && keySettings.dummyRemoveKey == VK_F7,
@@ -192,30 +307,20 @@ int main() {
     keySettings.dummyRemoveKey = VK_F8;
     Check(ResolveDummyKeys(keySettings) && keySettings.dummyAddKey == VK_F8 && keySettings.dummyRemoveKey == VK_F7,
           "add and remove never share a key");
-    keySettings.pageKeys[2] = VK_F6;
-    keySettings.pageKeys[3] = VK_F7;
-    keySettings.dummyAddKey = VK_F3;
-    keySettings.dummyRemoveKey = VK_TAB;
-    Check(ResolveDummyKeys(keySettings) && keySettings.dummyAddKey == 0 && keySettings.dummyRemoveKey == 0,
-          "no dummy key when the defaults are page keys too");
+    keySettings.dummyAddKey = VK_F7;
+    keySettings.dummyRemoveKey = VK_F7;
+    Check(ResolveDummyKeys(keySettings) && keySettings.dummyAddKey == VK_F7 && keySettings.dummyRemoveKey == 0,
+          "no remove key when its default is the add key");
     RoomViewSettings defaults;
     Check(!ResolveDummyKeys(defaults) && defaults.dummyAddKey == VK_F6 && defaults.dummyRemoveKey == VK_F7, "defaults do not collide");
-    BuildPageHint(defaults);
-    Check(std::wcscmp(defaults.pageHint, L"F3/Tab/RS") == 0, "default page hint");
-    RoomViewSettings padOnly;
-    std::memset(padOnly.pageKeys, 0, sizeof(padOnly.pageKeys));
-    padOnly.padButton = static_cast<std::uint32_t>(PadButtonOffset(L"LB"));
-    BuildPageHint(padOnly);
-    Check(std::wcscmp(padOnly.pageHint, L"LB") == 0, "pad-only page hint");
-    RoomViewSettings none;
-    std::memset(none.pageKeys, 0, sizeof(none.pageKeys));
-    none.padButton = 0;
-    BuildPageHint(none);
-    Check(none.pageHint[0] == 0, "no inputs, no hint");
     wchar_t keyName[8]{};
     Check(KeyName(VK_F12, keyName, 8) == 3 && std::wcscmp(keyName, L"F12") == 0 && KeyName(65, keyName, 8) == 2 &&
               std::wcscmp(keyName, L"65") == 0,
           "key names for the label");
+    Check(DummyCount() == 0, "no fake members are asked for by default");
+    SetDummyCount(3);
+    Check(DummyCount() == 3, "the fake member count is what the harness adds to the list");
+    SetDummyCount(0);
 
     // The name a member plays under, as the roster logs it (identity.h): a std::wstring of the game's, SSO
     // capacity 7. The longest name read is 64 characters, and 64 CJK characters are 192 bytes of UTF-8.
@@ -242,6 +347,6 @@ int main() {
         std::printf("%d check(s) failed\n", failures);
         return 1;
     }
-    std::printf("room view paging verified\n");
+    std::printf("room view rows verified\n");
     return 0;
 }

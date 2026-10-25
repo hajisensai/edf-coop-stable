@@ -116,7 +116,13 @@ std::vector<WideCompare> SessionCompares();
 std::vector<CallSite> SessionCalls();
 // Redirected to RoomCountAndCapacity and RoomFullCount (rooms.h), in this order.
 std::vector<CallSite> GuestCalls();
-// Room screen member pages (roomview.h): two calls to BuildPanelsHook, then UpdateVoiceIconsHook.
+// The room screen's member panels (roomview.h). The panel builder 8F8020 builds one panel per room member, its template
+// name read from a table of four on its stack ({Button_Master, Button_Member x3}, rbp+0xA0), so a fifth member made it
+// read past the table. Always applied: the first panel is Button_Master and every later one Button_Member, for any
+// number of members (docs/net-re/roompanels.md). Each Patch's `original` is the whole instruction run it changes one
+// instruction of, so the run is verified before it is written.
+std::vector<Patch> RoomPanelPatches();
+// Both calls to that builder, redirected to BuildPanelsHook: the game builds the panels, then the plugin lays them out.
 std::vector<CallSite> RoomViewCalls();
 // HUiRoom::OnUpdate, replaced by RoomOnUpdateHook.
 PointerSlot RoomViewSlot();

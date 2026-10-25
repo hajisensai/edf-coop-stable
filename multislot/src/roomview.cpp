@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
-#include <vector>
 
 #include "armor.h"
 #include "crashlog.h"
@@ -16,6 +15,7 @@
 #include "log.h"
 #include "mission.h"
 #include "patches.h"
+#include "roomrows.h"
 
 namespace multislot {
 namespace {
@@ -25,9 +25,44 @@ constexpr std::size_t kMembers = 0x900;          // {shared_ptr<MemberInfo>* dat
 constexpr std::size_t kRebuild = 0x940;          // byte: OnUpdate rebuilds members and panels
 constexpr std::size_t kChildA = 0xAF0;           // control blocks of the child screen / dialog
 constexpr std::size_t kChildB = 0xB00;           //   handles OnUpdate drops when it rebuilds
+// The panels the builder just made, in PlayersGroup's order: a vector of weak_ptr<Component> (data, capacity, size at
+// +0xB58 / +0xB60 / +0xB68), filled by 8F85EC..8F8742 from PlayersGroup's child list right after the panels are built.
+constexpr std::size_t kPanels = 0xB58;
+constexpr std::size_t kPanelCount = 0xB68;
 constexpr std::uint32_t kPanelBuilder = 0x8F8020;
-constexpr std::uint32_t kVoiceIcons = 0x903160;
 constexpr std::uint32_t kRoomOnUpdate = 0x8FDFE0;
+// ui::Component (constructor 7E9790, Init 7EBC30): its ordinal under its parent in the layout tree, its two child lists
+// (std::list heads; a node is {next, prev, object, control}; 8E1950 looks a child up in both), its local matrix (the
+// scale on the diagonal, the translation in the last row), its area {x, y, w, h} and its visibility. The draw (7EC790)
+// reads the matrix and the area every frame and skips a hidden component with everything under it.
+constexpr std::size_t kOrdinal = 0x110;
+constexpr std::size_t kChildren = 0x138;
+constexpr std::size_t kChildrenToo = 0x158;
+constexpr std::size_t kScaleX = 0x170;
+constexpr std::size_t kScaleY = 0x184;
+constexpr std::size_t kTranslateX = 0x1A0;
+constexpr std::size_t kTranslateY = 0x1A4;
+constexpr std::size_t kAreaWidth = 0x1B8;
+constexpr std::size_t kAreaHeight = 0x1BC;
+constexpr std::size_t kVisible = 0x1F8;
+constexpr std::size_t kPanelMember = 0x200;      // the panel's MemberInfo (902328: members[i] for panel i)
+constexpr std::size_t kFontColour = 0x2B0;       // ui::TextField: RGBA floats (drawn by 7F890C)
+// A member's way to its EOS user: MemberInfo +0x98 weak_ptr<eos::RoomInfo::PlayerInfo> (901AB5..901B60), PlayerInfo
+// +0x00 weak_ptr<eos::User> (744B31), User +0x18 its EOS_ProductUserId (as Users::Add's slots, joinlog.cpp).
+constexpr std::size_t kMemberPlayerInfo = 0x98;
+constexpr std::size_t kPlayerInfoUser = 0x00;
+constexpr std::size_t kUserProductId = 0x18;
+// The game functions the rows use.
+constexpr std::uint32_t kSetArea = 0x7E7FA0;       // HUiButton::SetArea(button, const float4*): area and its own label
+constexpr std::uint32_t kSetEnabled = 0x7EE280;    // (component, bool): the pending state the next Update commits
+constexpr std::uint32_t kCreateByName = 0x8456D0;  // (screen, Shared* out, Shared* parent (consumed), definition name)
+constexpr std::uint32_t kSetText = 0x7F8BB0;       // (ui::TextField*, text, font params or null), as the panel fill
+constexpr std::uint32_t kDynamicCast = 0x12DA7AA;  // __RTDynamicCast
+constexpr std::uint32_t kComponentType = 0x2062F00;  // type descriptors ui::Component and ui::TextField (8E1991)
+constexpr std::uint32_t kTextFieldType = 0x2062F28;
+// The definition a faction label is made from: the panel's own name field (TextField, Transparent skin, 16 point). It
+// is a top-level definition of LYT_HUIONLINEROOM.SGO, so CreateByName can make another one under any panel.
+constexpr const wchar_t* kLabelDefinition = L"_pl_Name";
 // Pad input: two slots of 0x4A0 bytes holding pointers to per-button channels; the channel's
 // byte +0x4C is the button's current state (EDF+1182A00 writes it every frame).
 constexpr std::uint32_t kPadSlots = 0x2136530;
@@ -41,15 +76,11 @@ constexpr std::size_t kMemberClassOk = 0x08;   // byte  (747340 read the source 
 constexpr std::size_t kMemberClass = 0x0C;     // int   soldier type
 constexpr std::size_t kMemberArmorOk = 0x38;   // byte  (745D50)
 constexpr std::size_t kMemberArmor = 0x3C;     // int   the number the room panel prints as _pl_Armor
-constexpr std::size_t kMemberRatioOk = 0x40;   // byte  (745ED0)
-constexpr std::size_t kMemberRatio = 0x44;     // float clear ratio
-constexpr std::size_t kMemberPlaceOk = 0x48;   // byte  (746050)
-constexpr std::size_t kMemberPlace = 0x4C;     // int   index into a name table
 constexpr std::uint32_t kLocalPlayers = 0x6E90;    // GameStatus: class, then the armor field at +4
-constexpr std::size_t kLocalPlayerStride = 0x3E60;
 constexpr std::uint32_t kEffectiveArmor = 0x0D8700;  // (GameStatus, slot) -> the armor limit, or its default
 constexpr std::size_t kPadSlotSize = 0x4A0;
 constexpr std::size_t kChannelPressed = 0x4C;
+constexpr std::uint64_t kLabelInterval = 200;  // ms between faction label refreshes
 
 struct Entry {
     void* object;
@@ -61,51 +92,34 @@ struct MemberVector {
     std::size_t size;
 };
 
+// MSVC's _Ref_count_base: the vtable's first two entries destroy the object and free the block.
+struct ControlBlock;
+struct ControlBlockVtable {
+    void(__fastcall* destroy)(ControlBlock*);
+    void(__fastcall* deleteThis)(ControlBlock*);
+};
 struct ControlBlock {
-    void** vtable;
-    std::int32_t uses;
-    std::int32_t weaks;
+    ControlBlockVtable* vtable;
+    long uses;
+    long weaks;
 };
 
 const unsigned char* game = nullptr;
 RoomViewSettings config{};
 RoomFunction originalBuilder = nullptr;
-RoomFunction originalVoiceIcons = nullptr;
 using OnUpdateFunction = std::uint64_t (*)(void*, void*);
 OnUpdateFunction nextOnUpdate = nullptr;  // the game's HUiRoom::OnUpdate, or a hook chained onto its slot first
 
 // Everything below runs on the game's UI thread only (HUiRoom::OnUpdate and what it calls).
 void* currentRoom = nullptr;
-int currentPage = 0;
 std::size_t dummyCount = 0;
-bool padWasDown = false;
-bool pageKeyWasDown[kMaxPageKeys]{};
 bool addKeyWasDown = false;
 bool removeKeyWasDown = false;
-// For the menu label: when the room screen last updated and how many members it showed.
-std::uint64_t lastUpdate = 0;
-std::size_t lastShown = 0;
-constexpr std::uint64_t kRoomScreenTimeout = 500;  // ms
 
 MemberVector* Members(void* room) { return static_cast<MemberVector*>(static_cast<void*>(static_cast<char*>(room) + kMembers)); }
 
 bool Alive(void* control) {
     return control && static_cast<ControlBlock*>(control)->uses > 0;
-}
-
-std::uint64_t CallWithMembers(RoomFunction original, void* room, Entry* data, std::size_t count) {
-    MemberVector* members = Members(room);
-    const MemberVector saved = *members;
-    members->data = data;
-    members->capacity = count;
-    members->size = count;
-    std::uint64_t result = 0;
-    __try {
-        result = original(room);
-    } __finally {
-        *members = saved;
-    }
-    return result;
 }
 
 void RequestRebuild(void* room) { static_cast<std::uint8_t*>(room)[kRebuild] = 1; }
@@ -250,70 +264,247 @@ void NoteMembers(void* room) {
 void Poll(void* room) {
     if (room != currentRoom) {
         currentRoom = room;
-        currentPage = 0;
         lastRoster[0] = 0;  // a different room writes its roster again
         ForgetUserSlots();
     }
     ProbeLocalArmor();
     NoteMembers(room);
-    bool page = Edge(PadDown(config.padButton), padWasDown);
-    for (std::size_t i = 0; i < kMaxPageKeys; ++i) page |= Edge(KeyDown(config.pageKeys[i]), pageKeyWasDown[i]);
     const bool add = config.dummies && Edge(KeyDown(config.dummyAddKey), addKeyWasDown);
     const bool remove = config.dummies && Edge(KeyDown(config.dummyRemoveKey), removeKeyWasDown);
-    if (!page && !add && !remove) return;
+    if (!add && !remove) return;
     if (ChildOpen(room)) return;
     const std::size_t shown = Members(room)->size;
-    if (add || remove) {
-        const std::size_t previous = dummyCount;
-        std::size_t next = dummyCount;
-        if (add && shown < static_cast<std::size_t>(kMaxPlayers)) ++next;
-        if (remove && next) --next;
-        if (next != dummyCount) {
-            dummyCount = next;
-            RequestRebuild(room);
-            // `shown` still holds the previous frame's list: say what the next rebuild will show.
-            Log("ROOMVIEW fake members %zu (the room screen will show %zu)", dummyCount,
-                shown >= previous ? shown - previous + dummyCount : dummyCount);
-        }
-    }
-    const std::size_t total = shown;
-    if (page && PageCount(total) > 1) {
-        currentPage = NextPage(total, currentPage);
-        RequestRebuild(room);
-        const PageSlice slice = SliceForPage(total, currentPage);
-        Log("ROOMVIEW page %d/%d shows members %zu-%zu of %zu", slice.page + 1, PageCount(total), slice.first + 1,
-            slice.first + slice.count, total);
+    const std::size_t previous = dummyCount;
+    std::size_t next = dummyCount;
+    if (add && shown < static_cast<std::size_t>(kMaxPlayers)) ++next;
+    if (remove && next) --next;
+    if (next == dummyCount) return;
+    dummyCount = next;
+    RequestRebuild(room);
+    // `shown` still holds the previous frame's list: say what the next rebuild will show.
+    Log("ROOMVIEW fake members %zu (the room screen will show %zu)", dummyCount,
+        shown >= previous ? shown - previous + dummyCount : dummyCount);
+}
+
+// --- Member rows (roomrows.h) ---
+
+RoomUiCalls ui{};
+MemberLabelFn labelSource = nullptr;
+bool labelSourceSet = false;  // a test's source; otherwise EDF6VehicleCrew.dll's, looked up per room screen
+void* labelRoom = nullptr;    // the room screen the plugin's source was looked up for
+PanelMemberIdFn memberIdSource = nullptr;
+
+// What the rows were laid out with, for the label refreshes until the next build.
+struct Row {
+    void* panel;
+    void* label;  // the faction label made for this row, null without one
+    bool master;
+    bool labelShown;
+    std::uint32_t argb;
+    wchar_t text[64];
+};
+void* rowsRoom = nullptr;
+rows::Plan plan{};
+Row rowState[rows::kMaxRows]{};
+std::size_t rowCount = 0;
+std::uint64_t lastRefresh = 0;
+// What was logged last, so a rebuild with the same rows says nothing.
+std::size_t loggedMembers = ~std::size_t{0};
+bool loggedLabels = false;
+const char* loggedFailure = nullptr;
+
+const char* ModeName(rows::Mode m) {
+    switch (m) {
+        case rows::Mode::Stock: return "the game's own";
+        case rows::Mode::TwoLine: return "two-line";
+        case rows::Mode::OneLine: return "one-line";
+        default: return "two columns of";
     }
 }
 
-std::uint64_t PagedCall(void* room, RoomFunction original) {
-    const MemberVector* members = Members(room);
-    if (members->size <= kPanelsPerPage) return original(room);  // the vanilla case
-    if (members->size > static_cast<std::size_t>(kMaxPlayers) || !members->data) return original(room);  // not a member vector
-    const PageSlice slice = SliceForPage(members->size, room == currentRoom ? currentPage : 0);
-    if (room == currentRoom) currentPage = slice.page;
-    return CallWithMembers(original, room, members->data + slice.first, slice.count);
+template <typename T>
+T& Field(void* object, std::size_t offset) {
+    return *reinterpret_cast<T*>(static_cast<unsigned char*>(object) + offset);
+}
+
+void ReleaseShared(void* control) {
+    auto* block = static_cast<ControlBlock*>(control);
+    if (block && InterlockedDecrement(&block->uses) == 0) {
+        block->vtable->destroy(block);
+        if (InterlockedDecrement(&block->weaks) == 0) block->vtable->deleteThis(block);
+    }
+}
+
+void Apply(void* child, const rows::Place& p) {
+    if (p.move) {
+        Field<float>(child, kTranslateX) = p.x;
+        Field<float>(child, kTranslateY) = p.y;
+    }
+    if (p.width > 0) Field<float>(child, kAreaWidth) = p.width;
+    if (p.height > 0) Field<float>(child, kAreaHeight) = p.height;
+    if (p.scale > 0) {
+        Field<float>(child, kScaleX) = p.scale;
+        Field<float>(child, kScaleY) = p.scale;
+    }
+    if (p.shown != rows::Shown::Keep) Field<std::uint8_t>(child, kVisible) = p.shown == rows::Shown::Show ? 1 : 0;
+}
+
+// Every direct child of `panel` but its faction label, placed for this plan. Both child lists are walked (8E1950
+// searches both); placing a child twice writes the same values twice.
+void PlaceChildren(void* panel, bool master, bool label, const void* labelChild) {
+    for (std::size_t list : {kChildren, kChildrenToo}) {
+        auto* head = Field<unsigned char*>(panel, list);
+        if (!head) continue;
+        std::size_t steps = 0;
+        for (auto* node = *reinterpret_cast<unsigned char**>(head); node && node != head && steps < 64;
+             node = *reinterpret_cast<unsigned char**>(node), ++steps) {
+            void* child = *reinterpret_cast<void**>(node + 0x10);
+            if (!child || child == labelChild) continue;
+            const rows::Role role = rows::RoleOf(Field<std::int32_t>(child, kOrdinal), master);
+            if (role != rows::Role::Other) Apply(child, rows::PlaceChild(plan, role, label));
+        }
+    }
+}
+
+// A faction label under `panel`: a new _pl_Name made by the game's own CreateByName, which hands the panel a strong
+// reference to it; ours is let go at once (the label lives and dies with its panel). Hidden until it has a text.
+void* MakeLabel(void* room, void* panel, void* control) {
+    if (!ui.createByName) return nullptr;
+    InterlockedIncrement(&static_cast<ControlBlock*>(control)->uses);  // the parent copy CreateByName consumes
+    Entry parent{panel, control}, made{};
+    ui.createByName(room, &made, &parent, kLabelDefinition);
+    void* label = made.object;
+    if (label) {
+        Apply(label, rows::PlaceLabel(plan));
+        Field<std::uint8_t>(label, kVisible) = 0;
+    }
+    if (made.control) ReleaseShared(made.control);
+    return label;
+}
+
+// The row's member, as All Forces knows it: the EOS ProductUserId behind the panel's MemberInfo.
+const char* PanelMemberId(void* panel, char* out, std::size_t outChars) {
+    out[0] = 0;
+    const void* member = Field<void*>(panel, kPanelMember);
+    return member && memberIdSource ? memberIdSource(member, out, outChars) : out;
+}
+
+// One row's label as of now: its text and colour, and what it takes the place of.
+void ShowLabel(Row& row) {
+    if (!row.label || !labelSource) return;
+    char id[64]{};
+    wchar_t text[64]{};
+    std::uint32_t argb = 0;
+    const bool shown = PanelMemberId(row.panel, id, sizeof(id))[0] && labelSource(id, text, 64, &argb) == 1 && text[0];
+    if (shown != row.labelShown) {
+        PlaceChildren(row.panel, row.master, shown, row.label);
+        Field<std::uint8_t>(row.label, kVisible) = shown ? 1 : 0;
+        row.labelShown = shown;
+    }
+    if (!shown || (std::wcscmp(text, row.text) == 0 && argb == row.argb)) return;
+    void* field = ui.textField ? ui.textField(row.label) : nullptr;
+    if (!field) return;
+    ui.setText(field, text, nullptr);
+    const float colour[4] = {static_cast<float>((argb >> 16) & 0xFF) / 255.0f, static_cast<float>((argb >> 8) & 0xFF) / 255.0f,
+                             static_cast<float>(argb & 0xFF) / 255.0f, static_cast<float>((argb >> 24) & 0xFF) / 255.0f};
+    std::memcpy(static_cast<unsigned char*>(field) + kFontColour, colour, sizeof(colour));
+    std::memcpy(row.text, text, sizeof(row.text));
+    row.argb = argb;
+}
+
+// The panels of `room` as the builder left them, laid out by `plan`. False when a field could not be read (nothing
+// after it is touched; the log says so once).
+bool LayOut(void* room, const char*& failure) {
+    __try {
+        const auto* panels = Field<Entry*>(room, kPanels);
+        const std::size_t count = Field<std::size_t>(room, kPanelCount);
+        if (!panels || count > static_cast<std::size_t>(kMaxPlayers)) {
+            failure = "the room's panel list is not one";
+            return false;
+        }
+        plan = rows::PlanRows(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            void* panel = panels[i].object;
+            if (!panel || !Alive(panels[i].control)) continue;
+            rows::Rect r{};
+            if (plan.mode != rows::Mode::Stock) {
+                if (!rows::RowRect(plan, i, r)) {
+                    // Past the cap: neither drawn nor reached by the focus.
+                    Field<std::uint8_t>(panel, kVisible) = 0;
+                    ui.setEnabled(panel, false);
+                    continue;
+                }
+                const float area[4] = {0.0f, 0.0f, r.w, r.h};
+                ui.setArea(panel, area);
+                Field<float>(panel, kTranslateX) = r.x;
+                Field<float>(panel, kTranslateY) = r.y;
+            }
+            // At most kMaxRows rows are shown (Stock: at most four), so every shown panel has a row.
+            if (rowCount == rows::kMaxRows) continue;
+            Row& row = rowState[rowCount++];
+            row = Row{panel, nullptr, i == 0, false, 0, {}};
+            if (labelSource) row.label = MakeLabel(room, panel, panels[i].control);
+            PlaceChildren(panel, row.master, false, row.label);
+        }
+        for (std::size_t i = 0; i < rowCount; ++i) ShowLabel(rowState[i]);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        failure = "a panel could not be read or laid out";
+        return false;
+    }
+}
+
+bool Refresh(void* room) {
+    __try {
+        const auto* panels = Field<Entry*>(room, kPanels);
+        const std::size_t count = Field<std::size_t>(room, kPanelCount);
+        for (std::size_t i = 0, at = 0; i < count && at < rowCount; ++i) {
+            if (!panels[i].object || !Alive(panels[i].control)) continue;
+            // The rows of the last build only: a panel list that changed since means a build the hook did not see.
+            if (panels[i].object != rowState[at].panel) return false;
+            ShowLabel(rowState[at++]);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void ResolveLabelSource(void* room) {
+    if (labelSourceSet || room == labelRoom) return;
+    labelRoom = room;
+    const HMODULE allForces = GetModuleHandleW(L"EDF6VehicleCrew.dll");
+    labelSource = allForces ? reinterpret_cast<MemberLabelFn>(GetProcAddress(allForces, "EDF6AF_PvpMemberLabel")) : nullptr;
+}
+
+// The game's way from MemberInfo to the member's EOS user, each weak_ptr checked alive (on this, the UI thread, nothing
+// else ends them meanwhile).
+const void* ProductIdOf(const void* member) {
+    __try {
+        const auto* m = static_cast<const unsigned char*>(member);
+        const auto* info = *reinterpret_cast<const unsigned char* const*>(m + kMemberPlayerInfo);
+        if (!info || !Alive(*reinterpret_cast<void* const*>(m + kMemberPlayerInfo + 8))) return nullptr;
+        const auto* user = *reinterpret_cast<const unsigned char* const*>(info + kPlayerInfoUser);
+        if (!user || !Alive(*reinterpret_cast<void* const*>(info + kPlayerInfoUser + 8))) return nullptr;
+        return *reinterpret_cast<const void* const*>(user + kUserProductId);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+const char* GameMemberId(const void* member, char* out, std::size_t outChars) {
+    const void* id = Probing([&] { return ProductIdOf(member); });
+    return ProductUserIdText(id, out, outChars);
+}
+
+// The component as the ui::TextField the game's own fill writes to (8E1950's cast).
+void* GameTextField(void* component) {
+    using Cast = void*(__cdecl*)(void*, long, void*, void*, int);
+    return reinterpret_cast<Cast>(const_cast<unsigned char*>(game) + kDynamicCast)(
+        component, 0, const_cast<unsigned char*>(game) + kComponentType, const_cast<unsigned char*>(game) + kTextFieldType, 0);
 }
 
 }  // namespace
-
-PageSlice SliceForPage(std::size_t total, int page) {
-    const int pages = PageCount(total);
-    if (page < 0) page = 0;
-    if (page >= pages) page = pages - 1;
-    const std::size_t first = static_cast<std::size_t>(page) * kPanelsPerPage;
-    const std::size_t left = total > first ? total - first : 0;
-    return {first, left < kPanelsPerPage ? left : kPanelsPerPage, page};
-}
-
-int PageCount(std::size_t total) {
-    return total <= kPanelsPerPage ? 1 : static_cast<int>((total + kPanelsPerPage - 1) / kPanelsPerPage);
-}
-
-int NextPage(std::size_t total, int page) {
-    const int pages = PageCount(total);
-    return pages <= 1 ? 0 : (page + 1) % pages;
-}
 
 int PadButtonOffset(const wchar_t* name) {
     struct Named {
@@ -359,81 +550,6 @@ std::size_t KeyName(int key, wchar_t* out, std::size_t outChars) {
     return static_cast<std::size_t>(written);
 }
 
-std::size_t ParseKeyList(const wchar_t* text, int* keys, std::size_t maxKeys, wchar_t* skipped, std::size_t skippedChars) {
-    if (skipped && skippedChars) skipped[0] = 0;
-    std::size_t count = 0, skippedUsed = 0;
-    if (!text || !keys) return 0;
-    const auto separator = [](wchar_t c) { return c == L',' || c == L' ' || c == L'\t' || c == L';'; };
-    for (const wchar_t* at = text; *at;) {
-        while (*at && separator(*at)) ++at;
-        const wchar_t* start = at;
-        while (*at && !separator(*at)) ++at;
-        const std::size_t length = static_cast<std::size_t>(at - start);
-        if (!length) continue;
-        wchar_t name[16]{};
-        int key = -1;
-        if (length < 16) {
-            wmemcpy(name, start, length);
-            key = VirtualKey(name);
-        }
-        if (key == 0) continue;  // None
-        if (key < 0 || key == kEightPlayerModKey) {
-            if (skipped && skippedUsed + length + 2 < skippedChars) {
-                if (skippedUsed) skipped[skippedUsed++] = L',';
-                wmemcpy(skipped + skippedUsed, start, length);
-                skippedUsed += length;
-                skipped[skippedUsed] = 0;
-            }
-            continue;
-        }
-        bool seen = false;
-        for (std::size_t i = 0; i < count; ++i) seen = seen || keys[i] == key;
-        if (!seen && count < maxKeys) keys[count++] = key;
-    }
-    return count;
-}
-
-bool ResolveDummyKeys(RoomViewSettings& settings) {
-    const auto taken = [&](int key, int other) {
-        if (!key) return false;
-        if (key == kEightPlayerModKey || key == other) return true;
-        for (int page : settings.pageKeys)
-            if (page && page == key) return true;
-        return false;
-    };
-    bool changed = false;
-    if (taken(settings.dummyAddKey, 0)) {
-        settings.dummyAddKey = taken(VK_F6, 0) ? 0 : VK_F6;
-        changed = true;
-    }
-    if (taken(settings.dummyRemoveKey, settings.dummyAddKey)) {
-        settings.dummyRemoveKey = taken(VK_F7, settings.dummyAddKey) ? 0 : VK_F7;
-        changed = true;
-    }
-    return changed;
-}
-
-void BuildPageHint(RoomViewSettings& settings) {
-    wchar_t hint[32]{};
-    std::size_t used = 0;
-    const auto add = [&](const wchar_t* part) {
-        const std::size_t length = wcslen(part);
-        if (!length || used + length + 2 > 32) return;
-        if (used) hint[used++] = L'/';
-        wmemcpy(hint + used, part, length);
-        used += length;
-        hint[used] = 0;
-    };
-    for (int key : settings.pageKeys) {
-        if (!key) continue;
-        wchar_t name[8]{};
-        KeyName(key, name, 8);
-        add(name);
-    }
-    add(PadButtonShortName(settings.padButton));
-    wmemcpy(settings.pageHint, hint, 32);
-}
-
 int VirtualKey(const wchar_t* name) {
     if (_wcsicmp(name, L"None") == 0) return 0;
     if (_wcsicmp(name, L"Tab") == 0) return VK_TAB;
@@ -448,59 +564,104 @@ int VirtualKey(const wchar_t* name) {
     return (end && end != name && !*end && code > 0 && code < 256) ? static_cast<int>(code) : -1;
 }
 
+bool ResolveDummyKeys(RoomViewSettings& settings) {
+    const auto taken = [&](int key, int other) { return key && (key == kEightPlayerModKey || key == other); };
+    bool changed = false;
+    if (taken(settings.dummyAddKey, 0)) {
+        settings.dummyAddKey = VK_F6;
+        changed = true;
+    }
+    if (taken(settings.dummyRemoveKey, settings.dummyAddKey)) {
+        settings.dummyRemoveKey = taken(VK_F7, settings.dummyAddKey) ? 0 : VK_F7;
+        changed = true;
+    }
+    return changed;
+}
+
 void InitRoomView(const unsigned char* gameBase, const RoomViewSettings& settings) {
     game = gameBase;
     config = settings;
     originalBuilder = reinterpret_cast<RoomFunction>(gameBase + kPanelBuilder);
-    originalVoiceIcons = reinterpret_cast<RoomFunction>(gameBase + kVoiceIcons);
     nextOnUpdate = reinterpret_cast<OnUpdateFunction>(gameBase + kRoomOnUpdate);
+    auto* base = const_cast<unsigned char*>(gameBase);
+    ui.setArea = reinterpret_cast<decltype(ui.setArea)>(base + kSetArea);
+    ui.setEnabled = reinterpret_cast<decltype(ui.setEnabled)>(base + kSetEnabled);
+    ui.createByName = reinterpret_cast<decltype(ui.createByName)>(base + kCreateByName);
+    ui.setText = reinterpret_cast<decltype(ui.setText)>(base + kSetText);
+    ui.textField = &GameTextField;
+    memberIdSource = &GameMemberId;
 }
 
 void ChainRoomOnUpdate(std::uint64_t next) {
     nextOnUpdate = reinterpret_cast<OnUpdateFunction>(static_cast<std::uintptr_t>(next));
 }
 
-std::uint64_t BuildPanelsHook(void* room) { return PagedCall(room, originalBuilder); }
+void LayoutRows(void* room) {
+    ResolveLabelSource(room);
+    rowsRoom = room;
+    rowCount = 0;
+    plan = {};
+    const char* failure = nullptr;
+    const bool laid = Probing([&] { return LayOut(room, failure); });
+    if (!laid) {
+        rowsRoom = nullptr;
+        rowCount = 0;
+        if (failure != loggedFailure) Log("ROOMVIEW the member rows were left as the game built them: %s", failure);
+        loggedFailure = failure;
+        return;
+    }
+    loggedFailure = nullptr;
+    lastRefresh = GetTickCount64();
+    const bool labels = labelSource != nullptr;
+    if (plan.members == loggedMembers && labels == loggedLabels) return;
+    loggedMembers = plan.members;
+    loggedLabels = labels;
+    if (plan.mode == rows::Mode::Stock)
+        Log("ROOMVIEW %zu member panel(s), the game's own layout%s", plan.members,
+            labels ? "; All Forces' faction labels on them" : "");
+    else
+        Log("ROOMVIEW %zu member panels: %s rows %.0f x %.0f, %zu shown%s%s", plan.members, ModeName(plan.mode),
+            plan.rowWidth, plan.rowHeight, plan.shown,
+            plan.shown < plan.members ? " (the room screen shows the first 32; the rest are in the room, not on it)" : "",
+            labels ? "; All Forces' faction labels on them" : "");
+}
 
-std::uint64_t UpdateVoiceIconsHook(void* room) { return PagedCall(room, originalVoiceIcons); }
+void RefreshLabels(void* room) {
+    if (room != rowsRoom || !rowCount || !labelSource) return;
+    if (!Probing([&] { return Refresh(room); })) rowCount = 0;  // the panels it knew are gone; the next build lays out anew
+}
+
+std::uint64_t CallBuilder(void* room, RoomFunction original) {
+    const std::uint64_t result = original(room);
+    LayoutRows(room);
+    return result;
+}
+
+std::uint64_t BuildPanelsHook(void* room) { return CallBuilder(room, originalBuilder); }
 
 std::uint64_t RoomOnUpdateHook(void* room, void* context) {
     Poll(room);
-    NoteRoomUpdate(room, GetTickCount64());
+    ResolveLabelSource(room);
+    const std::uint64_t now = GetTickCount64();
+    if (now - lastRefresh >= kLabelInterval) {
+        lastRefresh = now;
+        RefreshLabels(room);
+    }
     return nextOnUpdate(room, context);
 }
-
-std::uint64_t CallWithPageView(void* room, RoomFunction original) { return PagedCall(room, original); }
 
 void SetDummyCount(std::size_t count) { dummyCount = count; }
 
 std::size_t DummyCount() { return dummyCount; }
 
-void SetPage(void* room, int page) {
-    currentRoom = room;
-    currentPage = page;
+void SetMemberLabelSource(MemberLabelFn label) {
+    labelSource = label;
+    labelSourceSet = true;
 }
 
-void NoteRoomUpdate(void* room, std::uint64_t now) {
-    const std::size_t limit = static_cast<std::size_t>(kMaxPlayers);
-    std::size_t shown = Members(room)->size;  // fake members are part of the game's own list (fakemembers.h)
-    if (shown > limit) shown = 0;  // the member list is cut to kMaxPlayers: anything longer is not one, show no page hint
-    lastShown = shown;
-    lastUpdate = now ? now : 1;
-}
+void SetPanelMemberIdSource(PanelMemberIdFn source) { memberIdSource = source; }
 
-RoomPageView RoomPageAt(std::uint64_t now) {
-    RoomPageView view{};
-    view.active = lastUpdate && now >= lastUpdate && now - lastUpdate <= kRoomScreenTimeout;
-    view.shown = lastShown;
-    view.pages = PageCount(lastShown);
-    view.page = currentPage < 0 ? 0 : (currentPage >= view.pages ? view.pages - 1 : currentPage);
-    return view;
-}
-
-RoomPageView CurrentRoomPage() { return RoomPageAt(GetTickCount64()); }
-
-const wchar_t* PageHint() { return config.pageHint; }
+void SetRoomUiCalls(const RoomUiCalls& calls) { ui = calls; }
 
 bool PadButtonDown(std::uint32_t channel) { return PadDown(channel); }
 

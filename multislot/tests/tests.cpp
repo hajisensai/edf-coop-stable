@@ -213,6 +213,88 @@ void CheckVectorBlocks() {
           "backlink inspection rejects missing prefix and out-of-range payloads");
 }
 
+// The room screen's panels (patches.h RoomPanelPatches, roomview.cpp): the builder's table, the two instructions
+// changed, and everything the row layout reads or calls, where the game itself does the same.
+void CheckRoomPanels(const Image& image) {
+    const auto RipTarget = [&](std::uint32_t rva, std::size_t length) {
+        std::int32_t disp = 0;
+        std::memcpy(&disp, image.At(rva, length) + length - 4, 4);
+        return static_cast<std::uint32_t>(static_cast<std::int64_t>(rva) + static_cast<std::int64_t>(length) + disp);
+    };
+    const auto Bytes = [&](std::uint32_t rva, std::initializer_list<std::uint8_t> bytes) {
+        const std::uint8_t* at = image.At(rva, bytes.size());
+        return at && std::equal(bytes.begin(), bytes.end(), at);
+    };
+    const auto panels = RoomPanelPatches();
+    Check(panels.size() == 2, "two room panel patches");
+    for (const auto& patch : panels) {
+        Check(Matches(image.At(patch.rva, patch.original.size()), patch), patch.name, patch.rva);
+        Check(patch.original.size() == patch.replacement.size(), "a panel patch keeps its size", patch.rva);
+        std::size_t changed = 0;
+        for (std::size_t i = 0; i < patch.original.size(); ++i) changed += patch.original[i] != patch.replacement[i];
+        Check(changed > 0 && changed <= 7, "a panel patch changes one instruction only", patch.rva);
+    }
+    // Patch 1: the table {Master, Member, Member, Member} at rbp+0xA0..0xB8; its last store goes to rbp+0x28.
+    Check(RipTarget(0x8F805B, 7) == 0x180B428 && RipTarget(0x8F8069, 7) == 0x180B448, "Button_Master and Button_Member", 0x8F805B);
+    Check(std::memcmp(image.At(0x180B428, 28), L"Button_Master", 28) == 0 && std::memcmp(image.At(0x180B448, 28), L"Button_Member", 28) == 0,
+          "the two template names", 0x180B428);
+    const std::uint8_t store[] = {0x48, 0x89, 0x45, 0x28, 0x0F, 0x1F, 0x00};  // mov [rbp+0x28], rax; nop dword [rax]
+    Check(panels[0].rva == 0x8F805B && panels[0].replacement.size() == 42 &&
+              std::memcmp(panels[0].replacement.data() + 35, store, sizeof(store)) == 0,
+          "8F807E stores Button_Member at rbp+0x28", 0x8F807E);
+    // Patch 2: the loop reads the table through rbx (callee-saved, so 845BB0 keeps it), from the second panel on at rbp+0x28.
+    const std::uint8_t lea[] = {0x48, 0x8D, 0x5D, 0x28};  // lea rbx, [rbp+0x28]
+    Check(panels[1].rva == 0x8F83FD && panels[1].replacement.size() == 48 &&
+              std::memcmp(panels[1].replacement.data() + 32, lea, sizeof(lea)) == 0,
+          "8F841D points rbx at rbp+0x28", 0x8F841D);
+    Check(CallTargets(image.At(0x8F8416, 5), 0x8F8416, 0x845BB0), "the loop instantiates each template with 845BB0", 0x8F8416);
+    // The frame: rbp = rsp (after the pushes) - 0xD0, then 0x1D0 of locals, so rbp+0x28 lies inside it (rbp-0x100..rbp+0xD0).
+    Check(Bytes(0x8F8038, {0x48, 0x8D, 0xAC, 0x24, 0x30, 0xFF, 0xFF, 0xFF}) && Bytes(0x8F8040, {0x48, 0x81, 0xEC, 0xD0, 0x01, 0x00, 0x00}),
+          "8F8020's frame: lea rbp, [rsp-0xD0]; sub rsp, 0x1D0", 0x8F8038);
+    // Nothing in 8F8020..8F8A33 (its ret) addresses rbp+0x28 as a move, load, address or arithmetic operand: REX, the
+    // opcode, ModRM mod 01 rm 101 (rbp + disp8), disp8 0x28.
+    std::size_t uses = 0;
+    for (std::uint32_t rva = 0x8F8020; rva + 4 <= 0x8F8A34; ++rva) {
+        const std::uint8_t* at = image.At(rva, 4);
+        const std::uint8_t op = at[1];
+        const bool opcode = op == 0x89 || op == 0x8B || op == 0x8D || op == 0x88 || op == 0x8A || op == 0xC7 || op == 0x83 ||
+                            op == 0x39 || op == 0x3B || op == 0x01 || op == 0x03 || op == 0x29 || op == 0x2B;
+        if (at[0] >= 0x40 && at[0] <= 0x4F && opcode && (at[2] & 0xC7) == 0x45 && at[3] == 0x28) ++uses;
+    }
+    Check(uses == 0, "nothing in 8F8020 uses rbp+0x28 before the patch", 0x8F8020);
+    // What the layout reads: the panel list (weak_ptrs, data +0xB58, size +0xB68), a panel's MemberInfo at +0x200,
+    // MemberInfo's PlayerInfo weak_ptr at +0x98/+0xA0, PlayerInfo's User weak_ptr at +0/+8, a child's ordinal and both
+    // child lists.
+    Check(Bytes(0x8F8590, {0x49, 0x8B, 0x8D, 0x58, 0x0B, 0x00, 0x00}) && Bytes(0x8F8597, {0x49, 0xFF, 0x8D, 0x68, 0x0B, 0x00, 0x00}) &&
+              Bytes(0x8F85EC, {0x49, 0x8D, 0xB5, 0x50, 0x0B, 0x00, 0x00}),
+          "the panel list: data +0xB58, size +0xB68", 0x8F8590);
+    Check(Bytes(0x902328, {0x48, 0x89, 0x81, 0x00, 0x02, 0x00, 0x00}), "a panel's MemberInfo at +0x200", 0x902328);
+    Check(Bytes(0x901B52, {0x48, 0x89, 0x83, 0xA8, 0x00, 0x00, 0x00}) && Bytes(0x901B59, {0x48, 0x89, 0x8B, 0xB0, 0x00, 0x00, 0x00}) &&
+              Bytes(0x901B87, {0x48, 0x8D, 0x43, 0x10}),
+          "MemberInfo (its block + 0x10) keeps a weak PlayerInfo at +0x98/+0xA0", 0x901B52);
+    Check(Bytes(0x744B31, {0x49, 0x89, 0x4D, 0x00}) && Bytes(0x744B39, {0x49, 0x89, 0x55, 0x08}) && Bytes(0x744B2A, {0xF0, 0xFF, 0x40, 0x0C}),
+          "PlayerInfo keeps a weak eos::User at +0/+8", 0x744B31);
+    Check(Bytes(0x8E197D, {0x44, 0x39, 0x81, 0x10, 0x01, 0x00, 0x00}) && Bytes(0x8E1965, {0x48, 0x8B, 0x81, 0x58, 0x01, 0x00, 0x00}) &&
+              Bytes(0x8E19D3, {0x48, 0x8B, 0x82, 0x38, 0x01, 0x00, 0x00}),
+          "children are found by the ordinal at +0x110 in the lists at +0x158 and +0x138", 0x8E1950);
+    Check(RipTarget(0x8E1991, 7) == 0x2062F28 && RipTarget(0x8E1998, 7) == 0x2062F00 && CallTargets(image.At(0x8E19A1, 5), 0x8E19A1, 0x12DA7AA),
+          "a child is cast to ui::TextField with __RTDynamicCast(Component 2062F00, TextField 2062F28)", 0x8E1991);
+    // What it calls: SetArea (as the game's own runtime resize at 80F588, which then moves the button by +0x1A0),
+    // SetEnabled, CreateByName, SetText as the fill writes the name (8F7711), and the colour the text draw reads.
+    Check(Bytes(0x7E7FA0, {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57}) &&
+              Bytes(0x7E7FBC, {0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0xB0, 0x01, 0x00, 0x00}) &&
+              CallTargets(image.At(0x80F588, 5), 0x80F588, 0x7E7FA0) && Bytes(0x80F590, {0x44, 0x89, 0xB0, 0xA0, 0x01, 0x00, 0x00}),
+          "HUiButton::SetArea copies the area to +0x1B0; the game moves a button by +0x1A0 after it", 0x7E7FA0);
+    Check(Bytes(0x7EE280, {0x88, 0x51, 0x71, 0xC3}), "SetEnabled writes the pending state +0x71", 0x7EE280);
+    Check(Bytes(0x8456D0, {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C}),
+          "CreateByName 8456D0", 0x8456D0);
+    Check(Bytes(0x7F8BB0, {0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56}) &&
+              CallTargets(image.At(0x8F7716, 5), 0x8F7716, 0x7F8BB0) && Bytes(0x8F770E, {0x45, 0x33, 0xC0}),
+          "SetText 7F8BB0 (text field, text, no font), as the panel fill writes the name", 0x7F8BB0);
+    Check(Bytes(0x7F890C, {0xF3, 0x0F, 0x10, 0x9B, 0xBC, 0x02, 0x00, 0x00}) && Bytes(0x12DA7AA, {0xFF, 0x25}),
+          "the text draw reads the colour at +0x2B0..+0x2BC; __RTDynamicCast is an import thunk", 0x7F890C);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -243,7 +325,8 @@ int main(int argc, char** argv) {
     auto calls = GuestCalls();
     Check(calls.size() == 2, "two member count calls are redirected");
     const auto roomCalls = RoomViewCalls();
-    Check(roomCalls.size() == 3, "two panel builder calls and the voice icon call are redirected");
+    Check(roomCalls.size() == 2 && roomCalls[0].target == 0x8F8020 && roomCalls[1].target == 0x8F8020,
+          "both calls to the panel builder are redirected, and nothing else of the room screen");
     calls.insert(calls.end(), roomCalls.begin(), roomCalls.end());
     // Every call to the member list builder: the list is cut to kMaxPlayers, and fake members reach all of its consumers.
     const auto memberListCalls = MemberListCalls();
@@ -334,6 +417,7 @@ int main(int argc, char** argv) {
     const std::uint8_t templates[] = {0x48, 0x8D, 0x05};  // lea rax, [Button_Master] in the panel builder
     Check(std::memcmp(image.At(0x8F805B, 3), templates, 3) == 0 && RipTarget(0x8F805B, 7) == 0x180B428,
           "panel builder's template table starts with Button_Master", 0x8F805B);
+    CheckRoomPanels(image);
 
     for (const auto& patch : guest) {
         Check(Matches(image.At(patch.rva, patch.original.size()), patch), patch.name, patch.rva);
@@ -915,6 +999,8 @@ int main(int argc, char** argv) {
 
     auto all = guest;
     all.insert(all.end(), sessions.begin(), sessions.end());
+    const auto panelPatches = RoomPanelPatches();
+    all.insert(all.end(), panelPatches.begin(), panelPatches.end());
     all.insert(all.end(), missionPatches.begin(), missionPatches.end());
     all.insert(all.end(), hudPatches.begin(), hudPatches.end());
     allHooks.insert(allHooks.end(), hostHooks.begin(), hostHooks.end());

@@ -212,7 +212,11 @@ set_tests_properties(HitAuthorityGameCode PROPERTIES SKIP_RETURN_CODE ${GAME_TES
 add_executable(RoomViewTests tests/roomview_test.cpp src/roomview.cpp src/armor.cpp src/mission.cpp src/midhook.cpp
     src/code.cpp src/patches.cpp src/log.cpp src/identity.cpp src/joinlog.cpp)
 target_compile_options(RoomViewTests PRIVATE ${WARNINGS})
-add_test(NAME RoomViewPaging COMMAND RoomViewTests)
+add_test(NAME RoomViewRows COMMAND RoomViewTests)
+# The member rows' layout (roomrows.h), pure arithmetic.
+add_executable(RoomRowsTests tests/roomrows_test.cpp)
+target_compile_options(RoomRowsTests PRIVATE ${WARNINGS})
+add_test(NAME RoomMemberRows COMMAND RoomRowsTests)
 
 add_executable(SlotChainTests tests/slotchain_test.cpp src/midhook.cpp src/code.cpp src/patches.cpp)
 target_compile_options(SlotChainTests PRIVATE ${WARNINGS})
@@ -444,10 +448,10 @@ set_tests_properties(GameNet_worldadmission GameNet_worldfeed GameNet_worldfeedo
 add_executable(ModRoomIsolationTests ../tests/mod_room_test.cpp)
 target_compile_options(ModRoomIsolationTests PRIVATE /W4 /WX /utf-8 /EHsc)
 add_test(NAME ModRoomIsolation COMMAND ModRoomIsolationTests)
-# All Forces' mission-pack check on rooms Coop persisted (REJOIN, virtual, full-lobby): with the export, and an All
-# Forces from before it (FakeExtensionNoPacks).
+# All Forces' room namespace and mission-pack check on rooms Coop persisted (REJOIN, virtual, full-lobby): All Forces with
+# its exports, and one from before them (FakeExtensionNoPacks: no room protocol exports, no pack check).
 add_library(FakeExtensionNoPacks SHARED "${CMAKE_SOURCE_DIR}/../tests/fake_extension_profile.cpp")
-target_compile_definitions(FakeExtensionNoPacks PRIVATE FAKE_AF_NO_PACKS)
+target_compile_definitions(FakeExtensionNoPacks PRIVATE FAKE_AF_NO_PACKS FAKE_AF_NO_NAMESPACE)
 set_target_properties(FakeExtensionNoPacks PROPERTIES OUTPUT_NAME EDF6VehicleCrew
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-packs"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension-no-packs")

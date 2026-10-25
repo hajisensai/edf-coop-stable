@@ -153,6 +153,10 @@ How a join goes, by host:
 
 With All Forces (`EDF6VehicleCrew.dll`) the join also waits for the host's world state (a new player enters only while the host is in the lobby, not during a mission). A host whose EDF6Coop sends neither slots over EOS nor a direct link can never give it, so such a join fails after 10 s with `... its host's EDF6Coop sends no world state at all: the host must update EDF6Coop`.
 
+All Forces rooms are their own namespace: their `SEARCH_TYPE` is All Forces' prefix plus the game's value, and the lobby says `AF_PROFILE` = All Forces' room protocol. EDF6Coop takes both from All Forces itself (`EDF6AF_RoomPrefix` / `EDF6AF_RoomProfile`), so only rooms of the same All Forces room protocol are joined; there is no compatibility with other protocols. An All Forces without those exports is from before them: with it loaded no room is joined at all (log `... exports no room protocol ... update All Forces`). Without All Forces nothing changes, except that no All Forces room is joined.
+
+The room screen shows every member. Up to four keep the game's own panels; with more, the plugin lays the game's panels out again after each build so that they fit: 5-8 members in rows of two lines, 9-17 in one-line rows, 18-32 in two columns, and of a larger room the first 32 (the rest are in the room, not on its screen). With All Forces' PvP on, each row also shows the member's faction and role in the faction's colour (`EDF6AF_PvpMemberLabel`). `[RoomScreen] DummyMembers=1` adds local fake members (F6 / F7) to try it alone.
+
 A room with only its host in it is not entered without the slots either: the host's own slot is 0 only while it is the player who created the room (after the room changed hands it can be any), so the guest's slot cannot be known without the host.
 
 ### Weapon pages and the room's weapon files

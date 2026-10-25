@@ -1,4 +1,4 @@
-EDF6Coop 2.6.1 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
+EDF6Coop 2.7.0 - bigger and steadier online co-op for EARTH DEFENSE FORCE 6
 Project page: https://github.com/hajisensai/edf-coop-stable
 中文: README_EDF6Coop_zh.txt / 日本語: README_EDF6Coop_ja.txt
 If something goes wrong, open an Issue and attach Mods\Plugins\EDF6Coop.log.
@@ -21,8 +21,13 @@ Going back is a rename: delete EDF6Coop.dll and remove ".disabled" from the old 
 [Room sizes: the host picks]
 One package serves every room size. F2 / left-stick click cycles OFF, 8, 10, 12, 16, 24, 32, 48, 64,
 128, 256, 512 and 1024. The INI also accepts RoomSize=2..1024; 0 is the normal four-player mode.
-Everyone in a modded room must run 2.6.0 or later (2.6.1 recommended): network protocol 3 is not compatible
-with 2.5.0 (protocol 2), and the host removes members on another protocol; 2.6.0 and 2.6.1 share protocol 3; 2.4.x modded rooms are not compatible either. Normal four-player rooms remain available.
+Everyone in a modded room must run 2.6.0 or later (2.7.0 recommended): network protocol 3 is not compatible
+with 2.5.0 (protocol 2), and the host removes members on another protocol; 2.6.0, 2.6.1 and 2.7.0 share protocol 3; 2.4.x modded rooms are not compatible either. Normal four-player rooms remain available.
+All Forces (EDF6 All Forces): 2.7.0 goes with the All Forces builds that publish their room protocol (protocol 2)
+and is needed for their rooms. Older All Forces builds keep working with 2.7.0 in their own (protocol 1) rooms,
+as with 2.6.1. Players of the two All Forces generations cannot share a room; update All Forces to play together.
+When EDF6Coop refuses a room it remembered (REJOIN, the direct-link fallback) for that, the lower left of the
+menu says why for a while (e.g. "Room refused: host's All Forces is newer, update All Forces").
 1024 is an implementation limit, not a demonstrated practical multiplayer capacity. The new large-room
 paths have automated/native-code coverage, but have not been verified in live play at those sizes.
 Rooms above 16 players have no in-game voice chat. Required bandwidth and CPU grow with room size.
@@ -98,7 +103,7 @@ both need 2.2.0 or later.
 
 [Automatic updates]
 At game start EDF6Coop fetches a newer release from GitHub; it runs from the next start. (2.2.x of every
-room size updates to the same 2.6.1.)
+room size updates to the same 2.7.0.)
 The lower left of the menu (outside a room) says what happened: "EDF6Coop 2.3.2 (latest)",
 "EDF6Coop 2.3.1 -> 2.3.2 downloaded, restart the game", then after the restart
 "EDF6Coop 2.3.2 (updated from 2.3.1)". A failure says "update failed, see EDF6Coop.log".

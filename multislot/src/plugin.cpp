@@ -64,6 +64,7 @@
 #include "src/log.h"
 #include "src/product.h"
 #include "src/updater.h"
+#include "src/room_notice.h"
 
 namespace multislot {
 namespace {
@@ -934,6 +935,7 @@ bool LoadCoop(PluginInfo* info) {
     LogOpen(logPath);
     dn::logToSink(&ForwardDirectNetLine);
     dn::statusToSink(&SetPluginStatus);
+    dn::roomNoticeToSink(&SetRoomNotice);
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDF6Coop";
     info->version = PLUG_VER(MULTISLOT_VERSION_MAJOR, MULTISLOT_VERSION_MINOR, MULTISLOT_VERSION_PATCH, 0);

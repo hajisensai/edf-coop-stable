@@ -50,6 +50,16 @@ void SetPluginStatus(const char* text);
 // The current status, "" when there is none.
 std::wstring PluginStatus();
 
+// A join the direct-link part refused (dn::tellRoomRefused, src/room_notice.h: a remembered or virtual room this
+// machine's All Forces cannot take), shown outside rooms for kRoomNoticeMs after it. Without it the game only fails the
+// join. Set from any thread; "" clears it, and so does entering a room (UpdateMenuFrame).
+constexpr std::uint64_t kRoomNoticeMs = 30000;
+void SetRoomNotice(const char* text);
+// Test seam: as SetRoomNotice, refused at `tick` (GetTickCount64's clock).
+void SetRoomNoticeAt(const char* text, std::uint64_t tick);
+// The notice at `now`, "" when there is none or it is older than kRoomNoticeMs.
+std::wstring RoomNotice(std::uint64_t now);
+
 // What is installed, read the way Update-EDF6VR.ps1 reads it: EDF6VR\PACKAGE_MANIFEST.json first, then
 // the version string inside EDF6VR.dll (or EDF6VR.dll.disabled). Invalid when neither is there.
 Version InstalledVrVersion(const wchar_t* gameFolder);

@@ -449,7 +449,8 @@ add_executable(ModRoomIsolationTests ../tests/mod_room_test.cpp)
 target_compile_options(ModRoomIsolationTests PRIVATE /W4 /WX /utf-8 /EHsc)
 add_test(NAME ModRoomIsolation COMMAND ModRoomIsolationTests)
 # All Forces' room namespace and mission-pack check on rooms Coop persisted (REJOIN, virtual, full-lobby): All Forces with
-# its exports, and one from before them (FakeExtensionNoPacks: no room protocol exports, no pack check).
+# its exports (room protocol 2), and one from before them (FakeExtensionNoPacks: room protocol 1 - EDF6AF_DecodeRoomType
+# and no namespace exports, no pack check - which keeps 2.6.1's namespace).
 add_library(FakeExtensionNoPacks SHARED "${CMAKE_SOURCE_DIR}/../tests/fake_extension_profile.cpp")
 target_compile_definitions(FakeExtensionNoPacks PRIVATE FAKE_AF_NO_PACKS FAKE_AF_NO_NAMESPACE)
 set_target_properties(FakeExtensionNoPacks PROPERTIES OUTPUT_NAME EDF6VehicleCrew

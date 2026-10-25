@@ -403,6 +403,33 @@ int main() {
     SetPluginStatus("");
     Check(Compose(Menu(false, false), kSize, 0) == L"F2/LS " + Size(kSize), "no status, no text");
 
+    // A join the direct-link part refused (dn::tellRoomRefused): outside rooms, right after the controls and before
+    // the status, for kRoomNoticeMs; in a room never, and entering one clears it.
+    const char* refused = "Room refused: host's All Forces is newer, update All Forces";
+    const std::uint64_t now = GetTickCount64();
+    Check(RoomNotice(now).empty(), "no refused join, no notice");
+    SetRoomNoticeAt(refused, now);
+    Check(RoomNotice(now + kRoomNoticeMs - 1) == L"Room refused: host's All Forces is newer, update All Forces" &&
+              RoomNotice(now + kRoomNoticeMs).empty(),
+          "a refused join is told for kRoomNoticeMs, then no longer");
+    SetRoomNotice(refused);
+    Check(Compose(Menu(false, false), kSize, 0) ==
+              controls + L"   Room refused: host's All Forces is newer, update All Forces",
+          "outside a room the label says why the join was refused");
+    SetPluginStatus("EDF6Coop 2.7.0");
+    SetRoomNotice("Room refused: host's All Forces is older");
+    Check(Compose(Menu(false, false), kSize, 0) == controls + L"   Room refused: host's All Forces is older   EDF6Coop 2.7.0",
+          "before the version");
+    SetRoomNotice(refused);
+    SetPluginStatus("EDF6Coop 2.7.0 (update check failed)");
+    Check(Compose(Menu(false, false), kSize, 0).starts_with(controls + L"   Room refused: host's All Forces is newer, update All Forces"),
+          "a full field keeps the whole notice and cuts the status");
+    Check(Compose(Menu(true, false), 0, kSize) == inRoomGuest, "in a room it is not shown");
+    SetPluginStatus("");
+    SetRoomNotice("");
+    Check(RoomNotice(GetTickCount64()).empty() && Compose(Menu(false, false), kSize, 0) == L"F2/LS " + Size(kSize),
+          "cleared, the label is as before");
+
     // Menu frame updates write the label through the game's functions, once per change.
     wchar_t iniPath[MAX_PATH]{};
     GetTempPathW(MAX_PATH, iniPath);

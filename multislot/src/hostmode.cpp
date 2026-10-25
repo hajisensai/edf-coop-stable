@@ -289,6 +289,11 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
                          CopyArmor() ? L"ON" : L"OFF");
         wcsncat_s(out, outChars, copy, _TRUNCATE);
     }
+    // A join just refused (updatecheck.h RoomNotice), outside rooms: what the player tried last and why it failed.
+    // Before the EDF6VR notice and the status, which say nothing about it.
+    if (!context.inRoom)
+        if (const std::wstring refused = RoomNotice(GetTickCount64()); !refused.empty())
+            wcsncat_s(out, outChars, ((out[0] ? L"   " : L"") + refused).c_str(), _TRUNCATE);
     // Last on purpose. The field holds 96 characters and the guides above tell the player what the
     // buttons do right now; if something has to be cut it should be this, so the notice is appended with
     // _TRUNCATE after everything else rather than competing with it.
@@ -322,6 +327,8 @@ std::size_t ComposeLabel(const MenuContext& context, int setting, int created, w
 void UpdateMenuFrame(void* frame, bool keyDown, const MenuContext& context) {
     const bool pressed = keyDown && !keyWasDown;
     keyWasDown = keyDown;
+    // In a room the last refused join is over: it is not shown again once the player is back outside.
+    if (context.inRoom) SetRoomNotice("");
     if (pressed && !context.inRoom) {
         const int previous = roomSize.load(), size = NextRoomSize(previous);
         roomSize.store(size);

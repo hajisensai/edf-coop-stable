@@ -31,6 +31,8 @@ constexpr std::uint32_t kStreamRewind = 0x12B4FD0;      // back to it (577C6E, 6
 constexpr std::uint32_t kPartsReserve = 0x124190;       // GDI+0x70: the constructor's reserve(4) (22FE27)
 constexpr std::uint32_t kPartsRelease = 0x11E9D0;       // and its release
 constexpr std::uint32_t kVehicleAccept = 0x6347C0;      // VehicleBase slot 34: marks the vehicle classes
+constexpr std::uint32_t kObjectAccept = 0x54F8D0;       // GameObjectBase slot 34: the shooter's machine decides
+constexpr std::uint32_t kSoldierAccept = 0x5A3600;      // SoldierBase slot 34: a player where it is, else as 54F8D0
 constexpr std::uint32_t kVehicleRunner = 0x630F90;      // int(veh, hostFallback, preferSeat0): 1 this machine, 2 another
 constexpr std::uint32_t kIsHost = 0x784210;             // bool(null): this machine owns the room (true offline)
 
@@ -43,6 +45,7 @@ constexpr std::size_t kNetworkFlags = 0x128;  // NetworkObject+8
 constexpr std::size_t kDead = 0x2E8;
 constexpr std::size_t kHealth = 0x2F8;
 constexpr std::size_t kHealthDelta = 0x5B4;  // what 54CBE0 broadcasts (type 2), summed by slot 11 (54A9F6)
+constexpr std::size_t kOnlineUser = 0x1ED0;  // SoldierBase: the player's eos::User; 5A3600 tests it first
 constexpr std::size_t kSeats = 0x608;        // VehicleBase seat array (630FEF), 0x340 bytes a seat (631016)
 constexpr std::size_t kSeatCount = 0x618;    // VehicleBase seats (630FD9); 630F90 reads seat 0 when there are any
 constexpr std::size_t kSeatRider = 0x260, kSeatRiderControl = 0x268;  // weak_ptr to the rider (631020, 631043)
@@ -136,12 +139,14 @@ bool NoRegisteredDriver(const std::uint8_t* vehicle) {
     return OwnerOf(Field<std::uint32_t>(rider, kNetworkFlags)) == NetOwner::Unregistered;
 }
 
-NetOwner AttackerOwner(const std::uint8_t* gdi) {
+// `asGame`: the owner as the game itself sees it, before the vehicle rule.
+NetOwner AttackerOwner(const std::uint8_t* gdi, NetOwner* asGame) {
     // The override the game honours first (547E6D), then the attacker's own NetworkObject.
-    if (gdi[kGdiOverride]) return gdi[kGdiOverrideRemote] ? NetOwner::Remote : NetOwner::Local;
+    if (gdi[kGdiOverride]) return *asGame = gdi[kGdiOverrideRemote] ? NetOwner::Remote : NetOwner::Local;
     GameRef net;
     Fn<GameRef*(__fastcall*)(GameRef*, const void*)>(kLockNetworkObject)(&net, gdi + kGdiAttacker);
     NetOwner owner = net.object ? OwnerOf(Field<std::uint32_t>(net.object, 8)) : NetOwner::Unregistered;
+    *asGame = owner;
     if (owner != NetOwner::Unregistered) {
         // A vehicle's registration owner is whoever created it (the host, for a delivered one), not whoever fires
         // from it. Its shots follow a registered current driver through 630F90; without one, only the host decides.
@@ -222,6 +227,16 @@ DWORD WINAPI SampleRule(void*) {
         }
         Sleep(kRuleSampleMs);
     }
+}
+
+// Whether the game's rule for the target (its slot 34, one of three) leaves a hit to the shooter's machine wherever the
+// target is: enemies, NPCs and objects (54F8D0, and 5A3600 for a soldier that is no player). Read from which rule the
+// class has, not by asking it: its answer depends on whose copy this is. Any other rule keeps the events.
+bool ShooterDecides(const std::uint8_t* target) {
+    const auto table = *reinterpret_cast<const std::uint8_t* const*>(target);
+    const auto accept = reinterpret_cast<const unsigned char*>(Field<const void*>(table, kAcceptSlot));
+    if (accept == game + kObjectAccept) return true;
+    return accept == game + kSoldierAccept && Field<std::uint64_t>(target, kOnlineUser) == 0;
 }
 
 // The game's own answer to "would you take another machine's hit, not from the network" (slot 34): yes for a
@@ -530,7 +545,8 @@ void HitPreFilterHandler(CpuContext* context) {
     // Cheap answers first: the attacker is only looked up when it decides something.
     if (input.replaying || input.fromNetwork || !(input.damage > 0.0f) || input.target == NetOwner::Unregistered)
         return;
-    input.attacker = AttackerOwner(gdi);
+    input.attacker = AttackerOwner(gdi, &input.gameAttacker);
+    input.shooterDecides = ShooterDecides(target);
     const HitVerdict verdict = DecideHit(input);
     if (verdict != HitVerdict::Drop && verdict != HitVerdict::Forward) return;
     // A hit that could not be sent stays the game's: dealt here as it would be (or not, by its own rule).

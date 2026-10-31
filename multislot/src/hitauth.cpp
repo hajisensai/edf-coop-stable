@@ -76,6 +76,11 @@ HitVerdict DecideHit(const HitInput& input) {
     // Without a network identity on either side there is no owner to send to, and every machine has the object as
     // its own: the game's rule (the plugins' objects, docs/net-re/damage.md section 6).
     if (input.attacker == NetOwner::Unregistered || input.target == NetOwner::Unregistered) return HitVerdict::Vanilla;
+    // The game already decides this hit on the machine we would pick, the shooter's: it deals it on its copy of the
+    // target at once (the shooter sees the damage and its number) and sends the HP change to everyone. An event would
+    // only move that to the owner a round trip later, and the shooter's own copy would show nothing. Only a vehicle's
+    // shots can have another shooter in the game's eyes than in ours (VehicleShooter): those still go as events.
+    if (input.shooterDecides && input.attacker == input.gameAttacker) return HitVerdict::Vanilla;
     // Someone else's shot: its machine forwards it (HitRuleClock: dropping implies every sender forwards). Not yet
     // dropping: the game's rule (a remote shot at our player or vehicle is dealt here, at anything else not at all).
     if (input.attacker == NetOwner::Remote) return input.dropping ? HitVerdict::Drop : HitVerdict::Vanilla;

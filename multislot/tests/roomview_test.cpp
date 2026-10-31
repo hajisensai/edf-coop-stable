@@ -115,14 +115,26 @@ struct Panel {
     Component& Child(int ordinal) { return children[static_cast<std::size_t>(ordinal)]; }
 };
 
+// The room's focus targets as the game keeps them: the menu buttons first (the screen's own, never member panels), the
+// builder's panels after them, their number at +0xB78.
+constexpr std::size_t kMenuButtons = 7;
 struct Room {
     std::vector<unsigned char> bytes = std::vector<unsigned char>(0x1000, 0);
+    std::deque<Component> buttons = std::deque<Component>(kMenuButtons);
     std::deque<Panel> panels;
     std::vector<Entry> list;
     void* self() { return bytes.data(); }
+    Room() {
+        for (std::size_t i = 0; i < buttons.size(); ++i) {
+            At<float>(buttons[i].self(), 0x1A4) = 58.0f * static_cast<float>(i);
+            At<float>(buttons[i].self(), 0x1B8) = 440.0f;
+            At<float>(buttons[i].self(), 0x1BC) = 48.0f;
+        }
+    }
     void Build(std::size_t members) {
         panels.clear();
         list.clear();
+        for (auto& b : buttons) list.push_back({b.self(), &b.block});
         for (std::size_t i = 0; i < members; ++i) {
             panels.emplace_back(i == 0, "member" + std::to_string(i));
             At<float>(panels.back().panel.self(), 0x1A4) = i ? rows::kMasterHeight + rows::kMemberHeight * (i - 1) : 0.0f;
@@ -130,6 +142,15 @@ struct Room {
         for (auto& p : panels) list.push_back({p.panel.self(), &p.panel.block});
         At<Entry*>(self(), 0xB58) = list.data();
         At<std::size_t>(self(), 0xB68) = list.size();
+        At<int>(self(), 0xB78) = static_cast<int>(members);
+    }
+    // The menu buttons where the screen put them: never moved, sized or labelled as member rows.
+    bool ButtonsUntouched() {
+        bool same = true;
+        for (std::size_t i = 0; i < buttons.size(); ++i)
+            same = same && Y(buttons[i]) == 58.0f * static_cast<float>(i) && W(buttons[i]) == 440.0f &&
+                   At<float>(buttons[i].self(), 0x1BC) == 48.0f && Visible(buttons[i]) && buttons[i].nodes.empty();
+        return same;
     }
 };
 
@@ -216,6 +237,7 @@ int main() {
     Check(CallBuilder(room.self(), &FakeBuilder) == 0x1234 && builds == 1, "the game's builder runs and its result is kept");
     Check(areaCalls == 0 && Y(room.panels[1].panel) == rows::kMasterHeight && Y(room.panels[2].panel) == rows::kMasterHeight + rows::kMemberHeight,
           "three members: the panels stay where the game put them");
+    Check(room.ButtonsUntouched(), "three members: the menu buttons before them are left alone");
     Check(createCalls == 3 && consumed == 3 && lastDefinition == L"_pl_Name", "a label is made from _pl_Name for every row");
     for (auto& p : room.panels) Check(p.panel.block.uses == 1, "the parent reference CreateByName consumes was the plugin's own");
     for (auto& m : made) Check(m.block.uses == 1, "the plugin lets go of its reference to each label: the panel keeps it");
@@ -259,6 +281,7 @@ int main() {
                  At<float>(p.panel.self(), 0x1BC) == r.h;
     }
     Check(placed, "each row where roomrows.h puts it, the host's first");
+    Check(room.ButtonsUntouched(), "ten members: the menu buttons before the panels are not member rows");
     Panel& host = room.panels[0];
     Check(X(host.Child(0)) == 8 && W(host.Child(0)) == 104 && X(host.Child(1)) == 116 && W(host.Child(1)) == 170,
           "class and name on one line");
@@ -286,7 +309,7 @@ int main() {
     Check(!Visible(room.panels[5].Child(0)) && W(room.panels[5].Child(1)) == forty.rowWidth - 52, "narrow rows: the name, no class");
 
     // A panel list that changed without a build the hook saw: the old rows are not refreshed.
-    std::swap(room.list[0], room.list[1]);
+    std::swap(room.list[kMenuButtons], room.list[kMenuButtons + 1]);
     const int before = labelCalls;
     RefreshLabels(room.self());
     Check(labelCalls == before, "rows of panels that are gone are left alone");

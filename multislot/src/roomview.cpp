@@ -25,10 +25,15 @@ constexpr std::size_t kMembers = 0x900;          // {shared_ptr<MemberInfo>* dat
 constexpr std::size_t kRebuild = 0x940;          // byte: OnUpdate rebuilds members and panels
 constexpr std::size_t kChildA = 0xAF0;           // control blocks of the child screen / dialog
 constexpr std::size_t kChildB = 0xB00;           //   handles OnUpdate drops when it rebuilds
-// The panels the builder just made, in PlayersGroup's order: a vector of weak_ptr<Component> (data, capacity, size at
-// +0xB58 / +0xB60 / +0xB68), filled by 8F85EC..8F8742 from PlayersGroup's child list right after the panels are built.
-constexpr std::size_t kPanels = 0xB58;
-constexpr std::size_t kPanelCount = 0xB68;
+// The room's focus targets: a vector of weak_ptr<Component> (data, capacity, size at +0xB58 / +0xB60 / +0xB68). The
+// screen puts its menu buttons there first; the builder keeps the member panels at its end, their number in the int at
+// +0xB78: it pops that many off the end (8F8584..8F85D5, then +0xB78 = 0) and appends the new panels from PlayersGroup's
+// child list in its order (8F85EC..8F8742, +0xB78 + 1 each). So the panels are the last +0xB78 entries, never the whole
+// vector: read from its start, the menu buttons were laid out as member rows (2026-10-31, a one-member room: "8 member
+// panels", the buttons 98 apart and the one panel on the eighth row).
+constexpr std::size_t kTargets = 0xB58;
+constexpr std::size_t kTargetCount = 0xB68;
+constexpr std::size_t kPanelCount = 0xB78;
 constexpr std::uint32_t kPanelBuilder = 0x8F8020;
 constexpr std::uint32_t kRoomOnUpdate = 0x8FDFE0;
 // ui::Component (constructor 7E9790, Init 7EBC30): its ordinal under its parent in the layout tree, its two child lists
@@ -412,13 +417,25 @@ void ShowLabel(Row& row) {
     row.argb = argb;
 }
 
+// The member panels at the end of the room's focus targets (kTargets): `count` of them from `panels`. False when the
+// numbers do not make a panel list (more panels than targets or than a room holds, no data).
+bool PanelsOf(void* room, const Entry*& panels, std::size_t& count) {
+    const auto* targets = Field<Entry*>(room, kTargets);
+    const std::size_t total = Field<std::size_t>(room, kTargetCount);
+    const int built = Field<int>(room, kPanelCount);
+    if (!targets || built < 0 || built > kMaxPlayers || static_cast<std::size_t>(built) > total) return false;
+    count = static_cast<std::size_t>(built);
+    panels = targets + (total - count);
+    return true;
+}
+
 // The panels of `room` as the builder left them, laid out by `plan`. False when a field could not be read (nothing
 // after it is touched; the log says so once).
 bool LayOut(void* room, const char*& failure) {
     __try {
-        const auto* panels = Field<Entry*>(room, kPanels);
-        const std::size_t count = Field<std::size_t>(room, kPanelCount);
-        if (!panels || count > static_cast<std::size_t>(kMaxPlayers)) {
+        const Entry* panels = nullptr;
+        std::size_t count = 0;
+        if (!PanelsOf(room, panels, count)) {
             failure = "the room's panel list is not one";
             return false;
         }
@@ -456,8 +473,9 @@ bool LayOut(void* room, const char*& failure) {
 
 bool Refresh(void* room) {
     __try {
-        const auto* panels = Field<Entry*>(room, kPanels);
-        const std::size_t count = Field<std::size_t>(room, kPanelCount);
+        const Entry* panels = nullptr;
+        std::size_t count = 0;
+        if (!PanelsOf(room, panels, count)) return false;
         for (std::size_t i = 0, at = 0; i < count && at < rowCount; ++i) {
             if (!panels[i].object || !Alive(panels[i].control)) continue;
             // The rows of the last build only: a panel list that changed since means a build the hook did not see.

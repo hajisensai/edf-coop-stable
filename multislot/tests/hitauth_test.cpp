@@ -155,6 +155,33 @@ void TestDecision() {
     HitInput replay = in;
     replay.replaying = true;
     Check(DecideHit(replay) == HitVerdict::Deal, "an event being dealt by its owner is dealt");
+
+    // A target the game already leaves to the shooter's machine (enemies, NPCs, objects): the game's rule.
+    HitInput enemy;
+    enemy.forwarding = enemy.dropping = true;
+    enemy.damage = 10.0f;
+    enemy.shooterDecides = true;
+    enemy.attacker = enemy.gameAttacker = NetOwner::Local;
+    enemy.target = NetOwner::Remote;
+    Check(DecideHit(enemy) == HitVerdict::Vanilla,
+          "our shot at another machine's enemy: dealt on our copy as the game does, no event");
+    enemy.attacker = enemy.gameAttacker = NetOwner::Remote;
+    enemy.target = NetOwner::Local;
+    Check(DecideHit(enemy) == HitVerdict::Vanilla, "a remote shot at our enemy: the game's rule (its machine deals it)");
+    // A vehicle registered on the host, fired by our driver: the game would leave the hit to the host.
+    enemy.attacker = NetOwner::Local;
+    enemy.gameAttacker = NetOwner::Remote;
+    enemy.target = NetOwner::Remote;
+    Check(DecideHit(enemy) == HitVerdict::Forward, "our driver's shot from the host's vehicle still goes as an event");
+    enemy.attacker = NetOwner::Remote;
+    enemy.gameAttacker = NetOwner::Local;
+    enemy.target = NetOwner::Local;
+    Check(DecideHit(enemy) == HitVerdict::Drop, "the host drops its copy of a client driver's shot from its vehicle");
+    HitInput player = enemy;
+    player.shooterDecides = false;
+    player.attacker = player.gameAttacker = NetOwner::Local;
+    player.target = NetOwner::Remote;
+    Check(DecideHit(player) == HitVerdict::Forward, "our shot at another machine's player or vehicle goes as an event");
 }
 
 void TestRuleClock() {
@@ -205,8 +232,9 @@ int TimesDealt(bool sForwarding, bool sDropping, bool rForwarding, bool rDroppin
     s.forwarding = sForwarding;
     s.dropping = sDropping;
     s.damage = 10.0f;
-    s.attacker = NetOwner::Local;
+    s.attacker = s.gameAttacker = NetOwner::Local;
     s.target = NetOwner::Remote;
+    s.shooterDecides = !ownerDecides;
     switch (DecideHit(s)) {
         case HitVerdict::Forward: dealt += OwnerTakesEvent(rDropping, ownerDecides); break;
         case HitVerdict::Vanilla:
@@ -217,8 +245,9 @@ int TimesDealt(bool sForwarding, bool sDropping, bool rForwarding, bool rDroppin
     r.forwarding = rForwarding;
     r.dropping = rDropping;
     r.damage = 10.0f;
-    r.attacker = NetOwner::Remote;
+    r.attacker = r.gameAttacker = NetOwner::Remote;
     r.target = NetOwner::Local;
+    r.shooterDecides = !ownerDecides;
     switch (DecideHit(r)) {
         case HitVerdict::Vanilla:
         case HitVerdict::Deal: dealt += ownerDecides ? 1 : 0; break;  // slot 34 on R: its own player yes, else no
@@ -820,8 +849,14 @@ bool __fastcall FakeSend(void*, void*) {
     return fakeSendResult;
 }
 
+// Class vtables for the fixtures, by their slot 34 rule: 54F8D0, 5A3600, 6347C0.
+constexpr std::uint32_t kGameObjectVtable = 0x17CD3F0, kSoldierVtable = 0x17D24D8, kVehicleVtable = 0x17D8B50;
+
 // The pre-filter's decisions on fake objects (the forward itself needs a game session: gamenet/real machine).
 void TestPreFilter() {
+    Check(Slot(kGameObjectVtable, 34) == 0x54F8D0 && Slot(kSoldierVtable, 34) == 0x5A3600 &&
+              Slot(kVehicleVtable, 34) == 0x6347C0,
+          "the fixture vtables carry the three slot 34 rules");
     struct Case {
         const char* what;
         std::uint32_t targetFlags;
@@ -854,6 +889,8 @@ void TestPreFilter() {
         SetHitRuleForTest(c.forwarding, c.dropping);
         fakeSendResult = c.sendWorks;
         alignas(16) std::uint8_t object[0x800]{};
+        const void* classTable = base + kVehicleVtable;  // decided where it is (6347C0): the events' case
+        std::memcpy(object, &classTable, 8);
         const void* netTablePtr = netTable;
         std::memcpy(object + 0x120, &netTablePtr, 8);  // its NetworkObject's vtable: the send
         std::memcpy(object + 0x128, &c.targetFlags, 4);
@@ -885,6 +922,51 @@ void TestPreFilter() {
     HitPreFilterHandler(&ctx);
     Check(message == 0x10000007, "a message that is not damage passes");
     Check(fakeSends == 2, "the two forwards went through the object's send");
+
+    // A target whose own rule already leaves hits to the shooter's machine: the game decides, nothing is sent.
+    struct ClassCase {
+        const char* what;
+        std::uint32_t table;
+        bool player;
+        bool attackerRemote;
+        std::uint32_t targetFlags;
+        std::uint32_t expect;
+    };
+    const ClassCase classes[] = {
+        {"our shot at another machine's enemy: dealt on our copy, as the game does", kGameObjectVtable, false, false, 1,
+         kDamageMessage},
+        {"someone else's shot at our enemy: the game's rule (its machine dealt it)", kGameObjectVtable, false, true, 2,
+         kDamageMessage},
+        {"our shot at another machine's soldier NPC: the game's", kSoldierVtable, false, false, 1, kDamageMessage},
+        {"our shot at another machine's player: sent, dropped here", kSoldierVtable, true, false, 1, kDroppedMessage},
+        {"someone else's shot at our player: dropped (its machine sends)", kSoldierVtable, true, true, 2,
+         kDroppedMessage},
+    };
+    fakeSendResult = true;
+    const int sendsBefore = fakeSends;
+    for (const auto& c : classes) {
+        alignas(16) std::uint8_t target[0x2000]{};
+        const void* classTable = base + c.table;
+        std::memcpy(target, &classTable, 8);
+        const void* netTablePtr = netTable;
+        std::memcpy(target + 0x120, &netTablePtr, 8);
+        std::memcpy(target + 0x128, &c.targetFlags, 4);
+        if (c.player) target[0x1ED0] = 1;  // its eos::User
+        alignas(16) std::uint8_t gdi[kGdiBytes]{};
+        gdi[kGdiOverride] = 1;
+        gdi[kGdiOverrideRemote] = c.attackerRemote ? 1 : 0;
+        const float damage = 50.0f;
+        std::memcpy(gdi + kGdiDamage, &damage, 4);
+        std::uint32_t damageMessage = kDamageMessage;
+        void* gdiPayload = gdi;
+        CpuContext call{};
+        call.rcx = reinterpret_cast<std::uint64_t>(target);
+        call.rdx = reinterpret_cast<std::uint64_t>(&damageMessage);
+        call.r8 = reinterpret_cast<std::uint64_t>(&gdiPayload);
+        HitPreFilterHandler(&call);
+        Check(damageMessage == c.expect, c.what);
+    }
+    Check(fakeSends == sendsBefore + 1, "only the shot at the player went through the object's send");
     const HitCounters counters = HitAuthorityCounters();
     Check(counters.forwardFailed >= 1, "the send that failed is counted");
     ClearHitRuleForTest();
@@ -931,6 +1013,8 @@ void TestForwardReferenceOwnership() {
     std::uint64_t netTable[20]{};
     netTable[0x80 / 8] = reinterpret_cast<std::uint64_t>(&FakeSend);
     alignas(16) std::uint8_t target[0x800]{};
+    const void* classTable = base + kVehicleVtable;  // decided where it is: the forward's case
+    std::memcpy(target, &classTable, sizeof(classTable));
     const void* table = netTable;
     const std::uint32_t remote = 1;
     std::memcpy(target + 0x120, &table, sizeof(table));
@@ -983,6 +1067,7 @@ void TestVehicleSeatAuthority() {
     // This real vehicle vtable carries the RTTI that 22FCA0 uses to return its NetworkObject at +0x120.
     Check(Slot(0x17D8B50, 34) == 0x6347C0, "the native vehicle fixture has the VehicleBase acceptance rule");
     pointer(vehicle, base + 0x17D8B50);
+    pointer(target, base + 0x17D8B50);  // the target is a vehicle too: decided where it is
     pointer(vehicle + 0x608, seat);
     const std::uint64_t seats = 1;
     std::memcpy(vehicle + 0x618, &seats, sizeof(seats));

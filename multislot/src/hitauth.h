@@ -79,6 +79,11 @@ struct HitInput {
     float damage = 0.0f;
     NetOwner attacker = NetOwner::Unregistered;
     NetOwner target = NetOwner::Unregistered;
+    // The target's own rule (its slot 34) leaves a remote attacker's hit to the attacker's machine: enemies, NPCs,
+    // objects (54F8D0), not players or vehicles.
+    bool shooterDecides = false;
+    // The attacker's owner as the game sees it (GDI+1 override, else its NetworkObject+8), before VehicleShooter.
+    NetOwner gameAttacker = NetOwner::Unregistered;
 };
 enum class HitVerdict : std::uint8_t {
     Vanilla,  // not ours to decide: the game's own rule

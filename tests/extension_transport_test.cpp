@@ -11,10 +11,14 @@
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopGetExtensionApi(uint32_t, uint32_t, EDF6CoopExtensionApi*) noexcept;
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapacity(uint32_t, uint32_t, EDF6CoopExtensionCapacity*) noexcept;
 extern "C" uint32_t EDF6COOP_CALL EDF6CoopTrySendExtension(uint64_t, const EDF6CoopPeer*, const void*, uint32_t, uint32_t, uint32_t) noexcept;
+extern "C" uint32_t EDF6COOP_CALL EDF6CoopPollExtensionBatch(uint64_t, EDF6CoopExtensionMessage*, uint32_t, void*, uint32_t, uint32_t*) noexcept;
 // Observation of real production queues under the same mutex; no fake send path.
 namespace dn {
 struct ExtensionTransportTestAccess {
     static void dropTransportAcks(DirectNet& net, bool on) { net.testDropAcks_.store(on); }
+    static uint64_t faults(DirectNet& net) {
+        std::lock_guard<std::mutex> lock(net.mu_); return net.extensionFaults_;
+    }
     static size_t inbox(DirectNet& net) {
         std::lock_guard<std::mutex> lock(net.mu_); return net.extensionInbox_.size();
     }
@@ -74,7 +78,7 @@ int main() {
     CHECK(EDF6CoopGetExtensionCapacity(1, sizeof(capacity), &capacity));
     CHECK(capacity.size == 32 && capacity.version == 1 && capacity.maxPayload == 1024 &&
         capacity.maxPeers == 1024 && capacity.inboxMessages == 4096 && capacity.pendingBytes == 1048576 &&
-        capacity.congestedBacklogBytes == 1048576 && capacity.flags == 3);
+        capacity.congestedBacklogBytes == 1048576 && capacity.flags == 15);
     EDF6CoopExtensionApi api{};
     CHECK(!EDF6CoopGetExtensionApi(1, sizeof(api), nullptr));
     CHECK(!EDF6CoopGetExtensionApi(2, sizeof(api), &api));
@@ -237,13 +241,49 @@ int main() {
     }
     fillInbox();
     CHECK(host.extensionSend(hs.generation, bId, &byte, 1));
-    CHECK(waitFor([&] { tick(); return !snap(b).ready; }));
-    CHECK(snap(b).generation != freshB.generation && dn::ExtensionTransportTestAccess::inbox(b) == 0);
+    CHECK(waitFor([&] { tick(); return snap(b).generation != freshB.generation; }));
+    CHECK(dn::ExtensionTransportTestAccess::inbox(b) == 0);
     CHECK(!b.extensionPoll(freshB.generation, 2048, message));
-    for (unsigned i = 0; i < 3; ++i) tick();
-    CHECK(!snap(b).ready); // repeating identical room facts cannot reopen an overflow
-    b.clearExtensionRoom(); tick();
-    CHECK(snap(b).ready);
+    // The overflow renews the generation, never latches the room: nothing is queued on B's link, so
+    // the same room facts make B ready again at once, under a generation no earlier message can use.
+    CHECK(waitFor([&] { tick(); return snap(b).ready; }));
+    const auto recoveredB = snap(b);
+    CHECK(recoveredB.generation != freshB.generation && dn::ExtensionTransportTestAccess::faults(b) == 1);
+    CHECK(!b.extensionPoll(freshB.generation, 2048, message));
+
+    // Batch poll: one lock, payloads packed in arrival order, sender as the api.peer index.
+    {
+        hs = snap(host); as = snap(a);
+        const uint32_t values[3] = {11, 22, 33};
+        // One at a time: A's goes through the host's relay, so its arrival order is fixed by waiting.
+        CHECK(host.extensionSend(hs.generation, bId, reinterpret_cast<const uint8_t*>(&values[0]), 4));
+        CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::inbox(b) == 1; }));
+        CHECK(a.extensionSend(as.generation, bId, reinterpret_cast<const uint8_t*>(&values[1]), 4));
+        CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::inbox(b) == 2; }));
+        CHECK(host.extensionSend(hs.generation, bId, reinterpret_cast<const uint8_t*>(&values[2]), 4));
+        CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::inbox(b) == 3; }));
+        dn::bindExtensionTransport(std::shared_ptr<dn::DirectNet>(&b, [](dn::DirectNet*){}));
+        EDF6CoopExtensionMessage items[4]{};
+        uint8_t packed[16]{};
+        uint32_t count = 99;
+        const auto bGen = snap(b).generation;
+        CHECK(!EDF6CoopPollExtensionBatch(bGen - 1, items, 4, packed, sizeof(packed), &count) && count == 0);
+        CHECK(!EDF6CoopPollExtensionBatch(bGen, nullptr, 4, packed, sizeof(packed), &count));
+        // A buffer with room for two payloads takes two; the third stays queued.
+        CHECK(EDF6CoopPollExtensionBatch(bGen, items, 4, packed, 8, &count) && count == 2);
+        EDF6CoopPeer hostPeer{}, aPeer{};
+        CHECK(b.extensionPeer(bGen, items[0].peer, hostPeer) && hostId == hostPeer.id);
+        CHECK(items[0].offset == 0 && items[0].bytes == 4 && items[1].offset == 4 && items[1].bytes == 4);
+        CHECK(b.extensionPeer(bGen, items[1].peer, aPeer) && aId == aPeer.id);
+        uint32_t got[2]{};
+        memcpy(got, packed, sizeof(got));
+        CHECK(got[0] == 11 && got[1] == 22 && dn::ExtensionTransportTestAccess::inbox(b) == 1);
+        CHECK(EDF6CoopPollExtensionBatch(bGen, items, 4, packed, sizeof(packed), &count) && count == 1);
+        memcpy(got, packed, 4);
+        CHECK(got[0] == 33 && items[0].offset == 0);
+        CHECK(EDF6CoopPollExtensionBatch(bGen, items, 4, packed, sizeof(packed), &count) && count == 0);
+        dn::bindExtensionTransport(nullptr);
+    }
 
     // Application Applied replies are Data messages, not transport ACKs. Lose only
     // B's transport ACKs while every application reply still reaches the host:
@@ -338,13 +378,19 @@ int main() {
     CHECK(waitFor([&] { tick(); return !snap(host).ready; }));
     CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == relayBoundary);
     CHECK(!host.extensionSend(hs.generation, bId, &byte, 1));
+    // Still over the resume mark while the link is dark: the fault holds, no new generation churns.
+    const auto faultedGeneration = snap(host).generation;
+    for (unsigned i = 0; i < 3; ++i) tick();
+    CHECK(!snap(host).ready && snap(host).generation == faultedGeneration);
     host.setTestBlackhole(false);
     CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }, 15000));
     CHECK(host.send(bId, "EDF6", 1, 2, &byte, 1));
     CHECK(waitFor([&] { tick(); return b.pop(nullptr, 2048, message); })); // refusal left no sequence hole
     CHECK(message.socketName == "EDF6" && message.data == std::vector<uint8_t>{byte});
-    host.clearExtensionRoom(); a.clearExtensionRoom(); b.clearExtensionRoom(); tick();
+    // Drained: the same room is ready again by itself, under a new generation (no room reset needed).
     CHECK(waitFor([&] { tick(); return snap(host).ready && snap(a).ready && snap(b).ready; }));
+    CHECK(snap(host).generation != hs.generation && snap(host).generation != faultedGeneration);
+    CHECK(!host.extensionSend(hs.generation, bId, &byte, 1));
 
     // EOS room facts cannot remain authoritative while the game's tick stopped.
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));

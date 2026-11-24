@@ -46,9 +46,13 @@ typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionApiFn)(
 // pendingBytes/congestedBacklogBytes count encoded datagrams on the shared link,
 // including ordinary game traffic. flags bit 0 promises one reliable ordered route;
 // bit 1 proves EDF6CoopTrySendExtension atomic, nonfatal bounded admission.
+// bit 2: an overflow (legacy send/relay backlog, inbox) renews the generation and readiness returns
+// once the links drain, instead of latching the room closed. bit 3 proves EDF6CoopPollExtensionBatch.
 #define EDF6COOP_EXTENSION_CAPACITY_VERSION 1u
 #define EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED 1u
 #define EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND 2u
+#define EDF6COOP_EXTENSION_CAPACITY_RECOVERABLE_FAULT 4u
+#define EDF6COOP_EXTENSION_CAPACITY_POLL_BATCH 8u
 typedef struct EDF6CoopExtensionCapacity {
     uint32_t size, version, maxPayload, maxPeers, inboxMessages, pendingBytes, congestedBacklogBytes, flags;
 } EDF6CoopExtensionCapacity;
@@ -66,6 +70,17 @@ typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionCapacityFn)(
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopTrySendExtensionFn)(
     uint64_t expectedGeneration, const EDF6CoopPeer* peer, const void* data, uint32_t bytes,
     uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
+
+// Optional batch poll (capacity bit 3): one transport lock for up to maxMessages queued messages.
+// Payloads are packed into buffer; messages[i].peer is the index api.peer enumerates for the same
+// generation (the authenticated sender), offset/bytes locate its payload. A message that does not fit
+// stays queued, so bufferBytes must be at least EDF6COOP_EXTENSION_MAX_PAYLOAD: a smaller buffer can
+// leave a full-size message at the head of the queue forever. Returns 1 with *outCount (possibly 0), or 0 (*outCount 0) when unavailable or the
+// generation is stale.
+typedef struct EDF6CoopExtensionMessage { uint32_t peer, offset, bytes, reserved; } EDF6CoopExtensionMessage;
+typedef uint32_t (EDF6COOP_CALL *EDF6CoopPollExtensionBatchFn)(
+    uint64_t expectedGeneration, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
+    void* buffer, uint32_t bufferBytes, uint32_t* outCount);
 
 // AF -> Coop, in-process only. The producer snapshots actual current-world player
 // PUIDs atomically. Lobby users alone are not participants. ready is 0 while the

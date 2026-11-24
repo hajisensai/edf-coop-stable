@@ -138,8 +138,25 @@ extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopGetExtensionCapa
         EDF6COOP_EXTENSION_MAX_PAYLOAD, EDF6COOP_EXTENSION_MAX_PEERS,
         dn::extension::kInboxMessages, dn::extension::kPendingBytes,
         dn::extension::kCongestedBacklogBytes,
-        EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED | EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND};
+        EDF6COOP_EXTENSION_CAPACITY_RELIABLE_ORDERED | EDF6COOP_EXTENSION_CAPACITY_BOUNDED_TRY_SEND |
+        EDF6COOP_EXTENSION_CAPACITY_RECOVERABLE_FAULT | EDF6COOP_EXTENSION_CAPACITY_POLL_BATCH};
     return 1;
+}
+
+// One transport lock for a frame's worth of messages (capacity bit 3; extension_api.h).
+extern "C" __declspec(dllexport) uint32_t EDF6COOP_CALL EDF6CoopPollExtensionBatch(
+    uint64_t generation, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
+    void* buffer, uint32_t bufferBytes, uint32_t* outCount) noexcept {
+    if (outCount) *outCount = 0;
+    if (!messages || !buffer || !outCount || stopped.load()) return 0;
+    try {
+        auto net = transport.load();
+        uint32_t count = 0;
+        if (!net || !net->extensionPollBatch(generation, messages, maxMessages, static_cast<uint8_t*>(buffer),
+                bufferBytes, count)) return 0;
+        *outCount = count;
+        return 1;
+    } catch (...) { return 0; }
 }
 
 // Local atomic admission: a temporary full queue keeps its identity/generation.

@@ -24,12 +24,12 @@ set(MODLOADER_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/EDFModLoader")
 
 # The installed game this build reads from (read-only): EDF.dll for the patch-table and load tests, Root.cpk
 # for tools/make_menu_label.py. Pass -DEDF6_GAME_DIR=... or set the EDF6_GAME_DIR environment variable.
-if(DEFINED ENV{EDF6_GAME_DIR})
-    set(EDF6_GAME_DIR_DEFAULT "$ENV{EDF6_GAME_DIR}")
-else()
-    set(EDF6_GAME_DIR_DEFAULT "${CMAKE_SOURCE_DIR}/..")
+# The environment variable wins over the cache on every configure: a cached default from an earlier configure without
+# it would otherwise stay, and the game tests would run as skipped against a folder that holds no EDF.dll.
+set(EDF6_GAME_DIR "${CMAKE_SOURCE_DIR}/.." CACHE PATH "EARTH DEFENSE FORCE 6 install folder (holds EDF.dll)")
+if(DEFINED ENV{EDF6_GAME_DIR} AND NOT "$ENV{EDF6_GAME_DIR}" STREQUAL "")
+    set(EDF6_GAME_DIR "$ENV{EDF6_GAME_DIR}" CACHE PATH "EARTH DEFENSE FORCE 6 install folder (holds EDF.dll)" FORCE)
 endif()
-set(EDF6_GAME_DIR "${EDF6_GAME_DIR_DEFAULT}" CACHE PATH "EARTH DEFENSE FORCE 6 install folder (holds EDF.dll)")
 set(WARNINGS /W4 /WX /utf-8 /permissive-)
 
 # The default settings the plugin writes when no INI exists come from EDF6MultiSlot.ini itself.
@@ -186,7 +186,12 @@ set(EDF_DLL "${EDF6_GAME_DIR}/EDF.dll")
 # The tests against the game's code are registered either way. Without EDF.dll they report themselves skipped
 # (exit code 77), so ctest names them in its summary instead of a configure warning nobody reads in CI.
 set(GAME_TEST_SKIPPED 77)
-if(NOT EXISTS "${EDF_DLL}")
+if(NOT EXISTS "${EDF_DLL}" AND NOT MULTISLOT_CI)
+    # Only CI has no game. A full build (the one a release is tested and packaged from) skipping these would still
+    # read "100% tests passed".
+    message(FATAL_ERROR "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): set EDF6_GAME_DIR (or -DEDF6_GAME_DIR=...) to "
+                        "the game folder, or build with -CI (MULTISLOT_CI=ON) to run without the game's tests")
+elseif(NOT EXISTS "${EDF_DLL}")
     message(WARNING "No EDF.dll in EDF6_GAME_DIR (${EDF6_GAME_DIR}): the tests against the game's code "
                     "(PatchTablesMatchEDF, PluginLoad_*, GameNet_*) will be reported as skipped")
 endif()

@@ -139,6 +139,9 @@ struct Delivered {
     uint8_t channel = 0;
     std::vector<uint8_t> data;
     uint8_t cls = 0;  // TrafficClass it was sent as: a classified datagram may come over two paths (a copy)
+    // Extension inbox only: a state message (extension ABI v2 sendState) and its key.
+    bool state = false;
+    uint32_t key = 0;
 };
 
 class DirectNet {
@@ -222,6 +225,13 @@ public:
     // wildcard channel reads. Room facts are refreshed on the EOS tick only.
     static constexpr const char* kExtensionSocket = "EDF6CoopExt1";
     static constexpr uint8_t kExtensionChannel = 0xAF;
+    // A state message's payload on the wire: u32 key, u64 sender sequence, then the extension's bytes.
+    static constexpr size_t kExtensionStateHeader = 12;
+    // Data in the extension namespace that carries a sequence number belongs to the link's extension ordered
+    // domain (Link::xtx / xrx), never to the game's: both ends decide it from the same fields.
+    static bool extensionOrdered(const DataMsg& msg) {
+        return msg.seq != 0 && msg.socketName == kExtensionSocket && msg.channel == kExtensionChannel;
+    }
     void setExtensionRoom(std::string room, std::string host, std::vector<std::string> members, uint64_t worldEpoch = 1);
     void clearExtensionRoom();
     bool extensionParticipant(const std::string& peer);
@@ -230,7 +240,11 @@ public:
     bool extensionSend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes);
     uint32_t extensionTrySend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes,
                               uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
-    bool extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out);
+    // Latest-only state (extension ABI v2 sendState): unsequenced on the link, never retransmitted.
+    bool extensionSendState(uint64_t generation, const std::string& peer, uint32_t key, const uint8_t* data,
+                            uint32_t bytes);
+    // `peerIndex`: the sender's index in this generation's peer list.
+    bool extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out, uint32_t* peerIndex = nullptr);
     // One lock and one refresh for a frame's worth of queued messages (EDF6CoopPollExtensionBatch).
     // False: unavailable or another generation. Otherwise `count` messages, possibly zero.
     bool extensionPollBatch(uint64_t generation, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
@@ -291,6 +305,12 @@ private:
         uint32_t rttMs = 0;
         ReliableSender tx;
         ReliableReceiver rx;
+        // The extension ordered domain (protocol 8): its own sequence space, acknowledgements (ExtAck) and
+        // in-order delivery, so extension messages never wait behind a lost game packet and game packets never
+        // wait behind them. Nothing in it expires: an unacknowledged one stalls the link as a reliable game
+        // packet does.
+        ReliableSender xtx;
+        ReliableReceiver xrx;
         LinkMac txMac, rxMac;  // our direction's key, the peer's
         uint64_t txCounter = 0;
         ReplayWindow replay;
@@ -330,7 +350,7 @@ private:
     using Pages = ListPages;
 
     // A link that carries game packets now: up, and not being closed for an unacknowledged backlog.
-    static bool usable(const Link& link) { return link.up && !link.tx.overloaded(); }
+    static bool usable(const Link& link) { return link.up && !link.tx.overloaded() && !link.xtx.overloaded(); }
     // Usable, heard lately, losing few pings and not congested (see the file comment).
     bool healthy(const Link& link, uint64_t now) const;
     bool congested(const Link& link) const;
@@ -350,6 +370,8 @@ private:
     };
     Route routeFor(const std::string& remote, uint8_t cls, uint64_t now);
     bool takeStateBudget(Link& link, size_t bytes, uint64_t now);
+    // host: takes `bytes` of the relay budget (DirectOptions::relayBytesPerSecond); false when it is used up.
+    bool takeRelayBudget(size_t bytes, uint64_t now);
     void wantPeer(const std::string& remote, uint64_t now);
     void onPeerQuery(Link& from, const std::string& wanted, uint64_t now);
     void onPeerInfo(const PeerMsg& info, uint64_t now);
@@ -427,6 +449,13 @@ private:
     std::shared_ptr<const Identity> identity_;
     std::deque<Delivered> inbox_;
     std::deque<Delivered> extensionInbox_;
+    size_t extensionReliableQueued_ = 0;  // reliable messages in extensionInbox_ (what kInboxMessages bounds)
+    // An unread state message per (sender, key), in extensionInbox_ (deque elements keep their address while
+    // others are pushed at the back or popped at the front), and the newest sequence taken per (sender, key).
+    std::map<std::pair<std::string, uint32_t>, Delivered*> extensionStateQueued_;
+    std::map<std::pair<std::string, uint32_t>, uint64_t> extensionStateSeen_;
+    uint64_t extensionStateSeq_ = 0;  // the last sequence our state messages carried (see extensionSendState)
+    void popExtensionFrontLocked();
     std::string extensionRoom_, extensionHost_;
     std::vector<std::string> extensionMembers_, extensionPeers_;
     std::vector<uint64_t> extensionLinks_;

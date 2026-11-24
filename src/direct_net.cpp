@@ -925,14 +925,18 @@ void DirectNet::sendData(Link& link, DataMsg msg, uint64_t now) {
     // is not repaired here: state is replaced by the next one, and an event or control datagram is the game's to
     // resend (and goes over two paths).
     link.lastDataMs = now;
-    bool upgraded = msg.reliability == 0 && opt_.upgradeUnreliable && msg.cls == 0;
+    // The extension namespace has an ordered domain of its own (Link::xtx), and is never upgraded: a reliable
+    // extension message is numbered there, a state message (class State) goes unnumbered.
+    const bool extension = msg.socketName == kExtensionSocket && msg.channel == kExtensionChannel;
+    bool upgraded = !extension && msg.reliability == 0 && opt_.upgradeUnreliable && msg.cls == 0;
     bool tracked = msg.reliability != 0 || upgraded;
-    msg.seq = tracked ? link.tx.nextSeq() : 0;
+    ReliableSender& tx = extension ? link.xtx : link.tx;
+    msg.seq = tracked ? tx.nextSeq() : 0;
     uint32_t seq = msg.seq;
     m.data = std::move(msg);
     std::vector<uint8_t> dg = encode(m, opt_.key);
-    if (!sendSealed(link, dg)) link.tx.sendRefused();  // still tracked: resent once the link has credit again
-    if (tracked) link.tx.track(seq, std::move(dg), now, upgraded);
+    if (!sendSealed(link, dg)) tx.sendRefused();  // still tracked: resent once the link has credit again
+    if (tracked) tx.track(seq, std::move(dg), now, upgraded);
 }
 
 void DirectNet::deliverLocal(DataMsg msg) {
@@ -981,22 +985,27 @@ void DirectNet::routeData(DataMsg msg) {
             return;
         }
         // The host's uplink pays for what it relays: state beyond the relay budget is dropped (the next replaces it).
-        const double rate = static_cast<double>(opt_.relayBytesPerSecond);
-        if (relayTokensMs_ == 0) relayTokens_ = rate / 4;
-        relayTokens_ = std::min(rate / 4, relayTokens_ + static_cast<double>(now - relayTokensMs_) * rate / 1000.0);
-        relayTokensMs_ = now;
-        if (relayTokens_ < static_cast<double>(msg.payload.size())) {
-            ++relayShed_;
-            return;
-        }
-        relayTokens_ -= static_cast<double>(msg.payload.size());
+        if (!takeRelayBudget(msg.payload.size(), now)) return;
     }
     relayed_ += msg.payload.size();
     sendData(it->second, std::move(msg), now);
 }
 
+bool DirectNet::takeRelayBudget(size_t bytes, uint64_t now) {
+    const double rate = static_cast<double>(opt_.relayBytesPerSecond);
+    if (relayTokensMs_ == 0) relayTokens_ = rate / 4;
+    relayTokens_ = std::min(rate / 4, relayTokens_ + static_cast<double>(now - relayTokensMs_) * rate / 1000.0);
+    relayTokensMs_ = now;
+    if (relayTokens_ < static_cast<double>(bytes)) {
+        ++relayShed_;
+        return false;
+    }
+    relayTokens_ -= static_cast<double>(bytes);
+    return true;
+}
+
 void DirectNet::sendLink(Link& link, Message m) {
-    if (testDropAcks_ && m.type == MsgType::Ack) return; // selective transport-ACK loss fixture
+    if (testDropAcks_ && (m.type == MsgType::Ack || m.type == MsgType::ExtAck)) return; // transport-ACK loss fixture
     m.epoch = link.epoch;
     std::vector<uint8_t> dg = encode(m, opt_.key);
     sendSealed(link, dg);
@@ -1045,6 +1054,9 @@ void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
         case MsgType::Ack:
             link.tx.onAck(m.ack, now);
             break;
+        case MsgType::ExtAck:
+            link.xtx.onAck(m.ack, now);
+            break;
         case MsgType::Data:
         case MsgType::Forward: {
             if (m.type == MsgType::Data) link.lastDataMs = now;
@@ -1054,6 +1066,14 @@ void DirectNet::onLinkCommon(Link& link, const Message& m, uint64_t now) {
             }
             std::vector<DataMsg> ready;
             Message ack;
+            if (m.type == MsgType::Data && extensionOrdered(m.data)) {
+                // The extension ordered domain: its own sequence space and acknowledgements.
+                ack.type = MsgType::ExtAck;
+                ack.ack = link.xrx.onData(m.data, ready);
+                sendLink(link, ack);
+                for (auto& d : ready) routeData(std::move(d));
+                break;
+            }
             ack.type = MsgType::Ack;
             ack.ack = m.type == MsgType::Data ? link.rx.onData(m.data, ready) : link.rx.onForward(m.forward.floor, ready);
             sendLink(link, ack);
@@ -1640,6 +1660,8 @@ void DirectNet::tick(uint64_t now) {
         // A resent packet goes out with a new counter: the peer takes every counter once, and must be
         // able to acknowledge again a packet whose acknowledgement was lost.
         link.tx.poll(now, [&](std::vector<uint8_t>& dg) { return sendSealed(link, dg); }, retransmitBudget_.get());
+        // Nothing in the extension domain expires, so it never owes a Forward.
+        link.xtx.poll(now, [&](std::vector<uint8_t>& dg) { return sendSealed(link, dg); }, retransmitBudget_.get());
         if (auto floor = link.tx.forwardDue(now)) {
             Message f;
             f.type = MsgType::Forward;
@@ -1659,9 +1681,10 @@ void DirectNet::tick(uint64_t now) {
     // True (and logged) when `link` has to close: silent too long, stuck on a packet the game sent
     // reliably, or holding more unacknowledged data than a working peer ever lets pile up.
     auto closing = [&](const Link& link, const char* who) {
-        if (link.tx.overloaded()) {
-            logf("DIRECT %s dropped: %zu packets (%zu KB) sent but never acknowledged", who, link.tx.pendingCount(),
-                 link.tx.pendingBytes() / 1024);
+        if (link.tx.overloaded() || link.xtx.overloaded()) {
+            logf("DIRECT %s dropped: %zu packets (%zu KB) sent but never acknowledged (%zu of them extension)", who,
+                 link.tx.pendingCount() + link.xtx.pendingCount(), (link.tx.pendingBytes() + link.xtx.pendingBytes()) / 1024,
+                 link.xtx.pendingCount());
             return true;
         }
         if (now - link.lastRecvMs > opt_.linkTimeoutMs) {
@@ -1669,7 +1692,8 @@ void DirectNet::tick(uint64_t now) {
                  static_cast<unsigned long long>(now - link.lastRecvMs), opt_.linkTimeoutMs, link.tx.pendingCount());
             return true;
         }
-        if (uint64_t age = link.tx.oldestReliableAgeMs(now); age > opt_.stallTimeoutMs) {
+        if (uint64_t age = std::max(link.tx.oldestReliableAgeMs(now), link.xtx.oldestReliableAgeMs(now));
+            age > opt_.stallTimeoutMs) {
             logf("DIRECT %s stalled: a packet the game sent reliably is unacknowledged after %llu ms (limit %u ms) "
                  "although the peer answers (last heard %llu ms ago); %zu packets unacknowledged, %llu resends",
                  who, static_cast<unsigned long long>(age), opt_.stallTimeoutMs,
@@ -1965,7 +1989,7 @@ bool DirectNet::onPeerDatagram(const Received& r, const sockaddr_storage& from, 
     // Extensions have one ordered path, through the authenticated room host.
     if (m.type == MsgType::Data && (m.data.socketName == kExtensionSocket || m.data.channel == kExtensionChannel)) return true;
     if (!isLinkScoped(m.type) || m.type == MsgType::Roster || m.type == MsgType::Room || m.type == MsgType::PeerQuery ||
-        m.type == MsgType::PeerInfo)
+        m.type == MsgType::PeerInfo || m.type == MsgType::ExtAck)
         return true;  // the host's business, not a joiner's
     onLinkCommon(*link, m, now);
     return true;

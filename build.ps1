@@ -35,6 +35,19 @@ $steps = @(
     $configure,
     "cmake --build `"$buildDir`""
 )
-if ($Test) { $steps += "ctest --test-dir `"$buildDir`" --output-on-failure --no-tests=error" }
+$junit = Join-Path $buildDir 'ctest-junit.xml'
+if ($Test) {
+    if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+    $steps += "ctest --test-dir `"$buildDir`" --output-on-failure --no-tests=error --output-junit `"$junit`""
+}
 cmd /c ($steps -join ' && ')
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+# ctest counts a skipped test (exit code 77: no EDF.dll) as passed. Only -CI may skip; a full run must have run them all.
+if ($Test) {
+    [xml]$report = Get-Content -LiteralPath $junit -Raw
+    $skipped = @($report.SelectNodes('//testcase[skipped]') | ForEach-Object { $_.name })
+    if ($skipped.Count -gt 0) {
+        $message = "$($skipped.Count) test(s) skipped: $($skipped -join ', ')"
+        if ($CI) { Write-Warning $message } else { throw "$message. A build without -CI must run every test (EDF6_GAME_DIR)." }
+    }
+}

@@ -65,8 +65,10 @@ struct ExtensionTransportTestAccess {
         memcpy(msg.payload.data() + DirectNet::kExtensionStateHeader, &value, sizeof(value));
         net.extensionPacket(msg);
     }
-    // A reliable ordered datagram whose first transmission was lost: its sequence is taken in the game or the
-    // extension domain of the link, and nothing goes out (or is tracked) until releaseHeld sends it.
+    // A reliable ordered datagram that is lost until releaseHeld sends it: its sequence is taken in the game or
+    // the extension domain of the link and tracked there like any sent packet, so the sender's floor stays at it
+    // and no Forward skips it. What is tracked (and retransmitted every RTO) is a copy from an earlier session
+    // of the link (another epoch), which the peer refuses: every retransmission is lost too.
     static std::vector<uint8_t> holdNumbered(DirectNet& net, const std::string& peer, bool extension, uint8_t value) {
         std::lock_guard<std::mutex> lock(net.mu_);
         auto& link = route(net, peer);
@@ -79,8 +81,13 @@ struct ExtensionTransportTestAccess {
         m.data.channel = extension ? DirectNet::kExtensionChannel : 1;
         m.data.reliability = 2;
         m.data.payload = {value};
-        m.data.seq = extension ? link.xtx.nextSeq() : link.tx.nextSeq();
-        return encode(m, net.opt_.key);
+        auto& tx = extension ? link.xtx : link.tx;
+        m.data.seq = tx.nextSeq();
+        const auto real = encode(m, net.opt_.key);
+        m.epoch = link.epoch ^ 1;
+        tx.track(m.data.seq, encode(m, net.opt_.key), static_cast<uint64_t>(std::chrono::duration_cast<
+            std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));
+        return real;
     }
     static void releaseHeld(DirectNet& net, const std::string& peer, std::vector<uint8_t> dg) {
         std::lock_guard<std::mutex> lock(net.mu_);

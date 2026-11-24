@@ -24,7 +24,10 @@
 // links to each other: PeerQuery (a guest asks the host where another guest is), PeerInfo (the host tells both
 // where the other one is, as it sees them), Punch (opens a guest's NAT towards another one; read by nobody), and
 // Data carries the datagram's traffic class (netclass.h). Roster and Room come in pages (`total`, `offset`) for
-// rooms larger than one datagram holds.
+// rooms larger than one datagram holds. Protocol 8 (extension ABI v2) gives extension traffic its own ordered
+// domain: Data in the extension namespace (socket EDF6CoopExt1, channel 0xAF) with a sequence number is numbered,
+// acknowledged (ExtAck) and delivered in a sequence space of its own on every link, so a lost game packet no longer
+// holds plugin messages back; an extension state message (reliability 0, class State) is carried unsequenced.
 #pragma once
 #include <array>
 #include <cstdint>
@@ -37,7 +40,7 @@
 namespace dn {
 
 constexpr uint32_t kMagic = 0x314E4445;  // "EDN1"
-constexpr uint16_t kProtocol = 7;
+constexpr uint16_t kProtocol = 8;
 constexpr uint8_t kFlagTagged = 1;
 constexpr size_t kTagBytes = 8;
 // Longest id / socket name on the wire. Decoding rejects longer ones instead of reading a string the
@@ -67,6 +70,9 @@ enum class MsgType : uint8_t {
     PeerQuery = 13,  // client -> host: where is this member (to link with it directly)
     PeerInfo = 14,   // host -> client: this member is at this address (both get told about each other)
     Punch = 15,      // client -> client: opens our NAT towards it before its hello; ignored on arrival
+    // Acknowledgement of the extension ordered domain (protocol 8): the body of Ack, for the link's other sequence
+    // space (extension Data with a sequence number). Extension messages are never given up, so it has no Forward.
+    ExtAck = 16,
 };
 
 // Members one Roster or Room page names (the 32 a Welcome holds). Larger lists go in several pages.
@@ -194,7 +200,7 @@ struct Message {
 
 // Messages sent only on an established link, authenticated with its keys (see sealLink()).
 inline bool isLinkScoped(MsgType t) {
-    return t == MsgType::Data || t == MsgType::Ack || t == MsgType::Forward || t == MsgType::Ping ||
+    return t == MsgType::Data || t == MsgType::Ack || t == MsgType::ExtAck || t == MsgType::Forward || t == MsgType::Ping ||
            t == MsgType::Pong || t == MsgType::Roster || t == MsgType::Bye || t == MsgType::Room ||
            t == MsgType::PeerQuery || t == MsgType::PeerInfo;
 }

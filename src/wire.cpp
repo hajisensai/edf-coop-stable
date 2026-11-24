@@ -172,7 +172,8 @@ void writeBody(Writer& w, const Message& m) {
             w.raw(m.data.payload.data(), m.data.payload.size());
             w.u8(m.data.cls);
             break;
-        case MsgType::Ack: {
+        case MsgType::Ack:
+        case MsgType::ExtAck: {
             w.u32(m.ack.cumulative);
             size_t n = m.ack.ranges.size() < kMaxAckRanges ? m.ack.ranges.size() : kMaxAckRanges;
             w.u8(static_cast<uint8_t>(n));
@@ -258,7 +259,8 @@ bool readBody(Reader& r, Message& m) {
             m.data.cls = r.u8();
             if (r.ok() && m.data.cls > 3) r.reject();  // TrafficClass has four values
             return true;
-        case MsgType::Ack: {
+        case MsgType::Ack:
+        case MsgType::ExtAck: {
             m.ack.cumulative = r.u32();
             size_t n = r.u8();
             if (n > kMaxAckRanges) {

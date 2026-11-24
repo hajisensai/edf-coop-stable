@@ -12,6 +12,8 @@ namespace multislot {
 //      the sender's epoch.
 //   3: hit events carry the shot's sub-hits as ragdoll body places (version 3), so a weak point's filter takes a
 //      forwarded hit.
-constexpr std::int64_t kNetProtocol = 3;
+//   4: extension ABI v2 over direct-link protocol 8: extension state messages (sendState) and an extension
+//      ordered domain of its own on every link (ExtAck), so plugin messages no longer share game sequencing.
+constexpr std::int64_t kNetProtocol = 4;
 
 }  // namespace multislot

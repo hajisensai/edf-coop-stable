@@ -5,9 +5,13 @@
 // All callbacks return 1 on success, 0 on failure. No callback throws across the ABI.
 // A failed/!ready snapshot must cancel pending work. generation is local, opaque,
 // changes on room/roster/host/link changes, and must never be sent as a shared epoch.
-#define EDF6COOP_EXTENSION_VERSION 1u
+// Version 2 (EDF6Coop 2.9.0, direct-link protocol 8) replaced version 1, which is no longer served:
+// it adds sendState and reports every delivered message with EDF6CoopExtensionMessage.
+#define EDF6COOP_EXTENSION_VERSION 2u
 #define EDF6COOP_EXTENSION_MAX_PAYLOAD 1024u
 #define EDF6COOP_EXTENSION_MAX_PEERS 1024u
+// (sender, key) pairs one receiver tracks per generation; state of a further pair is dropped.
+#define EDF6COOP_EXTENSION_MAX_STATE_KEYS 65536u
 #define EDF6AF_SUPPORT_PROTOCOL_VERSION 2u
 #if defined(_WIN32)
 #define EDF6COOP_CALL __cdecl
@@ -27,6 +31,25 @@ typedef struct EDF6CoopSnapshot {
     EDF6CoopPeer host;
 } EDF6CoopSnapshot;
 
+// One delivered message (poll and EDF6CoopPollExtensionBatch). peer: the index api.peer enumerates for
+// the same generation (the authenticated sender). offset/bytes: where its payload is (poll: offset 0).
+// flags bit 0 (STATE): a sendState message, and key is its key; otherwise a reliable ordered message
+// (send/TrySend) and key is 0.
+#define EDF6COOP_EXTENSION_MESSAGE_STATE 1u
+typedef struct EDF6CoopExtensionMessage { uint32_t peer, offset, bytes, flags, key; } EDF6CoopExtensionMessage;
+
+// Two kinds of message, both 1..EDF6COOP_EXTENSION_MAX_PAYLOAD bytes, through the authenticated host:
+//   send       a transaction: reliable, ordered per sender, retransmitted until acknowledged. Extension
+//              messages have an ordered domain of their own on every link: a lost game packet never
+//              holds them back, only a lost extension message does.
+//   sendState  "the latest replaces the previous" state under a caller-chosen key: sent once, never
+//              retransmitted, outside the reliable backlog (pendingBytes, TrySend limits, the overflow
+//              drain gate). It carries the sender's sequence; a receiver drops one not newer than the last
+//              it took for (sender, key), and an unread queued one is overwritten in place by a newer one.
+//              It may be lost, dropped for the link's or the host relay's budget, or arrive while a
+//              transaction sent before it is still being repaired: never use it for anything a later
+//              state message does not fully replace. Keys are per sender; the same key from two senders
+//              is two streams. Returns 1 when taken by the transport (which may still drop it).
 typedef struct EDF6CoopExtensionApi {
     uint32_t size;
     uint32_t version;
@@ -34,17 +57,20 @@ typedef struct EDF6CoopExtensionApi {
     uint32_t (EDF6COOP_CALL *peer)(uint64_t expectedGeneration, uint32_t index, EDF6CoopPeer* out);
     uint32_t (EDF6COOP_CALL *send)(uint64_t expectedGeneration, const EDF6CoopPeer* peer,
                                   const void* data, uint32_t bytes);
-    // Empty/too-small buffer returns 0 and sets outBytes=0. Sender is authenticated
-    // by DirectNet (relay trusts the authenticated room host); never payload-derived.
+    // Empty/too-small buffer returns 0 and leaves the message queued (*info zeroed). Sender is
+    // authenticated by DirectNet (relay trusts the authenticated room host); never payload-derived.
+    // info: peer index, bytes, flags and key of the message taken (offset 0).
     uint32_t (EDF6COOP_CALL *poll)(uint64_t expectedGeneration, EDF6CoopPeer* sender,
-                                  void* data, uint32_t capacity, uint32_t* outBytes);
+                                  void* data, uint32_t capacity, EDF6CoopExtensionMessage* info);
+    uint32_t (EDF6COOP_CALL *sendState)(uint64_t expectedGeneration, const EDF6CoopPeer* peer,
+                                       uint32_t key, const void* data, uint32_t bytes);
 } EDF6CoopExtensionApi;
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionApiFn)(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionApi* out);
 
-// Optional, read-only local capacity proof; does not change ExtensionApi v1.
-// pendingBytes/congestedBacklogBytes count encoded datagrams on the shared link,
-// including ordinary game traffic. flags bit 0 promises one reliable ordered route;
+// Optional, read-only local capacity proof.
+// pendingBytes/congestedBacklogBytes count the unacknowledged encoded datagrams of the link's
+// extension ordered domain (game traffic and state messages have their own). flags bit 0 promises one reliable ordered route;
 // bit 1 proves EDF6CoopTrySendExtension atomic, nonfatal bounded admission.
 // bit 2: an overflow (legacy send/relay backlog, inbox) renews the generation and readiness returns
 // once the links drain, instead of latching the room closed. bit 3 proves EDF6CoopPollExtensionBatch.
@@ -59,8 +85,8 @@ typedef struct EDF6CoopExtensionCapacity {
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopGetExtensionCapacityFn)(
     uint32_t version, uint32_t outSize, EDF6CoopExtensionCapacity* out);
 
-// Optional atomic admission on the local host route. Limits include all pending
-// encoded datagrams (ordinary game traffic too), and must be nonzero and no larger
+// Optional atomic admission on the local host route. Limits apply to the link's pending
+// extension ordered datagrams (not game traffic, not state), and must be nonzero and no larger
 // than pendingBytes/8192 packets. WOULD_BLOCK keeps the generation and sequence;
 // retain the application work until transport ACKs make room. This does not reserve
 // capacity at a second joiner's host relay; host-originated fan-out has one link.
@@ -71,13 +97,12 @@ typedef uint32_t (EDF6COOP_CALL *EDF6CoopTrySendExtensionFn)(
     uint64_t expectedGeneration, const EDF6CoopPeer* peer, const void* data, uint32_t bytes,
     uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
 
-// Optional batch poll (capacity bit 3): one transport lock for up to maxMessages queued messages.
-// Payloads are packed into buffer; messages[i].peer is the index api.peer enumerates for the same
-// generation (the authenticated sender), offset/bytes locate its payload. A message that does not fit
-// stays queued, so bufferBytes must be at least EDF6COOP_EXTENSION_MAX_PAYLOAD: a smaller buffer can
-// leave a full-size message at the head of the queue forever. Returns 1 with *outCount (possibly 0), or 0 (*outCount 0) when unavailable or the
+// Optional batch poll (capacity bit 3): one transport lock for up to maxMessages queued messages,
+// state and reliable alike, in queue order. Payloads are packed into buffer; messages[i] describes one
+// (EDF6CoopExtensionMessage above). A message that does not fit stays queued, so bufferBytes must be at
+// least EDF6COOP_EXTENSION_MAX_PAYLOAD: a smaller buffer can leave a full-size message at the head of the
+// queue forever. Returns 1 with *outCount (possibly 0), or 0 (*outCount 0) when unavailable or the
 // generation is stale.
-typedef struct EDF6CoopExtensionMessage { uint32_t peer, offset, bytes, reserved; } EDF6CoopExtensionMessage;
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopPollExtensionBatchFn)(
     uint64_t expectedGeneration, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
     void* buffer, uint32_t bufferBytes, uint32_t* outCount);

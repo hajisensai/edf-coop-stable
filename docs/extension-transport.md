@@ -143,8 +143,10 @@ bufferBytes, outCount)` takes up to `maxMessages` queued messages under one tran
 lock and one readiness refresh. Payloads are packed into `buffer` in arrival order;
 each 16-byte `EDF6CoopExtensionMessage` gives the sender as the index `api.peer`
 enumerates for that generation, plus the payload's offset and size. A message that
-does not fit stays queued. It returns 1 with a count (possibly 0), or 0 when the
-transport is unavailable or the generation is stale.
+does not fit stays queued, so the caller must pass at least
+`EDF6COOP_EXTENSION_MAX_PAYLOAD` (1024) bytes of buffer; a smaller one can leave a
+full-size message at the head of the queue for good. It returns 1 with a count
+(possibly 0), or 0 when the transport is unavailable or the generation is stale.
 
 **Overflow recovery contract (capacity bit 2).** An overflow is a generation
 boundary, never a room boundary. Inbox overflow, and a legacy send or host relay
@@ -155,9 +157,14 @@ link's real backlog (game traffic included) is at most half of the ceiling
 (512 KiB and 4096 packets), and becomes ready again by itself under a further new
 generation; no room change is needed. Earlier DLLs latched the room closed until
 the room authority changed, which in practice meant the rest of the mission. On the
-host, a relay overflow renews the host's generation; the host consumer's new epoch
-reaches every joiner through its own handshake, so a dropped relayed message is
-never mistaken for a delivered one.
+host, a relay overflow renews only the host's generation: the joiners' generations
+do not change, and the joiner that sent a dropped joiner-to-joiner message saw it
+acknowledged by the host. The transport alone therefore does not tell that sender
+its message was lost. A consumer that relays transactions between joiners must
+carry its own host-led epoch and cancel in-flight work when it changes (EDF6 All
+Forces does: the host resumes under a new support epoch that every joiner adopts,
+resetting its channels, before any message of that epoch is accepted). A repeated
+fault logs one line per 10 seconds with the number of faults it stands for.
 
 Every query/send/poll revalidates route identities, reconnect link IDs and readiness
 while holding DirectNet's mutex. Direct and relayed extension sends preflight the

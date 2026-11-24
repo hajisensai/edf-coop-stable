@@ -74,7 +74,8 @@ typedef uint32_t (EDF6COOP_CALL *EDF6CoopTrySendExtensionFn)(
 // Optional batch poll (capacity bit 3): one transport lock for up to maxMessages queued messages.
 // Payloads are packed into buffer; messages[i].peer is the index api.peer enumerates for the same
 // generation (the authenticated sender), offset/bytes locate its payload. A message that does not fit
-// stays queued. Returns 1 with *outCount (possibly 0), or 0 (*outCount 0) when unavailable or the
+// stays queued, so bufferBytes must be at least EDF6COOP_EXTENSION_MAX_PAYLOAD: a smaller buffer can
+// leave a full-size message at the head of the queue forever. Returns 1 with *outCount (possibly 0), or 0 (*outCount 0) when unavailable or the
 // generation is stale.
 typedef struct EDF6CoopExtensionMessage { uint32_t peer, offset, bytes, reserved; } EDF6CoopExtensionMessage;
 typedef uint32_t (EDF6COOP_CALL *EDF6CoopPollExtensionBatchFn)(

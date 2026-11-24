@@ -1,5 +1,6 @@
 #include "direct_net.h"
 #include "extension_limits.h"
+#include "log.h"
 
 #include <algorithm>
 #include <cstring>
@@ -10,6 +11,10 @@ namespace {
 std::atomic<uint64_t> nextGeneration{1}; // unique across retired/replaced DirectNet instances
 constexpr uint64_t kRoomLeaseMs = 2000;
 constexpr uint64_t kLinkFreshMs = 3000;
+// After an overflow, readiness returns once every participant link's real backlog (game traffic
+// included) is back under half of the extension ceiling: room to work again, not an instant refault.
+constexpr size_t kResumeBytes = extension::kPendingBytes / 2;
+constexpr size_t kResumePackets = ReliableSender::kMaxPendingPackets / 2;
 
 uint64_t extensionNowMs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -27,6 +32,32 @@ void DirectNet::resetExtensionLocked() {
     extensionReady_ = false;
     extensionLinks_.clear();
     extensionGeneration_ = nextGeneration.fetch_add(1);
+}
+
+// An overflow (legacy send/relay backlog, or the inbox) cancels this generation: queued messages are
+// dropped and every consumer sees a new generation, so no half of an acknowledged transaction is
+// delivered silently. It is not a room boundary: once drained, the same room is ready again with a
+// fresh generation (consumers renegotiate their own epochs, as after any other readiness blip).
+void DirectNet::faultExtensionLocked(const char* why) {
+    extensionFault_ = true;
+    ++extensionFaults_;
+    resetExtensionLocked();
+    logf("DIRECT extension %s: generation %llu renewed (fault %llu); ready again once the backlog drains",
+        why, static_cast<unsigned long long>(extensionGeneration_), static_cast<unsigned long long>(extensionFaults_));
+}
+
+bool DirectNet::extensionDrainedLocked() const {
+    auto drained = [](const Link& link) {
+        return link.tx.pendingBytes() <= kResumeBytes && link.tx.pendingCount() <= kResumePackets;
+    };
+    if (opt_.mode == Mode::Host) {
+        for (const auto& id : extensionPeers_) {
+            const auto link = clients_.find(id);
+            if (link != clients_.end() && !drained(link->second)) return false;
+        }
+        return true;
+    }
+    return !hostLink_ || drained(*hostLink_);
 }
 
 void DirectNet::setExtensionRoom(std::string room, std::string host, std::vector<std::string> members, uint64_t worldEpoch) {
@@ -67,6 +98,11 @@ bool DirectNet::extensionParticipant(const std::string& peer) {
 // snapshot can authorize a send after a link disappeared/reconnected or its key changed.
 bool DirectNet::refreshExtensionLocked() {
     const uint64_t now = extensionNowMs();
+    if (extensionFault_ && extensionDrainedLocked()) {
+        extensionFault_ = false;
+        logf("DIRECT extension backlog drained after fault %llu: the room may become ready again",
+            static_cast<unsigned long long>(extensionFaults_));
+    }
     bool ready = running_ && active_ && !extensionFault_ && !extensionRoom_.empty() && extensionWorldEpoch_ &&
         validId(localPuid_) && validId(extensionHost_) && extensionUpdatedMs_ &&
         now - extensionUpdatedMs_ <= kRoomLeaseMs &&
@@ -147,8 +183,7 @@ uint32_t DirectNet::admitExtensionDataLocked(Link& link, DataMsg msg, uint64_t n
     if (bytes > bytesLimit || link.tx.pendingBytes() > bytesLimit - bytes ||
         link.tx.pendingCount() >= packetsLimit) {
         if (!failClosed) return EDF6COOP_EXTENSION_SEND_WOULD_BLOCK;
-        extensionFault_ = true;
-        resetExtensionLocked();
+        faultExtensionLocked(msg.src == localPuid_ ? "send backlog over the ceiling" : "relay backlog over the ceiling");
         return EDF6COOP_EXTENSION_SEND_UNAVAILABLE;
     }
     sendData(link, std::move(msg), now);
@@ -195,6 +230,28 @@ bool DirectNet::extensionPoll(uint64_t generation, uint32_t capacity, Delivered&
     return true;
 }
 
+bool DirectNet::extensionPollBatch(uint64_t generation, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
+                                   uint8_t* buffer, uint32_t bufferBytes, uint32_t& count) {
+    count = 0;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!messages || !buffer || !refreshExtensionLocked() || generation != extensionGeneration_) return false;
+    uint32_t used = 0;
+    while (count < maxMessages && !extensionInbox_.empty()) {
+        const auto& next = extensionInbox_.front();
+        const auto size = static_cast<uint32_t>(next.data.size());
+        if (size > bufferBytes - used) break; // stays queued for the next batch
+        // Queued senders are always current peers: any peer change resets the inbox with the generation.
+        const auto peer = std::lower_bound(extensionPeers_.begin(), extensionPeers_.end(), next.src);
+        if (peer == extensionPeers_.end() || *peer != next.src) { extensionInbox_.pop_front(); continue; }
+        memcpy(buffer + used, next.data.data(), size);
+        messages[count] = {static_cast<uint32_t>(peer - extensionPeers_.begin()), used, size, 0};
+        used += size;
+        ++count;
+        extensionInbox_.pop_front();
+    }
+    return true;
+}
+
 // True means reserved for extensions, including malformed packets. Nothing in
 // this namespace may reach the game, even when an extension is absent/not ready.
 bool DirectNet::extensionPacket(const DataMsg& msg) {
@@ -211,8 +268,7 @@ bool DirectNet::extensionPacket(const DataMsg& msg) {
         return true;
     }
     if (extensionInbox_.size() >= extension::kInboxMessages) {
-        extensionFault_ = true; // no silent truncation of a reliable transaction
-        resetExtensionLocked();
+        faultExtensionLocked("inbox full"); // no silent truncation of a reliable transaction
         return true;
     }
     extensionInbox_.push_back({msg.src, msg.socketName, msg.channel, msg.payload, msg.cls});

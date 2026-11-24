@@ -231,6 +231,10 @@ public:
     uint32_t extensionTrySend(uint64_t generation, const std::string& peer, const uint8_t* data, uint32_t bytes,
                               uint32_t pendingBytesLimit, uint32_t pendingPacketsLimit);
     bool extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out);
+    // One lock and one refresh for a frame's worth of queued messages (EDF6CoopPollExtensionBatch).
+    // False: unavailable or another generation. Otherwise `count` messages, possibly zero.
+    bool extensionPollBatch(uint64_t generation, EDF6CoopExtensionMessage* messages, uint32_t maxMessages,
+                            uint8_t* buffer, uint32_t bufferBytes, uint32_t& count);
 
     // True when a game packet from `remote` arrived over the direct link within `windowMs`.
     bool heardFromRecently(const std::string& remote, uint64_t windowMs);
@@ -428,7 +432,12 @@ private:
     std::vector<uint64_t> extensionLinks_;
     uint64_t extensionGeneration_ = 0, extensionUpdatedMs_ = 0;
     uint64_t extensionWorldEpoch_ = 0;
+    // A backlog/inbox overflow: the generation is renewed at once; readiness returns only after the
+    // participant links drain to half the ceiling (extensionDrainedLocked). Never latched for the room.
     bool extensionReady_ = false, extensionFault_ = false;
+    uint64_t extensionFaults_ = 0;
+    void faultExtensionLocked(const char* why);
+    bool extensionDrainedLocked() const;
     void resetExtensionLocked();
     bool refreshExtensionLocked();
     bool extensionPacket(const DataMsg& msg);

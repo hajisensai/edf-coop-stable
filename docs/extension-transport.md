@@ -12,8 +12,9 @@ High-volume consumers additionally resolve the optional read-only export
 `congestedBacklogBytes`, `flags`. It reports 1024-byte payloads, 1024 reserved remote
 peer slots, 4096 inbox messages and a 1 MiB per-link encoded-datagram backlog.
 Flag bit 0 means reliable ordered delivery on one stable route. Bit 1 proves the
-optional `EDF6CoopTrySendExtension` flow-control export described below; other bits
-are zero.
+optional `EDF6CoopTrySendExtension` flow-control export described below. Bit 2 means
+overflows are recoverable (below). Bit 3 proves the optional
+`EDF6CoopPollExtensionBatch` export; other bits are zero.
 Bad version, size or null output returns 0 without writing. No room or ready
 transport is required, and the query neither changes transport state nor grants
 mission authority. The existing 40-byte `EDF6CoopExtensionApi` remains version 1.
@@ -135,8 +136,28 @@ or reserved channel removes a packet from game delivery, including malformed or
 unavailable-extension packets and wildcard game reads. Valid messages enter only
 the extension queue. A short poll buffer leaves its packet queued. There are at
 most 4096 queued messages (at most 4 MiB payload); overflow invalidates the
-extension session instead of losing part of an acknowledged transaction silently.
-Overflow remains closed until the room authority is explicitly invalidated.
+extension generation instead of losing part of an acknowledged transaction silently.
+
+`EDF6CoopPollExtensionBatch(expectedGeneration, messages, maxMessages, buffer,
+bufferBytes, outCount)` takes up to `maxMessages` queued messages under one transport
+lock and one readiness refresh. Payloads are packed into `buffer` in arrival order;
+each 16-byte `EDF6CoopExtensionMessage` gives the sender as the index `api.peer`
+enumerates for that generation, plus the payload's offset and size. A message that
+does not fit stays queued. It returns 1 with a count (possibly 0), or 0 when the
+transport is unavailable or the generation is stale.
+
+**Overflow recovery contract (capacity bit 2).** An overflow is a generation
+boundary, never a room boundary. Inbox overflow, and a legacy send or host relay
+that would exceed either backlog ceiling, drop the queued inbox and renew the
+generation at once, so every consumer cancels its in-flight work exactly as after
+any readiness blip. The transport then stays not ready until every participant
+link's real backlog (game traffic included) is at most half of the ceiling
+(512 KiB and 4096 packets), and becomes ready again by itself under a further new
+generation; no room change is needed. Earlier DLLs latched the room closed until
+the room authority changed, which in practice meant the rest of the mission. On the
+host, a relay overflow renews the host's generation; the host consumer's new epoch
+reaches every joiner through its own handshake, so a dropped relayed message is
+never mistaken for a delivered one.
 
 Every query/send/poll revalidates route identities, reconnect link IDs and readiness
 while holding DirectNet's mutex. Direct and relayed extension sends preflight the
@@ -145,9 +166,10 @@ takes pending wire bytes above 1 MiB, and the 8192-packet reliable-link ceiling 
 applies. Ordinary game traffic consumes this shared backlog and may itself exceed
 the extension admission ceiling; congestion alone does not change a generation or
 cancel a mission. The capacity query does not reserve payload space. Legacy API v1
-send and the host relay still latch the extension session closed if they would
-exceed either ceiling. Only the explicit TrySend API reports transient pressure as
-would-block. Inbox overflow remains fatal, as does loss of identity/room authority.
+send and the host relay renew the generation if they would exceed either ceiling
+(the recovery contract above). Only the explicit TrySend API reports transient
+pressure as would-block without a new generation. Inbox overflow renews the
+generation the same way; loss of identity/room authority closes the room.
 Pending reliable game packets are never trimmed by extension resets.
 The game routing heuristic (256 KiB backlog or a measured RTT increase over 150 ms)
 does not invalidate this stable extension route; its ordinary game routing remains
@@ -163,7 +185,10 @@ Validation uses real localhost UDP with three independently keyed peers, the
 production retransmission and relay implementation, ABI callbacks, EOS's existing
 test SDK, and a test-only All Forces readiness DLL. `ExtensionTransport` covers
 ordered repair, authenticated sender, reserved-channel isolation, bounds, stale
-generations, key rebinding, reconnect, queue overflow and room lease expiry. Its
+generations, key rebinding, reconnect, queue overflow and its recovery (inbox
+overflow ready again at once under a new generation; relay overflow held while the
+link stays above the resume mark, then ready by itself after it drains), batch poll
+packing and sender indexes, and room lease expiry. Its
 selective transport-ACK-loss fixture delivers every application reply while real
 SDK pending bytes remain charged, then verifies would-block without sequence or
 generation changes, shared game backlog above the extension admission ceiling,

@@ -43,12 +43,23 @@ process. A receiver keeps, per (sender, key), the last sequence it took and drop
 anything not newer; an unread queued state message is overwritten in place by a
 newer one, so the inbox holds at most one per (sender, key). At most
 `EDF6COOP_EXTENSION_MAX_STATE_KEYS` (65536) (sender, key) pairs are tracked per
-generation; state of a further pair is dropped (logged). A new generation forgets
-the pairs and their sequences. The sender applies the link's state budget (the
-same one as game state), and the host relays joiner-to-joiner state unnumbered
-within its relay budget (`relayBytesPerSecond`); either may drop a state message.
-`sendState` returns 1 once the transport took it, even if it is then dropped. Keys
-are per sender. Never use state for anything a later state message does not fully
+generation; state of a further pair is dropped (logged), while tracked pairs keep
+taking newer state. Nothing is evicted (a forgotten sequence would take a stale,
+delayed copy again). The cap is what bounds the receiver: keys are any 32-bit value
+and there may be up to `EDF6COOP_EXTENSION_MAX_PEERS` (1024) senders, so the pairs
+alone are not bounded. With it, the seen table, the queued-state index and the
+queued state messages in the inbox hold at most 65536 entries each (at most
+65536 x 1024 bytes = 64 MiB of queued state data). The cap is shared by all
+senders, so one sender with many keys can use it up for the generation; an
+extension should use few, fixed keys. A new generation forgets the pairs and their
+sequences. The sender applies the link's state budget (the same one as game state;
+a message over it is shed at once and counted in `stateShed`), and the host relays
+joiner-to-joiner state unnumbered within its relay budget (`relayBytesPerSecond`);
+either may drop a state message. `sendState` returns 1 once the transport took it,
+also when it was shed right away or is dropped later: by design (state may be lost)
+there is no delivery signal, and a caller must never treat 1 as delivered. It keeps
+sending its latest state (periodically or on change) instead. 0 means rejected
+(bad arguments, stale generation, unknown peer, not ready). Keys are per sender. Never use state for anything a later state message does not fully
 replace: a state message may arrive while a transaction sent before it is still
 being repaired.
 

@@ -540,12 +540,12 @@ int main() {
         Access::queueRaw(b, "0002abababababababababababababab", 1);
         Access::queueRaw(b, aId, 2);
         Access::queueRaw(b, "0003dddddddddddddddddddddddddddd", 3);
-        uint32_t index = UINT32_MAX;
-        EDF6CoopPeer indexed{};
-        CHECK(b.extensionPoll(bs.generation, 2048, message, &index) && message.src == aId &&
-              message.data == std::vector<uint8_t>{2} && b.extensionPeer(bs.generation, index, indexed) &&
-              aId == indexed.id);
-        CHECK(!b.extensionPoll(bs.generation, 2048, message, &index));
+        uint32_t polledIndex = UINT32_MAX;
+        EDF6CoopPeer polledPeer{};
+        CHECK(b.extensionPoll(bs.generation, 2048, message, &polledIndex) && message.src == aId &&
+              message.data == std::vector<uint8_t>{2} && b.extensionPeer(bs.generation, polledIndex, polledPeer) &&
+              aId == polledPeer.id);
+        CHECK(!b.extensionPoll(bs.generation, 2048, message, &polledIndex));
         CHECK(Access::inbox(b) == 0 && Access::reliableQueued(b) == 0 && snap(b).generation == bs.generation);
     }
 

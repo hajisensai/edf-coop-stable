@@ -49,6 +49,13 @@ struct ExtensionTransportTestAccess {
     static size_t stateKeys(DirectNet& net) {
         std::lock_guard<std::mutex> lock(net.mu_); return net.extensionStateSeen_.size();
     }
+    // A queued reliable message from `src` placed straight in the inbox, bypassing the receive path's peer check
+    // (what a broken "queued senders are current peers" invariant would leave behind).
+    static void queueRaw(DirectNet& net, const std::string& src, uint8_t value) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        net.extensionInbox_.push_back({src, DirectNet::kExtensionSocket, DirectNet::kExtensionChannel, {value}, 0});
+        ++net.extensionReliableQueued_;
+    }
     // A state datagram from `src` as the authenticated receive path hands it over (any sequence).
     static void injectState(DirectNet& net, const std::string& src, uint32_t key, uint64_t seq, uint32_t value) {
         std::lock_guard<std::mutex> lock(net.mu_);
@@ -525,6 +532,21 @@ int main() {
         b.clearExtensionRoom();
         CHECK(Access::stateKeys(b) == 0 && Access::inbox(b) == 0);
         CHECK(waitFor([&] { tick(); return snap(b).ready; }));
+
+        // poll reports only a current peer: a queued sender that is none (sorting between two peers, or past
+        // the last) is dropped, never reported under the index of the peer that sorts next.
+        bs = snap(b);
+        CHECK(Access::inbox(b) == 0 && Access::reliableQueued(b) == 0);
+        Access::queueRaw(b, "0002abababababababababababababab", 1);
+        Access::queueRaw(b, aId, 2);
+        Access::queueRaw(b, "0003dddddddddddddddddddddddddddd", 3);
+        uint32_t polledIndex = UINT32_MAX;
+        EDF6CoopPeer polledPeer{};
+        CHECK(b.extensionPoll(bs.generation, 2048, message, &polledIndex) && message.src == aId &&
+              message.data == std::vector<uint8_t>{2} && b.extensionPeer(bs.generation, polledIndex, polledPeer) &&
+              aId == polledPeer.id);
+        CHECK(!b.extensionPoll(bs.generation, 2048, message, &polledIndex));
+        CHECK(Access::inbox(b) == 0 && Access::reliableQueued(b) == 0 && snap(b).generation == bs.generation);
     }
 
     // Application Applied replies are Data messages, not transport ACKs. Lose only

@@ -264,7 +264,8 @@ bool DirectNet::extensionSendState(uint64_t generation, const std::string& peer,
     memcpy(msg.payload.data() + 4, &extensionStateSeq_, 8);
     memcpy(msg.payload.data() + kExtensionStateHeader, data, bytes);
     const uint64_t now = extensionNowMs();
-    // Over the link's state budget it is dropped like a lost datagram: the next one replaces it.
+    // Over the link's state budget it is dropped like a lost datagram: the next one replaces it. Still true
+    // (by design, extension_api.h sendState): 1 means taken, never delivered.
     if (opt_.shedState && !takeStateBudget(link, msg.payload.size(), now)) {
         ++stateShed_;
         return true;
@@ -282,10 +283,17 @@ void DirectNet::popExtensionFrontLocked() {
 
 bool DirectNet::extensionPoll(uint64_t generation, uint32_t capacity, Delivered& out, uint32_t* peerIndex) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!refreshExtensionLocked() || generation != extensionGeneration_ || extensionInbox_.empty() ||
-        extensionInbox_.front().data.size() > capacity) return false;
-    // Queued senders are always current peers: any peer change resets the inbox with the generation.
-    const auto peer = std::lower_bound(extensionPeers_.begin(), extensionPeers_.end(), extensionInbox_.front().src);
+    if (!refreshExtensionLocked() || generation != extensionGeneration_) return false;
+    // Queued senders are always current peers: any peer change resets the inbox with the generation. Like
+    // extensionPollBatch, a sender that is not one (the invariant broken) is dropped, never reported under the
+    // index of whichever peer sorts next (or one past the last).
+    auto peer = extensionPeers_.end();
+    while (!extensionInbox_.empty()) {
+        peer = std::lower_bound(extensionPeers_.begin(), extensionPeers_.end(), extensionInbox_.front().src);
+        if (peer != extensionPeers_.end() && *peer == extensionInbox_.front().src) break;
+        popExtensionFrontLocked();
+    }
+    if (extensionInbox_.empty() || extensionInbox_.front().data.size() > capacity) return false;
     if (peerIndex) *peerIndex = static_cast<uint32_t>(peer - extensionPeers_.begin());
     out = extensionInbox_.front();
     popExtensionFrontLocked();
@@ -358,6 +366,13 @@ bool DirectNet::extensionPacket(const DataMsg& msg) {
     memcpy(&key, msg.payload.data(), 4);
     memcpy(&seq, msg.payload.data() + 4, 8);
     const auto id = std::make_pair(msg.src, key);
+    // The seen table needs a cap of its own: keys are any 32-bit value and up to EDF6COOP_EXTENSION_MAX_PEERS
+    // senders, so (sender, key) alone is not bounded (2^42 pairs). When it holds EDF6COOP_EXTENSION_MAX_STATE_KEYS
+    // pairs, state of a further pair is dropped (logged) until the next generation; tracked pairs keep taking
+    // newer state. Nothing is evicted: a forgotten sequence would take a stale, delayed copy again. That caps this
+    // table, extensionStateQueued_ and the queued state in the inbox at 65536 entries each (the inbox at most
+    // 65536 x EDF6COOP_EXTENSION_MAX_PAYLOAD = 64 MiB of state data). The cap is shared: one sender using many
+    // keys can use it up for everyone in the generation.
     if (const auto seen = extensionStateSeen_.find(id); seen != extensionStateSeen_.end()) {
         if (seq <= seen->second) return true; // older than (or a copy of) one already taken
         seen->second = seq;

@@ -10,7 +10,9 @@
 #define EDF6COOP_EXTENSION_VERSION 2u
 #define EDF6COOP_EXTENSION_MAX_PAYLOAD 1024u
 #define EDF6COOP_EXTENSION_MAX_PEERS 1024u
-// (sender, key) pairs one receiver tracks per generation; state of a further pair is dropped.
+// (sender, key) pairs one receiver tracks per generation; state of a further pair is dropped (until the next
+// generation; tracked pairs are never evicted). Keys are 32-bit, so this cap is what bounds the receiver.
+// Shared by all senders: keep the keys one extension uses few and fixed.
 #define EDF6COOP_EXTENSION_MAX_STATE_KEYS 65536u
 #define EDF6AF_SUPPORT_PROTOCOL_VERSION 2u
 #if defined(_WIN32)
@@ -49,7 +51,12 @@ typedef struct EDF6CoopExtensionMessage { uint32_t peer, offset, bytes, flags, k
 //              It may be lost, dropped for the link's or the host relay's budget, or arrive while a
 //              transaction sent before it is still being repaired: never use it for anything a later
 //              state message does not fully replace. Keys are per sender; the same key from two senders
-//              is two streams. Returns 1 when taken by the transport (which may still drop it).
+//              is two streams. Returns 1 when taken by the transport, not when delivered: it also returns 1
+//              when the sender drops it at once for the link's state budget (shed, counted in stateShed), and
+//              the relay or the receiver may drop it later. By design (state may be lost) there is no
+//              delivery signal: a caller must never treat 1 as delivered, and keeps sending the latest state
+//              (periodically or on change) instead of retrying on 0. 0 means rejected (bad arguments,
+//              stale generation, unknown peer, not ready).
 typedef struct EDF6CoopExtensionApi {
     uint32_t size;
     uint32_t version;

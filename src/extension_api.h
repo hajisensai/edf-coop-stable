@@ -5,7 +5,7 @@
 // All callbacks return 1 on success, 0 on failure. No callback throws across the ABI.
 // A failed/!ready snapshot must cancel pending work. generation is local, opaque,
 // changes on room/roster/host/link changes, and must never be sent as a shared epoch.
-// Version 2 (EDF6Coop 2.8.0, direct-link protocol 8) replaced version 1, which is no longer served:
+// Version 2 (EDF6Coop 2.9.0, direct-link protocol 8) replaced version 1, which is no longer served:
 // it adds sendState and reports every delivered message with EDF6CoopExtensionMessage.
 #define EDF6COOP_EXTENSION_VERSION 2u
 #define EDF6COOP_EXTENSION_MAX_PAYLOAD 1024u

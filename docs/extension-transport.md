@@ -5,7 +5,7 @@
 the exact 48-byte API structure size. Callers initialize `Snapshot.size` before querying.
 All callbacks return `uint32_t` 0/1 and catch C++ exceptions at the boundary.
 
-ABI v2 (EDF6Coop 2.8.0, direct-link protocol 8, netcode protocol 4) replaced v1, which
+ABI v2 (EDF6Coop 2.9.0, direct-link protocol 8, netcode protocol 4) replaced v1, which
 is no longer served: a request for version 1 returns 0. Changes from v1:
 
 - the API structure gained a last member, `sendState(expectedGeneration, peer, key,

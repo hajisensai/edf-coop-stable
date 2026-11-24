@@ -1,9 +1,60 @@
-# Authenticated extension transport, ABI v1
+# Authenticated extension transport, ABI v2
 
 `src/extension_api.h` is the Windows x64 C ABI shared with All Forces. Resolve
-`EDF6CoopGetExtensionApi` dynamically from `EDF6Coop.dll`, request version 1 and
-the exact API structure size. Callers initialize `Snapshot.size` before querying.
+`EDF6CoopGetExtensionApi` dynamically from `EDF6Coop.dll`, request version 2 and
+the exact 48-byte API structure size. Callers initialize `Snapshot.size` before querying.
 All callbacks return `uint32_t` 0/1 and catch C++ exceptions at the boundary.
+
+ABI v2 (EDF6Coop 2.8.0, direct-link protocol 8, netcode protocol 4) replaced v1, which
+is no longer served: a request for version 1 returns 0. Changes from v1:
+
+- the API structure gained a last member, `sendState(expectedGeneration, peer, key,
+  data, bytes)` (40 → 48 bytes);
+- `poll`'s last parameter is now `EDF6CoopExtensionMessage* info` (was `uint32_t*
+  outBytes`);
+- `EDF6CoopExtensionMessage` is 20 bytes: `peer`, `offset`, `bytes`, `flags`, `key`
+  (was `peer`, `offset`, `bytes`, `reserved`). Flags bit 0
+  (`EDF6COOP_EXTENSION_MESSAGE_STATE`) marks a state message, whose key is in `key`;
+- reliable extension messages have an ordered domain of their own on every link (below).
+
+Because the wire format changed, every member of a room must run the same build:
+Coop's direct links refuse protocol 7 (`BadProtocol`) and the host removes members
+publishing another netcode protocol (`EDF6NET_PROTO`).
+
+## Two kinds of message
+
+`send` (and `EDF6CoopTrySendExtension`) is a transaction: reliable, ordered per
+sender, retransmitted until acknowledged. On every link the extension namespace has
+its own ordered domain: a separate sequence space, sender (`Link::xtx`), receiver
+(`Link::xrx`) and acknowledgement (`ExtAck`, message type 16). A lost game packet
+never holds an extension message back, and a lost extension message never holds the
+game back. Nothing in the extension domain expires, so it needs no `Forward`.
+Extension packets are never upgraded by `upgradeUnreliable`.
+
+`sendState(generation, peer, key, data, bytes)` is "the latest replaces the
+previous" state under a caller-chosen 32-bit key. It travels unnumbered (reliability
+0, traffic class State) over the same stable route, and is never tracked,
+retransmitted or upgraded; it is outside the extension backlog, the TrySend limits
+and the overflow drain gate. Its payload carries the key and a 64-bit sender sequence
+ahead of the data (`[u32 key][u64 seq][data]`, little-endian, 12-byte header). The
+sequence follows the sender's steady clock in microseconds (or one above the last if
+the clock has not moved), so it only rises, also across a restart of the sender's
+process. A receiver keeps, per (sender, key), the last sequence it took and drops
+anything not newer; an unread queued state message is overwritten in place by a
+newer one, so the inbox holds at most one per (sender, key). At most
+`EDF6COOP_EXTENSION_MAX_STATE_KEYS` (65536) (sender, key) pairs are tracked per
+generation; state of a further pair is dropped (logged). A new generation forgets
+the pairs and their sequences. The sender applies the link's state budget (the
+same one as game state), and the host relays joiner-to-joiner state unnumbered
+within its relay budget (`relayBytesPerSecond`); either may drop a state message.
+`sendState` returns 1 once the transport took it, even if it is then dropped. Keys
+are per sender. Never use state for anything a later state message does not fully
+replace: a state message may arrive while a transaction sent before it is still
+being repaired.
+
+Both kinds arrive through `poll` and `EDF6CoopPollExtensionBatch`, in queue order.
+`poll` fills `info` with the sender's peer index, the size, the flags and the key
+(offset 0); state messages never count toward the 4096-message inbox limit.
 
 High-volume consumers additionally resolve the optional read-only export
 `EDF6CoopGetExtensionCapacity(version, outSize, out)`. Version 1 requires the exact
@@ -17,19 +68,17 @@ overflows are recoverable (below). Bit 3 proves the optional
 `EDF6CoopPollExtensionBatch` export; other bits are zero.
 Bad version, size or null output returns 0 without writing. No room or ready
 transport is required, and the query neither changes transport state nor grants
-mission authority. The existing 40-byte `EDF6CoopExtensionApi` remains version 1.
-Older DLLs without this export can still serve ordinary API v1 consumers; consumers
-requiring the larger budget must prove it through this query on every participant.
+mission authority. The capacity structure stays at its version 1; its backlog figures
+describe the extension ordered domain only (not game traffic, not state messages).
 Consumers needing recoverable queue pressure also require flag bit 1 and resolve
 `EDF6CoopTrySendExtension(expectedGeneration, peer, data, bytes, pendingBytesLimit,
 pendingPacketsLimit)`. The fixed x64 ABI returns 0 for unavailable/invalid, 1 for
 accepted and 2 for would-block. Limits must be nonzero and at most 1 MiB/8192
 packets. Admission holds the transport mutex and checks actual encoded bytes and
-packet count on the shared outgoing link, including ordinary game traffic. A
-would-block result allocates no sequence, changes no generation and leaves all
-pending datagrams intact; the consumer retains its work until transport ACKs make
-room. Use a smaller ceiling (enemy control uses 768 KiB/768 packets) to leave room
-for control/game traffic. An application Applied/Restored ACK is a separate Data
+packet count of the outgoing link's extension ordered domain; game traffic and
+state messages are not in it. A would-block result allocates no sequence, changes no
+generation and leaves all pending datagrams intact; the consumer retains its work
+until transport ACKs make room. Enemy control uses 768 KiB/768 packets. An application Applied/Restored ACK is a separate Data
 message and never proves the SDK transport ACK has arrived. Consequently consumer
 application credits alone cannot bound this real queue. The atomic limit covers
 only this local outgoing link: host fan-out and joiner-to-host have one link;
@@ -57,7 +106,7 @@ present, its room isolation initialized, and its
 `EDF6AF_SupportProtocolVersion()` export returning 2. An absent extension publishes the
 nonempty value `disabled` because EOS rejects empty string attributes, including
 the rest of the same update. Virtual rooms, offline rejoin, and overflow members
-outside EOS's 64-member lobby are unavailable in v1. The ABI reserves room for
+outside EOS's 64-member lobby are unavailable in this ABI. The ABI reserves room for
 1024 remote peers without promising those paths are currently supported.
 
 The profile also requires `EDF6AF_MissionPlayerCreated`. After the safe native
@@ -67,8 +116,9 @@ and the control has positive strong uses (`+8`). Failed creation, bad reads and
 expired identities never notify; admission attempts alone cannot seal a roster.
 
 Messages have 1–1024 bytes and use socket `EDF6CoopExt1`, channel `0xAF`.
-The sender always uses the host link (or, as host, the recipient's link), reliable
-ordered delivery, and exactly one path. Joiner-to-joiner messages are relayed by
+The sender always uses the host link (or, as host, the recipient's link) and exactly
+one path; transactions are reliable ordered in the link's extension domain, state
+messages unnumbered. Joiner-to-joiner messages are relayed by
 the authenticated host. A peer's identity comes from DirectNet's signed handshake
 and authenticated link; relayed sender identities trust the authenticated host,
 not claims in an extension payload. Mesh packets in this namespace are refused.
@@ -135,14 +185,16 @@ The extension inbox is separate from the game's inbox. Either reserved socket
 or reserved channel removes a packet from game delivery, including malformed or
 unavailable-extension packets and wildcard game reads. Valid messages enter only
 the extension queue. A short poll buffer leaves its packet queued. There are at
-most 4096 queued messages (at most 4 MiB payload); overflow invalidates the
+most 4096 queued transactions (at most 4 MiB payload); overflow invalidates the
 extension generation instead of losing part of an acknowledged transaction silently.
+Queued state messages (at most one per tracked (sender, key)) never overflow it.
 
 `EDF6CoopPollExtensionBatch(expectedGeneration, messages, maxMessages, buffer,
 bufferBytes, outCount)` takes up to `maxMessages` queued messages under one transport
 lock and one readiness refresh. Payloads are packed into `buffer` in arrival order;
-each 16-byte `EDF6CoopExtensionMessage` gives the sender as the index `api.peer`
-enumerates for that generation, plus the payload's offset and size. A message that
+each 20-byte `EDF6CoopExtensionMessage` gives the sender as the index `api.peer`
+enumerates for that generation, the payload's offset and size, and the flags and key
+(state bit 0 and its key; 0 and 0 for a transaction). A message that
 does not fit stays queued. It returns 1 with a count (possibly 0), or 0 when the
 transport is unavailable or the generation is stale.
 
@@ -151,7 +203,8 @@ boundary, never a room boundary. Inbox overflow, and a legacy send or host relay
 that would exceed either backlog ceiling, drop the queued inbox and renew the
 generation at once, so every consumer cancels its in-flight work exactly as after
 any readiness blip. The transport then stays not ready until every participant
-link's real backlog (game traffic included) is at most half of the ceiling
+link's real extension backlog (its own ordered domain; game traffic and state
+messages are not in it) is at most half of the ceiling
 (512 KiB and 4096 packets), and becomes ready again by itself under a further new
 generation; no room change is needed. Earlier DLLs latched the room closed until
 the room authority changed, which in practice meant the rest of the mission. On the
@@ -163,10 +216,10 @@ Every query/send/poll revalidates route identities, reconnect link IDs and readi
 while holding DirectNet's mutex. Direct and relayed extension sends preflight the
 actual encoded datagram before allocating a sequence: extension admission never
 takes pending wire bytes above 1 MiB, and the 8192-packet reliable-link ceiling also
-applies. Ordinary game traffic consumes this shared backlog and may itself exceed
-the extension admission ceiling; congestion alone does not change a generation or
-cancel a mission. The capacity query does not reserve payload space. Legacy API v1
-send and the host relay renew the generation if they would exceed either ceiling
+applies, both to the extension domain alone. Game traffic has a backlog of its own
+and never counts here; congestion alone does not change a generation or cancel a
+mission. The capacity query does not reserve payload space. `send` and the host
+relay of transactions renew the generation if they would exceed either ceiling
 (the recovery contract above). Only the explicit TrySend API reports transient
 pressure as would-block without a new generation. Inbox overflow renews the
 generation the same way; loss of identity/room authority closes the room.
@@ -187,13 +240,23 @@ test SDK, and a test-only All Forces readiness DLL. `ExtensionTransport` covers
 ordered repair, authenticated sender, reserved-channel isolation, bounds, stale
 generations, key rebinding, reconnect, queue overflow and its recovery (inbox
 overflow ready again at once under a new generation; relay overflow held while the
-link stays above the resume mark, then ready by itself after it drains), batch poll
-packing and sender indexes, and room lease expiry. Its
+link stays above the resume mark, then ready by itself after it drains, with no
+sequence hole in the extension domain), batch poll packing, sender indexes, flags and
+keys, and room lease expiry. State messages: only the newest per (sender, key) is
+queued, older or duplicate sequences are dropped (also when reordered while unread),
+keys are per sender, a flood twice the extension ceiling under total loss leaves both
+backlogs empty and readiness unchanged and is never retransmitted, joiner-to-joiner
+state goes through the host relay, the (sender, key) cap holds without a fault, and
+a new generation forgets the sequences. Head-of-line: with one extension transaction
+lost, a later state message is delivered at once while the later transaction waits
+for the repair; with one game packet lost, a later extension transaction is
+delivered (and acknowledged) at once while the game's later packet waits. Its
 selective transport-ACK-loss fixture delivers every application reply while real
-SDK pending bytes remain charged, then verifies would-block without sequence or
-generation changes, shared game backlog above the extension admission ceiling,
-and resumed ordered delivery after cumulative transport ACKs return. Legacy
-send/relay fatal byte and packet boundaries remain independently covered.
+pending bytes remain charged, then verifies would-block without sequence or
+generation changes, game backlog above the extension ceiling without any effect on
+the extension's queue or admission, and each domain's backlog retired by its own
+acknowledgement once ACKs return. Fatal send/relay byte and packet boundaries remain
+independently covered.
 `ExtensionProfile` covers old/missing/mismatched/current member capabilities,
 missing room details, readiness failure and normal Coop marker publication.
 It also calls the exact production `publishExtensionRoom` with the real marker,

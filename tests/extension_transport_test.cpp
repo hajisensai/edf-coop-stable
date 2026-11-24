@@ -1,5 +1,6 @@
 #include "../src/direct_net.h"
 #include "../src/extension_bridge.h"
+#include "../src/netclass.h"
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -22,10 +23,68 @@ struct ExtensionTransportTestAccess {
     static size_t inbox(DirectNet& net) {
         std::lock_guard<std::mutex> lock(net.mu_); return net.extensionInbox_.size();
     }
+    static Link& route(DirectNet& net, const std::string& peer) {
+        return net.opt_.mode == Mode::Host ? net.clients_.at(peer) : *net.hostLink_;
+    }
+    // The link's extension ordered domain (what the extension ceiling and TrySend measure).
     static std::pair<size_t, size_t> pending(DirectNet& net, const std::string& peer) {
         std::lock_guard<std::mutex> lock(net.mu_);
-        auto& link = net.opt_.mode == Mode::Host ? net.clients_.at(peer) : *net.hostLink_;
+        auto& link = route(net, peer);
+        return {link.xtx.pendingBytes(), link.xtx.pendingCount()};
+    }
+    // The link's game reliable domain.
+    static std::pair<size_t, size_t> gamePending(DirectNet& net, const std::string& peer) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        auto& link = route(net, peer);
         return {link.tx.pendingBytes(), link.tx.pendingCount()};
+    }
+    static size_t reliableQueued(DirectNet& net) {
+        std::lock_guard<std::mutex> lock(net.mu_); return net.extensionReliableQueued_;
+    }
+    static uint64_t stateSeen(DirectNet& net, const std::string& src, uint32_t key) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        const auto it = net.extensionStateSeen_.find({src, key});
+        return it == net.extensionStateSeen_.end() ? 0 : it->second;
+    }
+    static size_t stateKeys(DirectNet& net) {
+        std::lock_guard<std::mutex> lock(net.mu_); return net.extensionStateSeen_.size();
+    }
+    // A state datagram from `src` as the authenticated receive path hands it over (any sequence).
+    static void injectState(DirectNet& net, const std::string& src, uint32_t key, uint64_t seq, uint32_t value) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        DataMsg msg;
+        msg.src = src;
+        msg.dst = net.localPuid_;
+        msg.socketName = DirectNet::kExtensionSocket;
+        msg.channel = DirectNet::kExtensionChannel;
+        msg.reliability = 0;
+        msg.cls = static_cast<uint8_t>(TrafficClass::State);
+        msg.payload.resize(DirectNet::kExtensionStateHeader + sizeof(value));
+        memcpy(msg.payload.data(), &key, 4);
+        memcpy(msg.payload.data() + 4, &seq, 8);
+        memcpy(msg.payload.data() + DirectNet::kExtensionStateHeader, &value, sizeof(value));
+        net.extensionPacket(msg);
+    }
+    // A reliable ordered datagram whose first transmission was lost: its sequence is taken in the game or the
+    // extension domain of the link, and nothing goes out (or is tracked) until releaseHeld sends it.
+    static std::vector<uint8_t> holdNumbered(DirectNet& net, const std::string& peer, bool extension, uint8_t value) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        auto& link = route(net, peer);
+        Message m;
+        m.type = MsgType::Data;
+        m.epoch = link.epoch;
+        m.data.src = net.localPuid_;
+        m.data.dst = peer;
+        m.data.socketName = extension ? DirectNet::kExtensionSocket : "EDF6";
+        m.data.channel = extension ? DirectNet::kExtensionChannel : 1;
+        m.data.reliability = 2;
+        m.data.payload = {value};
+        m.data.seq = extension ? link.xtx.nextSeq() : link.tx.nextSeq();
+        return encode(m, net.opt_.key);
+    }
+    static void releaseHeld(DirectNet& net, const std::string& peer, std::vector<uint8_t> dg) {
+        std::lock_guard<std::mutex> lock(net.mu_);
+        net.sendSealed(route(net, peer), dg);
     }
     static bool routingCongestionDoesNotInvalidate(DirectNet& net, const std::string& peer) {
         std::lock_guard<std::mutex> lock(net.mu_);
@@ -61,9 +120,13 @@ int main() {
     testguard::LoopbackGuard loopbackGuard;  // every UDP socket of this test on loopback (loopback_guard.h)
     static_assert(sizeof(EDF6CoopPeer) == 65);
     static_assert(sizeof(EDF6CoopSnapshot) == 160);
-    static_assert(sizeof(EDF6CoopExtensionApi) == 40);
+    static_assert(sizeof(EDF6CoopExtensionApi) == 48);
     static_assert(offsetof(EDF6CoopExtensionApi, snapshot) == 8);
     static_assert(offsetof(EDF6CoopExtensionApi, poll) == 32);
+    static_assert(offsetof(EDF6CoopExtensionApi, sendState) == 40);
+    static_assert(sizeof(EDF6CoopExtensionMessage) == 20);
+    static_assert(offsetof(EDF6CoopExtensionMessage, flags) == 12 && offsetof(EDF6CoopExtensionMessage, key) == 16);
+    static_assert(EDF6COOP_EXTENSION_VERSION == 2);
     static_assert(sizeof(EDF6CoopExtensionCapacity) == 32);
     static_assert(offsetof(EDF6CoopExtensionCapacity, flags) == 28);
     EDF6CoopExtensionCapacity capacity{};
@@ -80,11 +143,13 @@ int main() {
         capacity.maxPeers == 1024 && capacity.inboxMessages == 4096 && capacity.pendingBytes == 1048576 &&
         capacity.congestedBacklogBytes == 1048576 && capacity.flags == 15);
     EDF6CoopExtensionApi api{};
-    CHECK(!EDF6CoopGetExtensionApi(1, sizeof(api), nullptr));
-    CHECK(!EDF6CoopGetExtensionApi(2, sizeof(api), &api));
-    CHECK(!EDF6CoopGetExtensionApi(1, sizeof(api) - 1, &api));
-    CHECK(EDF6CoopGetExtensionApi(1, sizeof(api), &api));
-    CHECK(api.size == 40 && api.version == 1 && api.snapshot && api.peer && api.send && api.poll);
+    CHECK(!EDF6CoopGetExtensionApi(2, sizeof(api), nullptr));
+    CHECK(!EDF6CoopGetExtensionApi(1, 40, &api)); // version 1 is not served at all
+    CHECK(!EDF6CoopGetExtensionApi(1, sizeof(api), &api));
+    CHECK(!EDF6CoopGetExtensionApi(3, sizeof(api), &api));
+    CHECK(!EDF6CoopGetExtensionApi(2, sizeof(api) - 1, &api));
+    CHECK(EDF6CoopGetExtensionApi(2, sizeof(api), &api));
+    CHECK(api.size == 48 && api.version == 2 && api.snapshot && api.peer && api.send && api.poll && api.sendState);
     EDF6CoopSnapshot unavailable{};
     CHECK(!api.snapshot(&unavailable));
     unavailable.size = sizeof(unavailable);
@@ -274,6 +339,7 @@ int main() {
         EDF6CoopPeer hostPeer{}, aPeer{};
         CHECK(b.extensionPeer(bGen, items[0].peer, hostPeer) && hostId == hostPeer.id);
         CHECK(items[0].offset == 0 && items[0].bytes == 4 && items[1].offset == 4 && items[1].bytes == 4);
+        CHECK(!items[0].flags && !items[0].key && !items[1].flags && !items[1].key);
         CHECK(b.extensionPeer(bGen, items[1].peer, aPeer) && aId == aPeer.id);
         uint32_t got[2]{};
         memcpy(got, packed, sizeof(got));
@@ -283,6 +349,175 @@ int main() {
         CHECK(got[0] == 33 && items[0].offset == 0);
         CHECK(EDF6CoopPollExtensionBatch(bGen, items, 4, packed, sizeof(packed), &count) && count == 0);
         dn::bindExtensionTransport(nullptr);
+    }
+
+    // State messages (sendState): unnumbered, only the newest per (sender, key), never retransmitted and
+    // outside every backlog; and the two ordered domains of a link never hold each other back.
+    {
+        using Access = dn::ExtensionTransportTestAccess;
+        CHECK(waitFor([&] { tick(); return snap(host).ready && snap(a).ready && snap(b).ready; }));
+        hs = snap(host); as = snap(a); bs = snap(b);
+        auto u32 = [](const std::vector<uint8_t>& data) {
+            uint32_t value = UINT32_MAX;
+            if (data.size() == sizeof(value)) memcpy(&value, data.data(), sizeof(value));
+            return value;
+        };
+        auto bytesOf = [](const uint32_t& value) { return reinterpret_cast<const uint8_t*>(&value); };
+        const uint32_t marker = 0xABCD;
+        std::vector<uint8_t> tooBig(1025, 1);
+        CHECK(!host.extensionSendState(hs.generation - 1, bId, 1, &byte, 1));
+        CHECK(!host.extensionSendState(hs.generation, "unknown", 1, &byte, 1));
+        CHECK(!host.extensionSendState(hs.generation, bId, 1, &byte, 0));
+        CHECK(!host.extensionSendState(hs.generation, bId, 1, nullptr, 1));
+        CHECK(!host.extensionSendState(hs.generation, bId, 1, tooBig.data(), 1025));
+        CHECK(!b.extensionSendState(bs.generation, bId, 1, &byte, 1)); // not to ourselves
+
+        // Latest only: three states under one key, then a reliable marker; the unread slot holds the newest.
+        for (uint32_t v = 1; v <= 3; ++v) CHECK(host.extensionSendState(hs.generation, bId, 1, bytesOf(v), 4));
+        CHECK(host.extensionSend(hs.generation, bId, bytesOf(marker), 4));
+        CHECK(waitFor([&] { tick(); return Access::reliableQueued(b) == 1; }));
+        CHECK(Access::inbox(b) == 2);
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.state && message.key == 1 &&
+              message.src == hostId && u32(message.data) == 3);
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && !message.state && !message.key && u32(message.data) == marker);
+        CHECK(Access::reliableQueued(b) == 0 && Access::inbox(b) == 0);
+        CHECK(!host.pop(nullptr, 2048, message) && !b.pop(nullptr, 2048, message)); // never reaches the game
+
+        // Older (or a copy) than the last one taken for (sender, key) is dropped; a newer one is taken.
+        const uint64_t taken = Access::stateSeen(b, hostId, 1);
+        CHECK(taken != 0);
+        Access::injectState(b, hostId, 1, taken - 1, 70);
+        Access::injectState(b, hostId, 1, taken, 71);
+        CHECK(Access::inbox(b) == 0 && Access::stateSeen(b, hostId, 1) == taken);
+        const uint32_t four = 4;
+        CHECK(host.extensionSendState(hs.generation, bId, 1, bytesOf(four), 4)); // the sender's sequence only rises
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 1; }));
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.state && u32(message.data) == 4);
+        CHECK(Access::stateSeen(b, hostId, 1) > taken);
+        // Reordered while unread: an older one never replaces the queued newer one; a newer one does, in place.
+        Access::injectState(b, aId, 50, 100, 1);
+        Access::injectState(b, aId, 50, 90, 2);
+        CHECK(Access::inbox(b) == 1);
+        Access::injectState(b, aId, 50, 110, 3);
+        Access::injectState(b, aId, 50, 120, 4);
+        Access::injectState(b, aId, 51, 5, 5); // another key is another stream
+        CHECK(Access::inbox(b) == 2);
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.src == aId && message.key == 50 &&
+              u32(message.data) == 4);
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.key == 51 && u32(message.data) == 5);
+        // Keys are per sender: the same key from the host is a separate stream with its own sequence.
+        Access::injectState(b, hostId, 50, 1, 6);
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.src == hostId && u32(message.data) == 6);
+
+        // Never retransmitted, never in a backlog: all of the host's UDP is lost under a flood of the largest
+        // state messages (twice the extension ceiling); the extension and game queues stay empty, readiness and
+        // the generation hold, and once the link is back nothing of it ever arrives.
+        CHECK(waitFor([&] { tick(); return Access::pending(host, bId).second == 0 && Access::gamePending(host, bId).second == 0; }));
+        std::vector<uint8_t> stateFull(capacity.maxPayload, 5);
+        host.setTestBlackhole(true);
+        for (unsigned i = 0; i < 2048; ++i)
+            CHECK(host.extensionSendState(hs.generation, bId, 2, stateFull.data(), static_cast<uint32_t>(stateFull.size())));
+        CHECK(Access::pending(host, bId) == std::make_pair(size_t{0}, size_t{0}));
+        CHECK(Access::gamePending(host, bId) == std::make_pair(size_t{0}, size_t{0}));
+        CHECK(snap(host).ready && snap(host).generation == hs.generation);
+        host.setTestBlackhole(false);
+        for (unsigned i = 0; i < 12; ++i) { tick(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
+        CHECK(Access::stateSeen(b, hostId, 2) == 0 && Access::inbox(b) == 0);
+        CHECK(host.extensionSendState(hs.generation, bId, 2, bytesOf(marker), 4));
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 1; }));
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.key == 2 && u32(message.data) == marker);
+
+        // Joiner to joiner through the host relay, as state (unnumbered, within the host's relay budget).
+        const uint32_t relayed = 0x5151;
+        CHECK(a.extensionSendState(as.generation, bId, 9, bytesOf(relayed), 4));
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 1; }));
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.src == aId && message.state &&
+              message.key == 9 && u32(message.data) == relayed);
+        CHECK(Access::pending(host, bId).second == 0 && Access::pending(a, hostId).second == 0);
+
+        // A lost extension transaction is repaired in its own domain; state sent after it is not held back.
+        const auto heldExtension = Access::holdNumbered(host, bId, true, 0x51);
+        const uint8_t afterHole = 0x52;
+        CHECK(host.extensionSend(hs.generation, bId, &afterHole, 1));
+        const uint32_t live = 0x7777;
+        CHECK(host.extensionSendState(hs.generation, bId, 7, bytesOf(live), 4));
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 1; }));
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.state && message.key == 7 &&
+              u32(message.data) == live);
+        for (unsigned i = 0; i < 4; ++i) { tick(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
+        CHECK(Access::inbox(b) == 0 && !b.extensionPoll(bs.generation, 2048, message)); // held behind the hole
+        Access::releaseHeld(host, bId, heldExtension);
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 2; }));
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.data == std::vector<uint8_t>{0x51});
+        CHECK(b.extensionPoll(bs.generation, 2048, message) && message.data == std::vector<uint8_t>{afterHole});
+        CHECK(waitFor([&] { tick(); return Access::pending(host, bId).second == 0; }));
+
+        // A lost game packet holds back the game's later packets, never a reliable extension message.
+        const auto heldGame = Access::holdNumbered(host, bId, false, 0x61);
+        const uint8_t gameAfter = 0x62, extensionAfter = 0x63;
+        CHECK(host.send(bId, "EDF6", 1, 2, &gameAfter, 1));
+        CHECK(host.extensionSend(hs.generation, bId, &extensionAfter, 1));
+        CHECK(waitFor([&] { tick(); return b.extensionPoll(bs.generation, 2048, message); }));
+        CHECK(message.src == hostId && !message.state && message.data == std::vector<uint8_t>{extensionAfter});
+        CHECK(waitFor([&] { tick(); return Access::pending(host, bId).second == 0; })); // the ExtAck retired it
+        CHECK(!b.pop(nullptr, 2048, message)); // the game's later packet waits for the lost one
+        Access::releaseHeld(host, bId, heldGame);
+        CHECK(waitFor([&] { tick(); return b.pop(nullptr, 2048, message); }));
+        CHECK(message.socketName == "EDF6" && message.data == std::vector<uint8_t>{0x61});
+        CHECK(waitFor([&] { tick(); return b.pop(nullptr, 2048, message); }));
+        CHECK(message.data == std::vector<uint8_t>{gameAfter});
+        CHECK(waitFor([&] { tick(); return Access::gamePending(host, bId).second == 0; }));
+        CHECK(snap(b).generation == bs.generation && snap(host).generation == hs.generation);
+
+        // The ABI: sendState and poll's message info, and batch poll's flags and key.
+        dn::bindExtensionTransport(std::shared_ptr<dn::DirectNet>(&b, [](dn::DirectNet*){}));
+        EDF6CoopPeer hostPeer{}; memcpy(hostPeer.id, hostId.data(), hostId.size());
+        const uint32_t viaApi = 0x4242;
+        CHECK(!api.sendState(bs.generation, nullptr, 5, &viaApi, 4));
+        CHECK(!api.sendState(bs.generation - 1, &hostPeer, 5, &viaApi, 4));
+        CHECK(api.sendState(bs.generation, &hostPeer, 5, &viaApi, 4));
+        CHECK(waitFor([&] { tick(); return host.extensionPoll(hs.generation, 2048, message); }));
+        CHECK(message.src == bId && message.state && message.key == 5 && u32(message.data) == viaApi);
+        CHECK(host.extensionSendState(hs.generation, bId, 6, bytesOf(viaApi), 4));
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 1; }));
+        EDF6CoopPeer sender{};
+        EDF6CoopExtensionMessage info{};
+        uint8_t got[8]{};
+        CHECK(!api.poll(bs.generation, &sender, got, sizeof(got), nullptr));
+        CHECK(!api.poll(bs.generation, &sender, got, 3, &info) && !info.bytes && !info.flags);
+        CHECK(api.poll(bs.generation, &sender, got, sizeof(got), &info));
+        EDF6CoopPeer indexed{};
+        CHECK(hostId == sender.id && b.extensionPeer(bs.generation, info.peer, indexed) && hostId == indexed.id);
+        CHECK(info.offset == 0 && info.bytes == 4 && info.flags == EDF6COOP_EXTENSION_MESSAGE_STATE && info.key == 6);
+        CHECK(host.extensionSend(hs.generation, bId, bytesOf(marker), 4));
+        CHECK(host.extensionSendState(hs.generation, bId, 8, bytesOf(viaApi), 4));
+        CHECK(waitFor([&] { tick(); return Access::inbox(b) == 2; }));
+        CHECK(api.poll(bs.generation, &sender, got, sizeof(got), &info) && info.flags == 0 && info.key == 0 &&
+              info.bytes == 4);
+        EDF6CoopExtensionMessage items[2]{};
+        uint8_t packed[8]{};
+        uint32_t count = 0;
+        CHECK(EDF6CoopPollExtensionBatch(bs.generation, items, 2, packed, sizeof(packed), &count) && count == 1);
+        CHECK(items[0].flags == EDF6COOP_EXTENSION_MESSAGE_STATE && items[0].key == 8 && items[0].bytes == 4);
+        dn::bindExtensionTransport(nullptr);
+
+        // At most EDF6COOP_EXTENSION_MAX_STATE_KEYS (sender, key) pairs per generation; state never faults.
+        CHECK(waitFor([&] { tick(); return snap(b).ready; }));
+        bs = snap(b);
+        for (uint32_t key = 1000; key < 1000 + 2 * EDF6COOP_EXTENSION_MAX_STATE_KEYS &&
+             Access::stateKeys(b) < EDF6COOP_EXTENSION_MAX_STATE_KEYS; ++key)
+            Access::injectState(b, aId, key, 1, key);
+        const size_t queuedStates = Access::inbox(b);
+        CHECK(Access::stateKeys(b) == EDF6COOP_EXTENSION_MAX_STATE_KEYS && queuedStates > capacity.inboxMessages &&
+              snap(b).generation == bs.generation);
+        Access::injectState(b, aId, 999, 1, 999); // a further pair is dropped
+        CHECK(Access::inbox(b) == queuedStates && Access::stateSeen(b, aId, 999) == 0);
+        Access::injectState(b, aId, 1000, 2, 1); // a tracked pair still takes newer state
+        CHECK(Access::stateSeen(b, aId, 1000) == 2 && Access::inbox(b) == queuedStates);
+        // A new generation forgets the pairs and their sequences.
+        b.clearExtensionRoom();
+        CHECK(Access::stateKeys(b) == 0 && Access::inbox(b) == 0);
+        CHECK(waitFor([&] { tick(); return snap(b).ready; }));
     }
 
     // Application Applied replies are Data messages, not transport ACKs. Lose only
@@ -325,22 +560,28 @@ int main() {
     CHECK(trySend(flowPayload.data(), static_cast<uint32_t>(flowPayload.size())) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
     CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
     CHECK(snap(host).ready && snap(host).generation == hs.generation);
-    // The packet limit is checked against the same actual shared queue too.
+    // The packet limit is checked against the same actual extension queue too.
     CHECK(trySend(&byte, 1, capacity.pendingBytes, applied) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
     CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
-    // Ordinary game data may take the shared backlog above the extension ceiling;
-    // that is still flow control, never a new mission/identity generation.
+    // Game traffic has a backlog of its own: game data held by the same lost ACKs takes the game queue above the
+    // extension ceiling, and the extension's queue, admission, readiness and generation do not move.
     for (unsigned i = 0; i < 300; ++i)
         CHECK(host.send(bId, "EDF6", 1, 2, flowPayload.data(), flowPayload.size()));
-    CHECK(dn::ExtensionTransportTestAccess::pending(host, bId).first > capacity.pendingBytes);
+    CHECK(dn::ExtensionTransportTestAccess::gamePending(host, bId).first > capacity.pendingBytes);
+    CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
     CHECK(snap(host).ready && snap(host).generation == hs.generation);
-    CHECK(trySend(&byte, 1) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
+    CHECK(trySend(&byte, 1, capacity.pendingBytes, applied) == EDF6COOP_EXTENSION_SEND_WOULD_BLOCK);
     dn::ExtensionTransportTestAccess::dropTransportAcks(b, false);
-    // One newly acknowledged game packet cumulatively retires the delayed ACK
-    // backlog. The next extension must arrive without a sequence hole or reset.
+    // Each domain's backlog is retired by its own acknowledgement: one extension message's ExtAck covers
+    // the extension backlog, one game packet's Ack the game backlog. No sequence hole, no reset.
+    const uint8_t retire = 3;
+    CHECK(host.extensionSend(hs.generation, bId, &retire, 1));
     CHECK(host.send(bId, "EDF6", 1, 2, &byte, 1));
-    CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }, 15000));
+    CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0 &&
+        dn::ExtensionTransportTestAccess::gamePending(host, bId).first == 0; }, 15000));
     CHECK(snap(host).ready && snap(host).generation == hs.generation);
+    CHECK(waitFor([&] { tick(); return b.extensionPoll(bs.generation, 2048, message); }));
+    CHECK(message.src == hostId && message.data == std::vector<uint8_t>{retire});
     CHECK(trySend(&byte, 1) == EDF6COOP_EXTENSION_SEND_ACCEPTED);
     CHECK(waitFor([&] { tick(); return b.extensionPoll(bs.generation, 2048, message); }));
     CHECK(message.src == hostId && message.data == std::vector<uint8_t>{byte});
@@ -391,6 +632,16 @@ int main() {
     CHECK(waitFor([&] { tick(); return snap(host).ready && snap(a).ready && snap(b).ready; }));
     CHECK(snap(host).generation != hs.generation && snap(host).generation != faultedGeneration);
     CHECK(!host.extensionSend(hs.generation, bId, &byte, 1));
+    // The refused messages left no hole in the extension domain either: the next one arrives (after any of
+    // the admitted backlog B still holds for its generation).
+    const uint8_t afterRefusal = 0x33;
+    CHECK(host.extensionSend(snap(host).generation, bId, &afterRefusal, 1));
+    CHECK(waitFor([&] {
+        tick();
+        while (b.extensionPoll(snap(b).generation, 2048, message))
+            if (message.data == std::vector<uint8_t>{afterRefusal}) return true;
+        return false;
+    }, 15000));
 
     // EOS room facts cannot remain authoritative while the game's tick stopped.
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));

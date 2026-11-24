@@ -465,6 +465,7 @@ private:
     // participant links drain to half the ceiling (extensionDrainedLocked). Never latched for the room.
     bool extensionReady_ = false, extensionFault_ = false;
     uint64_t extensionFaults_ = 0;
+    uint64_t extensionFaultLogMs_ = 0, extensionFaultsUnlogged_ = 0; // one fault line per 10 s at most
     void faultExtensionLocked(const char* why);
     bool extensionDrainedLocked() const;
     void resetExtensionLocked();

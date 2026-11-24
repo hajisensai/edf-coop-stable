@@ -49,8 +49,15 @@ void DirectNet::faultExtensionLocked(const char* why) {
     extensionFault_ = true;
     ++extensionFaults_;
     resetExtensionLocked();
-    logf("DIRECT extension %s: generation %llu renewed (fault %llu); ready again once the backlog drains",
-        why, static_cast<unsigned long long>(extensionGeneration_), static_cast<unsigned long long>(extensionFaults_));
+    // A consumer that stops polling refills the inbox right after each recovery: one line per 10 s, with
+    // the count of the faults it stands for, instead of one per cycle.
+    const uint64_t now = extensionNowMs();
+    if (extensionFaultLogMs_ && now - extensionFaultLogMs_ < 10000) { ++extensionFaultsUnlogged_; return; }
+    logf("DIRECT extension %s: generation %llu renewed (fault %llu, %llu more since the last line); ready again "
+        "once the backlog drains", why, static_cast<unsigned long long>(extensionGeneration_),
+        static_cast<unsigned long long>(extensionFaults_), static_cast<unsigned long long>(extensionFaultsUnlogged_));
+    extensionFaultLogMs_ = now ? now : 1;
+    extensionFaultsUnlogged_ = 0;
 }
 
 bool DirectNet::extensionDrainedLocked() const {
@@ -107,8 +114,9 @@ bool DirectNet::refreshExtensionLocked() {
     const uint64_t now = extensionNowMs();
     if (extensionFault_ && extensionDrainedLocked()) {
         extensionFault_ = false;
-        logf("DIRECT extension backlog drained after fault %llu: the room may become ready again",
-            static_cast<unsigned long long>(extensionFaults_));
+        if (!extensionFaultsUnlogged_)
+            logf("DIRECT extension backlog drained after fault %llu: the room may become ready again",
+                static_cast<unsigned long long>(extensionFaults_));
     }
     bool ready = running_ && active_ && !extensionFault_ && !extensionRoom_.empty() && extensionWorldEpoch_ &&
         validId(localPuid_) && validId(extensionHost_) && extensionUpdatedMs_ &&

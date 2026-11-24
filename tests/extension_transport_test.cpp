@@ -23,7 +23,7 @@ struct ExtensionTransportTestAccess {
     static size_t inbox(DirectNet& net) {
         std::lock_guard<std::mutex> lock(net.mu_); return net.extensionInbox_.size();
     }
-    static Link& route(DirectNet& net, const std::string& peer) {
+    static DirectNet::Link& route(DirectNet& net, const std::string& peer) {
         return net.opt_.mode == Mode::Host ? net.clients_.at(peer) : *net.hostLink_;
     }
     // The link's extension ordered domain (what the extension ceiling and TrySend measure).
@@ -565,7 +565,8 @@ int main() {
     CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
     // Game traffic has a backlog of its own: game data held by the same lost ACKs takes the game queue above the
     // extension ceiling, and the extension's queue, admission, readiness and generation do not move.
-    for (unsigned i = 0; i < 300; ++i)
+    constexpr unsigned gamePackets = 1100;  // about 1.2 MB: above the 1 MiB extension ceiling
+    for (unsigned i = 0; i < gamePackets; ++i)
         CHECK(host.send(bId, "EDF6", 1, 2, flowPayload.data(), flowPayload.size()));
     CHECK(dn::ExtensionTransportTestAccess::gamePending(host, bId).first > capacity.pendingBytes);
     CHECK(dn::ExtensionTransportTestAccess::pending(host, bId) == heldByLostAcks);
@@ -588,7 +589,7 @@ int main() {
     CHECK(waitFor([&] { tick(); return dn::ExtensionTransportTestAccess::pending(host, bId).first == 0; }));
     unsigned background = 0;
     while (b.pop(nullptr, 2048, message)) ++background;
-    CHECK(background == 301);
+    CHECK(background == gamePackets + 1);
 
     // Fill the actual host->B wire backlog while all outgoing host UDP is lost.
     // A can still submit one authenticated relay message; projected overflow must

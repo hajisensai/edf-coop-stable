@@ -638,7 +638,7 @@ bool LoadRooms(const wchar_t* iniPath) {
             const wchar_t* key;
             int fallback;
         } caps[kSoldierTypeCount] = {{L"MaxRanger", 4000}, {L"MaxWingDiver", 2500}, {L"MaxAirRaider", 3000},
-                                     {L"MaxFencer", 4000}};
+                                     {L"MaxFencer", 4000}, {L"MaxVehicler", 4000}, {L"MaxRuneBlade", 4000}};
         for (int i = 0; i < kSoldierTypeCount; ++i) {
             copyArmorCaps[i] = static_cast<int>(GetPrivateProfileIntW(L"CopyArmor", caps[i].key, caps[i].fallback, iniPath));
             if (copyArmorCaps[i] >= 0) continue;
@@ -727,9 +727,10 @@ bool LoadRooms(const wchar_t* iniPath) {
         hosting, hostModeHint);
     if (copyArmorKey || copyArmorPad)
         Log("Copy armor: %ls in a room follows the lowest armor in it that is more than %d from yours (your own "
-            "class if anyone else plays it, otherwise the room), up to %d/%d/%d/%d for Ranger/Wing Diver/Air "
-            "Raider/Fencer; it never lowers, never reaches the room's own display and never saves",
-            copyArmorHint, copyArmorIgnore, copyArmorCaps[0], copyArmorCaps[1], copyArmorCaps[2], copyArmorCaps[3]);
+            "class if anyone else plays it, otherwise the room), up to %d/%d/%d/%d/%d/%d for Ranger/Wing "
+            "Diver/Air Raider/Fencer/Vehicler/Rune Blade; it never lowers, never reaches the room's own display and never saves",
+            copyArmorHint, copyArmorIgnore, copyArmorCaps[0], copyArmorCaps[1], copyArmorCaps[2], copyArmorCaps[3],
+            copyArmorCaps[4], copyArmorCaps[5]);
     else
         Log("Copy armor: off, the armor sites are untouched");
     Log("Room screen: one member panel per member, in rows that fit the screen (up to %zu shown); fake members %s",

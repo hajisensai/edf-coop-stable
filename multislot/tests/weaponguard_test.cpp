@@ -87,9 +87,18 @@ void Loadout() {
     Check(record.Id(5) == 405 && record.LevelAt(5) == Level(405), "an id written below -1 is decoded first");
     Check(swaps.size() == 4 && swaps[0].from == 1579 && swaps[0].to == 400 && swaps[3].slot == 5, "each replacement is told");
 
+    // All Forces' classes 4 (Vehicler) and 5 (Rune Blade) are guarded like the stock four, from their own rows.
+    Record vehicler, runeBlade;
+    vehicler.Set(4, {1579, 310, -1, -1, -1, -1});
+    runeBlade.Set(5, {310, -1, 1590, -1, -1, -1});
+    Check(GuardLoadout(vehicler.bytes, local).size() == 1 && vehicler.Id(0) == 500 && vehicler.Id(1) == 310,
+          "a class 4 record: its unknown id becomes this machine's own of class 4");
+    Check(GuardLoadout(runeBlade.bytes, local).size() == 1 && runeBlade.Id(2) == 602 && runeBlade.LevelAt(2) == Level(602),
+          "a class 5 record: its unknown id becomes this machine's own of class 5");
+
     Record other;
     other.Set(7, {1579, 1, 2, 3, 4, 5});
-    Check(GuardLoadout(other.bytes, local).empty() && other.Id(0) == 1579, "a record of no class 0..3 is left");
+    Check(GuardLoadout(other.bytes, local).empty() && other.Id(0) == 1579, "a record of no class 0..5 is left");
 
     LocalWeapons empty;
     empty.rows = kStockRows;

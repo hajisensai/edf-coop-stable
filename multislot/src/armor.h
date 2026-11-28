@@ -28,7 +28,7 @@ namespace multislot {
 // all take their new value from the screen's own state, never from a read of the count, so a raised count
 // cannot reach the save. Your own armor screen keeps showing the real number for the same reason.
 struct RoomMemberArmor {
-    int soldier;  // class id: 0 Ranger, 1 Wing Diver, 2 Air Raider, 3 Fencer
+    int soldier;  // class id: 0 Ranger, 1 Wing Diver, 2 Air Raider, 3 Fencer, 4 Vehicler, 5 Rune Blade
     int armor;    // the number the room panel shows, or 0 when the member has not reported one
     bool valid;   // both of those are set
 };
@@ -40,7 +40,9 @@ struct RoomMemberArmor {
 // someone else's armor.
 void InitArmor(unsigned char* gameBase, int key, std::uint32_t padButton, const wchar_t* hint, int ignoreWithin,
                const int* caps);
-constexpr int kSoldierTypeCount = 4;  // 0 Ranger, 1 Wing Diver, 2 Air Raider, 3 Fencer
+// 0 Ranger, 1 Wing Diver, 2 Air Raider, 3 Fencer, and All Forces' 4 Vehicler, 5 Rune Blade. GameStatus keeps a
+// pickup count for ten classes per local player (DEDA0: ten ints from +0x6F88), so 4 and 5 read their own.
+constexpr int kSoldierTypeCount = 6;
 // F4 (0 = the feature is not installed).
 int CopyArmorKey();
 // The pad button that does the same, as a channel offset (0 = none). The page button switches member

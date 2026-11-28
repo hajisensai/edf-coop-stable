@@ -32,8 +32,8 @@ constexpr ArmorRules kFencer{300.0f, 2.0f};
 
 RoomMemberArmor Member(int soldier, int armor, bool valid = true) { return RoomMemberArmor{soldier, armor, valid}; }
 
-// Ranger, Wing Diver, Air Raider, Fencer, as the INI ships them.
-constexpr int caps[kSoldierTypeCount] = {4000, 2500, 3000, 4000};
+// Ranger, Wing Diver, Air Raider, Fencer, Vehicler, Rune Blade, as the INI ships them.
+constexpr int caps[kSoldierTypeCount] = {4000, 2500, 3000, 4000, 4000, 4000};
 
 }  // namespace
 
@@ -85,6 +85,11 @@ int main() {
     Check(TargetArmor(room.data(), room.size(), 1, 3, 2014, 0) == 4312, "the lowest armor of your own class");
     Check(TargetArmor(room.data(), room.size(), 1, 2, 2014, 0) == 1146, "no one of your class: the lowest in the room");
     Check(TargetArmor(room.data(), room.size(), room.size(), 3, 9999, 0) == 2014, "with nobody left out, you are counted too");
+    // All Forces' classes 4 and 5 are classes like the others.
+    const std::vector<RoomMemberArmor> newClasses{Member(4, 1500), Member(5, 2200), Member(5, 3100), Member(4, 900)};
+    Check(TargetArmor(newClasses.data(), newClasses.size(), 1, 5, 2200, 0) == 3100, "a Rune Blade copies a Rune Blade");
+    Check(TargetArmor(newClasses.data(), newClasses.size(), 3, 4, 900, 0) == 1500, "a Vehicler copies a Vehicler");
+    Check(CappedArmor(5000, caps[5]) == 4000 && CappedArmor(5000, caps[4]) == 4000, "the two new classes have their ceilings");
     Check(TargetArmor(room.data(), 0, 0, 0, 0, 0) == 0 && TargetArmor(nullptr, 4, 0, 0, 0, 0) == 0,
           "an empty room has nobody to copy");
     const std::vector<RoomMemberArmor> alone{Member(3, 2014)};

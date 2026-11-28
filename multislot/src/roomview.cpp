@@ -213,6 +213,8 @@ const char* SoldierName(int soldier) {
         case 1: return "Wing Diver";
         case 2: return "Air Raider";
         case 3: return "Fencer";
+        case 4: return "Vehicler";
+        case 5: return "Rune Blade";
         default: return "?";
     }
 }

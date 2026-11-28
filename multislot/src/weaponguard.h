@@ -20,7 +20,11 @@ namespace multislot {
 //     can build, with this machine's level of it.
 // Every replacement is logged once per id.
 
-constexpr int kWeaponClasses = 4;
+// The soldier classes a loadout record can name: the stock four (0 Ranger, 1 Wing Diver, 2 Air Raider, 3 Fencer)
+// and All Forces' two (4 Vehicler, 5 Rune Blade; its rooms need every member on the same build). GameStatus keeps
+// equipment for ten classes per local player (DEDA0 lays out ten 0x18-byte rows from +0x6E98), so the rows of 4 and 5
+// are there to read whatever is installed.
+constexpr int kWeaponClasses = 6;
 constexpr int kWeaponSlots = 6;
 
 // The table row an id names: -1 is an empty slot, and an id below -1 stands for |id| - 2 (745659).
@@ -52,7 +56,7 @@ std::vector<WeaponSwap> GuardRoomWeapons(std::int32_t (&ids)[kWeaponSlots], std:
 
 // A loadout record as the mission start message decodes it: class at +0, the six ids at +0x8, their levels at
 // +0xA4 (8 bytes each). An unknown id becomes this machine's own weapon of that class and slot - or, if it has
-// none there, the first it has of the class - with this machine's level of it. A record of no class 0..3 is left.
+// none there, the first it has of the class - with this machine's level of it. A record of no class 0..5 is left.
 constexpr std::size_t kLoadoutClass = 0x0, kLoadoutWeapons = 0x8, kLoadoutLevels = 0xA4;
 std::vector<WeaponSwap> GuardLoadout(std::uint8_t* record, const LocalWeapons& local);
 
